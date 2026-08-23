@@ -195,13 +195,13 @@ The same precedence applies to `X-Content-Type-Options`, which OxPHP sets to `no
 |----------|---------|-------------|
 | `STATIC_MAX_AGE` | `30d` | `Cache-Control: max-age` for static files. Accepts: `30s`, `5m`, `2h`, `30d`, `1w`, `1y`, bare seconds (`3600`), or `off` to disable the header. Replaces deprecated `STATIC_CACHE_TTL`. |
 | `STATIC_REVALIDATE` | `off` | Boolean — see [Boolean values](#boolean-values). Set truthy to enable mtime revalidation on the in-memory content cache: the file's modification time is re-checked at most once every 3 seconds per file (not per request) and stale entries are evicted automatically, so changes become visible within 3 seconds. Replaces deprecated `STATIC_CACHE` (where `off` had the inverse meaning). |
-| `COMPRESSION_ENCODINGS` | `br,zstd,gzip` | Content codings the server offers, comma-separated: `br` (or `brotli`), `zstd`, `gzip`, or `off` to switch compression off entirely. An unknown name is a startup error. The order written here is ignored — cached static files prefer Brotli, whose cost is paid once, and everything else prefers Zstandard. See [Compression](../features/compression.md#choosing-a-coding) |
+| `COMPRESSION_ENCODINGS` | `br,zstd,gzip` | Content codings the server offers, comma-separated: `br` (or `brotli`), `zstd`, `gzip`. An unknown name is a startup error. Set the whole value to `off` (or `none`) to switch compression off entirely — it is not a list token, so `br,off` is an error rather than a switch. An empty assignment is treated as unset and restores the default. The order written here is ignored — cached static files prefer Brotli, whose cost is paid once, and everything else prefers Zstandard. See [Compression](../features/compression.md#choosing-a-coding) |
 | `COMPRESSION_BROTLI_LEVEL` | `5` | Brotli quality (0–11). Replaces deprecated `COMPRESSION_LEVEL` |
 | `COMPRESSION_ZSTD_LEVEL` | `6` | Zstandard compression level (0–19) |
 | `COMPRESSION_GZIP_LEVEL` | `6` | Gzip compression level (0–9) |
-| `COMPRESSION_LEVEL` | *(unset)* | Deprecated name for `COMPRESSION_BROTLI_LEVEL`; emits a startup `WARN`. `COMPRESSION_LEVEL=0` keeps its older meaning and disables every coding, not just Brotli. An explicit `COMPRESSION_BROTLI_LEVEL` wins over it |
+| `COMPRESSION_LEVEL` | *(unset)* | Deprecated name for `COMPRESSION_BROTLI_LEVEL`; emits a startup `WARN`. `COMPRESSION_LEVEL=0` keeps its older meaning and disables every coding, not just Brotli. An explicit `COMPRESSION_BROTLI_LEVEL` wins over a non-zero value — but not over `0`, which switches compression off whatever else is set |
 
-A coding is offered when `COMPRESSION_ENCODINGS` lists it **and** its level is not `0`; either one alone withdraws it.
+A coding is offered when `COMPRESSION_ENCODINGS` lists it **and** its level is not `0`; either one alone withdraws it. A level outside its range, or one that is not a number, aborts startup with an error naming the variable — nothing is clamped.
 
 ## Logging
 
@@ -439,13 +439,17 @@ curl -s http://localhost:9090/config | jq .
   "queue_capacity": 1024,
   "queue_wait_timeout_ms": 1000,
   "queue_max_waiting": 1024,
+  "queue_max_waiting_bytes": 67108864,
   "max_connections": 10000,
   "drain_timeout_seconds": 30,
   "header_timeout_seconds": 5,
   "rate_limit": 100,
   "rate_window_seconds": 60,
   "tls_enabled": true,
-  "compression_level": 4,
+  "tls_min_version": "1.2",
+  "brotli_level": 5,
+  "gzip_level": 6,
+  "zstd_level": 6,
   "access_log": "all",
   "max_query_body": 524288,
   "worker_mode_enabled": false,

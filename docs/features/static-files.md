@@ -71,7 +71,7 @@ The `max-age` value is the TTL converted to seconds. Set `STATIC_MAX_AGE=off` to
 
 Every static file response includes:
 
-- **ETag** — a strong ETag in the format `"<size>-<mtime_hex>"`, derived from the file size and last modification time. A strong validator also satisfies `If-Range`, so interrupted downloads can resume safely. When a response is served brotli-compressed, the tag is weakened to `W/"…"` — the compressed bytes are a different representation, and a weak tag still revalidates (304) but prevents mixing compressed and uncompressed fragments on resume.
+- **ETag** — a strong ETag in the format `"<size>-<mtime_hex>"`, derived from the file size and last modification time. A strong validator also satisfies `If-Range`, so interrupted downloads can resume safely. When a response is served compressed — under any of the codings — the tag is weakened to `W/"…"` — the compressed bytes are a different representation, and a weak tag still revalidates (304) but prevents mixing compressed and uncompressed fragments on resume.
 - **Last-Modified** — an RFC 7231 HTTP date based on the file's modification time
 
 These headers allow browsers and CDNs to validate cached copies without re-downloading the file.
@@ -104,7 +104,7 @@ This enables `<video>`/`<audio>` seeking in browsers, resumable downloads (`wget
 - **If-Range** is honored: when the client sends the ETag (or `Last-Modified` date) of its partial copy and the file has changed since, OxPHP returns the full `200` response instead of a mismatched fragment. The date form is only accepted once the file's modification second has fully elapsed — a just-written file could change again within the same second without moving the date, so it is not yet a strong validator (RFC 9110).
 - Requests with **multiple ranges** (`bytes=0-1,4-5`) receive the full file as `200 OK` — `multipart/byteranges` responses are not generated.
 - **HEAD** requests with a `Range` header receive the same `206`/`Content-Range` headers as GET without a body, matching nginx and Apache.
-- **Ranges and compression are mutually exclusive.** For clients that accept brotli, range handling is disabled on representations that would be served compressed, and compressed responses do not advertise `Accept-Ranges` — a resumed download could otherwise splice uncompressed bytes onto a compressed prefix. Files above the compression window (3 MB) are never compressed, so ranges always work for the content that actually needs them: video, archives, and images. Responses for compression-eligible files always carry `Vary: Accept-Encoding` — even when served uncompressed — so shared caches keep the variants apart.
+- **Ranges and compression are mutually exclusive.** For clients that accept any content coding, range handling is disabled on representations that would be served compressed, and compressed responses do not advertise `Accept-Ranges` — a resumed download could otherwise splice uncompressed bytes onto a compressed prefix. Files above the compression window (3 MB) are never compressed, so ranges always work for the content that actually needs them: video, archives, and images. Responses for compression-eligible files always carry `Vary: Accept-Encoding` — even when served uncompressed — so shared caches keep the variants apart.
 - `206` responses are never compressed, and range handling does not apply to PHP responses — only to static files.
 
 Example: resume an interrupted download with curl:
