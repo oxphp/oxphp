@@ -29,6 +29,18 @@ targets = [
     "aarch64-unknown-linux-musl",
 ]
 
+# zstd-sys declares only the license of its Rust bindings (MIT OR Apache-2.0),
+# but its build script compiles a vendored copy of Meta's zstd C library into
+# the binary. That code is BSD-3-Clause OR GPL-2.0, and this records that we
+# take it under the first — so the choice is written down, and so a future
+# tightening of `accepted` fails here instead of shipping GPL-2.0 terms by
+# accident. The checksums pin the exact texts this was read from.
+[zstd-sys]
+clarify = { license = "MIT AND BSD-3-Clause", files = [
+    { path = "LICENSE.Mit", license = "MIT", checksum = "129e8edef29e9abcd2ebabe252f4ef1b1289cdca356bf0040284a2fbccfb96c8" },
+    { path = "zstd/LICENSE", license = "BSD-3-Clause", checksum = "7055266497633c9025b777c78eb7235af13922117480ed5c674677adc381c9d8" },
+] }
+
 # Per-crate clarifications get added here on first run if cargo-about cannot
 # auto-resolve a crate's SPDX expression. Leave empty initially.
 # [[crates]]

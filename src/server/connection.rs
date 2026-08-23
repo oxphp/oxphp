@@ -131,12 +131,15 @@ pub async fn handle_request(
     let start = Instant::now();
     let (parts, body) = req.into_parts();
 
-    // Pick the content coding before parts are consumed by the pipeline (no alloc)
-    let coding = parts
+    // Weigh Accept-Encoding before parts are consumed by the pipeline (no
+    // alloc). Which coding wins depends on where the bytes are headed, so the
+    // weights are kept and resolved separately on each path.
+    let accepted = parts
         .headers
         .get(http::header::ACCEPT_ENCODING)
         .and_then(|v| v.to_str().ok())
-        .and_then(|accept_encoding| compression::negotiate(accept_encoding, server.compression));
+        .map(|accept_encoding| compression::Acceptable::parse(accept_encoding, server.compression))
+        .unwrap_or_default();
 
     // ── RequestReceived event ──
     // Handlers: RequestIdGenerator (-100), TrustedProxyHandler (-80),
@@ -218,7 +221,7 @@ pub async fn handle_request(
             profiling_mode,
             profiling_run_id,
             cancel_state.clone(),
-            coding,
+            accepted.artifact(),
         );
 
         // Drop guard fires cancel_request(ClientAbort) if the dispatch future
@@ -282,7 +285,7 @@ pub async fn handle_request(
     let request_id = building_event.request_id; // move back out
     let metadata = std::mem::take(&mut building_event.metadata);
 
-    // ── Brotli compression (after error pages, before metrics/logging) ──
+    // ── Compression (after error pages, before metrics/logging) ──
     let mut response = response;
     if let Some(wanted) = response
         .extensions_mut()
@@ -299,7 +302,7 @@ pub async fn handle_request(
         // saving is only knowable where the identity length was.
         server.metrics.record_compression(saving.0 as u64);
         response
-    } else if let Some(coding) = coding {
+    } else if let Some(coding) = accepted.per_request() {
         let pre_size = response.body().size_hint().exact().unwrap_or(0);
         let compressed =
             compression::maybe_compress(response, coding, server.compression.level(coding)).await;

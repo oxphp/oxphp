@@ -28,16 +28,28 @@ const BLOCKING_THRESHOLD_HIGH: usize = 4_096;
 pub enum Coding {
     Br,
     Gzip,
+    Zstd,
 }
 
 impl Coding {
-    /// Server preference, best first. A client that accepts several codings at
-    /// the same weight — which is what every browser sends — gets the first of
-    /// these it named.
-    pub(crate) const PREFERENCE: [Coding; 2] = [Coding::Br, Coding::Gzip];
+    /// Every coding, in the order their per-coding arrays are indexed.
+    pub(crate) const ALL: [Coding; 3] = [Coding::Br, Coding::Gzip, Coding::Zstd];
 
     /// How many codings exist. The width of a per-coding array.
-    pub(crate) const COUNT: usize = Self::PREFERENCE.len();
+    pub(crate) const COUNT: usize = Self::ALL.len();
+
+    /// Server preference for a body compressed while the request waits, best
+    /// first. Zstandard leads because it is the only coding that is cheaper
+    /// *and* smaller than the others at the levels a request can afford: over
+    /// real bodies above 4 KB it beat brotli's default quality on both, by
+    /// wider margins on x86-64 than on arm64.
+    const PER_REQUEST: [Coding; Self::COUNT] = [Coding::Zstd, Coding::Br, Coding::Gzip];
+
+    /// Server preference for a cached static file, best first. Brotli leads
+    /// here for the opposite reason: its cost is paid once and never again, and
+    /// at the top of its range — with the static dictionary that makes it slow —
+    /// it produces the smallest bytes of the three.
+    const ARTIFACT: [Coding; Self::COUNT] = [Coding::Br, Coding::Zstd, Coding::Gzip];
 
     /// The token this coding is named by in `Accept-Encoding` and
     /// `Content-Encoding`.
@@ -45,7 +57,17 @@ impl Coding {
         match self {
             Coding::Br => "br",
             Coding::Gzip => "gzip",
+            Coding::Zstd => "zstd",
         }
+    }
+
+    /// Read a coding out of configuration. `brotli` is accepted alongside the
+    /// header token `br`, which reads as a typo in a settings file.
+    pub fn from_name(name: &str) -> Option<Coding> {
+        Coding::ALL
+            .into_iter()
+            .find(|coding| name.eq_ignore_ascii_case(coding.name()))
+            .or_else(|| name.eq_ignore_ascii_case("brotli").then_some(Coding::Br))
     }
 
     /// This coding's index in a per-coding array.
@@ -55,22 +77,26 @@ impl Coding {
 }
 
 /// The level each coding is configured to run at. Zero means the server does
-/// not offer that coding.
-#[derive(Clone, Copy, Debug)]
+/// not offer that coding at all — either its level was set to zero or it was
+/// left out of the offered set.
+#[derive(Clone, Copy, Debug, Default)]
 pub struct Levels {
-    /// Brotli quality, 0-11. Zero disables compression entirely rather than
-    /// just brotli: that is what `COMPRESSION_LEVEL=0` meant when brotli was
-    /// the only coding, and a deployment that set it to switch compression off
-    /// must not start emitting gzip because a second coding was added.
+    /// Brotli quality, 0-11.
     pub brotli: i32,
     /// Gzip level, 0-9.
     pub gzip: i32,
+    /// Zstandard level, 0-19.
+    pub zstd: i32,
 }
 
 impl Levels {
-    /// Is any compression offered at all?
-    pub(crate) fn any(&self) -> bool {
-        self.brotli > 0
+    /// Set one coding's level. Zero withdraws the coding.
+    pub(crate) fn set(&mut self, coding: Coding, level: i32) {
+        match coding {
+            Coding::Br => self.brotli = level,
+            Coding::Gzip => self.gzip = level,
+            Coding::Zstd => self.zstd = level,
+        }
     }
 
     /// The configured level for one coding.
@@ -78,32 +104,60 @@ impl Levels {
         match coding {
             Coding::Br => self.brotli,
             Coding::Gzip => self.gzip,
+            Coding::Zstd => self.zstd,
         }
     }
 }
 
-/// Choose the coding to encode a response with, or `None` for identity.
+/// What one client will accept, weighed against what this server offers.
 ///
-/// The client's weights decide first — RFC 9110 §12.5.3 makes them a ranking,
-/// not a list — and server preference breaks a tie, which is the usual case
-/// since browsers send every coding they support at the default weight.
-pub(crate) fn negotiate(accept_encoding: &str, levels: Levels) -> Option<Coding> {
-    if !levels.any() {
-        return None;
-    }
-    let mut best: Option<(u16, Coding)> = None;
-    for coding in Coding::PREFERENCE {
-        if levels.level(coding) == 0 {
-            continue;
+/// Read from `Accept-Encoding` once per request and then asked twice, because
+/// the answer depends on what happens to the compressed bytes afterwards: a
+/// response encoded for this request alone wants the cheapest coding that is
+/// small enough, while a static file whose compressed copy will be served
+/// thousands of times wants the smallest coding whatever it costs. The client's
+/// weights outrank both — RFC 9110 §12.5.3 makes them a ranking, not a list —
+/// and server preference only breaks a tie, which is the usual case since
+/// browsers send every coding they support at the default weight.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Acceptable([u16; Coding::COUNT]);
+
+impl Acceptable {
+    /// Weigh one `Accept-Encoding` field against the server's configuration.
+    pub(crate) fn parse(accept_encoding: &str, levels: Levels) -> Self {
+        let mut weights = [0u16; Coding::COUNT];
+        for coding in Coding::ALL {
+            if levels.level(coding) > 0 {
+                weights[coding.slot()] = qvalue(accept_encoding, coding.name());
+            }
         }
-        let weight = qvalue(accept_encoding, coding.name());
-        // Zero is a refusal, and a coding the header never named scores zero
-        // unless a `*` covers it.
-        if weight > 0 && best.is_none_or(|(best_weight, _)| weight > best_weight) {
-            best = Some((weight, coding));
-        }
+        Self(weights)
     }
-    best.map(|(_, coding)| coding)
+
+    /// The coding to encode a response with on the request path, or `None` for
+    /// identity.
+    pub(crate) fn per_request(self) -> Option<Coding> {
+        self.best(Coding::PER_REQUEST)
+    }
+
+    /// The coding whose stored copy of a cached static file this client should
+    /// be served, or `None` for identity.
+    pub(crate) fn artifact(self) -> Option<Coding> {
+        self.best(Coding::ARTIFACT)
+    }
+
+    fn best(self, preference: [Coding; Coding::COUNT]) -> Option<Coding> {
+        let mut best: Option<(u16, Coding)> = None;
+        for coding in preference {
+            // Zero is a refusal, and a coding the header never named scores
+            // zero unless a `*` covers it.
+            let weight = self.0[coding.slot()];
+            if weight > 0 && best.is_none_or(|(best_weight, _)| weight > best_weight) {
+                best = Some((weight, coding));
+            }
+        }
+        best.map(|(_, coding)| coding)
+    }
 }
 
 /// Try to compress a response with `coding`, which the caller must have
@@ -202,6 +256,7 @@ fn blocking_threshold(coding: Coding, level: i32) -> usize {
     let steep = match coding {
         Coding::Br => level > 4,
         Coding::Gzip => level > 6,
+        Coding::Zstd => level > 9,
     };
     if steep {
         BLOCKING_THRESHOLD_HIGH
@@ -370,6 +425,7 @@ pub(crate) fn artifact_level(coding: Coding) -> i32 {
     match coding {
         Coding::Br => 11,
         Coding::Gzip => 9,
+        Coding::Zstd => 19,
     }
 }
 
@@ -385,7 +441,16 @@ fn compress(data: &[u8], coding: Coding, level: i32) -> Option<Vec<u8>> {
     match coding {
         Coding::Br => compress_brotli(data, level),
         Coding::Gzip => compress_gzip(data, level),
+        Coding::Zstd => compress_zstd(data, level),
     }
+}
+
+/// Compress data using zstd. Returns None if compression would not reduce size.
+fn compress_zstd(data: &[u8], level: i32) -> Option<Vec<u8>> {
+    let output = zstd::bulk::compress(data, level)
+        .inspect_err(|e| tracing::debug!(error = %e, "Zstd compression failed"))
+        .ok()?;
+    (output.len() < data.len()).then_some(output)
 }
 
 /// Compress data using gzip. Returns None if compression would not reduce size.
@@ -433,8 +498,21 @@ mod tests {
         qvalue(accept_encoding, "br") > 0
     }
 
-    fn levels(brotli: i32, gzip: i32) -> Levels {
-        Levels { brotli, gzip }
+    fn levels(brotli: i32, gzip: i32, zstd: i32) -> Levels {
+        Levels { brotli, gzip, zstd }
+    }
+
+    /// Everything on, at the shipped defaults.
+    fn all() -> Levels {
+        levels(4, 6, 6)
+    }
+
+    fn per_request(accept_encoding: &str, levels: Levels) -> Option<Coding> {
+        Acceptable::parse(accept_encoding, levels).per_request()
+    }
+
+    fn artifact(accept_encoding: &str, levels: Levels) -> Option<Coding> {
+        Acceptable::parse(accept_encoding, levels).artifact()
     }
 
     fn build_response(content_type: &str, body: &[u8]) -> Response<ResponseBody> {
@@ -780,55 +858,101 @@ mod tests {
     }
 
     #[test]
-    fn test_negotiate_prefers_brotli_when_weights_tie() {
-        // What every browser sends: several codings, no weights at all.
-        let all = levels(4, 6);
-        assert_eq!(negotiate("gzip, deflate, br", all), Some(Coding::Br));
-        assert_eq!(negotiate("br;q=1.0, gzip;q=1.0", all), Some(Coding::Br));
-        assert_eq!(negotiate("gzip;q=0.5, br;q=0.5", all), Some(Coding::Br));
+    fn test_a_tie_is_broken_by_what_happens_to_the_bytes() {
+        // What every browser sends: several codings, no weights at all. The
+        // same header resolves differently depending on whether the result is
+        // compressed for this request or kept and served again.
+        let header = "gzip, deflate, br, zstd";
+        assert_eq!(per_request(header, all()), Some(Coding::Zstd));
+        assert_eq!(artifact(header, all()), Some(Coding::Br));
+        // Explicit equal weights are still a tie.
+        assert_eq!(
+            per_request("br;q=0.5, zstd;q=0.5", all()),
+            Some(Coding::Zstd)
+        );
+        assert_eq!(artifact("br;q=0.5, zstd;q=0.5", all()), Some(Coding::Br));
     }
 
     #[test]
-    fn test_negotiate_honors_client_weights() {
-        // A client that ranks gzip above brotli is asking for gzip, and
+    fn test_a_client_that_offers_one_coding_gets_that_coding() {
+        // Neither preference order can be honored, so both agree.
+        for coding in Coding::ALL {
+            assert_eq!(per_request(coding.name(), all()), Some(coding));
+            assert_eq!(artifact(coding.name(), all()), Some(coding));
+        }
+    }
+
+    #[test]
+    fn test_client_weights_outrank_server_preference() {
+        // A client that ranks gzip above the rest is asking for gzip, and
         // §12.5.3 makes that ranking binding on the server.
-        let all = levels(4, 6);
-        assert_eq!(negotiate("br;q=0.5, gzip", all), Some(Coding::Gzip));
-        assert_eq!(negotiate("br;q=0.1, gzip;q=0.2", all), Some(Coding::Gzip));
-        // ... and back the other way.
-        assert_eq!(negotiate("br, gzip;q=0.5", all), Some(Coding::Br));
+        assert_eq!(per_request("br, zstd, gzip;q=1", all()), Some(Coding::Zstd));
+        assert_eq!(
+            per_request("br;q=0.5, zstd;q=0.5, gzip", all()),
+            Some(Coding::Gzip)
+        );
+        assert_eq!(
+            artifact("br;q=0.5, zstd;q=0.5, gzip", all()),
+            Some(Coding::Gzip)
+        );
+        // Brotli demoted below zstd loses even on the path that prefers it.
+        assert_eq!(artifact("br;q=0.5, zstd", all()), Some(Coding::Zstd));
     }
 
     #[test]
     fn test_negotiate_falls_back_to_gzip() {
-        let all = levels(4, 6);
-        // The client brotli never reaches: Chromium over plain HTTP, most
-        // command-line tools, anything older than 2016.
-        assert_eq!(negotiate("gzip, deflate", all), Some(Coding::Gzip));
-        assert_eq!(negotiate("br;q=0, gzip", all), Some(Coding::Gzip));
+        // The client neither brotli nor zstd reaches: Chromium over plain
+        // HTTP, most command-line tools, anything older than 2016.
+        assert_eq!(per_request("gzip, deflate", all()), Some(Coding::Gzip));
+        assert_eq!(
+            per_request("br;q=0, zstd;q=0, gzip", all()),
+            Some(Coding::Gzip)
+        );
         // Codings this server does not produce are not fallbacks.
-        assert_eq!(negotiate("deflate, zstd", all), None);
-        assert_eq!(negotiate("", all), None);
+        assert_eq!(per_request("deflate, compress", all()), None);
+        assert_eq!(per_request("", all()), None);
     }
 
     #[test]
     fn test_negotiate_wildcard_takes_server_preference() {
-        // "*" accepts both, so the choice is entirely the server's.
-        assert_eq!(negotiate("*", levels(4, 6)), Some(Coding::Br));
-        assert_eq!(negotiate("*", levels(0, 6)), None);
-        assert_eq!(negotiate("*;q=0", levels(4, 6)), None);
+        // "*" accepts everything, so the choice is entirely the server's.
+        assert_eq!(per_request("*", all()), Some(Coding::Zstd));
+        assert_eq!(artifact("*", all()), Some(Coding::Br));
+        assert_eq!(per_request("*", levels(0, 6, 0)), Some(Coding::Gzip));
+        assert_eq!(per_request("*", levels(0, 0, 0)), None);
+        assert_eq!(per_request("*;q=0", all()), None);
     }
 
     #[test]
     fn test_negotiate_skips_disabled_codings() {
-        // GZIP_LEVEL=0 turns off gzip alone: brotli clients are unaffected,
-        // gzip-only clients get identity.
-        assert_eq!(negotiate("gzip, br", levels(4, 0)), Some(Coding::Br));
-        assert_eq!(negotiate("gzip", levels(4, 0)), None);
-        // COMPRESSION_LEVEL=0 is the switch for all of it — the meaning it
-        // had when brotli was the only coding.
-        assert_eq!(negotiate("gzip, br", levels(0, 6)), None);
-        assert_eq!(negotiate("gzip", levels(0, 6)), None);
+        // A coding left out of COMPRESSION_ENCODINGS, or set to level zero,
+        // arrives here as a zero level and is not offered to anyone.
+        assert_eq!(
+            per_request("gzip, br, zstd", levels(4, 0, 0)),
+            Some(Coding::Br)
+        );
+        assert_eq!(per_request("gzip", levels(4, 0, 0)), None);
+        assert_eq!(
+            per_request("gzip, br, zstd", levels(0, 0, 6)),
+            Some(Coding::Zstd)
+        );
+        // Nothing offered is the same as nothing accepted.
+        assert_eq!(per_request("gzip, br, zstd", levels(0, 0, 0)), None);
+        assert_eq!(artifact("gzip, br, zstd", levels(0, 0, 0)), None);
+    }
+
+    #[test]
+    fn test_coding_names_parse_back_out_of_configuration() {
+        for coding in Coding::ALL {
+            assert_eq!(Coding::from_name(coding.name()), Some(coding));
+            assert_eq!(
+                Coding::from_name(&coding.name().to_uppercase()),
+                Some(coding)
+            );
+        }
+        assert_eq!(Coding::from_name("brotli"), Some(Coding::Br));
+        assert_eq!(Coding::from_name("deflate"), None);
+        assert_eq!(Coding::from_name(""), None);
     }
 
     #[test]
@@ -873,7 +997,7 @@ mod tests {
     fn test_every_coding_has_a_distinct_slot() {
         // The artifact cache indexes an array by `slot()`; two codings sharing
         // one would silently serve each other's bytes.
-        let slots: Vec<usize> = Coding::PREFERENCE.iter().map(|c| c.slot()).collect();
+        let slots: Vec<usize> = Coding::ALL.iter().map(|c| c.slot()).collect();
         for (i, slot) in slots.iter().enumerate() {
             assert!(*slot < Coding::COUNT);
             assert!(!slots[..i].contains(slot));

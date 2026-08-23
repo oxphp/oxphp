@@ -203,7 +203,7 @@ pub struct Metrics {
     static_cache_hits: AtomicU64,
     static_cache_misses: AtomicU64,
 
-    /// Responses compressed with brotli.
+    /// Responses sent under a content coding.
     compressed_responses_total: AtomicU64,
     /// Bytes saved by compression (original - compressed).
     compression_bytes_saved_total: AtomicU64,
@@ -921,7 +921,7 @@ impl Metrics {
         // ── Compression ──
         let _ = writeln!(
             out,
-            "# HELP oxphp_compressed_responses_total Responses compressed with brotli."
+            "# HELP oxphp_compressed_responses_total Responses sent under a content coding."
         );
         let _ = writeln!(out, "# TYPE oxphp_compressed_responses_total counter");
         let _ = writeln!(
