@@ -113,7 +113,7 @@ The `run` role applies CLI-oriented defaults before your `-d` overrides and `php
 
 | Directive | Default | Why |
 |---|---|---|
-| `max_execution_time` | `0` | A one-shot job (migration, importer, daemon) must not be killed by `SIGALRM`. |
+| `max_execution_time` | `0` | A one-shot job (migration, importer, daemon) must not be killed by PHP's execution timer. |
 | `max_input_time` | `-1` | No input-parsing deadline for CLI. |
 | `display_errors` | `stderr` | Errors go to standard error, not standard output. |
 | `html_errors` | `0` | Plain-text errors for a terminal. |
