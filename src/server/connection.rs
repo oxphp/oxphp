@@ -131,13 +131,12 @@ pub async fn handle_request(
     let start = Instant::now();
     let (parts, body) = req.into_parts();
 
-    // Check brotli support before parts are consumed by the pipeline (no alloc)
-    let supports_brotli = server.compression_level > 0
-        && parts
-            .headers
-            .get(http::header::ACCEPT_ENCODING)
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(compression::accepts_brotli);
+    // Pick the content coding before parts are consumed by the pipeline (no alloc)
+    let coding = parts
+        .headers
+        .get(http::header::ACCEPT_ENCODING)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|accept_encoding| compression::negotiate(accept_encoding, server.compression));
 
     // ── RequestReceived event ──
     // Handlers: RequestIdGenerator (-100), TrustedProxyHandler (-80),
@@ -219,7 +218,7 @@ pub async fn handle_request(
             profiling_mode,
             profiling_run_id,
             cancel_state.clone(),
-            supports_brotli,
+            coding,
         );
 
         // Drop guard fires cancel_request(ClientAbort) if the dispatch future
@@ -300,9 +299,10 @@ pub async fn handle_request(
         // saving is only knowable where the identity length was.
         server.metrics.record_compression(saving.0 as u64);
         response
-    } else if supports_brotli {
+    } else if let Some(coding) = coding {
         let pre_size = response.body().size_hint().exact().unwrap_or(0);
-        let compressed = compression::maybe_compress(response, server.compression_level).await;
+        let compressed =
+            compression::maybe_compress(response, coding, server.compression.level(coding)).await;
         let post_size = compressed.body().size_hint().exact().unwrap_or(0);
         if post_size < pre_size {
             server.metrics.record_compression(pre_size - post_size);
@@ -348,7 +348,7 @@ pub async fn handle_request(
     Ok(response)
 }
 
-/// Build a cached static file's Brotli artifact off the request path.
+/// Build one coding's artifact for a cached static file, off the request path.
 ///
 /// The compression runs at a quality no request could afford to wait for
 /// (tens of milliseconds per file), so it goes to the blocking pool and this
@@ -358,20 +358,23 @@ pub async fn handle_request(
 /// rather than queued — the claim is what keeps a cold cache under load from
 /// compressing the same file once per concurrent request.
 fn schedule_artifact(server: &Server, wanted: static_file::ArtifactWanted) {
-    let Some(claim) = server.file_cache.claim_artifact(&wanted.key) else {
+    let Some(claim) = server.file_cache.claim_artifact(&wanted.key, wanted.coding) else {
         return;
     };
     let cache = std::sync::Arc::clone(&server.file_cache);
     tokio::task::spawn_blocking(move || {
         // Released on every exit, including a panic inside this task.
         let _claim = claim;
-        match compression::compress_artifact(&wanted.bytes) {
-            Some(artifact) => {
-                cache.insert_artifact(&wanted.key, wanted.modified, Bytes::from(artifact))
-            }
+        match compression::compress_artifact(&wanted.bytes, wanted.coding) {
+            Some(artifact) => cache.insert_artifact(
+                &wanted.key,
+                wanted.coding,
+                wanted.modified,
+                Bytes::from(artifact),
+            ),
             // Compression did not shrink these bytes. Recorded so the entry
             // stops asking — otherwise every hit would repeat this work.
-            None => cache.reject_artifact(&wanted.key, wanted.modified),
+            None => cache.reject_artifact(&wanted.key, wanted.coding, wanted.modified),
         }
     });
 }
@@ -397,7 +400,7 @@ async fn dispatch_request(
     profiling_mode_override: Option<crate::profiling::ProfilingMode>,
     profiling_run_id: Option<String>,
     cancel_state: std::sync::Arc<crate::bridge::cancel::CancellationState>,
-    supports_brotli: bool,
+    coding: Option<compression::Coding>,
 ) -> Result<(Response<ResponseBody>, usize, PhpExecData), crate::types::BoxError> {
     let uri_path = parts.uri.path();
     let route_result = server
@@ -421,7 +424,7 @@ async fn dispatch_request(
                 &parts.method,
                 &parts.headers,
                 server.static_cache_control.as_deref(),
-                supports_brotli,
+                coding,
             )
             .await?;
 

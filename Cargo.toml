@@ -69,14 +69,15 @@ arc-swap = "1"
 # prost-build at compile time from proto/pprof.proto.
 prost = "0.13"
 
-# Gzip compression. Used by the pprof exporter (Content-Type:
-# application/vnd.google.pprof+proto+gzip) and available for
-# future compressed payloads. Uses the system zlib backend (native
-# C implementation) — ~2× faster than miniz_oxide at the same
-# level, and the Dockerfile already installs `zlib-dev` for other
-# deps. zlib-ng would be marginally faster still but requires
-# cmake, which the Alpine builder image does not install.
-flate2 = { version = "1", default-features = false, features = ["zlib"] }
+# Gzip compression. Encodes responses for clients that do not accept
+# brotli, and the pprof exporter's payload (Content-Type:
+# application/vnd.google.pprof+proto+gzip). The backend is a whole-build
+# choice, so both use zlib-rs: a Rust rewrite of zlib that measured ~2x
+# faster than miniz_oxide from ~16 KB up at the same output size, and
+# needs neither a C toolchain nor zlib headers at build time. zlib-ng
+# would be marginally faster still but requires cmake, which the Alpine
+# builder image does not install.
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 
 # Faster synchronization primitives (smaller uncontended cost than std::sync
 # on Linux; used in the file cache's read-heavy hot path)
@@ -170,6 +171,9 @@ prost-build = "0.13"
 
 [dev-dependencies]
 bytes = "1"
+# Decodes the gzip responses the compression suite asserts on. Same backend
+# as the main dependency above — a build selects one for the whole crate.
+flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
 criterion = { version = "0.5", default-features = false, features = ["async_tokio"] }
 h2 = "0.4"
 http = "1"
