@@ -3018,6 +3018,14 @@ OxPHP compresses HTTP responses using Brotli encoding by default. Compression ap
 
 Compression happens after PHP execution and after static file serving. The entire compressed body is held in memory briefly, which is why responses above 3 MB are excluded.
 
+## Cached Static Files
+
+A static file small enough to sit in the content cache (1 MiB or less) is compressed once rather than on every request. Once such a file has been served twice, OxPHP compresses it at maximum Brotli quality on a background thread and keeps the result next to the cached bytes; every later request for it is answered from that stored copy.
+
+This is invisible from the outside apart from the response getting smaller — maximum quality typically produces 12–19% less than the per-request level. No request waits for the compression: the one that triggers it, and any that arrive while it runs, are served at the configured `COMPRESSION_LEVEL` as before. Response headers do not change.
+
+The stored copy shares the cached file's validator, so it is discarded together with the cached bytes when [`STATIC_REVALIDATE`](static-files.md) notices the file changed on disk, and it counts against the same content-cache budget. Files that do not compress are marked and not retried. Setting `COMPRESSION_LEVEL=0` disables this along with all other compression.
+
 ## Configuration
 
 | Variable | Default | Description |

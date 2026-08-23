@@ -284,7 +284,23 @@ pub async fn handle_request(
     let metadata = std::mem::take(&mut building_event.metadata);
 
     // ── Brotli compression (after error pages, before metrics/logging) ──
-    let response = if supports_brotli {
+    let mut response = response;
+    if let Some(wanted) = response
+        .extensions_mut()
+        .remove::<static_file::ArtifactWanted>()
+    {
+        schedule_artifact(server, wanted);
+    }
+    let response = if let Some(saving) = response
+        .extensions()
+        .get::<static_file::PrecompressedSaving>()
+        .copied()
+    {
+        // Body is already a cached artifact — nothing left to compress, and the
+        // saving is only knowable where the identity length was.
+        server.metrics.record_compression(saving.0 as u64);
+        response
+    } else if supports_brotli {
         let pre_size = response.body().size_hint().exact().unwrap_or(0);
         let compressed = compression::maybe_compress(response, server.compression_level).await;
         let post_size = compressed.body().size_hint().exact().unwrap_or(0);
@@ -330,6 +346,34 @@ pub async fn handle_request(
     server.dispatcher.dispatch(&mut complete_event);
 
     Ok(response)
+}
+
+/// Build a cached static file's Brotli artifact off the request path.
+///
+/// The compression runs at a quality no request could afford to wait for
+/// (tens of milliseconds per file), so it goes to the blocking pool and this
+/// request is served the per-request way. Requests that arrive before the job
+/// lands are served that way too; the artifact takes over from the first hit
+/// after it is stored. A file whose artifact is already being built is skipped
+/// rather than queued — the claim is what keeps a cold cache under load from
+/// compressing the same file once per concurrent request.
+fn schedule_artifact(server: &Server, wanted: static_file::ArtifactWanted) {
+    let Some(claim) = server.file_cache.claim_artifact(&wanted.key) else {
+        return;
+    };
+    let cache = std::sync::Arc::clone(&server.file_cache);
+    tokio::task::spawn_blocking(move || {
+        // Released on every exit, including a panic inside this task.
+        let _claim = claim;
+        match compression::compress_artifact(&wanted.bytes) {
+            Some(artifact) => {
+                cache.insert_artifact(&wanted.key, wanted.modified, Bytes::from(artifact))
+            }
+            // Compression did not shrink these bytes. Recorded so the entry
+            // stops asking — otherwise every hit would repeat this work.
+            None => cache.reject_artifact(&wanted.key, wanted.modified),
+        }
+    });
 }
 
 /// Typed data produced by PHP execution and propagated to `RequestComplete`.
