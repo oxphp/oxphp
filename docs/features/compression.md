@@ -99,7 +99,7 @@ Responses are sent without compression when any of the following conditions are 
 - The response already has a `Content-Encoding` header (e.g. pre-compressed content)
 - The response body is smaller than 256 bytes or larger than 3 MB
 - The content type is not in the compressible list — `image/png`, `image/jpeg`, `font/woff2` and `application/zip` because those formats already carry their own compression, and `text/event-stream` because an event stream must reach the client event by event
-- The response is streamed — its length is unknown when the headers are sent (PHP scripts using `oxphp_stream_flush()`, Server-Sent Events, and static files above 1 MiB, which are read from disk as they are sent). OxPHP compresses a response in one piece, so a body it does not yet hold in full is passed through. Brotli, Zstandard and gzip can all encode incrementally, so this is a limit of the server rather than of the codings
+- The response is streamed — its length is unknown when the headers are sent (PHP scripts using `oxphp_stream_flush()`, Server-Sent Events, and static files above 3 MB, which are read from disk as they are sent). OxPHP compresses a response in one piece, so a body it does not yet hold in full is passed through. Brotli, Zstandard and gzip can all encode incrementally, so this is a limit of the server rather than of the codings
 
 ## Response Headers
 

@@ -16,7 +16,7 @@ When a request matches a static file:
 3. **Cache check** — the file cache is checked before touching the filesystem
 4. **Conditional check** — if the request carries `If-None-Match` or `If-Modified-Since`, OxPHP evaluates the condition and may return `304 Not Modified` without sending a body
 5. **Range check** — if a GET or HEAD request carries a `Range` header, OxPHP responds with `206 Partial Content`: GET receives only the requested byte range, HEAD the same range headers with no body
-6. **Response** — files up to 1 MiB are served from the in-memory cache; larger files are streamed directly from disk
+6. **Response** — files up to 1 MiB are served from the in-memory cache; larger files are streamed directly from disk, unless they are about to be compressed
 
 ## Configuration
 
@@ -44,7 +44,8 @@ MIME types are determined automatically from the file extension. If no type can 
 OxPHP uses an in-memory cache to reduce disk I/O for frequently requested files:
 
 - Files **up to 1 MiB** (1,048,576 bytes) are read into memory and cached. The total cache budget is 64 MiB (67,108,864 bytes). When the budget is exceeded, the least recently used entries are evicted to make room.
-- Files **larger than 1 MiB** are always streamed directly from disk. The `Content-Length` header is set from file metadata so the client knows the total size upfront.
+- Files **larger than 1 MiB** are streamed directly from disk instead of being cached. The `Content-Length` header is set from file metadata so the client knows the total size upfront.
+- One exception to the streaming: a compressible file that still fits the [compression](compression.md) window (3 MB) is read in full for clients that accept a content coding, because a body the server does not hold whole cannot be encoded. It is compressed for that request and, being over the cache limit, compressed again for the next one — put a CDN in front of assets in this range, or keep them under 1 MiB, and the work is done once.
 
 The file cache is populated on the first request to each file and retained across subsequent requests. By default, cache entries persist until evicted by the LRU policy.
 
@@ -103,7 +104,7 @@ This enables `<video>`/`<audio>` seeking in browsers, resumable downloads (`wget
 - **If-Range** is honored: when the client sends the ETag (or `Last-Modified` date) of its partial copy and the file has changed since, OxPHP returns the full `200` response instead of a mismatched fragment. The date form is only accepted once the file's modification second has fully elapsed — a just-written file could change again within the same second without moving the date, so it is not yet a strong validator (RFC 9110).
 - Requests with **multiple ranges** (`bytes=0-1,4-5`) receive the full file as `200 OK` — `multipart/byteranges` responses are not generated.
 - **HEAD** requests with a `Range` header receive the same `206`/`Content-Range` headers as GET without a body, matching nginx and Apache.
-- **Ranges and compression are mutually exclusive.** For clients that accept brotli, range handling is disabled on representations that would be served compressed, and compressed responses do not advertise `Accept-Ranges` — a resumed download could otherwise splice uncompressed bytes onto a compressed prefix. Only files served from the in-memory cache (up to 1 MiB) are ever compressed, so ranges always work for the content that actually needs them: video, archives, images, and every file streamed from disk. Responses for compression-eligible files always carry `Vary: Accept-Encoding` — even when served uncompressed — so shared caches keep the variants apart.
+- **Ranges and compression are mutually exclusive.** For clients that accept brotli, range handling is disabled on representations that would be served compressed, and compressed responses do not advertise `Accept-Ranges` — a resumed download could otherwise splice uncompressed bytes onto a compressed prefix. Files above the compression window (3 MB) are never compressed, so ranges always work for the content that actually needs them: video, archives, and images. Responses for compression-eligible files always carry `Vary: Accept-Encoding` — even when served uncompressed — so shared caches keep the variants apart.
 - `206` responses are never compressed, and range handling does not apply to PHP responses — only to static files.
 
 Example: resume an interrupted download with curl:

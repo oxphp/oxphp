@@ -155,6 +155,43 @@ async fn a_cached_static_file_hands_over_to_its_brotli_copy() {
 }
 
 #[tokio::test]
+async fn a_file_too_large_to_cache_is_still_compressed() {
+    let dir = tempfile::TempDir::new().unwrap();
+    // Past the 1 MiB content-cache limit and inside the compression window.
+    // A file in this band is read from disk as it is sent, and a body the
+    // server does not hold whole cannot be encoded — so until it was read
+    // whole for these clients, a bundle of this size went out in full.
+    let body = css_body().repeat(800);
+    assert!(body.len() > 1024 * 1024);
+    std::fs::write(dir.path().join("big.css"), &body).unwrap();
+    let addr = start_server(
+        dir.path(),
+        Levels {
+            brotli: 5,
+            gzip: 6,
+            zstd: 6,
+        },
+    )
+    .await;
+
+    let response = reqwest::Client::new()
+        .get(format!("http://{addr}/big.css"))
+        .header("accept-encoding", "gzip, deflate, br, zstd")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers().get("content-encoding").unwrap(), "zstd");
+    // Nothing caches this file, so no stored artifact ever takes over: every
+    // hit is compressed for that request, which is the per-request coding.
+    assert!(response.headers().get("accept-ranges").is_none());
+    let compressed = response.bytes().await.unwrap();
+    assert!(compressed.len() < body.len() / 4);
+    assert_eq!(unzstd(&compressed), body.as_bytes());
+}
+
+#[tokio::test]
 async fn a_clients_weights_outrank_server_preference() {
     let dir = tempfile::TempDir::new().unwrap();
     std::fs::write(dir.path().join("app.css"), css_body()).unwrap();
