@@ -278,7 +278,18 @@ fn parse_knob(name: &str, default: usize) -> Result<usize, crate::types::BoxErro
 /// than a clamp, since a clamped level looks exactly like a working one in
 /// every log line afterwards.
 fn compression_level(name: &str, max: i32, default: i32) -> Result<i32, crate::types::BoxError> {
-    match std::env::var(name) {
+    parse_compression_level(name, max, default, std::env::var(name))
+}
+
+/// The reading half of [`compression_level`], split out so the range and the
+/// unreadable-value rejection can be tested without mutating the environment.
+fn parse_compression_level(
+    name: &str,
+    max: i32,
+    default: i32,
+    raw: Result<String, std::env::VarError>,
+) -> Result<i32, crate::types::BoxError> {
+    match raw {
         Err(std::env::VarError::NotPresent) => Ok(default),
         Err(std::env::VarError::NotUnicode(_)) => Err(format!("{name} is not valid UTF-8").into()),
         Ok(val) if val.trim().is_empty() => Ok(default),
@@ -310,15 +321,35 @@ fn compression_from_env() -> Result<Levels, crate::types::BoxError> {
         // bytes after the upgrade than before it.
         zstd: compression_level("COMPRESSION_ZSTD_LEVEL", 19, 6)?,
     };
-    // An exactly-empty value is an unset one on both, the way it is for every
-    // other knob here — a `${VAR:-}` substitution must not abort startup.
-    let set = |name: &str| std::env::var(name).ok().filter(|v| !v.trim().is_empty());
     resolve_compression(
-        set("COMPRESSION_ENCODINGS").as_deref(),
-        set("COMPRESSION_LEVEL").as_deref(),
+        text_knob("COMPRESSION_ENCODINGS")?.as_deref(),
+        text_knob("COMPRESSION_LEVEL")?.as_deref(),
         levels,
-        set("COMPRESSION_BROTLI_LEVEL").is_some(),
+        text_knob("COMPRESSION_BROTLI_LEVEL")?.is_some(),
     )
+}
+
+/// Read a compression knob whose value is text rather than a number. An
+/// exactly-empty value is an unset one, the way it is for every other knob here
+/// — a `${VAR:-}` substitution must not abort startup — but an unreadable one
+/// is not: a silent default there is the one outcome an operator has no way to
+/// notice, which is exactly what the numeric knobs refuse.
+fn text_knob(name: &str) -> Result<Option<String>, crate::types::BoxError> {
+    parse_text_knob(name, std::env::var(name))
+}
+
+/// The reading half of [`text_knob`], split out the same way and for the same
+/// reason as [`parse_compression_level`].
+fn parse_text_knob(
+    name: &str,
+    raw: Result<String, std::env::VarError>,
+) -> Result<Option<String>, crate::types::BoxError> {
+    match raw {
+        Err(std::env::VarError::NotPresent) => Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err(format!("{name} is not valid UTF-8").into()),
+        Ok(val) if val.trim().is_empty() => Ok(None),
+        Ok(val) => Ok(Some(val)),
+    }
 }
 
 /// Decide which codings this server offers, and at what level each one runs.
@@ -994,6 +1025,69 @@ mod tests {
 
     fn resolve(encodings: Option<&str>, legacy: Option<&str>) -> Levels {
         resolve_compression(encodings, legacy, shipped_levels(), false).expect("valid")
+    }
+
+    #[test]
+    fn a_level_outside_its_own_coding_range_is_a_startup_error() {
+        // Each ceiling is the coding's own — gzip stops at 9, Zstandard at 19 —
+        // and a clamp would read as a working configuration in every log line
+        // afterwards.
+        for (name, max, over) in [
+            ("COMPRESSION_GZIP_LEVEL", 9, "10"),
+            ("COMPRESSION_ZSTD_LEVEL", 19, "20"),
+            ("COMPRESSION_BROTLI_LEVEL", 11, "12"),
+        ] {
+            let err = parse_compression_level(name, max, 6, Ok(over.to_string()))
+                .expect_err("above the ceiling");
+            assert!(err.to_string().contains(name), "{err}");
+            assert!(parse_compression_level(name, max, 6, Ok("-1".into())).is_err());
+            assert_eq!(
+                parse_compression_level(name, max, 6, Ok(max.to_string())).unwrap(),
+                max
+            );
+        }
+        // Unset and `${VAR:-}` alike leave the default in place.
+        let unset = Err(std::env::VarError::NotPresent);
+        assert_eq!(
+            parse_compression_level("COMPRESSION_GZIP_LEVEL", 9, 6, unset).unwrap(),
+            6
+        );
+        assert_eq!(
+            parse_compression_level("COMPRESSION_GZIP_LEVEL", 9, 6, Ok("  ".into())).unwrap(),
+            6
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_compression_value_that_is_not_valid_utf8_is_a_startup_error() {
+        // Reading it as unset would quietly pick the default — the one outcome
+        // an operator has no way to notice, and the reason every numeric knob
+        // here rejects it by name.
+        use std::os::unix::ffi::OsStringExt;
+        let unreadable = || {
+            Err(std::env::VarError::NotUnicode(
+                std::ffi::OsString::from_vec(vec![0xff]),
+            ))
+        };
+
+        let err = parse_compression_level("COMPRESSION_BROTLI_LEVEL", 11, 5, unreadable())
+            .expect_err("an unreadable level is not a default");
+        assert!(
+            err.to_string().contains("COMPRESSION_BROTLI_LEVEL"),
+            "{err}"
+        );
+
+        // The two text-valued knobs read the same way — they were the pair
+        // that still fell back.
+        for name in ["COMPRESSION_ENCODINGS", "COMPRESSION_LEVEL"] {
+            let err = parse_text_knob(name, unreadable()).expect_err("nor is an unreadable set");
+            assert!(err.to_string().contains(name), "{err}");
+        }
+        assert_eq!(
+            parse_text_knob("COMPRESSION_ENCODINGS", Ok(" ".into())).unwrap(),
+            None
+        );
     }
 
     #[test]

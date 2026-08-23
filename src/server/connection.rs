@@ -131,15 +131,11 @@ pub async fn handle_request(
     let start = Instant::now();
     let (parts, body) = req.into_parts();
 
-    // Weigh Accept-Encoding before parts are consumed by the pipeline (no
-    // alloc). Which coding wins depends on where the bytes are headed, so the
-    // weights are kept and resolved separately on each path.
-    let accepted = parts
-        .headers
-        .get(http::header::ACCEPT_ENCODING)
-        .and_then(|v| v.to_str().ok())
-        .map(|accept_encoding| compression::Acceptable::parse(accept_encoding, server.compression))
-        .unwrap_or_default();
+    // Weigh Accept-Encoding before parts are consumed by the pipeline, and
+    // without allocating for the one field line every client actually sends.
+    // Which coding wins depends on where the bytes are headed, so the weights
+    // are kept and resolved separately on each path.
+    let accepted = compression::Acceptable::from_headers(&parts.headers, server.compression);
 
     // ── RequestReceived event ──
     // Handlers: RequestIdGenerator (-100), TrustedProxyHandler (-80),
@@ -320,7 +316,7 @@ pub async fn handle_request(
     // is getting. Without the header a shared cache stores that copy under the
     // bare URL and serves it to clients that would have taken a compressed one.
     let mut response = response;
-    compression::mark_varies_by_encoding(&mut response);
+    compression::mark_varies_by_encoding(&mut response, server.compression);
     let response = response;
 
     // ── RequestComplete event ──
@@ -359,6 +355,22 @@ pub async fn handle_request(
     Ok(response)
 }
 
+/// How many artifacts may be built at once. The build is CPU-bound at a
+/// quality chosen for size alone, and it competes with the runtime and the PHP
+/// pool for the same cores; a cold cache wants one per distinct file, which on
+/// a site with a few hundred assets is a burst large enough to swamp the
+/// blocking pool that every `tokio::fs` call on the static path also uses.
+/// A quarter of the cores caps that without stalling the build-out: nothing
+/// waits on an artifact, so the only cost of a small cap is that the last file
+/// gets its stored copy a few seconds later.
+static ARTIFACT_BUILDS: std::sync::LazyLock<tokio::sync::Semaphore> =
+    std::sync::LazyLock::new(|| {
+        let cpu = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4);
+        tokio::sync::Semaphore::new((cpu / 4).max(1))
+    });
+
 /// Build one coding's artifact for a cached static file, off the request path.
 ///
 /// The compression runs at a quality no request could afford to wait for
@@ -367,14 +379,19 @@ pub async fn handle_request(
 /// lands are served that way too; the artifact takes over from the first hit
 /// after it is stored. A file whose artifact is already being built is skipped
 /// rather than queued — the claim is what keeps a cold cache under load from
-/// compressing the same file once per concurrent request.
+/// compressing the same file once per concurrent request — and so is one that
+/// finds no permit free, since the next hit asks again.
 fn schedule_artifact(server: &Server, wanted: static_file::ArtifactWanted) {
+    let Ok(permit) = ARTIFACT_BUILDS.try_acquire() else {
+        return;
+    };
     let Some(claim) = server.file_cache.claim_artifact(&wanted.key, wanted.coding) else {
         return;
     };
     let cache = std::sync::Arc::clone(&server.file_cache);
     tokio::task::spawn_blocking(move || {
-        // Released on every exit, including a panic inside this task.
+        // Both released on every exit, including a panic inside this task.
+        let _permit = permit;
         let _claim = claim;
         match compression::compress_artifact(&wanted.bytes, wanted.coding) {
             Some(artifact) => cache.insert_artifact(
@@ -436,6 +453,7 @@ async fn dispatch_request(
                 &parts.headers,
                 server.static_cache_control.as_deref(),
                 coding,
+                server.compression,
             )
             .await?;
 
