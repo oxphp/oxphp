@@ -111,14 +111,25 @@ pub async fn maybe_compress(
         }
     };
 
-    let compressed_len = compressed.len();
     let mut response = Response::from_parts(parts, full_body(Bytes::from(compressed)));
+    mark_encoded(&mut response, "br");
+    response
+}
+
+/// Rewrite the headers of a response whose body has just been replaced with an
+/// encoded representation. Both compression paths end here — the one that
+/// encodes on the request, and static serving handing over a cached artifact —
+/// so an encoded response looks the same however it was produced.
+pub(crate) fn mark_encoded(response: &mut Response<ResponseBody>, coding: &'static str) {
+    let encoded_len = hyper::body::Body::size_hint(response.body())
+        .exact()
+        .unwrap_or(0);
     response
         .headers_mut()
-        .insert(header::CONTENT_ENCODING, HeaderValue::from_static("br"));
-    // The compressed bytes are a different representation than the identity
+        .insert(header::CONTENT_ENCODING, HeaderValue::from_static(coding));
+    // The encoded bytes are a different representation than the identity
     // bytes the ETag was computed from; a strong tag shared by both would let
-    // a client resume a brotli download with identity 206 fragments
+    // a client resume an encoded download with identity 206 fragments
     // (If-Range requires strong comparison, RFC 9110 §13.1.5). Downgrade to
     // weak — nginx's gzip filter does the same. Weak tags still revalidate
     // via If-None-Match, which uses weak comparison.
@@ -133,13 +144,13 @@ pub async fn maybe_compress(
     }
     // Drop Accept-Ranges: byte offsets are meaningless against the encoded
     // body, and a date-form If-Range (which the weak ETag cannot guard)
-    // would otherwise let a client resume this brotli download with
+    // would otherwise let a client resume this encoded download with
     // identity 206 fragments. nginx's gzip filter clears the header the
     // same way (ngx_http_clear_accept_ranges).
     response.headers_mut().remove(header::ACCEPT_RANGES);
     response
         .headers_mut()
-        .insert(header::CONTENT_LENGTH, HeaderValue::from(compressed_len));
+        .insert(header::CONTENT_LENGTH, HeaderValue::from(encoded_len));
     // Append Vary: Accept-Encoding so caches store both compressed and
     // uncompressed variants — unless the origin already declared it (static
     // serving does, on representations whose range behavior depends on the
@@ -156,7 +167,6 @@ pub async fn maybe_compress(
             .headers_mut()
             .append(header::VARY, HeaderValue::from_static("Accept-Encoding"));
     }
-    response
 }
 
 /// Would a buffered 200 response with this MIME type and size be
@@ -259,6 +269,18 @@ fn is_compressible(content_type: &str) -> bool {
             | "application/x-font-opentype"
             | "application/vnd.ms-fontobject"
     )
+}
+
+/// Brotli quality for an artifact that will be cached and served many times.
+/// The cost is paid once, so the only thing worth optimizing is size: over real
+/// assets q11 lands 12–19% below what the per-request default produces, at a
+/// price (tens of milliseconds per file) no request should ever pay directly.
+pub(crate) const ARTIFACT_QUALITY: i32 = 11;
+
+/// Compress bytes for the static artifact cache. `None` when the result would
+/// not be smaller, same as the per-request path.
+pub(crate) fn compress_artifact(data: &[u8]) -> Option<Vec<u8>> {
+    compress_brotli(data, ARTIFACT_QUALITY)
 }
 
 /// Compress data using Brotli. Returns None if compression would not reduce size.

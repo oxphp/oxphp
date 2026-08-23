@@ -45,6 +45,37 @@ struct ContentEntry {
     /// When this entry's mtime was last verified against disk. Used by TTL-based
     /// revalidation to skip the `stat()` while the window is still open.
     last_checked: Instant,
+    /// Brotli representation of `bytes`, built once in the background and
+    /// served to clients that accept it. Kept inside the entry rather than in
+    /// a cache of its own so it shares the identity bytes' validator: when
+    /// revalidation evicts the entry because the file changed on disk, the
+    /// artifact cannot outlive the bytes it was made from.
+    artifact: ArtifactState,
+}
+
+/// Where an entry stands with respect to its Brotli artifact.
+#[derive(Clone)]
+pub enum ArtifactState {
+    /// Not built yet — a hit on this entry asks for one.
+    Absent,
+    /// Built, and smaller than the identity bytes.
+    Ready(Bytes),
+    /// Compression did not make these bytes smaller. Recorded so the entry
+    /// stops asking: without it every hit on an incompressible file would
+    /// spawn another q11 compression that throws its result away.
+    Rejected,
+}
+
+impl ContentEntry {
+    /// Bytes this entry charges against the cache budget — identity plus any
+    /// artifact hanging off it.
+    fn footprint(&self) -> usize {
+        self.bytes.len()
+            + match &self.artifact {
+                ArtifactState::Ready(bytes) => bytes.len(),
+                ArtifactState::Absent | ArtifactState::Rejected => 0,
+            }
+    }
 }
 
 /// Outcome of a content-cache lookup that already factored in conditional
@@ -62,7 +93,29 @@ pub enum Lookup {
         modified: SystemTime,
         etag: Arc<str>,
         last_modified_str: Arc<str>,
+        /// Where this entry stands with respect to its Brotli artifact.
+        artifact: ArtifactState,
     },
+}
+
+/// Reports that this response body is a cached artifact rather than the
+/// identity bytes, and how many bytes that saved. Static serving cannot reach
+/// the metrics registry, and the compression layer downstream sees an
+/// already-encoded response and has nothing to measure — without this the
+/// bytes-saved counter would quietly stop counting static traffic.
+#[derive(Clone, Copy)]
+pub struct PrecompressedSaving(pub usize);
+
+/// Asks the caller to build the Brotli artifact for a cached entry that does
+/// not have one yet. Static serving decides (it holds the cache and the
+/// request), the caller acts (it holds the runtime handle and an owned cache
+/// reference) — so the decision stays where the state is and the side effect
+/// stays where the machinery is.
+#[derive(Clone)]
+pub struct ArtifactWanted {
+    pub key: String,
+    pub bytes: Bytes,
+    pub modified: SystemTime,
 }
 
 /// Content cache with its own byte budget. Kept as a single struct so the
@@ -94,6 +147,31 @@ pub struct FileCache {
     /// most once per `ttl` window; entries whose mtime changed are evicted.
     /// `None` disables revalidation (cached bytes served until LRU eviction).
     revalidate_ttl: Option<Duration>,
+    /// Keys whose Brotli artifact is being built right now. Its own lock:
+    /// claiming must not queue behind the content lock, which static serving
+    /// holds on every hit.
+    artifacts_in_flight: Mutex<std::collections::HashSet<String>>,
+}
+
+/// Holds a single-flight claim on one key's artifact for as long as the job
+/// runs. Releasing on drop covers the paths that do not reach the insert —
+/// incompressible input, a panic inside the blocking task, a shutdown that
+/// drops it — any of which would otherwise wedge that key permanently.
+pub struct ArtifactClaim {
+    cache: Arc<FileCache>,
+    key: String,
+}
+
+impl ArtifactClaim {
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+}
+
+impl Drop for ArtifactClaim {
+    fn drop(&mut self) {
+        self.cache.artifacts_in_flight.lock().remove(&self.key);
+    }
 }
 
 impl FileCache {
@@ -122,6 +200,7 @@ impl FileCache {
             }),
             canonical: Mutex::new(LruCache::new(cap)),
             revalidate_ttl,
+            artifacts_in_flight: Mutex::new(std::collections::HashSet::new()),
         }
     }
 
@@ -140,6 +219,7 @@ impl FileCache {
                 modified: entry.modified,
                 etag: entry.etag.clone(),
                 last_modified_str: entry.last_modified_str.clone(),
+                artifact: entry.artifact.clone(),
             }
         }
     }
@@ -211,7 +291,7 @@ impl FileCache {
                 .is_some_and(|e| e.modified == modified)
             {
                 if let Some(evicted) = guard.entries.pop(key) {
-                    guard.total_bytes -= evicted.bytes.len();
+                    guard.total_bytes -= evicted.footprint();
                 }
             }
             None
@@ -288,6 +368,7 @@ impl FileCache {
                 modified,
                 etag,
                 last_modified_str,
+                artifact: _,
             } => Some((bytes, mime_type, modified, etag, last_modified_str)),
             // try_304 = false never produces a NotModified result.
             Lookup::NotModified { .. } => None,
@@ -314,7 +395,7 @@ impl FileCache {
         // Evict LRU entries while over budget — O(1) per eviction via pop_lru()
         while guard.total_bytes + bytes.len() > MAX_CACHE_TOTAL_BYTES {
             if let Some((_evicted_key, evicted)) = guard.entries.pop_lru() {
-                guard.total_bytes -= evicted.bytes.len();
+                guard.total_bytes -= evicted.footprint();
             } else {
                 break;
             }
@@ -322,7 +403,7 @@ impl FileCache {
 
         // Remove old entry if re-inserting same key
         if let Some(old) = guard.entries.pop(&key) {
-            guard.total_bytes -= old.bytes.len();
+            guard.total_bytes -= old.footprint();
         }
 
         guard.total_bytes += bytes.len();
@@ -335,8 +416,75 @@ impl FileCache {
                 etag,
                 last_modified_str,
                 last_checked: Instant::now(),
+                artifact: ArtifactState::Absent,
             },
         );
+    }
+
+    /// Claim the right to build `key`'s Brotli artifact. `None` means another
+    /// request is already building it — the caller serves this request the
+    /// per-request way and lets that one finish. Without the claim, a cold
+    /// cache under load spends one q11 compression per concurrent request on
+    /// the same file, all but one of them thrown away.
+    pub fn claim_artifact(self: &Arc<Self>, key: &str) -> Option<ArtifactClaim> {
+        if !self.artifacts_in_flight.lock().insert(key.to_string()) {
+            return None;
+        }
+        Some(ArtifactClaim {
+            cache: Arc::clone(self),
+            key: key.to_string(),
+        })
+    }
+
+    /// Attach a Brotli artifact to the entry for `key`. The write is dropped
+    /// unless the entry still describes `modified`: between the read that
+    /// started the compression and its result the file may have changed on
+    /// disk and the entry been replaced, and pairing new identity bytes with
+    /// an artifact built from the old ones would serve two different
+    /// representations under one validator.
+    pub fn insert_artifact(&self, key: &str, modified: SystemTime, artifact: Bytes) {
+        let mut guard = self.content.write();
+        // Promote first so the eviction loop below cannot pop the very entry
+        // we are about to grow.
+        match guard.entries.get(key) {
+            Some(entry)
+                if entry.modified == modified
+                    && matches!(entry.artifact, ArtifactState::Absent) => {}
+            _ => return,
+        }
+        while guard.total_bytes + artifact.len() > MAX_CACHE_TOTAL_BYTES {
+            match guard.entries.pop_lru() {
+                Some((evicted_key, evicted)) => {
+                    guard.total_bytes -= evicted.footprint();
+                    // Budget too small to hold this entry and its artifact:
+                    // the entry itself came up for eviction. It is gone now,
+                    // so there is nothing left to attach to.
+                    if evicted_key == key {
+                        return;
+                    }
+                }
+                None => break,
+            }
+        }
+        let len = artifact.len();
+        if let Some(entry) = guard.entries.get_mut(key) {
+            entry.artifact = ArtifactState::Ready(artifact);
+            guard.total_bytes += len;
+        }
+    }
+
+    /// Record that `key`'s bytes do not compress, so hits stop asking for an
+    /// artifact. Same staleness guard as [`insert_artifact`]: a verdict about
+    /// bytes the entry no longer holds is discarded.
+    ///
+    /// [`insert_artifact`]: Self::insert_artifact
+    pub fn reject_artifact(&self, key: &str, modified: SystemTime) {
+        let mut guard = self.content.write();
+        if let Some(entry) = guard.entries.get_mut(key) {
+            if entry.modified == modified && matches!(entry.artifact, ArtifactState::Absent) {
+                entry.artifact = ArtifactState::Rejected;
+            }
+        }
     }
 
     /// Get a cached canonical path. Returns `None` on cache miss.
@@ -754,10 +902,12 @@ pub async fn serve(
             modified,
             etag,
             last_modified_str,
+            artifact,
         }) => {
-            let allow_ranges = ranges_allowed(supports_brotli, &mime_type, bytes.len() as u64);
-            return Ok(respond_bytes(
-                bytes,
+            let identity_len = bytes.len();
+            let allow_ranges = ranges_allowed(supports_brotli, &mime_type, identity_len as u64);
+            let mut response = respond_bytes(
+                bytes.clone(),
                 &mime_type,
                 &etag,
                 &last_modified_str,
@@ -766,7 +916,34 @@ pub async fn serve(
                 method,
                 request_headers,
                 allow_ranges,
-            )?);
+            )?;
+            // `allow_ranges` is false for exactly the representations the
+            // compression layer would encode for this client, so a false here
+            // means `respond_bytes` produced a full 200 and the body can be
+            // swapped for the encoded one without disturbing a range plan.
+            if supports_brotli && !allow_ranges {
+                match artifact {
+                    ArtifactState::Ready(artifact) => {
+                        let saved = identity_len.saturating_sub(artifact.len());
+                        *response.body_mut() = full_body(artifact);
+                        crate::server::compression::mark_encoded(&mut response, "br");
+                        response.extensions_mut().insert(PrecompressedSaving(saved));
+                    }
+                    // No artifact yet: this request is served the per-request
+                    // way and the caller is asked to build one for the next.
+                    ArtifactState::Absent => {
+                        response.extensions_mut().insert(ArtifactWanted {
+                            key: cache_key.into_owned(),
+                            bytes,
+                            modified,
+                        });
+                    }
+                    // These bytes do not compress — asking again would only
+                    // repeat the work that established that.
+                    ArtifactState::Rejected => {}
+                }
+            }
+            return Ok(response);
         }
         None => {}
     }
@@ -1995,6 +2172,259 @@ mod tests {
             plan_range(&http::Method::GET, &headers, 100, &etag, &modified),
             RangePlan::Full
         );
+    }
+
+    /// Serve as a client that accepts Brotli — the only clients the artifact
+    /// cache is reachable from.
+    async fn serve_br(
+        file_path: &std::path::Path,
+        dir: &TempDir,
+        cache: &FileCache,
+    ) -> Response<ResponseBody> {
+        serve(
+            file_path,
+            cache,
+            &canonical_root(dir),
+            &empty_allow(),
+            &http::Method::GET,
+            &HeaderMap::new(),
+            Some("public, max-age=86400"),
+            true,
+        )
+        .await
+        .unwrap()
+    }
+
+    /// A body that is both compressible and over the compression floor.
+    fn css_body() -> String {
+        "body { color: rebeccapurple; margin: 0 }\n".repeat(40)
+    }
+
+    #[tokio::test]
+    async fn test_artifact_asked_for_on_a_cache_hit_then_served() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("app.css");
+        let body = css_body();
+        fs::write(&file_path, &body).unwrap();
+        let cache = Arc::new(FileCache::new(10));
+        let key = file_path.to_string_lossy().to_string();
+
+        // First hit reads from disk and fills the content cache. Nothing is
+        // asked for yet: a file served exactly once should not cost a q11
+        // compression, so the ask waits for evidence the file is hot.
+        let first = serve_br(&file_path, &dir, &cache).await;
+        assert!(first.headers().get(header::CONTENT_ENCODING).is_none());
+        assert!(first.extensions().get::<ArtifactWanted>().is_none());
+
+        // Second hit comes out of the cache and asks for the artifact, still
+        // serving identity bytes itself.
+        let second = serve_br(&file_path, &dir, &cache).await;
+        assert!(second.headers().get(header::CONTENT_ENCODING).is_none());
+        let wanted = second
+            .extensions()
+            .get::<ArtifactWanted>()
+            .expect("a cached compressible entry with no artifact asks for one")
+            .clone();
+        assert_eq!(wanted.key, key);
+        assert_eq!(&wanted.bytes[..], body.as_bytes());
+
+        // Stand in for the background job.
+        let artifact =
+            crate::server::compression::compress_artifact(&wanted.bytes).expect("css compresses");
+        let artifact_len = artifact.len();
+        assert!(artifact_len < body.len());
+        cache.insert_artifact(&wanted.key, wanted.modified, Bytes::from(artifact));
+
+        // Third hit is served from the artifact.
+        let third = serve_br(&file_path, &dir, &cache).await;
+        assert_eq!(third.headers()[header::CONTENT_ENCODING], "br");
+        assert_eq!(
+            third.headers()[header::CONTENT_LENGTH],
+            artifact_len.to_string()
+        );
+        // Byte offsets do not survive the re-encoding, and the validator no
+        // longer describes the bytes on the wire strongly.
+        assert!(third.headers().get(header::ACCEPT_RANGES).is_none());
+        assert!(third.headers()[header::ETAG]
+            .to_str()
+            .unwrap()
+            .starts_with("W/"));
+        assert!(third
+            .headers()
+            .get_all(header::VARY)
+            .iter()
+            .any(|v| v.to_str().unwrap().eq_ignore_ascii_case("accept-encoding")));
+        assert_eq!(
+            third.extensions().get::<PrecompressedSaving>().unwrap().0,
+            body.len() - artifact_len
+        );
+        assert!(third.extensions().get::<ArtifactWanted>().is_none());
+        assert_eq!(body_bytes(third).await.len(), artifact_len);
+    }
+
+    #[tokio::test]
+    async fn test_no_artifact_path_without_brotli_support() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("app.css");
+        fs::write(&file_path, css_body()).unwrap();
+        let cache = Arc::new(FileCache::new(10));
+
+        // Warm the content cache, then hit it as a client that does not accept
+        // Brotli: no ask, and no encoded body even once an artifact exists.
+        serve_with(&file_path, &dir, &cache, HeaderMap::new()).await;
+        let cached = serve_with(&file_path, &dir, &cache, HeaderMap::new()).await;
+        assert!(cached.extensions().get::<ArtifactWanted>().is_none());
+
+        let key = file_path.to_string_lossy().to_string();
+        let modified = fs::metadata(&file_path).unwrap().modified().unwrap();
+        let artifact =
+            crate::server::compression::compress_artifact(css_body().as_bytes()).unwrap();
+        cache.insert_artifact(&key, modified, Bytes::from(artifact));
+
+        let identity = serve_with(&file_path, &dir, &cache, HeaderMap::new()).await;
+        assert!(identity.headers().get(header::CONTENT_ENCODING).is_none());
+        assert_eq!(body_bytes(identity).await.len(), css_body().len());
+    }
+
+    #[tokio::test]
+    async fn test_no_artifact_for_incompressible_type() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("photo.png");
+        fs::write(&file_path, vec![0u8; 4096]).unwrap();
+        let cache = Arc::new(FileCache::new(10));
+
+        serve_br(&file_path, &dir, &cache).await;
+        let cached = serve_br(&file_path, &dir, &cache).await;
+        // image/png is outside the compressible list, so ranges stay on and
+        // nothing asks for an artifact that would never be served.
+        assert!(cached.extensions().get::<ArtifactWanted>().is_none());
+        assert_eq!(cached.headers()[header::ACCEPT_RANGES], "bytes");
+    }
+
+    #[tokio::test]
+    async fn test_incompressible_entry_stops_asking() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("noise.css");
+        // Compressible MIME type, incompressible bytes: a deterministic LCG
+        // stream that Brotli cannot shrink below its own input.
+        let mut state = 0x2545_f491u32;
+        let noise: Vec<u8> = (0..2048)
+            .map(|_| {
+                state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                (state >> 24) as u8
+            })
+            .collect();
+        fs::write(&file_path, &noise).unwrap();
+        let cache = Arc::new(FileCache::new(10));
+        let key = file_path.to_string_lossy().to_string();
+
+        serve_br(&file_path, &dir, &cache).await;
+        let wanted = serve_br(&file_path, &dir, &cache)
+            .await
+            .extensions()
+            .get::<ArtifactWanted>()
+            .expect("a compressible MIME type asks before it knows the bytes resist")
+            .clone();
+        assert!(
+            crate::server::compression::compress_artifact(&wanted.bytes).is_none(),
+            "the fixture must not compress, or this test proves nothing"
+        );
+
+        // What the background job does when compression does not pay off.
+        cache.reject_artifact(&wanted.key, wanted.modified);
+
+        let after = serve_br(&file_path, &dir, &cache).await;
+        assert!(
+            after.extensions().get::<ArtifactWanted>().is_none(),
+            "a rejected entry must not keep scheduling a compression that cannot help"
+        );
+        assert!(after.headers().get(header::CONTENT_ENCODING).is_none());
+        assert_eq!(cache.content.read().total_bytes, noise.len());
+        assert!(key.ends_with("noise.css"));
+    }
+
+    #[test]
+    fn test_artifact_claim_is_single_flight() {
+        let cache = Arc::new(FileCache::new(10));
+        let claim = cache
+            .claim_artifact("/w/app.css")
+            .expect("first claim wins");
+        assert_eq!(claim.key(), "/w/app.css");
+        assert!(
+            cache.claim_artifact("/w/app.css").is_none(),
+            "a second claim on the same key must not start a second compression"
+        );
+        // A different file is unaffected.
+        assert!(cache.claim_artifact("/w/other.css").is_some());
+        drop(claim);
+        assert!(
+            cache.claim_artifact("/w/app.css").is_some(),
+            "the claim must be released when the job's guard drops"
+        );
+    }
+
+    #[test]
+    fn test_stale_artifact_is_dropped() {
+        let cache = Arc::new(FileCache::new(10));
+        let key = "/w/app.css".to_string();
+        let modified = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        cache.insert_content(
+            key.clone(),
+            Bytes::from_static(b"identity"),
+            "text/css".into(),
+            modified,
+            "\"tag\"".into(),
+            "date".into(),
+        );
+
+        // The file changed while the job ran: the artifact describes bytes the
+        // entry no longer holds.
+        cache.insert_artifact(
+            &key,
+            modified + Duration::from_secs(1),
+            Bytes::from_static(b"x"),
+        );
+        assert!(matches!(
+            cache.content.read().entries.peek(&key).unwrap().artifact,
+            ArtifactState::Absent
+        ));
+
+        // Matching mtime is accepted, and charged to the budget.
+        let before = cache.content.read().total_bytes;
+        cache.insert_artifact(&key, modified, Bytes::from_static(b"xy"));
+        let guard = cache.content.read();
+        assert!(matches!(
+            &guard.entries.peek(&key).unwrap().artifact,
+            ArtifactState::Ready(bytes) if &bytes[..] == b"xy"
+        ));
+        assert_eq!(guard.total_bytes, before + 2);
+    }
+
+    #[test]
+    fn test_artifact_is_not_rebuilt_over_an_existing_one() {
+        let cache = Arc::new(FileCache::new(10));
+        let key = "/w/app.css".to_string();
+        let modified = SystemTime::UNIX_EPOCH;
+        cache.insert_content(
+            key.clone(),
+            Bytes::from_static(b"identity"),
+            "text/css".into(),
+            modified,
+            "\"tag\"".into(),
+            "date".into(),
+        );
+        cache.insert_artifact(&key, modified, Bytes::from_static(b"first"));
+        let charged = cache.content.read().total_bytes;
+        cache.insert_artifact(&key, modified, Bytes::from_static(b"second"));
+        let guard = cache.content.read();
+        assert!(
+            matches!(
+                &guard.entries.peek(&key).unwrap().artifact,
+                ArtifactState::Ready(bytes) if &bytes[..] == b"first"
+            ),
+            "a late second job must not overwrite a stored artifact"
+        );
+        assert_eq!(guard.total_bytes, charged, "nor charge the budget twice");
     }
 
     async fn serve_with(
