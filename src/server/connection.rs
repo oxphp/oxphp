@@ -315,6 +315,14 @@ pub async fn handle_request(
         response
     };
 
+    // Whatever happened above, a body this server would compress for some
+    // client varies by Accept-Encoding — including the identity copy this one
+    // is getting. Without the header a shared cache stores that copy under the
+    // bare URL and serves it to clients that would have taken a compressed one.
+    let mut response = response;
+    compression::mark_varies_by_encoding(&mut response);
+    let response = response;
+
     // ── RequestComplete event ──
     // Handlers: MetricsResponseHandler (0), AccessLogHandler (100)
     let status = response.status().as_u16();
