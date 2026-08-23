@@ -298,16 +298,16 @@ fn compression_from_env() -> Result<Levels, crate::types::BoxError> {
         // and 5 is the level at which preferring brotli over gzip pays for
         // itself: at 4 it produced more bytes than gzip's own default on JSON
         // above 4 KB and on real minified assets, and spent more CPU doing it.
-        brotli: compression_level("BROTLI_LEVEL", 11, 5)?,
+        brotli: compression_level("COMPRESSION_BROTLI_LEVEL", 11, 5)?,
         // Level 6 is zlib's own default and the point the benchmark put the
         // knee at: on real assets level 9 costs about twice as much for a
         // percent or two of size.
-        gzip: compression_level("GZIP_LEVEL", 9, 6)?,
+        gzip: compression_level("COMPRESSION_GZIP_LEVEL", 9, 6)?,
         // Level 6 rather than zstd's own default of 3: on bodies over 4 KB it
         // produces fewer bytes in less time than the brotli quality earlier
         // releases compressed everything with, so no deployment sends more
         // bytes after the upgrade than before it.
-        zstd: compression_level("ZSTD_LEVEL", 19, 6)?,
+        zstd: compression_level("COMPRESSION_ZSTD_LEVEL", 19, 6)?,
     };
     // An exactly-empty value is an unset one on both, the way it is for every
     // other knob here — a `${VAR:-}` substitution must not abort startup.
@@ -316,7 +316,7 @@ fn compression_from_env() -> Result<Levels, crate::types::BoxError> {
         set("COMPRESSION_ENCODINGS").as_deref(),
         set("COMPRESSION_LEVEL").as_deref(),
         levels,
-        set("BROTLI_LEVEL").is_some(),
+        set("COMPRESSION_BROTLI_LEVEL").is_some(),
     )
 }
 
@@ -344,7 +344,7 @@ fn resolve_compression(
             }
         };
         tracing::warn!(
-            "COMPRESSION_LEVEL is deprecated: use BROTLI_LEVEL for brotli's quality and COMPRESSION_ENCODINGS to choose which codings are offered"
+            "COMPRESSION_LEVEL is deprecated: use COMPRESSION_BROTLI_LEVEL for brotli's quality and COMPRESSION_ENCODINGS to choose which codings are offered"
         );
         if level == 0 {
             // The switch it has always been. A deployment that set it to turn
@@ -352,8 +352,8 @@ fn resolve_compression(
             // learned a coding it had never heard of.
             return Ok(Levels::default());
         }
-        // An explicit BROTLI_LEVEL is the newer statement of the same thing,
-        // so it wins over the variable it replaces.
+        // An explicit COMPRESSION_BROTLI_LEVEL is the newer statement of the
+        // same thing, so it wins over the variable it replaces.
         if !brotli_level_set {
             levels.brotli = level;
         }
