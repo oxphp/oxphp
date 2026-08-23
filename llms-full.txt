@@ -3006,65 +3006,113 @@ In traditional mode, `oxphp_async_await()` blocks the worker thread. If all PHP 
 
 # Compression
 
-OxPHP compresses HTTP responses with Brotli, Zstandard, or gzip, whichever the client accepts. Compression applies automatically to text-based content types, reducing transfer sizes without any application code changes.
+OxPHP compresses HTTP responses with Brotli, Zstandard, or gzip, whichever the client accepts. Compression applies automatically to a fixed list of content types — text, JSON, XML, SVG, WebAssembly and several font formats — without any application code changes.
 
 ## How It Works
 
-1. **Content coding negotiation** — the client's `Accept-Encoding` header decides which coding the response is encoded with, or whether it is encoded at all. See [Choosing a coding](#choosing-a-coding).
-2. **Content type check** — the response MIME type is verified against the list of compressible types.
-3. **Already encoded check** — responses with an existing `Content-Encoding` header are skipped to avoid double-compression.
-4. **Size range check** — only responses between 256 bytes and 3 MB are compressed. Smaller responses see little benefit; larger responses are streamed without buffering.
-5. **Compression** — the negotiated coding is applied. If the compressed output is not smaller than the original, the uncompressed response is sent instead.
+The client's `Accept-Encoding` header is read once, before the request reaches the routing pipeline, and weighed against the codings the server offers. What happens next depends on where the bytes come from.
 
-Compression happens after PHP execution and after static file serving. The entire compressed body is held in memory briefly, which is why responses above 3 MB are excluded.
+**A cached static file that already has a stored compressed copy** is answered from that copy directly. Nothing is compressed on the request, and none of the checks below apply. See [Cached static files](#cached-static-files).
+
+**Every other response** — PHP output, a custom error page, a static file with no stored copy yet — goes through the compression step after the response is built:
+
+1. **Partial responses are skipped** — a `206` is never encoded, because its `Content-Range` offsets describe the unencoded representation.
+2. **Content type check** — the response MIME type is looked up in the list of compressible types.
+3. **Already encoded check** — a response that already carries a `Content-Encoding` header is left alone.
+4. **Size check** — only bodies between 256 bytes and 3 MiB (3,145,728 bytes) are compressed, inclusive at both ends. The `Content-Length` header is used when the response carries one; PHP responses usually do not, and are measured on the buffered body instead.
+5. **Compression** — the negotiated coding is applied at its configured level. If the compressed output is not smaller than the original, the uncompressed response is sent instead.
+
+Compression happens after PHP execution, after static file serving, and after custom error pages are substituted — so a custom `404` body over 256 bytes is compressed like any other response. The built-in error bodies (`404 Not Found`, `500 Internal Server Error`) are a few dozen bytes and fall under the size floor. The status code is otherwise never consulted.
+
+Small bodies are compressed inline; past a threshold the work moves to a blocking thread so it cannot stall the async runtime. The threshold is 64 KiB, dropping to 4 KiB once the level is steep enough for the cost curve to turn — above quality 4 for Brotli, level 6 for gzip, level 9 for Zstandard. At the shipped defaults Brotli is already in the steep half, so Brotli bodies over 4 KiB are compressed off the async thread.
+
+```text
+                   Accept-Encoding, read once per request
+                                    │
+                  ranked by weight; a coding the server does
+                  not offer scores zero and drops out here
+                                    │
+                    ┌───────────────┴───────────────┐
+                    │                               │
+          cached static file with           everything else: PHP,
+          a stored copy for that            error pages, uncached
+          coding                            and oversized files
+                    │                               │
+          tie → br › zstd › gzip            tie → zstd › br › gzip
+          at 11 / 19 / 9, built             at the configured 5 / 6 / 6,
+          once in the background            compressed on this request
+                    │                               │
+                    └───────────────┬───────────────┘
+                                    │
+                    Content-Encoding, recomputed Content-Length,
+                    Vary, weakened ETag, no Accept-Ranges
+```
 
 ## Choosing a Coding
 
 `Accept-Encoding` is a ranking, not a list (RFC 9110 §12.5.3), and OxPHP reads it as one:
 
 - Coding names are matched case-insensitively, and unknown codings are ignored.
-- `br;q=0` is a refusal, not support — the same as omitting the coding entirely.
+- `br;q=0` is a refusal, not support. It is not the same as leaving the coding out: an omitted coding can still be picked up by a `*`, an explicitly refused one cannot.
 - A `*` covers any coding the header does not name explicitly, at the weight given to it.
-- Among the codings a client accepts, the one it weighted highest wins.
+- A weight that does not parse is not a refusal: the coding keeps the default weight rather than being dropped over a malformed parameter. That cuts both ways on `q=0` — a qvalue carries at most three decimals, so `q=0.000` refuses the coding and `q=0.0000` is not a valid weight at all and reads as full acceptance. A coding named twice is read at its first weight.
+- Among the codings a client accepts **and the server offers**, the one it weighted highest wins. A coding withdrawn by configuration scores zero before the ranking, so a client whose favourite coding the server does not offer falls through to its next choice rather than to an uncompressed response.
+- A header that accepts nothing — empty, or `*;q=0` — yields an unencoded response. OxPHP never answers `406` over content coding, and never reads `identity` as a token.
 
 Weights tie in the usual case, since browsers send every coding they support without weights. OxPHP breaks that tie by what becomes of the compressed bytes:
 
 | The response is | Preferred coding | Why |
 |---|---|---|
-| A cached static file | Brotli, then Zstandard, then gzip | The bytes are compressed once at maximum quality and served from memory from then on, so nothing but size counts — and at the top of its range Brotli is the smallest of the three |
+| Served from a stored copy | Brotli, then Zstandard, then gzip | The bytes are compressed once at maximum quality and served from memory from then on, so nothing but size counts — and at the top of its range Brotli is the smallest of the three |
 | Everything else | Zstandard, then Brotli, then gzip | The bytes are compressed while the client waits and discarded afterwards, so the cost is paid on every request — and at levels a request can afford, Zstandard measured within a few percent of Brotli on size for well under half the CPU |
 
-A client that accepts none of the three receives the response unencoded. In practice gzip is the fallback: every HTTP client of the last twenty years accepts it, while Zstandard needs a browser released in 2024 or later, and Chromium-based browsers advertise `br` only over HTTPS.
+The first row applies only once a stored copy exists. The hits before it, and every file too large to cache, take the second row — which is why a static asset is usually answered with Zstandard before it is answered with Brotli.
 
-Because the answer depends on the request header, every compressible response carries `Vary: Accept-Encoding` so shared caches keep the variants apart.
+This is a tie-break, not an override: a client that writes `br;q=0.2, gzip;q=0.9` gets gzip on both paths, and the stored copy built for it is a gzip one.
+
+A client that accepts none of the three receives the response unencoded. In practice gzip is the fallback: every HTTP client of the last twenty years accepts it, while Zstandard needs a browser released in 2024 or later. Browsers also gate the newer codings on the connection rather than on their age alone: `br` and `zstd` are advertised over HTTPS and withheld over plain HTTP, so a site served without TLS is a gzip site whatever its visitors are running.
+
+Because the answer depends on the request header, compressed responses carry `Vary: Accept-Encoding`, and static representations inside the compression window carry it whether or not they end up compressed. Two cases do not carry it. A *dynamic* response that ends up unencoded — the client sent no `Accept-Encoding`, or the body did not shrink — has none, so a shared cache in front of OxPHP may hand those identity bytes to a client that would have taken a compressed body. And a `304` carries neither `Vary` nor `Content-Encoding`: it freshens a representation the client already holds rather than describing a new one.
+
+`Vary` is added as its own header line rather than merged into one the application already sent, so a response that set `Vary: Cookie` goes out with two `Vary` lines. That is legal, and OxPHP reads all of them before appending so `Accept-Encoding` is never duplicated — but an intermediary that reads only the first line will miss it.
 
 ## Cached Static Files
 
-A static file small enough to sit in the content cache (1 MiB or less) is compressed once rather than on every request. Once such a file has been served twice to a client accepting a given coding, OxPHP compresses it at that coding's maximum level on a background thread and keeps the result next to the cached bytes; every later request that negotiates the same coding is answered from that stored copy.
+A static file that fits the content cache (1 MiB or less) and is compressible — a listed type, at least 256 bytes — is compressed once rather than on every request.
 
-This is invisible from the outside apart from the response getting smaller — maximum quality typically produces 8–12% less than the per-request level. No request waits for the compression: the one that triggers it, and any that arrive while it runs, are served at the configured per-request level as before. Response headers do not change.
+The first request for such a file is a cache miss: it is read from disk, stored, and compressed for that request like anything else. The next request finds it cached, and if there is no stored copy yet for the coding that request negotiated, the server asks for one to be built on a background thread; the request that triggered the build is served the per-request way, as is every request arriving while it runs. Once the copy lands, later requests that negotiate the same coding are answered from it. There is no hit counter: the trigger is the first cache hit with no stored copy for that coding, so a file that has only ever been served to gzip clients gets its Brotli copy on the first Brotli client that hits it.
 
-Each coding gets its own stored copy, built on demand: a file only ever served to gzip clients never costs a Brotli compression. All of them share the cached file's validator, so they are discarded together with the cached bytes when [`STATIC_REVALIDATE`](static-files.md) notices the file changed on disk, and they count against the same content-cache budget. Bytes that do not compress are marked and not retried.
+Stored copies are built at each coding's maximum level — Brotli 11, Zstandard 19, gzip 9 — regardless of the configured per-request levels, which a stored copy never uses. There is no separate setting for them: the only way to stop one being built is to withdraw the coding entirely. Maximum quality typically produces 8–12% fewer bytes than Brotli's own per-request level.
 
-Because the two preferences above differ, a client that accepts both Brotli and Zstandard sees the coding change once per file: the first hits are answered with Zstandard, compressed to serve that request, and every hit after the stored copy lands is answered with Brotli. Both are valid representations of the same resource and both carry `Vary`, so caches and clients need no help with the switch.
+Each coding gets its own stored copy, built on demand: a file only ever served to gzip clients never costs a Brotli compression. All of them share the cached file's validator and are discarded together with the cached bytes — when the entry is evicted to stay inside the 64 MiB cache budget, which the stored copies are charged against, or when [`STATIC_REVALIDATE`](static-files.md) is on and notices the file changed on disk. That setting is off by default, so on a default deployment eviction and restart are the only two ways a stored copy is ever discarded. Bytes that do not compress are marked as such and not retried, and a `304` neither triggers a build nor serves a stored copy.
+
+Because the two preferences above differ, a client that accepts both Brotli and Zstandard usually sees the coding change once per file: the first hits are answered with Zstandard, compressed to serve that request, and hits after the stored copy lands are answered with Brotli. Both are valid representations of the same resource and both carry `Vary`, so nothing breaks — but they also share one weak `ETag`, so a cache holding the Zstandard variant revalidates successfully and keeps it. The switch reaches new clients, not ones that already stored a copy.
+
+### Files too large to cache
+
+Between the cache limit and the top of the compression window — 1 MiB to 3 MiB, where framework bundles, source maps and WebAssembly modules live — a file is read whole and compressed **for every request**, whenever the client negotiated a coding and the type is compressible. It is not cached and never gets a stored copy, so this is the most expensive compression the server does per request. Put a CDN in front of assets in that range, or keep them under the cache limit, and the work is done once.
+
+Outside that case a file above 1 MiB is streamed from disk untouched: an incompressible type, a client that accepts no coding, or anything above 3 MiB.
 
 ## Configuration
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `COMPRESSION_ENCODINGS` | `br,zstd,gzip` | Which codings the server offers, comma-separated. Accepts `br` (or `brotli`), `zstd`, `gzip`, and `off` to switch compression off entirely. The order written here is ignored — the server picks per response, see [Choosing a coding](#choosing-a-coding) |
+| `COMPRESSION_ENCODINGS` | `br,zstd,gzip` | Which codings the server offers, comma-separated. Accepts `br` (or `brotli`), `zstd` and `gzip`, case-insensitively and with any surrounding whitespace. The order written here is ignored — the server picks per response, see [Choosing a coding](#choosing-a-coding). Set the whole value to `off` (or `none`) to switch compression off entirely; `off` is not a list token, so `br,off` is an error, not a switch |
 | `COMPRESSION_BROTLI_LEVEL` | `5` | Brotli quality (0–11) |
 | `COMPRESSION_ZSTD_LEVEL` | `6` | Zstandard level (0–19) |
 | `COMPRESSION_GZIP_LEVEL` | `6` | Gzip level (0–9) |
-| `COMPRESSION_LEVEL` | *(unset)* | Deprecated name for `COMPRESSION_BROTLI_LEVEL`, kept for existing deployments together with the second meaning it carried when Brotli was the only coding: `COMPRESSION_LEVEL=0` switches off all compression. Setting it logs a warning at startup, and an explicit `COMPRESSION_BROTLI_LEVEL` overrides it |
+| `COMPRESSION_LEVEL` | *(unset)* | Deprecated name for `COMPRESSION_BROTLI_LEVEL`, kept for existing deployments together with the second meaning it carried when Brotli was the only coding: `COMPRESSION_LEVEL=0` switches off all compression. Setting it logs a warning at startup. An explicit `COMPRESSION_BROTLI_LEVEL` overrides a non-zero value — but not `COMPRESSION_LEVEL=0`, which switches everything off whatever else is set |
 
-A coding is offered when it is listed in `COMPRESSION_ENCODINGS` **and** its level is not `0`; either one alone withdraws it. An unknown name in the list is a startup error rather than a silently dropped coding.
+A coding is offered when it is listed in `COMPRESSION_ENCODINGS` **and** its level is not `0`; either one alone withdraws it. A withdrawn coding is gone from the whole feature: it is never negotiated, never compressed on the request path, and never built as a stored copy.
+
+Values are validated at startup rather than corrected: an unknown coding name, or a level outside its range, or a level that is not a number, aborts startup with an error naming the variable. Nothing is clamped and nothing is silently dropped. An empty assignment (`COMPRESSION_ENCODINGS=`, the shape `${VAR:-}` produces when the host variable is missing) is treated as unset and restores the default — it does **not** mean `off`.
 
 Brotli defaults to 5 rather than 4 because its quality knee — a change of hasher — sits between the two: at 4 it produced *more* bytes than gzip does at its own default on JSON above 4 KB and on real minified assets, and spent more CPU doing it, which leaves no reason to prefer it over gzip at all. At 5 it is the smaller of the two on every body measured, for roughly twice gzip's CPU. Levels 9–11 are better suited for offline or build-time compression than for per-request work; cached static files use them anyway, because that cost is paid once. Gzip level 6 is zlib's own default and close to the point of diminishing returns — level 9 costs roughly twice as much for a percent or two. Zstandard defaults to 6 rather than to its own default of 3: on bodies over a few kilobytes level 6 costs less time than the Brotli quality earlier releases compressed everything with, while producing fewer bytes, so nothing regresses against what those releases sent.
 
 ## Compressible Content Types
 
-Compression applies to the following MIME types:
+The list is closed and matched exactly — there is no prefix or wildcard rule, so a type that is not named here is never compressed even when it would compress well. Parameters and surrounding whitespace are ignored, so `text/html; charset=utf-8` matches `text/html`.
 
 **Text types:**
 - `text/html`
@@ -3096,21 +3144,40 @@ Compression applies to the following MIME types:
 
 Responses are sent without compression when any of the following conditions are met:
 
-- The client accepts none of `br`, `zstd`, and `gzip` in the `Accept-Encoding` header, or accepts them only with a zero weight (`br;q=0, zstd;q=0, gzip;q=0`)
-- The response already has a `Content-Encoding` header (e.g. pre-compressed content)
-- The response body is smaller than 256 bytes or larger than 3 MB
-- The content type is not in the compressible list — `image/png`, `image/jpeg`, `font/woff2` and `application/zip` because those formats already carry their own compression, and `text/event-stream` because an event stream must reach the client event by event
-- The response is streamed — its length is unknown when the headers are sent (PHP scripts using `oxphp_stream_flush()`, Server-Sent Events, and static files above 3 MB, which are read from disk as they are sent). OxPHP compresses a response in one piece, so a body it does not yet hold in full is passed through. Brotli, Zstandard and gzip can all encode incrementally, so this is a limit of the server rather than of the codings
+- The client accepts none of `br`, `zstd`, and `gzip` in the `Accept-Encoding` header, or accepts them only with a zero weight (`br;q=0, zstd;q=0, gzip;q=0`), or sends no such header at all
+- Every coding the client accepts has been withdrawn by `COMPRESSION_ENCODINGS` or by a level of `0`
+- The response already has a `Content-Encoding` header (e.g. pre-compressed content produced by the application)
+- The response body is smaller than 256 bytes or larger than 3 MiB
+- The response is a `206 Partial Content` — range offsets describe the unencoded representation, so a partial body is never encoded
+- The content type is not in the list above. `image/png`, `image/jpeg`, `font/woff2` and `application/zip` are excluded because those formats already carry their own compression, and `text/event-stream` because an event stream must reach the client event by event — but so are `text/csv`, `application/pdf`, `image/x-icon` and a response with no `Content-Type` at all, which are simply not on the list
+- The server does not hold the body whole — PHP scripts using `oxphp_stream_flush()`, Server-Sent Events, and static files read from disk as they are sent. OxPHP compresses a response in one piece. Brotli, Zstandard and gzip can all encode incrementally, so this is a limit of the server rather than of the codings
+- The response came from a plugin that answered before the pipeline ran — a rate-limited `429`, for instance — which returns before the compression step
+- The response came from the internal listener (`INTERNAL_ADDR`), which serves `/metrics` and the health endpoints unencoded regardless of what the scraper accepts
 
 ## Response Headers
 
-When compression is applied, OxPHP sets the following headers:
+A response the server encodes is rewritten as follows, whether it was compressed for that request or served from a stored copy:
 
 | Header | Value |
 |--------|-------|
 | `Content-Encoding` | `br`, `zstd`, or `gzip`, whichever was negotiated |
 | `Content-Length` | Updated to the compressed body size |
-| `Vary` | `Accept-Encoding` is appended, ensuring HTTP caches store separate versions per coding |
+| `Vary` | `Accept-Encoding` is appended, so HTTP caches store separate versions per coding |
+| `ETag` | A strong tag is weakened to `W/"…"` — the encoded bytes are a different representation, and a strong tag shared with the identity bytes would let a client resume an encoded download with identity fragments |
+| `Accept-Ranges` | Removed. Byte offsets are meaningless against an encoded body |
+
+All codings of one static file share that weak tag, which is derived from the identity size and modification time. `Vary` is what keeps the variants apart; the tag only decides freshness, so a cache revalidating one variant cannot tell the server which of them it holds.
+
+Range handling is switched off before the response is built for anything that *would* be compressed for this client, not just for what was: a compressible static file inside the compression window is answered with a full `200` to a client that sends both `Range` and `Accept-Encoding`, and an unsatisfiable range from such a client gets that `200` rather than a `416`. Clients that accept no coding keep ranges, which is where resumable downloads live.
+
+## Observability
+
+Two counters on the [metrics endpoint](../operations/metrics.md) report what compression actually did:
+
+- `oxphp_compressed_responses_total` — responses sent under a content coding
+- `oxphp_compression_bytes_saved_total` — identity size minus compressed size, summed
+
+Both count stored-copy hits as well as per-request compressions, so a ratio against `oxphp_requests_total` answers "is compression reaching my traffic" more reliably than a single `curl -I`.
 
 ## Troubleshooting
 
@@ -3129,30 +3196,39 @@ curl -H "Accept-Encoding: br, zstd, gzip" -I http://localhost/
 Look for `Content-Encoding` in the response headers. If it is absent, check that:
 
 1. `COMPRESSION_ENCODINGS` still lists the coding you asked for, and its level is not `0`
-2. The response body is at least 256 bytes
-3. The response `Content-Type` is in the compressible list above
+2. The response body is at least 256 bytes and no larger than 3 MiB
+3. The response `Content-Type` is in the compressible list above — exactly, since the list is closed
+4. The handler does not stream. A script that calls `oxphp_stream_flush()`, sends Server-Sent Events, or otherwise starts writing before the length is known is passed through untouched, and this is the most common cause in an application that flushes
 
 ### Different clients get different codings
 
-This is the point of negotiation, and three cases account for nearly all of it. Chromium-based browsers advertise `br` only over HTTPS; over plain HTTP they send `Accept-Encoding: gzip, deflate` and are answered with gzip. Command-line tools often send no `Accept-Encoding` at all and are answered unencoded. And a browser new enough to send `zstd` gets Zstandard on dynamic responses where an older one gets Brotli. Nothing is misconfigured in any of these — `Vary: Accept-Encoding` is on every one of those responses so caches keep them apart.
+This is the point of negotiation, and three cases account for nearly all of it. Browsers withhold `br` and `zstd` over plain HTTP: there they send `Accept-Encoding: gzip, deflate` and are answered with gzip, however recent they are. Command-line tools often send no `Accept-Encoding` at all and are answered unencoded. And over HTTPS a browser new enough to send `zstd` gets Zstandard on a dynamic response where an older one gets Brotli. Nothing is misconfigured in any of these, and the responses that are compressed carry `Vary: Accept-Encoding` so caches keep them apart.
 
 ### The coding changes for the same static file
 
 Expected: the first hits on a cacheable static file are compressed with Zstandard to answer that request, and once the stored Brotli copy is built in the background, later hits are answered from it. See [Cached static files](#cached-static-files).
 
+### A range request returns the whole file
+
+Expected for a compressible file inside the compression window when the client also sends `Accept-Encoding`: the representation it is being served is encoded, and identity byte offsets do not describe it. The same request without `Accept-Encoding` gets its `206`. See [Response headers](#response-headers).
+
 ### Compression is making responses larger
 
-For very small responses (under a few hundred bytes), framing overhead occasionally produces a larger output than the original whichever coding is used. OxPHP detects this and sends the uncompressed response automatically — no configuration change is needed.
+A body that does not compress — a base64 blob, a payload of random identifiers, an already-compressed image wrapped as `image/svg+xml` — can come back from any of the three codings no smaller than it went in. OxPHP compares the two and sends the original whenever compression did not help, so this needs no configuration. It cannot be a small-response problem: 256 bytes is the floor for attempting compression at all.
 
 ### High CPU usage from compression
 
-Higher quality levels (8–11) compress significantly better but use much more CPU. If you observe high CPU consumption from compression:
+Compression cost climbs steeply at the top of every coding's range — Brotli 8–11, gzip 8–9, Zstandard 12–19 — and the per-request defaults sit well below that. If you observe high CPU consumption from compression:
 
-**Fix:** Lower `COMPRESSION_ZSTD_LEVEL` to `3` and `COMPRESSION_GZIP_LEVEL` to `4`. These levels provide 80–90% of the size reduction of maximum quality at a fraction of the CPU cost. Brotli is the expensive coding of the three, but lowering `COMPRESSION_BROTLI_LEVEL` to `4` is not the way to save that CPU — at 4 it produces more bytes than gzip does at its own default while still costing more than gzip. Drop `br` from `COMPRESSION_ENCODINGS` instead: clients that accept Brotli then get gzip, which on real bodies is 2–6% larger for roughly half the CPU. Static files cost nothing per request whichever codings remain, since their compressed copies are built once in the background.
+**Fix:** lower `COMPRESSION_ZSTD_LEVEL` to `3` and `COMPRESSION_GZIP_LEVEL` to `4`. Brotli is the expensive coding of the three, but lowering `COMPRESSION_BROTLI_LEVEL` to `4` is not the way to save that CPU — at 4 it produces more bytes than gzip does at its own default while still costing more than gzip. Drop `br` from `COMPRESSION_ENCODINGS` instead. Note where that lands each client: anything modern enough to send `zstd` falls through to Zstandard, not gzip, so the change costs it nothing; only clients that accept Brotli *without* Zstandard — Safari, browsers predating 2024, most intermediaries — move to gzip, which on real bodies is 2–6% larger for roughly half the CPU.
+
+Cached static files are not part of this cost: their compressed copies are built once in the background whichever codings remain. Files between 1 MiB and 3 MiB are, though — they are compressed on every request and cannot be cached; see [Files too large to cache](#files-too-large-to-cache).
 
 ### Pre-compressed assets are being compressed again
 
-If your build pipeline generates `.br`, `.zst`, or `.gz` files and sets the `Content-Encoding` header on those files, OxPHP skips re-compression automatically. If your pre-compressed content is being compressed again, verify that the `Content-Encoding` header is present in the original response before compression runs.
+OxPHP does not look for `.br`, `.zst` or `.gz` files next to the original — a request for `/app.js` is never answered from `/app.js.br`, and requesting the compressed file directly serves it as an opaque download that browsers will not decode. Build-time compression of static assets has no place to plug in; the server's own [stored copies](#cached-static-files) fill that role, at the same maximum quality, without the build step.
+
+Skipping re-compression applies to responses that already carry a `Content-Encoding` header, which in practice means a PHP script that encoded its own body and set the header itself.
 
 ## Docker Example
 
@@ -3176,6 +3252,7 @@ services:
 ## See Also
 
 - [Static Files](static-files.md) — file serving, MIME detection, and HTTP caching
+- [Metrics](../operations/metrics.md) — the compression counters and the rest of the endpoint
 - [Configuration Reference](../operations/configuration.md) — full list of environment variables
 
 ---
@@ -7021,7 +7098,7 @@ The `max-age` value is the TTL converted to seconds. Set `STATIC_MAX_AGE=off` to
 
 Every static file response includes:
 
-- **ETag** — a strong ETag in the format `"<size>-<mtime_hex>"`, derived from the file size and last modification time. A strong validator also satisfies `If-Range`, so interrupted downloads can resume safely. When a response is served brotli-compressed, the tag is weakened to `W/"…"` — the compressed bytes are a different representation, and a weak tag still revalidates (304) but prevents mixing compressed and uncompressed fragments on resume.
+- **ETag** — a strong ETag in the format `"<size>-<mtime_hex>"`, derived from the file size and last modification time. A strong validator also satisfies `If-Range`, so interrupted downloads can resume safely. When a response is served compressed — under any of the codings — the tag is weakened to `W/"…"` — the compressed bytes are a different representation, and a weak tag still revalidates (304) but prevents mixing compressed and uncompressed fragments on resume.
 - **Last-Modified** — an RFC 7231 HTTP date based on the file's modification time
 
 These headers allow browsers and CDNs to validate cached copies without re-downloading the file.
@@ -7054,7 +7131,7 @@ This enables `<video>`/`<audio>` seeking in browsers, resumable downloads (`wget
 - **If-Range** is honored: when the client sends the ETag (or `Last-Modified` date) of its partial copy and the file has changed since, OxPHP returns the full `200` response instead of a mismatched fragment. The date form is only accepted once the file's modification second has fully elapsed — a just-written file could change again within the same second without moving the date, so it is not yet a strong validator (RFC 9110).
 - Requests with **multiple ranges** (`bytes=0-1,4-5`) receive the full file as `200 OK` — `multipart/byteranges` responses are not generated.
 - **HEAD** requests with a `Range` header receive the same `206`/`Content-Range` headers as GET without a body, matching nginx and Apache.
-- **Ranges and compression are mutually exclusive.** For clients that accept brotli, range handling is disabled on representations that would be served compressed, and compressed responses do not advertise `Accept-Ranges` — a resumed download could otherwise splice uncompressed bytes onto a compressed prefix. Files above the compression window (3 MB) are never compressed, so ranges always work for the content that actually needs them: video, archives, and images. Responses for compression-eligible files always carry `Vary: Accept-Encoding` — even when served uncompressed — so shared caches keep the variants apart.
+- **Ranges and compression are mutually exclusive.** For clients that accept any content coding, range handling is disabled on representations that would be served compressed, and compressed responses do not advertise `Accept-Ranges` — a resumed download could otherwise splice uncompressed bytes onto a compressed prefix. Files above the compression window (3 MB) are never compressed, so ranges always work for the content that actually needs them: video, archives, and images. Responses for compression-eligible files always carry `Vary: Accept-Encoding` — even when served uncompressed — so shared caches keep the variants apart.
 - `206` responses are never compressed, and range handling does not apply to PHP responses — only to static files.
 
 Example: resume an interrupted download with curl:
@@ -14235,13 +14312,13 @@ The same precedence applies to `X-Content-Type-Options`, which OxPHP sets to `no
 |----------|---------|-------------|
 | `STATIC_MAX_AGE` | `30d` | `Cache-Control: max-age` for static files. Accepts: `30s`, `5m`, `2h`, `30d`, `1w`, `1y`, bare seconds (`3600`), or `off` to disable the header. Replaces deprecated `STATIC_CACHE_TTL`. |
 | `STATIC_REVALIDATE` | `off` | Boolean — see [Boolean values](#boolean-values). Set truthy to enable mtime revalidation on the in-memory content cache: the file's modification time is re-checked at most once every 3 seconds per file (not per request) and stale entries are evicted automatically, so changes become visible within 3 seconds. Replaces deprecated `STATIC_CACHE` (where `off` had the inverse meaning). |
-| `COMPRESSION_ENCODINGS` | `br,zstd,gzip` | Content codings the server offers, comma-separated: `br` (or `brotli`), `zstd`, `gzip`, or `off` to switch compression off entirely. An unknown name is a startup error. The order written here is ignored — cached static files prefer Brotli, whose cost is paid once, and everything else prefers Zstandard. See [Compression](../features/compression.md#choosing-a-coding) |
+| `COMPRESSION_ENCODINGS` | `br,zstd,gzip` | Content codings the server offers, comma-separated: `br` (or `brotli`), `zstd`, `gzip`. An unknown name is a startup error. Set the whole value to `off` (or `none`) to switch compression off entirely — it is not a list token, so `br,off` is an error rather than a switch. An empty assignment is treated as unset and restores the default. The order written here is ignored — cached static files prefer Brotli, whose cost is paid once, and everything else prefers Zstandard. See [Compression](../features/compression.md#choosing-a-coding) |
 | `COMPRESSION_BROTLI_LEVEL` | `5` | Brotli quality (0–11). Replaces deprecated `COMPRESSION_LEVEL` |
 | `COMPRESSION_ZSTD_LEVEL` | `6` | Zstandard compression level (0–19) |
 | `COMPRESSION_GZIP_LEVEL` | `6` | Gzip compression level (0–9) |
-| `COMPRESSION_LEVEL` | *(unset)* | Deprecated name for `COMPRESSION_BROTLI_LEVEL`; emits a startup `WARN`. `COMPRESSION_LEVEL=0` keeps its older meaning and disables every coding, not just Brotli. An explicit `COMPRESSION_BROTLI_LEVEL` wins over it |
+| `COMPRESSION_LEVEL` | *(unset)* | Deprecated name for `COMPRESSION_BROTLI_LEVEL`; emits a startup `WARN`. `COMPRESSION_LEVEL=0` keeps its older meaning and disables every coding, not just Brotli. An explicit `COMPRESSION_BROTLI_LEVEL` wins over a non-zero value — but not over `0`, which switches compression off whatever else is set |
 
-A coding is offered when `COMPRESSION_ENCODINGS` lists it **and** its level is not `0`; either one alone withdraws it.
+A coding is offered when `COMPRESSION_ENCODINGS` lists it **and** its level is not `0`; either one alone withdraws it. A level outside its range, or one that is not a number, aborts startup with an error naming the variable — nothing is clamped.
 
 ## Logging
 
@@ -14479,13 +14556,17 @@ curl -s http://localhost:9090/config | jq .
   "queue_capacity": 1024,
   "queue_wait_timeout_ms": 1000,
   "queue_max_waiting": 1024,
+  "queue_max_waiting_bytes": 67108864,
   "max_connections": 10000,
   "drain_timeout_seconds": 30,
   "header_timeout_seconds": 5,
   "rate_limit": 100,
   "rate_window_seconds": 60,
   "tls_enabled": true,
-  "compression_level": 4,
+  "tls_min_version": "1.2",
+  "brotli_level": 5,
+  "gzip_level": 6,
+  "zstd_level": 6,
   "access_log": "all",
   "max_query_body": 524288,
   "worker_mode_enabled": false,
