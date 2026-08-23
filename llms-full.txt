@@ -3094,6 +3094,22 @@ Between the cache limit and the top of the compression window — 1 MiB to 3 MiB
 
 Outside that case a file above 1 MiB is streamed from disk untouched: an incompressible type, a client that accepts no coding, or anything above 3 MiB.
 
+What a static file costs, by size:
+
+```text
+  0             256 B            1 MiB            3 MiB           ∞
+  ┌─────────────┬────────────────┬────────────────┬───────────────┐
+  │ never       │ cached, and a  │ read whole and │ streamed from │
+  │ compressed: │ stored copy is │ compressed on  │ disk, never   │
+  │ the framing │ built once in  │ every request: │ compressed:   │
+  │ would cost  │ the background │ too large to   │ past the      │
+  │ more than   │ on the first   │ cache, so no   │ compression   │
+  │ it saves    │ cache hit      │ copy is kept   │ window        │
+  └─────────────┴────────────────┴────────────────┴───────────────┘
+```
+
+The two middle bands describe a compressible type being served to a client that negotiated a coding. Take either condition away and the picture is the same as it has always been: cached up to 1 MiB, streamed above it, ranges honoured throughout.
+
 ## Configuration
 
 | Variable | Default | Description |
