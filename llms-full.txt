@@ -3026,26 +3026,20 @@ Compression happens after PHP execution, after static file serving, and after cu
 
 Small bodies are compressed inline; past a threshold the work moves to a blocking thread so it cannot stall the async runtime. The threshold is 64 KiB, dropping to 4 KiB once the level is steep enough for the cost curve to turn — above quality 4 for Brotli, level 6 for gzip, level 9 for Zstandard. At the shipped defaults Brotli is already in the steep half, so Brotli bodies over 4 KiB are compressed off the async thread.
 
-```text
-                   Accept-Encoding, read once per request
-                                    │
-                  ranked by weight; a coding the server does
-                  not offer scores zero and drops out here
-                                    │
-                    ┌───────────────┴───────────────┐
-                    │                               │
-          cached static file with           everything else: PHP,
-          a stored copy for that            error pages, uncached
-          coding                            and oversized files
-                    │                               │
-          tie → br › zstd › gzip            tie → zstd › br › gzip
-          at 11 / 19 / 9, built             at the configured 5 / 6 / 6,
-          once in the background            compressed on this request
-                    │                               │
-                    └───────────────┬───────────────┘
-                                    │
-                    Content-Encoding, recomputed Content-Length,
-                    Vary, weakened ETag, no Accept-Ranges
+```mermaid
+flowchart TD
+    AE["Accept-Encoding, read once per request"]
+    W["Ranked by weight. A coding the server<br/>does not offer scores zero and drops out"]
+    Q{"Is a stored copy<br/>being served?"}
+    A["Tie broken br, then zstd, then gzip.<br/>Built once at 11 / 19 / 9"]
+    P["Tie broken zstd, then br, then gzip.<br/>Compressed now at the configured 5 / 6 / 6"]
+    H["Content-Encoding, recomputed Content-Length,<br/>Vary, weakened ETag, no Accept-Ranges"]
+    AE --> W
+    W --> Q
+    Q -->|yes| A
+    Q -->|no| P
+    A --> H
+    P --> H
 ```
 
 ## Choosing a Coding
@@ -3096,19 +3090,26 @@ Outside that case a file above 1 MiB is streamed from disk untouched: an incompr
 
 What a static file costs, by size:
 
-```text
-  0             256 B            1 MiB            3 MiB           ∞
-  ┌─────────────┬────────────────┬────────────────┬───────────────┐
-  │ never       │ cached, and a  │ read whole and │ streamed from │
-  │ compressed: │ stored copy is │ compressed on  │ disk, never   │
-  │ the framing │ built once in  │ every request: │ compressed:   │
-  │ would cost  │ the background │ too large to   │ past the      │
-  │ more than   │ on the first   │ cache, so no   │ compression   │
-  │ it saves    │ cache hit      │ copy is kept   │ window        │
-  └─────────────┴────────────────┴────────────────┴───────────────┘
+```mermaid
+flowchart TD
+    F["Static file"]
+    C1{"256 B or larger?"}
+    C2{"1 MiB or smaller?"}
+    C3{"3 MiB or smaller?"}
+    N1["Sent as-is, and cached.<br/>The framing would cost more than it saves"]
+    N2["Cached, and a stored copy is built once<br/>in the background on the first cache hit"]
+    N3["Read whole and compressed on every request.<br/>Too large to cache, so no copy is kept"]
+    N4["Streamed from disk, never compressed.<br/>Past the compression window"]
+    F --> C1
+    C1 -->|no| N1
+    C1 -->|yes| C2
+    C2 -->|yes| N2
+    C2 -->|no| C3
+    C3 -->|yes| N3
+    C3 -->|no| N4
 ```
 
-The two middle bands describe a compressible type being served to a client that negotiated a coding. Take either condition away and the picture is the same as it has always been: cached up to 1 MiB, streamed above it, ranges honoured throughout.
+Compression along that path assumes a compressible type and a client that negotiated a coding. Take either condition away and the picture is the one it has always been: cached up to 1 MiB, streamed above it, ranges honoured throughout, and nothing encoded anywhere.
 
 ## Configuration
 
