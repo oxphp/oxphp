@@ -1814,7 +1814,7 @@ unsafe extern "C" fn oxphp_error_cb(
     // code placed after the delegation.
     if level == "error" {
         // Zend's `zend_fcall_interrupt` checks `EG(timed_out)` BEFORE
-        // dispatching to `zend_interrupt_function`, so SIGALRM-driven
+        // dispatching to `zend_interrupt_function`, so an expiry of
         // `max_execution_time` reaches us as a plain `zend_error_noreturn`
         // with the canonical "Maximum execution time of N second(s) exceeded"
         // message — our oxphp_zend_interrupt_handler never sees it. Pattern-

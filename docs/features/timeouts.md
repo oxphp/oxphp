@@ -5,7 +5,7 @@ description: Configure header read timeouts and PHP execution timeouts in OxPHP 
 
 # Timeouts
 
-OxPHP enforces two independent timeouts that protect against slow clients and runaway requests. The header timeout guards the connection phase at the server level. PHP execution time is bounded by PHP's own `max_execution_time` ini directive (and the `set_time_limit()` runtime function), exactly as on any other SAPI.
+OxPHP enforces two independent timeouts that protect against slow clients and runaway requests. The header timeout guards the connection phase at the server level. PHP execution time is bounded by PHP's own `max_execution_time` ini directive (and the `set_time_limit()` runtime function). One property of that limit differs from PHP-FPM and is easy to be caught out by: OxPHP runs a thread-safe (ZTS) PHP build, where the limit measures wall-clock time rather than CPU time. See [Wall-clock, not CPU time](#wall-clock-not-cpu-time).
 
 ## How It Works
 
@@ -13,7 +13,7 @@ Each request passes through these phases:
 
 1. **Connection accepted** — the header timeout starts. OxPHP waits for the client to send a complete set of HTTP headers.
 2. **Headers received** — the header timeout ends. The request is dispatched to a PHP worker.
-3. **PHP processes the request** — application code runs under PHP's own `max_execution_time` (SIGALRM-driven). When the limit is reached, the request is cancelled and the unified `Request cancelled (timeout)` fatal fires.
+3. **PHP processes the request** — application code runs under PHP's own `max_execution_time`, armed as a per-thread POSIX timer. When the limit is reached, the request is cancelled and the unified `Request cancelled (timeout)` fatal fires.
 4. **Response sent** — on keep-alive connections, the cycle repeats from step 1.
 
 ```text
@@ -37,6 +37,21 @@ PHP execution timing is delegated entirely to PHP. When `max_execution_time` is 
 - Sets `connection_status() & PHP_CONNECTION_TIMEOUT` so userland code can detect the cause.
 - Runs all `register_shutdown_function()` callbacks, exactly as PHP-FPM does.
 - Returns HTTP `504 Gateway Timeout` with the message `Request cancelled (timeout)` written to the error log.
+
+### Wall-clock, not CPU time
+
+`max_execution_time` measures how long the request has been alive, not how much CPU it has burned. Every second spent waiting counts: a slow database query, an HTTP call to another service, a blocking `fread()` on a socket, a `sleep()`.
+
+This differs from PHP-FPM, and the difference is in the PHP build rather than in OxPHP. A thread-safe (ZTS) build — which OxPHP requires, since it runs many PHP interpreters as threads of one process — arms the limit as a per-thread POSIX timer on a monotonic clock. A non-thread-safe build, which is what PHP-FPM runs, arms it with `setitimer(ITIMER_PROF)`, a timer that only advances while the process is on CPU. Hence the familiar rule of thumb that "waiting on the database doesn't count against `max_execution_time`" — it holds for PHP-FPM and does not hold here.
+
+The practical consequence shows up when migrating an existing application:
+
+| Request: 25s waiting on a report query, 2s rendering | Charged against a 30s limit |
+|------------------------------------------------------|-----------------------------|
+| PHP-FPM (non-thread-safe build) | ~2s — the limit is effectively unreachable |
+| OxPHP (thread-safe build) | 27s — the limit is one slow query away |
+
+So an application that never once hit `max_execution_time` under PHP-FPM can start returning `504` on its slowest endpoints after moving to OxPHP, with no change to the value of the directive. Size the limit against total request latency, including everything the request waits on, and raise it for endpoints that block on external systems.
 
 ### Cancellation status codes
 
@@ -89,6 +104,8 @@ Adjust these values based on your application's characteristics. For SSE endpoin
 
 The PHP execution-time limit fired before the script finished.
 
+If these requests were fine under PHP-FPM and started failing after the move to OxPHP, the cause is most likely the timer semantics described in [Wall-clock, not CPU time](#wall-clock-not-cpu-time): time the request spends waiting on a database or an upstream service now counts against the limit.
+
 **Fix:** Raise `max_execution_time` for the affected script, or call `set_time_limit($seconds)` to extend it at runtime:
 
 ```php
@@ -140,7 +157,7 @@ max_execution_time = 30
 ## Best Practices
 
 - **Never set `max_execution_time = 0` globally in production** unless you have SSE or long-polling endpoints that require indefinite connections. Prefer `set_time_limit(0)` per-script.
-- **Use shorter limits for API servers.** APIs have predictable response times. A 30-second `max_execution_time` catches stuck requests quickly without affecting normal traffic.
+- **Use shorter limits for API servers.** APIs have predictable response times. A 30-second `max_execution_time` catches stuck requests quickly without affecting normal traffic. Size it against your slowest downstream dependency rather than against the CPU work the script does — waiting counts.
 - **Combine with rate limiting.** Timeouts protect individual requests; rate limiting protects against high request volume. Together they provide comprehensive protection against slow and fast attack patterns.
 
 ## See Also

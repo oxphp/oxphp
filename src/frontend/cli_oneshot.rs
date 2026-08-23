@@ -117,7 +117,7 @@ pub fn run(opts: RunOptions) -> i32 {
         // struct into the global again, so php_init_config() actually parses the
         // blob. Without this the defaults + -d are silently discarded and
         // max_execution_time falls back to the engine default 30s, killing any
-        // long-running `oxphp run` (migration, daemon, async loop) via SIGALRM.
+        // long-running `oxphp run` (migration, daemon, async loop) via the execution timer.
         module.ini_entries = ini_ptr as *mut c_char;
         let rc = bindings::php_module_startup(&mut module, std::ptr::null_mut());
         if rc != 0 {
