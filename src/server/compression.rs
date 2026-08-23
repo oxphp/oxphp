@@ -7,7 +7,7 @@ use crate::types::{full_body, ResponseBody};
 /// Minimum body size worth compressing (bytes).
 const MIN_COMPRESS_SIZE: usize = 256;
 
-/// Maximum body size to attempt compression (3 MB).
+/// Maximum body size to attempt compression (3 MiB).
 /// Larger responses should be streamed from disk without compression.
 const MAX_COMPRESS_SIZE: usize = 3 * 1024 * 1024;
 
@@ -19,8 +19,9 @@ const BROTLI_WINDOW: i32 = 20;
 /// to avoid stalling the Tokio runtime.
 const BLOCKING_THRESHOLD_LOW: usize = 65_536;
 
-/// Lower threshold for high quality levels (>4) where brotli is 10-100x slower.
-/// At q11, even 8 KB can take milliseconds — keep async thread responsive.
+/// Lower threshold for the steep half of a coding's range, where the cost per
+/// byte climbs far enough that even a few kilobytes is worth handing off.
+/// Which level that starts at differs per coding — see `blocking_threshold`.
 const BLOCKING_THRESHOLD_HIGH: usize = 4_096;
 
 /// A content coding this server can produce.
@@ -101,6 +102,13 @@ impl Levels {
         }
     }
 
+    /// Whether the server offers any coding at all. When it offers none,
+    /// no response varies by `Accept-Encoding` — the server never reads the
+    /// header, so a shared cache has nothing to key on.
+    pub(crate) fn any(&self) -> bool {
+        Coding::ALL.iter().any(|&coding| self.level(coding) > 0)
+    }
+
     /// The configured level for one coding.
     pub(crate) fn level(&self, coding: Coding) -> i32 {
         match coding {
@@ -125,6 +133,32 @@ impl Levels {
 pub struct Acceptable([u16; Coding::COUNT]);
 
 impl Acceptable {
+    /// Weigh the request's `Accept-Encoding` against the server's configuration.
+    ///
+    /// A sender may spread a comma-separated list field over several field
+    /// lines, which RFC 9110 §5.3 defines as equivalent to the one line they
+    /// join into. One line is the whole of practice and is read as it stands;
+    /// more than one is joined first, so a coding named only on the second is
+    /// still a coding the client named.
+    pub(crate) fn from_headers(headers: &http::HeaderMap, levels: Levels) -> Self {
+        let mut lines = headers
+            .get_all(header::ACCEPT_ENCODING)
+            .iter()
+            .filter_map(|value| value.to_str().ok());
+        let Some(first) = lines.next() else {
+            return Self::default();
+        };
+        let Some(second) = lines.next() else {
+            return Self::parse(first, levels);
+        };
+        let mut joined = String::from(first);
+        for rest in std::iter::once(second).chain(lines) {
+            joined.push(',');
+            joined.push_str(rest);
+        }
+        Self::parse(&joined, levels)
+    }
+
     /// Weigh one `Accept-Encoding` field against the server's configuration.
     pub(crate) fn parse(accept_encoding: &str, levels: Levels) -> Self {
         let mut weights = [0u16; Coding::COUNT];
@@ -163,8 +197,8 @@ impl Acceptable {
 }
 
 /// Try to compress a response with `coding`, which the caller must have
-/// obtained from [`negotiate`] for this client. `level` is that coding's
-/// configured level.
+/// obtained from [`Acceptable::per_request`] for this client. `level` is that
+/// coding's configured level.
 pub async fn maybe_compress(
     response: Response<ResponseBody>,
     coding: Coding,
@@ -347,9 +381,12 @@ fn append_vary(response: &mut Response<ResponseBody>) {
 /// path only declared it when it actually encoded something, so the identity
 /// half of every dynamic response went out unkeyed.
 ///
-/// Bodies the server does not hold whole are exempt: they are never compressed
-/// under any header, so they genuinely do not vary.
-pub(crate) fn mark_varies_by_encoding(response: &mut Response<ResponseBody>) {
+/// A body handed here without an exact length is exempt: this path only ever
+/// encodes a body it holds whole, so a response of unknown length does not
+/// vary by anything it does. Static serving is the one place that streams a
+/// body it *would* have compressed at another size — it knows the file's
+/// length and declares the variance itself.
+pub(crate) fn mark_varies_by_encoding(response: &mut Response<ResponseBody>, levels: Levels) {
     // An encoded response was already marked, and a coding the application
     // chose for itself is not one this server negotiated.
     if response.status() == http::StatusCode::PARTIAL_CONTENT
@@ -365,20 +402,26 @@ pub(crate) fn mark_varies_by_encoding(response: &mut Response<ResponseBody>) {
     let Some(len) = hyper::body::Body::size_hint(response.body()).exact() else {
         return;
     };
-    if would_compress(content_type, len) {
+    if would_compress(levels, content_type, len) {
         append_vary(response);
     }
 }
 
-/// Would a buffered 200 response with this MIME type and size be compressed
-/// for a client that accepts a coding? Static serving uses this to disable
-/// range handling for such representations: a client resuming a compressed
+/// Would a 200 response with this MIME type and size be compressed for a
+/// client that accepts a coding? Two things ask: static serving, to disable
+/// range handling for such representations — a client resuming a compressed
 /// download (with or without If-Range) would otherwise receive identity bytes
-/// to splice onto a compressed prefix. nginx does the same by clearing
-/// `allow_ranges` in its gzip filter. Streaming bodies are never compressed
-/// regardless of this answer, so the streaming path must not consult it.
-pub(crate) fn would_compress(content_type: &str, size: u64) -> bool {
-    is_compressible(content_type)
+/// to splice onto a compressed prefix, and nginx clears `allow_ranges` in its
+/// gzip filter for the same reason — and both paths, to decide whether a
+/// response varies by `Accept-Encoding`.
+///
+/// The answer is about the representation, not about one request: a body that
+/// would be encoded for somebody answers yes even when this client is being
+/// handed the identity bytes. A server offering no coding at all answers no to
+/// everything, since it never reads the header.
+pub(crate) fn would_compress(levels: Levels, content_type: &str, size: u64) -> bool {
+    levels.any()
+        && is_compressible(content_type)
         && (MIN_COMPRESS_SIZE as u64..=MAX_COMPRESS_SIZE as u64).contains(&size)
 }
 
@@ -699,7 +742,7 @@ mod tests {
     #[test]
     fn an_uncompressed_body_that_would_have_compressed_still_varies() {
         let mut response = build_response("text/html", &b"x".repeat(1024));
-        mark_varies_by_encoding(&mut response);
+        mark_varies_by_encoding(&mut response, all());
 
         assert_eq!(
             response.headers().get(header::VARY).unwrap(),
@@ -714,11 +757,11 @@ mod tests {
         // Wrong type, and the right type below the floor: neither depends on
         // what the client accepts.
         let mut png = build_response("image/png", &b"x".repeat(1024));
-        mark_varies_by_encoding(&mut png);
+        mark_varies_by_encoding(&mut png, all());
         assert!(png.headers().get_all(header::VARY).iter().next().is_none());
 
         let mut tiny = build_response("text/html", b"small");
-        mark_varies_by_encoding(&mut tiny);
+        mark_varies_by_encoding(&mut tiny, all());
         assert!(tiny.headers().get_all(header::VARY).iter().next().is_none());
     }
 
@@ -726,7 +769,7 @@ mod tests {
     fn marking_an_encoded_response_again_does_not_duplicate_vary() {
         let mut response = build_response("text/html", &b"x".repeat(1024));
         mark_encoded(&mut response, Coding::Br);
-        mark_varies_by_encoding(&mut response);
+        mark_varies_by_encoding(&mut response, all());
 
         let varies: Vec<_> = response.headers().get_all(header::VARY).iter().collect();
         assert_eq!(varies.len(), 1);
@@ -740,7 +783,7 @@ mod tests {
         preencoded
             .headers_mut()
             .insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
-        mark_varies_by_encoding(&mut preencoded);
+        mark_varies_by_encoding(&mut preencoded, all());
         assert!(preencoded
             .headers()
             .get_all(header::VARY)
@@ -750,7 +793,7 @@ mod tests {
 
         let mut partial = build_response("text/html", &b"x".repeat(1024));
         *partial.status_mut() = StatusCode::PARTIAL_CONTENT;
-        mark_varies_by_encoding(&mut partial);
+        mark_varies_by_encoding(&mut partial, all());
         assert!(partial
             .headers()
             .get_all(header::VARY)
@@ -807,6 +850,56 @@ mod tests {
 
         let collected = result.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(collected.len(), cl);
+    }
+
+    #[test]
+    fn each_coding_hands_off_from_its_own_steepness_line() {
+        // The line is not the same level for all three: gzip stays cheap
+        // through zlib's default and zstd through most of its range, while
+        // brotli turns steep at the level it ships at. Reading one coding's
+        // threshold off another's would send half of them to the wrong pool.
+        assert_eq!(blocking_threshold(Coding::Br, 4), BLOCKING_THRESHOLD_LOW);
+        assert_eq!(blocking_threshold(Coding::Br, 5), BLOCKING_THRESHOLD_HIGH);
+        assert_eq!(blocking_threshold(Coding::Gzip, 6), BLOCKING_THRESHOLD_LOW);
+        assert_eq!(blocking_threshold(Coding::Gzip, 7), BLOCKING_THRESHOLD_HIGH);
+        assert_eq!(blocking_threshold(Coding::Zstd, 9), BLOCKING_THRESHOLD_LOW);
+        assert_eq!(
+            blocking_threshold(Coding::Zstd, 10),
+            BLOCKING_THRESHOLD_HIGH
+        );
+    }
+
+    #[test]
+    fn a_header_split_over_two_field_lines_is_read_as_one() {
+        // RFC 9110 §5.3: several field lines of the same name mean the one
+        // line they join into. Reading only the first would answer a client
+        // that offered three codings with none of them.
+        let mut headers = http::HeaderMap::new();
+        headers.append(header::ACCEPT_ENCODING, "identity".parse().unwrap());
+        headers.append(header::ACCEPT_ENCODING, "br, zstd".parse().unwrap());
+
+        assert_eq!(
+            Acceptable::from_headers(&headers, all()).per_request(),
+            Some(Coding::Zstd)
+        );
+    }
+
+    #[test]
+    fn a_missing_header_accepts_nothing() {
+        assert_eq!(
+            Acceptable::from_headers(&http::HeaderMap::new(), all()).per_request(),
+            None
+        );
+    }
+
+    #[test]
+    fn a_server_offering_no_coding_leaves_every_response_unkeyed() {
+        // `COMPRESSION_ENCODINGS=off`. The header is never read, so nothing
+        // depends on it — and telling a shared cache otherwise splits its
+        // storage per client for no gain.
+        let mut response = build_response("text/html", &vec![b'x'; 4096]);
+        mark_varies_by_encoding(&mut response, Levels::default());
+        assert!(response.headers().get(header::VARY).is_none());
     }
 
     /// The level brotli ships at sits above `blocking_threshold`'s steepness

@@ -13,7 +13,7 @@ use lru::LruCache;
 use parking_lot::{Mutex, RwLock};
 use tokio_util::io::ReaderStream;
 
-use crate::server::compression::Coding;
+use crate::server::compression::{Coding, Levels};
 use crate::types::{full_body, ResponseBody};
 
 /// Maximum individual file size eligible for content caching (1 MiB).
@@ -21,6 +21,19 @@ const MAX_CACHE_FILE_SIZE: usize = 1_048_576;
 
 /// Maximum total bytes held in the content cache (64 MiB).
 const MAX_CACHE_TOTAL_BYTES: usize = 67_108_864;
+
+/// How many files above the cache limit may be held in memory at once for the
+/// sake of compressing them. Such a file is read whole, and it and its
+/// compressed output stay resident until the response has been written, so the
+/// only other ceiling on this path is `MAX_CONNECTIONS` — ten thousand by
+/// default, and reachable by anyone who can ask for a bundle twice. Sixteen
+/// puts the worst case in the same order as the content cache's own budget.
+const MAX_OFF_DISK_COMPRESSIONS: usize = 16;
+
+/// Carried on the response so the permit outlives the bytes it accounts for —
+/// dropped when the response is, which is after the body reaches the wire.
+#[derive(Clone)]
+struct OffDiskCompression(#[allow(dead_code)] Arc<tokio::sync::OwnedSemaphorePermit>);
 
 /// Revalidation window when `STATIC_REVALIDATE=on`. A cached entry's mtime is
 /// re-checked via `stat()` at most once per window, not on every hit — so the
@@ -161,6 +174,11 @@ pub struct FileCache {
     /// claiming must not queue behind the content lock, which static serving
     /// holds on every hit.
     artifacts_in_flight: Mutex<std::collections::HashSet<(String, Coding)>>,
+    /// Permits for reading a file too large to cache whole so it can be
+    /// compressed. Deliberately never awaited: a request that finds none free
+    /// streams the file uncompressed — what it would have been served before
+    /// this path existed — rather than queueing behind the memory it wanted.
+    off_disk_compression: Arc<tokio::sync::Semaphore>,
 }
 
 /// Holds a single-flight claim on one key's artifact for as long as the job
@@ -217,6 +235,7 @@ impl FileCache {
             canonical: Mutex::new(LruCache::new(cap)),
             revalidate_ttl,
             artifacts_in_flight: Mutex::new(std::collections::HashSet::new()),
+            off_disk_compression: Arc::new(tokio::sync::Semaphore::new(MAX_OFF_DISK_COMPRESSIONS)),
         }
     }
 
@@ -819,8 +838,8 @@ fn add_cache_headers(
 /// neither If-Range form can distinguish the representations (nginx clears
 /// `allow_ranges` in its gzip filter for the same reason). Only buffered
 /// responses are ever compressed — the streaming path is exempt.
-fn ranges_allowed(will_encode: bool, mime_type: &str, size: u64) -> bool {
-    !(will_encode && crate::server::compression::would_compress(mime_type, size))
+fn ranges_allowed(will_encode: bool, levels: Levels, mime_type: &str, size: u64) -> bool {
+    !(will_encode && crate::server::compression::would_compress(levels, mime_type, size))
 }
 
 /// Build a 200 or 206 response for a fully buffered body, honoring the
@@ -837,16 +856,15 @@ fn respond_bytes(
     method: &http::Method,
     request_headers: &HeaderMap,
     allow_ranges: bool,
+    levels: Levels,
 ) -> Result<Response<ResponseBody>, http::Error> {
     let size = bytes.len() as u64;
     // A representation in the compression window is answered differently
     // depending on Accept-Encoding: encoded body with ranges disabled for
     // clients that accept a coding, identity with ranges (200/206/416) for the
-    // rest. Shared
-    // caches must key on the header for every variant — the compression
-    // layer only appends Vary when it actually encodes, which would let an
-    // identity response be cached without it and served to brotli clients.
-    let varies_by_encoding = crate::server::compression::would_compress(mime_type, size);
+    // rest. Shared caches must key on the header for every one of those
+    // variants, including the identity ones no compression step ever touches.
+    let varies_by_encoding = crate::server::compression::would_compress(levels, mime_type, size);
     let plan = if allow_ranges {
         plan_range(method, request_headers, size, etag, modified)
     } else {
@@ -910,6 +928,9 @@ fn respond_bytes(
 /// yet. When it is set and a buffered response would be served compressed,
 /// range handling is disabled for it (see [`ranges_allowed`]);
 /// a file that still streams is never compressed, so its ranges always work.
+/// `levels` is what the server offers to anybody, which decides which
+/// responses vary by `Accept-Encoding` — a question about the representation
+/// rather than about this request.
 /// Re-validates the file path at serve time against `canonical_root`
 /// to mitigate TOCTOU symlink swap attacks.
 #[allow(clippy::too_many_arguments)]
@@ -922,6 +943,7 @@ pub async fn serve(
     request_headers: &HeaderMap,
     cache_control: Option<&str>,
     coding: Option<Coding>,
+    levels: Levels,
 ) -> Result<Response<ResponseBody>, crate::types::BoxError> {
     let cache_key = file_path.to_string_lossy();
 
@@ -957,7 +979,8 @@ pub async fn serve(
             artifact,
         }) => {
             let identity_len = bytes.len();
-            let allow_ranges = ranges_allowed(coding.is_some(), &mime_type, identity_len as u64);
+            let allow_ranges =
+                ranges_allowed(coding.is_some(), levels, &mime_type, identity_len as u64);
             let mut response = respond_bytes(
                 bytes.clone(),
                 &mime_type,
@@ -968,6 +991,7 @@ pub async fn serve(
                 method,
                 request_headers,
                 allow_ranges,
+                levels,
             )?;
             // `allow_ranges` is false for exactly the representations the
             // compression layer would encode for this client, so a false here
@@ -1073,9 +1097,20 @@ pub async fn serve(
     //    compressed size, while a PHP response of the same size did not.
     //    The read is capped at the fstat'ed size so a file growing mid-read
     //    cannot produce a body longer than the validator describes.
-    let compress_off_disk =
-        coding.is_some() && crate::server::compression::would_compress(&mime_type, file_size);
-    if file_size <= MAX_CACHE_FILE_SIZE as u64 || compress_off_disk {
+    //    Only so many such files are read at once: the bytes stay resident
+    //    until the response has been written, and the connection limit alone is
+    //    far too generous a ceiling for them. Over the cap the file streams.
+    let off_disk = (file_size > MAX_CACHE_FILE_SIZE as u64
+        && coding.is_some()
+        && crate::server::compression::would_compress(levels, &mime_type, file_size))
+    .then(|| {
+        Arc::clone(&cache.off_disk_compression)
+            .try_acquire_owned()
+            .ok()
+            .map(Arc::new)
+    })
+    .flatten();
+    if file_size <= MAX_CACHE_FILE_SIZE as u64 || off_disk.is_some() {
         use tokio::io::AsyncReadExt;
         let mut contents = Vec::with_capacity(file_size as usize);
         (&mut file)
@@ -1109,8 +1144,8 @@ pub async fn serve(
             last_modified_arc.clone(),
         );
 
-        let allow_ranges = ranges_allowed(coding.is_some(), &mime_type, file_size);
-        return Ok(respond_bytes(
+        let allow_ranges = ranges_allowed(coding.is_some(), levels, &mime_type, file_size);
+        let mut response = respond_bytes(
             bytes,
             &mime_type,
             &etag,
@@ -1120,22 +1155,48 @@ pub async fn serve(
             method,
             request_headers,
             allow_ranges,
-        )?);
+            levels,
+        )?;
+        if let Some(permit) = off_disk {
+            response.extensions_mut().insert(OffDiskCompression(permit));
+        }
+        return Ok(response);
     }
 
-    // 5. Large file: stream from the already-open handle. Whatever reaches
-    //    here would not have been compressed anyway — too large for the
-    //    window, a type that does not compress, or a client that accepts no
-    //    coding — so the identity bytes are the only representation that
-    //    exists and ranges are always safe.
+    // 5. Large file: stream from the already-open handle. These bytes are not
+    //    compressed — too large for the window, a type that does not compress,
+    //    a client that accepts no coding, or no permit free to read it whole —
+    //    so ranges are always safe here.
+    //
+    //    A file inside the compression window still varies by Accept-Encoding
+    //    even though it is being streamed: the same URL answers a client that
+    //    negotiated a coding with a compressed body and no ranges, and a shared
+    //    cache that stored this response under the bare URL would hand these
+    //    full-size bytes to that client. The compression layer cannot declare
+    //    it downstream — a stream has no length for it to weigh — so it is
+    //    declared here, where the file's size is known.
+    let varies_by_encoding =
+        crate::server::compression::would_compress(levels, &mime_type, file_size);
     let range_plan = plan_range(method, request_headers, file_size, &etag, &modified);
     if matches!(range_plan, RangePlan::NotSatisfiable) {
-        return Ok(build_416(file_size)?);
+        // A client that negotiated a coding would have been answered 200 with
+        // the whole (compressed) file, so even the 416 varies.
+        let mut response = build_416(file_size)?;
+        if varies_by_encoding {
+            response.headers_mut().insert(
+                header::VARY,
+                http::HeaderValue::from_static("Accept-Encoding"),
+            );
+        }
+        return Ok(response);
     }
 
     let mut builder = Response::builder()
         .header(header::CONTENT_TYPE, &*mime_type)
         .header(header::ACCEPT_RANGES, "bytes");
+    if varies_by_encoding {
+        builder = builder.header(header::VARY, "Accept-Encoding");
+    }
 
     // Range request: seek to the start and cap the read at the range length.
     let body_len = if let RangePlan::Partial { start, end } = range_plan {
@@ -1186,6 +1247,21 @@ mod tests {
 
     fn empty_allow() -> SymlinkAllowList {
         SymlinkAllowList::default()
+    }
+
+    /// The shipped configuration: every coding offered.
+    fn offered() -> Levels {
+        Levels {
+            brotli: 5,
+            gzip: 6,
+            zstd: 6,
+        }
+    }
+
+    /// Compression switched off entirely, as `COMPRESSION_ENCODINGS=off`
+    /// leaves it.
+    fn no_codings() -> Levels {
+        Levels::default()
     }
 
     /// Canonicalize the temp dir path so it matches what `verify_canonical` resolves
@@ -1296,6 +1372,7 @@ mod tests {
             &HeaderMap::new(),
             Some("public, max-age=86400"),
             None,
+            offered(),
         )
         .await
         .unwrap();
@@ -1320,6 +1397,7 @@ mod tests {
             &HeaderMap::new(),
             Some("public, max-age=86400"),
             None,
+            offered(),
         )
         .await
         .unwrap();
@@ -1345,6 +1423,7 @@ mod tests {
             &HeaderMap::new(),
             Some("public, max-age=86400"),
             None,
+            offered(),
         )
         .await
         .unwrap();
@@ -1370,6 +1449,7 @@ mod tests {
             &HeaderMap::new(),
             Some("public, max-age=86400"),
             None,
+            offered(),
         )
         .await
         .unwrap();
@@ -1602,6 +1682,7 @@ mod tests {
             &HeaderMap::new(),
             Some("public, max-age=86400"),
             None,
+            offered(),
         )
         .await
         .unwrap();
@@ -1622,6 +1703,7 @@ mod tests {
             &HeaderMap::new(),
             Some("public, max-age=86400"),
             None,
+            offered(),
         )
         .await
         .unwrap();
@@ -1749,6 +1831,7 @@ mod tests {
             &HeaderMap::new(),
             Some("public, max-age=3600"),
             None,
+            offered(),
         )
         .await
         .unwrap();
@@ -1783,6 +1866,7 @@ mod tests {
             &HeaderMap::new(),
             None,
             None,
+            offered(),
         )
         .await
         .unwrap();
@@ -1811,6 +1895,7 @@ mod tests {
             &HeaderMap::new(),
             Some("public, max-age=86400"),
             None,
+            offered(),
         )
         .await
         .unwrap();
@@ -1834,6 +1919,7 @@ mod tests {
             &headers,
             Some("public, max-age=86400"),
             None,
+            offered(),
         )
         .await
         .unwrap();
@@ -1858,6 +1944,7 @@ mod tests {
             &headers,
             Some("public, max-age=86400"),
             None,
+            offered(),
         )
         .await
         .unwrap();
@@ -1882,6 +1969,7 @@ mod tests {
             &HeaderMap::new(),
             Some("public, max-age=86400"),
             None,
+            offered(),
         )
         .await
         .unwrap();
@@ -1905,6 +1993,7 @@ mod tests {
             &headers,
             Some("public, max-age=86400"),
             None,
+            offered(),
         )
         .await
         .unwrap();
@@ -2265,6 +2354,7 @@ mod tests {
             &HeaderMap::new(),
             Some("public, max-age=86400"),
             Some(coding),
+            offered(),
         )
         .await
         .unwrap()
@@ -2565,6 +2655,37 @@ mod tests {
     }
 
     #[test]
+    fn test_a_stale_rejection_does_not_condemn_the_new_bytes() {
+        let cache = Arc::new(FileCache::new(10));
+        let key = "/w/app.css".to_string();
+        let modified = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000);
+        cache.insert_content(
+            key.clone(),
+            Bytes::from_static(b"identity"),
+            "text/css".into(),
+            modified,
+            "\"tag\"".into(),
+            "date".into(),
+        );
+
+        // The job that found the bytes incompressible was working on the file
+        // as it was before it changed. Recording that verdict against the entry
+        // now would mark bytes it never saw as hopeless, permanently.
+        cache.reject_artifact(&key, Coding::Br, modified - Duration::from_secs(1));
+        assert!(matches!(
+            cache.content.read().entries.peek(&key).unwrap().artifacts[Coding::Br.slot()],
+            ArtifactState::Absent
+        ));
+
+        // A verdict on the bytes the entry actually holds is recorded.
+        cache.reject_artifact(&key, Coding::Br, modified);
+        assert!(matches!(
+            cache.content.read().entries.peek(&key).unwrap().artifacts[Coding::Br.slot()],
+            ArtifactState::Rejected
+        ));
+    }
+
+    #[test]
     fn test_artifact_is_not_rebuilt_over_an_existing_one() {
         let cache = Arc::new(FileCache::new(10));
         let key = "/w/app.css".to_string();
@@ -2597,6 +2718,17 @@ mod tests {
         cache: &FileCache,
         headers: HeaderMap,
     ) -> Response<ResponseBody> {
+        serve_at(file_path, dir, cache, headers, offered()).await
+    }
+
+    /// Serve as an identity client against a given compression configuration.
+    async fn serve_at(
+        file_path: &std::path::Path,
+        dir: &TempDir,
+        cache: &FileCache,
+        headers: HeaderMap,
+        levels: Levels,
+    ) -> Response<ResponseBody> {
         serve(
             file_path,
             cache,
@@ -2606,6 +2738,7 @@ mod tests {
             &headers,
             Some("public, max-age=86400"),
             None,
+            levels,
         )
         .await
         .unwrap()
@@ -2867,6 +3000,7 @@ mod tests {
             &range_headers("bytes=0-0"),
             Some("public, max-age=86400"),
             None,
+            offered(),
         )
         .await
         .unwrap();
@@ -2894,6 +3028,7 @@ mod tests {
             &range_headers("bytes=0-4"),
             Some("public, max-age=86400"),
             None,
+            offered(),
         )
         .await
         .unwrap();
@@ -2930,6 +3065,7 @@ mod tests {
             &headers,
             Some("public, max-age=86400"),
             None,
+            offered(),
         )
         .await
         .unwrap();
@@ -2971,6 +3107,7 @@ mod tests {
             &range_headers("bytes=0-9"),
             Some("public, max-age=86400"),
             Some(Coding::Br),
+            offered(),
         )
         .await
         .unwrap();
@@ -2991,6 +3128,7 @@ mod tests {
             &range_headers("bytes=0-9"),
             Some("public, max-age=86400"),
             None,
+            offered(),
         )
         .await
         .unwrap();
@@ -3016,6 +3154,7 @@ mod tests {
             &range_headers("bytes=0-9"),
             Some("public, max-age=86400"),
             Some(Coding::Br),
+            offered(),
         )
         .await
         .unwrap();
@@ -3052,6 +3191,7 @@ mod tests {
             &range_headers("bytes=0-9"),
             Some("public, max-age=86400"),
             Some(Coding::Br), // irrelevant on the streaming path
+            offered(),
         )
         .await
         .unwrap();
@@ -3128,6 +3268,128 @@ mod tests {
         let response = serve_with(&file_path, &dir, &cache, HeaderMap::new()).await;
 
         assert_eq!(hyper::body::Body::size_hint(response.body()).exact(), None);
+        assert_eq!(
+            response.headers().get(header::ACCEPT_RANGES).unwrap(),
+            "bytes"
+        );
+        // The other client got a quarter of these bytes off the same URL. A
+        // shared cache that stored this response unkeyed would hand the full
+        // megabyte to that client from then on.
+        assert_eq!(
+            response.headers().get(header::VARY).unwrap(),
+            "Accept-Encoding"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_an_unsatisfiable_range_on_a_streamed_band_file_varies() {
+        // A client that negotiated a coding gets ranges disabled and a 200 for
+        // this request, so even the refusal depends on Accept-Encoding.
+        let dir = TempDir::new().unwrap();
+        let file_path = band_css(&dir, "app.css");
+        let size = fs::metadata(&file_path).unwrap().len();
+
+        let cache = FileCache::new(10);
+        let response = serve_with(
+            &file_path,
+            &dir,
+            &cache,
+            range_headers(&format!("bytes={size}-")),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(
+            response.headers().get(header::VARY).unwrap(),
+            "Accept-Encoding"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_a_file_past_the_compression_window_does_not_vary() {
+        // Nothing this server offers would ever encode it, so its bytes are
+        // the same for every client and a cache may key on the URL alone.
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("huge.css");
+        fs::write(&file_path, vec![b'x'; ABOVE_COMPRESSION_WINDOW]).unwrap();
+
+        let cache = FileCache::new(10);
+        let response = serve_with(&file_path, &dir, &cache, HeaderMap::new()).await;
+
+        assert_eq!(hyper::body::Body::size_hint(response.body()).exact(), None);
+        assert!(response.headers().get(header::VARY).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_a_band_file_streams_when_no_permit_is_free() {
+        // The read is what makes this file compressible, and it is capped: the
+        // bytes stay resident until the response is written, and the
+        // connection limit is far too generous a ceiling for that. Over the
+        // cap the file streams uncompressed, which is what it was before this
+        // path existed — and it still varies, because the request that took
+        // the last permit was answered compressed.
+        let dir = TempDir::new().unwrap();
+        let file_path = band_css(&dir, "app.css");
+
+        let cache = FileCache::new(10);
+        let held: Vec<_> =
+            std::iter::repeat_with(|| Arc::clone(&cache.off_disk_compression).try_acquire_owned())
+                .take(MAX_OFF_DISK_COMPRESSIONS)
+                .collect::<Result<_, _>>()
+                .expect("a fresh cache hands out its whole cap");
+
+        let response = serve_br(&file_path, &dir, &cache).await;
+        assert_eq!(hyper::body::Body::size_hint(response.body()).exact(), None);
+        assert_eq!(
+            response.headers().get(header::VARY).unwrap(),
+            "Accept-Encoding"
+        );
+
+        // Releasing them puts the file back on the buffered path.
+        drop(held);
+        let response = serve_br(&file_path, &dir, &cache).await;
+        assert!(hyper::body::Body::size_hint(response.body())
+            .exact()
+            .is_some());
+    }
+
+    #[tokio::test]
+    async fn test_a_permit_is_held_until_the_response_is_dropped() {
+        // Releasing it when `serve` returns would count nothing: the bytes are
+        // still resident, and the compression that justifies the cap has not
+        // run yet.
+        let dir = TempDir::new().unwrap();
+        let file_path = band_css(&dir, "app.css");
+
+        let cache = FileCache::new(10);
+        let response = serve_br(&file_path, &dir, &cache).await;
+        assert_eq!(
+            cache.off_disk_compression.available_permits(),
+            MAX_OFF_DISK_COMPRESSIONS - 1
+        );
+
+        drop(response);
+        assert_eq!(
+            cache.off_disk_compression.available_permits(),
+            MAX_OFF_DISK_COMPRESSIONS
+        );
+    }
+
+    #[tokio::test]
+    async fn test_nothing_varies_when_no_coding_is_offered() {
+        // `COMPRESSION_ENCODINGS=off`: the server never reads Accept-Encoding,
+        // so declaring that the response depends on it only fragments a
+        // downstream cache over a header that changes nothing.
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("app.css");
+        fs::write(&file_path, "x".repeat(500)).unwrap();
+
+        let cache = FileCache::new(10);
+        let response = serve_at(&file_path, &dir, &cache, HeaderMap::new(), no_codings()).await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.headers().get(header::VARY).is_none());
+        // And ranges are never withheld, since nothing is ever encoded.
         assert_eq!(
             response.headers().get(header::ACCEPT_RANGES).unwrap(),
             "bytes"
