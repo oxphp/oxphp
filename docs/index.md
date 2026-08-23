@@ -9,13 +9,13 @@ description: Documentation for OxPHP, a high-performance async PHP application s
 
 # OxPHP Documentation
 
-OxPHP is a high-performance PHP application server that replaces nginx + PHP-FPM with a single binary — built-in TLS, Brotli compression, rate limiting, health checks, Prometheus metrics, SSE streaming, and persistent worker mode included.
+OxPHP is a high-performance PHP application server that replaces nginx + PHP-FPM with a single binary — built-in TLS, compression, rate limiting, health checks, Prometheus metrics, SSE streaming, and persistent worker mode included.
 
 ## Why OxPHP
 
 A typical PHP application in production is several containers: nginx, PHP-FPM, sometimes a separate TLS proxy and a metrics exporter. Configuration is scattered across them, and to make everything work together you need to synchronize socket settings, timeouts, and paths. OxPHP replaces the entire stack with [a single container](getting-started/docker.md). Inside is one process that accepts HTTP connections, executes PHP, and serves static files.
 
-The server works out of the box with sensible defaults. Fine-tuning is done through [environment variables](operations/configuration.md): [TLS](features/tls.md) is enabled with two variables (`TLS_CERT`, `TLS_KEY`), [rate limiting](features/rate-limiting.md) with one (`RATE_LIMIT`), and [Brotli compression](features/compression.md) is on by default. No need to edit nginx configs or build separate modules.
+The server works out of the box with sensible defaults. Fine-tuning is done through [environment variables](operations/configuration.md): [TLS](features/tls.md) is enabled with two variables (`TLS_CERT`, `TLS_KEY`), [rate limiting](features/rate-limiting.md) with one (`RATE_LIMIT`), and [compression](features/compression.md) is on by default. No need to edit nginx configs or build separate modules.
 
 On a dedicated [internal port](features/internal-server.md), [health checks](operations/health-checks.md) (`/health`), [Prometheus metrics](operations/metrics.md) (`/metrics`), and a configuration snapshot (`/config`) are available. This is enough for Kubernetes liveness/readiness probes and connecting Grafana without additional sidecar containers.
 
@@ -59,7 +59,7 @@ End-to-end recipes for running popular PHP applications on OxPHP — each a comp
 - [Static Files](features/static-files.md) — file cache, MIME detection, ETag/Last-Modified headers, and streaming
 - [Worker Mode](features/worker-mode.md) — persistent PHP processes with automatic soft reset between requests
 - [Fiber Multiplexing](features/fiber-multiplexing.md) — handle hundreds of concurrent requests per worker thread with cooperative multitasking
-- [Compression](features/compression.md) — Brotli compression for text-based responses
+- [Compression](features/compression.md) — Brotli, Zstandard and gzip for text-based responses, negotiated per client
 - [TLS](features/tls.md) — built-in TLS termination with certificate and key configuration
 - [Rate Limiting](features/rate-limiting.md) — per-IP rate limiting with configurable windows and limits
 - [Timeouts](features/timeouts.md) — header read and request timeouts
