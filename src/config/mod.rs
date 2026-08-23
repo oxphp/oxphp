@@ -279,7 +279,8 @@ fn parse_knob(name: &str, default: usize) -> Result<usize, crate::types::BoxErro
 /// every log line afterwards.
 fn compression_level(name: &str, max: i32, default: i32) -> Result<i32, crate::types::BoxError> {
     match std::env::var(name) {
-        Err(_) => Ok(default),
+        Err(std::env::VarError::NotPresent) => Ok(default),
+        Err(std::env::VarError::NotUnicode(_)) => Err(format!("{name} is not valid UTF-8").into()),
         Ok(val) if val.trim().is_empty() => Ok(default),
         Ok(val) => match val.trim().parse::<i32>() {
             Ok(level) if (0..=max).contains(&level) => Ok(level),

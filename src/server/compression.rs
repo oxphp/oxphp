@@ -313,6 +313,15 @@ pub(crate) fn mark_encoded(response: &mut Response<ResponseBody>, coding: Coding
     // uncompressed variants — unless the origin already declared it (static
     // serving does, on representations whose range behavior depends on the
     // encoding).
+    append_vary(response);
+}
+
+/// Declare `Vary: Accept-Encoding` unless the response already carries it.
+///
+/// Appended as its own field line rather than merged into a value the
+/// application may have set: RFC 9110 §5.3 makes the two equivalent, and
+/// rewriting someone else's header risks more than it saves.
+fn append_vary(response: &mut Response<ResponseBody>) {
     let already_varies = response
         .headers()
         .get_all(header::VARY)
@@ -324,6 +333,40 @@ pub(crate) fn mark_encoded(response: &mut Response<ResponseBody>, coding: Coding
         response
             .headers_mut()
             .append(header::VARY, HeaderValue::from_static("Accept-Encoding"));
+    }
+}
+
+/// Declare that a response's bytes depend on `Accept-Encoding` even though
+/// this client is not being sent encoded ones.
+///
+/// A representation this server would have compressed for some other client
+/// varies by the header whether or not it was compressed for this one, and a
+/// shared cache told otherwise will hand the identity bytes it stored to a
+/// client that would have taken a quarter of them. Static serving has always
+/// declared this for everything inside the compression window; the request
+/// path only declared it when it actually encoded something, so the identity
+/// half of every dynamic response went out unkeyed.
+///
+/// Bodies the server does not hold whole are exempt: they are never compressed
+/// under any header, so they genuinely do not vary.
+pub(crate) fn mark_varies_by_encoding(response: &mut Response<ResponseBody>) {
+    // An encoded response was already marked, and a coding the application
+    // chose for itself is not one this server negotiated.
+    if response.status() == http::StatusCode::PARTIAL_CONTENT
+        || response.headers().contains_key(header::CONTENT_ENCODING)
+    {
+        return;
+    }
+    let content_type = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let Some(len) = hyper::body::Body::size_hint(response.body()).exact() else {
+        return;
+    };
+    if would_compress(content_type, len) {
+        append_vary(response);
     }
 }
 
@@ -396,32 +439,40 @@ fn parse_weight(parameter: &str) -> Option<u16> {
     Some(weight.min(1000))
 }
 
-/// Check if the MIME type should be compressed.
+/// The media types worth compressing. Closed list: a type absent from it is
+/// sent as-is even when it would compress well.
+const COMPRESSIBLE_TYPES: [&str; 20] = [
+    "text/html",
+    "text/css",
+    "text/plain",
+    "text/xml",
+    "text/javascript",
+    "application/javascript",
+    "application/json",
+    "application/xml",
+    "application/xhtml+xml",
+    "application/rss+xml",
+    "application/atom+xml",
+    "application/manifest+json",
+    "application/ld+json",
+    "application/wasm",
+    "image/svg+xml",
+    "font/ttf",
+    "font/otf",
+    "application/x-font-ttf",
+    "application/x-font-opentype",
+    "application/vnd.ms-fontobject",
+];
+
+/// Check if the MIME type should be compressed. Parameters and surrounding
+/// whitespace are dropped, and the type itself is compared case-insensitively:
+/// RFC 9110 §8.3 makes media types case-insensitive, and a script that writes
+/// `application/JSON` means the same type an exact comparison would miss.
 fn is_compressible(content_type: &str) -> bool {
     let ct = content_type.split(';').next().unwrap_or("").trim();
-    matches!(
-        ct,
-        "text/html"
-            | "text/css"
-            | "text/plain"
-            | "text/xml"
-            | "text/javascript"
-            | "application/javascript"
-            | "application/json"
-            | "application/xml"
-            | "application/xhtml+xml"
-            | "application/rss+xml"
-            | "application/atom+xml"
-            | "application/manifest+json"
-            | "application/ld+json"
-            | "application/wasm"
-            | "image/svg+xml"
-            | "font/ttf"
-            | "font/otf"
-            | "application/x-font-ttf"
-            | "application/x-font-opentype"
-            | "application/vnd.ms-fontobject"
-    )
+    COMPRESSIBLE_TYPES
+        .iter()
+        .any(|candidate| ct.eq_ignore_ascii_case(candidate))
 }
 
 /// The level to build an artifact at — one that will be cached and served many
@@ -627,6 +678,85 @@ mod tests {
         // which browsers accept and intermediaries then hold onto.
         assert!(!is_compressible("text/event-stream"));
         assert!(!is_compressible("text/event-stream; charset=utf-8"));
+    }
+
+    /// RFC 9110 §8.3 makes a media type case-insensitive, and a script is free
+    /// to write one in any case it likes. An exact comparison sent those
+    /// responses out uncompressed with nothing to show for it.
+    #[test]
+    fn a_type_written_in_another_case_is_the_same_type() {
+        assert!(is_compressible("Text/HTML"));
+        assert!(is_compressible("application/JSON"));
+        assert!(is_compressible("IMAGE/SVG+XML"));
+        assert!(is_compressible("Application/Ld+Json; charset=utf-8"));
+        // Case folding must not make unrelated types compressible.
+        assert!(!is_compressible("IMAGE/PNG"));
+        assert!(!is_compressible("Text/Event-Stream"));
+    }
+
+    /// A representation this server would compress for some client varies by
+    /// the header whether or not it was compressed for this one.
+    #[test]
+    fn an_uncompressed_body_that_would_have_compressed_still_varies() {
+        let mut response = build_response("text/html", &b"x".repeat(1024));
+        mark_varies_by_encoding(&mut response);
+
+        assert_eq!(
+            response.headers().get(header::VARY).unwrap(),
+            "Accept-Encoding"
+        );
+        // No coding was applied, so nothing about the body changed.
+        assert!(!response.headers().contains_key(header::CONTENT_ENCODING));
+    }
+
+    #[test]
+    fn a_body_no_client_could_have_compressed_does_not_vary() {
+        // Wrong type, and the right type below the floor: neither depends on
+        // what the client accepts.
+        let mut png = build_response("image/png", &b"x".repeat(1024));
+        mark_varies_by_encoding(&mut png);
+        assert!(png.headers().get_all(header::VARY).iter().next().is_none());
+
+        let mut tiny = build_response("text/html", b"small");
+        mark_varies_by_encoding(&mut tiny);
+        assert!(tiny.headers().get_all(header::VARY).iter().next().is_none());
+    }
+
+    #[test]
+    fn marking_an_encoded_response_again_does_not_duplicate_vary() {
+        let mut response = build_response("text/html", &b"x".repeat(1024));
+        mark_encoded(&mut response, Coding::Br);
+        mark_varies_by_encoding(&mut response);
+
+        let varies: Vec<_> = response.headers().get_all(header::VARY).iter().collect();
+        assert_eq!(varies.len(), 1);
+    }
+
+    /// A coding the application chose for itself was not negotiated here, and
+    /// a partial body carries offsets into the unencoded representation.
+    #[test]
+    fn a_response_this_server_did_not_negotiate_is_left_alone() {
+        let mut preencoded = build_response("text/html", &b"x".repeat(1024));
+        preencoded
+            .headers_mut()
+            .insert(header::CONTENT_ENCODING, HeaderValue::from_static("gzip"));
+        mark_varies_by_encoding(&mut preencoded);
+        assert!(preencoded
+            .headers()
+            .get_all(header::VARY)
+            .iter()
+            .next()
+            .is_none());
+
+        let mut partial = build_response("text/html", &b"x".repeat(1024));
+        *partial.status_mut() = StatusCode::PARTIAL_CONTENT;
+        mark_varies_by_encoding(&mut partial);
+        assert!(partial
+            .headers()
+            .get_all(header::VARY)
+            .iter()
+            .next()
+            .is_none());
     }
 
     #[test]
