@@ -196,7 +196,7 @@ The same precedence applies to `X-Content-Type-Options`, which OxPHP sets to `no
 | `STATIC_MAX_AGE` | `30d` | `Cache-Control: max-age` for static files. Accepts: `30s`, `5m`, `2h`, `30d`, `1w`, `1y`, bare seconds (`3600`), or `off` to disable the header. Replaces deprecated `STATIC_CACHE_TTL`. |
 | `STATIC_REVALIDATE` | `off` | Boolean — see [Boolean values](#boolean-values). Set truthy to enable mtime revalidation on the in-memory content cache: the file's modification time is re-checked at most once every 3 seconds per file (not per request) and stale entries are evicted automatically, so changes become visible within 3 seconds. Replaces deprecated `STATIC_CACHE` (where `off` had the inverse meaning). |
 | `COMPRESSION_ENCODINGS` | `br,zstd,gzip` | Content codings the server offers, comma-separated: `br` (or `brotli`), `zstd`, `gzip`, or `off` to switch compression off entirely. An unknown name is a startup error. The order written here is ignored — cached static files prefer Brotli, whose cost is paid once, and everything else prefers Zstandard. See [Compression](../features/compression.md#choosing-a-coding) |
-| `BROTLI_LEVEL` | `4` | Brotli quality (0–11). Replaces deprecated `COMPRESSION_LEVEL` |
+| `BROTLI_LEVEL` | `5` | Brotli quality (0–11). Replaces deprecated `COMPRESSION_LEVEL` |
 | `ZSTD_LEVEL` | `6` | Zstandard compression level (0–19) |
 | `GZIP_LEVEL` | `6` | Gzip compression level (0–9) |
 | `COMPRESSION_LEVEL` | *(unset)* | Deprecated name for `BROTLI_LEVEL`; emits a startup `WARN`. `COMPRESSION_LEVEL=0` keeps its older meaning and disables every coding, not just Brotli. An explicit `BROTLI_LEVEL` wins over it |
@@ -388,7 +388,7 @@ RATE_WINDOW_SECONDS=60
 TRUSTED_PROXIES=private
 HEADER_TIMEOUT_SECONDS=5
 DRAIN_TIMEOUT_SECONDS=25
-BROTLI_LEVEL=4
+BROTLI_LEVEL=5
 ZSTD_LEVEL=6
 GZIP_LEVEL=6
 STATIC_MAX_AGE=30d

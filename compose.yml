@@ -145,7 +145,7 @@ services:
 
       # Per-coding effort. A coding is offered only when it is listed above
       # and its level is not 0.
-      # - BROTLI_LEVEL=4
+      # - BROTLI_LEVEL=5
       # - ZSTD_LEVEL=6
       # - GZIP_LEVEL=6
 
