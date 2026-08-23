@@ -65,6 +65,10 @@ async fn fetch(addr: SocketAddr, accept_encoding: Option<&str>) -> (Option<Strin
     (coding, body)
 }
 
+fn unzstd(body: &[u8]) -> Vec<u8> {
+    zstd::decode_all(body).unwrap()
+}
+
 fn gunzip(body: &[u8]) -> Vec<u8> {
     let mut decoded = Vec::new();
     flate2::read::GzDecoder::new(body)
@@ -77,7 +81,15 @@ fn gunzip(body: &[u8]) -> Vec<u8> {
 async fn a_gzip_only_client_gets_a_readable_gzip_body() {
     let dir = tempfile::TempDir::new().unwrap();
     std::fs::write(dir.path().join("app.css"), css_body()).unwrap();
-    let addr = start_server(dir.path(), Levels { brotli: 4, gzip: 6 }).await;
+    let addr = start_server(
+        dir.path(),
+        Levels {
+            brotli: 4,
+            gzip: 6,
+            zstd: 6,
+        },
+    )
+    .await;
 
     let (coding, body) = fetch(addr, Some("gzip, deflate")).await;
 
@@ -86,22 +98,75 @@ async fn a_gzip_only_client_gets_a_readable_gzip_body() {
 }
 
 #[tokio::test]
-async fn a_client_that_accepts_both_gets_brotli() {
+async fn a_client_that_accepts_everything_gets_zstd() {
     let dir = tempfile::TempDir::new().unwrap();
     std::fs::write(dir.path().join("app.css"), css_body()).unwrap();
-    let addr = start_server(dir.path(), Levels { brotli: 4, gzip: 6 }).await;
+    let addr = start_server(
+        dir.path(),
+        Levels {
+            brotli: 4,
+            gzip: 6,
+            zstd: 6,
+        },
+    )
+    .await;
 
-    // The header every browser sends: no weights, so the choice is ours.
-    let (coding, _) = fetch(addr, Some("gzip, deflate, br, zstd")).await;
+    // The header every current browser sends: no weights, so the choice is
+    // ours, and for bytes compressed to answer one request it is zstd.
+    let (coding, body) = fetch(addr, Some("gzip, deflate, br, zstd")).await;
 
-    assert_eq!(coding.as_deref(), Some("br"));
+    assert_eq!(coding.as_deref(), Some("zstd"));
+    assert_eq!(unzstd(&body), css_body().as_bytes());
+}
+
+#[tokio::test]
+async fn a_cached_static_file_hands_over_to_its_brotli_copy() {
+    let dir = tempfile::TempDir::new().unwrap();
+    std::fs::write(dir.path().join("app.css"), css_body()).unwrap();
+    let addr = start_server(
+        dir.path(),
+        Levels {
+            brotli: 4,
+            gzip: 6,
+            zstd: 6,
+        },
+    )
+    .await;
+
+    // Same client, same file, and the coding changes under it: the first hits
+    // are compressed to answer that one request, where zstd is cheapest, while
+    // the stored copy is built at brotli's top quality, where it is smallest.
+    // Both are correct representations and both carry Vary, so a cache that
+    // kept the first one is not wrong — it is only holding the larger body.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        let (coding, body) = fetch(addr, Some("gzip, deflate, br, zstd")).await;
+        if coding.as_deref() == Some("br") {
+            assert!(body.len() < css_body().len());
+            break;
+        }
+        assert_eq!(coding.as_deref(), Some("zstd"));
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the brotli copy never took over"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
 }
 
 #[tokio::test]
 async fn a_clients_weights_outrank_server_preference() {
     let dir = tempfile::TempDir::new().unwrap();
     std::fs::write(dir.path().join("app.css"), css_body()).unwrap();
-    let addr = start_server(dir.path(), Levels { brotli: 4, gzip: 6 }).await;
+    let addr = start_server(
+        dir.path(),
+        Levels {
+            brotli: 4,
+            gzip: 6,
+            zstd: 6,
+        },
+    )
+    .await;
 
     let (coding, body) = fetch(addr, Some("br;q=0.2, gzip;q=0.9")).await;
 
@@ -113,7 +178,15 @@ async fn a_clients_weights_outrank_server_preference() {
 async fn a_refused_coding_is_not_sent() {
     let dir = tempfile::TempDir::new().unwrap();
     std::fs::write(dir.path().join("app.css"), css_body()).unwrap();
-    let addr = start_server(dir.path(), Levels { brotli: 4, gzip: 6 }).await;
+    let addr = start_server(
+        dir.path(),
+        Levels {
+            brotli: 4,
+            gzip: 6,
+            zstd: 6,
+        },
+    )
+    .await;
 
     // Brotli refused outright, gzip never named: identity is all that is left.
     let (coding, body) = fetch(addr, Some("br;q=0")).await;
@@ -126,7 +199,15 @@ async fn a_refused_coding_is_not_sent() {
 async fn no_accept_encoding_means_no_encoding() {
     let dir = tempfile::TempDir::new().unwrap();
     std::fs::write(dir.path().join("app.css"), css_body()).unwrap();
-    let addr = start_server(dir.path(), Levels { brotli: 4, gzip: 6 }).await;
+    let addr = start_server(
+        dir.path(),
+        Levels {
+            brotli: 4,
+            gzip: 6,
+            zstd: 6,
+        },
+    )
+    .await;
 
     let (coding, body) = fetch(addr, None).await;
 
@@ -138,13 +219,21 @@ async fn no_accept_encoding_means_no_encoding() {
 async fn gzip_level_zero_leaves_a_gzip_only_client_unencoded() {
     let dir = tempfile::TempDir::new().unwrap();
     std::fs::write(dir.path().join("app.css"), css_body()).unwrap();
-    let addr = start_server(dir.path(), Levels { brotli: 4, gzip: 0 }).await;
+    let addr = start_server(
+        dir.path(),
+        Levels {
+            brotli: 4,
+            gzip: 0,
+            zstd: 0,
+        },
+    )
+    .await;
 
     let (gzip_client, body) = fetch(addr, Some("gzip")).await;
     assert_eq!(gzip_client, None);
     assert_eq!(body, css_body().as_bytes());
 
-    // Brotli clients are unaffected by that switch.
+    // Clients that reach a coding still on are unaffected by that switch.
     let (brotli_client, _) = fetch(addr, Some("gzip, br")).await;
     assert_eq!(brotli_client.as_deref(), Some("br"));
 }

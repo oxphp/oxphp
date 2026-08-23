@@ -113,7 +113,7 @@ High queue wait times indicate that all workers are busy and you should increase
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `oxphp_compressed_responses_total` | counter | Responses compressed with Brotli |
+| `oxphp_compressed_responses_total` | counter | Responses sent under a content coding (Brotli, zstd, or gzip) |
 | `oxphp_compression_bytes_saved_total` | counter | Total bytes saved by compression (original size minus compressed size) |
 
 ## Worker Mode Metrics

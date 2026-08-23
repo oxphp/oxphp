@@ -34,7 +34,7 @@ pub async fn start_test_server(
 ) -> (SocketAddr, Arc<Server>) {
     // Compression off: most suites assert on body bytes and would have to
     // decode first.
-    let off = oxphp::server::compression::Levels { brotli: 0, gzip: 0 };
+    let off = oxphp::server::compression::Levels::default();
     start_test_server_with_compression(document_root, h2, entry_file, metrics, dispatcher, off)
         .await
 }

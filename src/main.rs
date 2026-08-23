@@ -483,10 +483,15 @@ async fn async_main(
         None
     };
 
-    match (config.compression_level, config.gzip_level) {
-        (0, _) => tracing::info!("Compression disabled"),
-        (brotli, 0) => tracing::info!(brotli, "Compression enabled (brotli only)"),
-        (brotli, gzip) => tracing::info!(brotli, gzip, "Compression enabled"),
+    match config.compression {
+        server::compression::Levels {
+            brotli: 0,
+            gzip: 0,
+            zstd: 0,
+        } => tracing::info!("Compression disabled"),
+        server::compression::Levels { brotli, gzip, zstd } => {
+            tracing::info!(brotli, gzip, zstd, "Compression enabled (0 = not offered)")
+        }
     }
 
     if config.static_revalidate {
@@ -515,10 +520,7 @@ async fn async_main(
         Arc::clone(&metrics),
         dispatcher,
         tls_acceptor,
-        server::compression::Levels {
-            brotli: config.compression_level,
-            gzip: config.gzip_level,
-        },
+        config.compression,
         config.max_query_body,
         config.entry_file.clone(),
         config.worker_mode_enabled,
