@@ -195,7 +195,8 @@ The same precedence applies to `X-Content-Type-Options`, which OxPHP sets to `no
 |----------|---------|-------------|
 | `STATIC_MAX_AGE` | `30d` | `Cache-Control: max-age` for static files. Accepts: `30s`, `5m`, `2h`, `30d`, `1w`, `1y`, bare seconds (`3600`), or `off` to disable the header. Replaces deprecated `STATIC_CACHE_TTL`. |
 | `STATIC_REVALIDATE` | `off` | Boolean — see [Boolean values](#boolean-values). Set truthy to enable mtime revalidation on the in-memory content cache: the file's modification time is re-checked at most once every 3 seconds per file (not per request) and stale entries are evicted automatically, so changes become visible within 3 seconds. Replaces deprecated `STATIC_CACHE` (where `off` had the inverse meaning). |
-| `COMPRESSION_LEVEL` | `4` | Brotli compression quality (0–11). `0` disables compression |
+| `COMPRESSION_LEVEL` | `4` | Brotli compression quality (0–11). `0` disables compression entirely, gzip included |
+| `GZIP_LEVEL` | `6` | Gzip compression level (0–9), used for clients that do not accept Brotli. `0` disables gzip alone |
 
 ## Logging
 
@@ -383,6 +384,7 @@ TRUSTED_PROXIES=private
 HEADER_TIMEOUT_SECONDS=5
 DRAIN_TIMEOUT_SECONDS=25
 COMPRESSION_LEVEL=4
+GZIP_LEVEL=6
 STATIC_MAX_AGE=30d
 ```
 
