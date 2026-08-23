@@ -899,14 +899,17 @@ fn respond_bytes(
 
 /// Serve a static file with MIME type detection, content caching, and streaming.
 ///
-/// Files ≤ 1 MiB are cached in memory. Files > 1 MiB are streamed from disk.
+/// Files ≤ 1 MiB are cached in memory. A larger file is streamed from disk,
+/// unless it would be served compressed to this client and still fits the
+/// compression window, in which case it is read whole for that request and
+/// not cached.
 /// Single-range `Range` requests (RFC 9110 §14) are honored for GET/HEAD with
 /// 206/416; multi-range requests fall back to the full 200 response.
 /// `coding` is the coding this client negotiated for stored copies: it selects
 /// which artifact is served, and which one is asked for when none is stored
 /// yet. When it is set and a buffered response would be served compressed,
 /// range handling is disabled for it (see [`ranges_allowed`]);
-/// streamed files are never compressed, so their ranges always work.
+/// a file that still streams is never compressed, so its ranges always work.
 /// Re-validates the file path at serve time against `canonical_root`
 /// to mitigate TOCTOU symlink swap attacks.
 #[allow(clippy::too_many_arguments)]
@@ -1061,10 +1064,18 @@ pub async fn serve(
     let etag: Arc<str> = etag_str.as_str().into();
     let last_modified_arc: Arc<str> = last_modified_str.as_str().into();
 
-    // 4. Small file: read fully, cache, return buffered body.
+    // 4. Read the file in full and answer from memory. Files up to the cache
+    //    limit are also kept; a larger one is read only when the alternative
+    //    is sending it uncompressed, because the compression layer encodes a
+    //    body it holds whole and passes a stream through. Without this a file
+    //    between the cache limit and the top of the compression window — a
+    //    bundle, a source map, a WASM module — went out several times its
+    //    compressed size, while a PHP response of the same size did not.
     //    The read is capped at the fstat'ed size so a file growing mid-read
     //    cannot produce a body longer than the validator describes.
-    if file_size <= MAX_CACHE_FILE_SIZE as u64 {
+    let compress_off_disk =
+        coding.is_some() && crate::server::compression::would_compress(&mime_type, file_size);
+    if file_size <= MAX_CACHE_FILE_SIZE as u64 || compress_off_disk {
         use tokio::io::AsyncReadExt;
         let mut contents = Vec::with_capacity(file_size as usize);
         (&mut file)
@@ -1085,6 +1096,10 @@ pub async fn serve(
                 .header(header::CONTENT_LENGTH, bytes.len())
                 .body(full_body(bytes))?);
         }
+        // Refused for anything above the cache limit, which is the point:
+        // a file read only to be compressed must not evict the small files
+        // the cache exists for, nor be re-served from a budget it would fill
+        // on its own.
         cache.insert_content(
             cache_key.into_owned(),
             bytes.clone(),
@@ -1108,12 +1123,11 @@ pub async fn serve(
         )?);
     }
 
-    // 5. Large file: stream from the already-open handle.
-    //    Streamed responses are never compressed (the compression layer
-    //    passes through bodies without an exact size hint), so the identity
-    //    bytes are the only representation that exists — ranges are always
-    //    safe here, even for compressible MIME types and clients that accept
-    //    a coding.
+    // 5. Large file: stream from the already-open handle. Whatever reaches
+    //    here would not have been compressed anyway — too large for the
+    //    window, a type that does not compress, or a client that accepts no
+    //    coding — so the identity bytes are the only representation that
+    //    exists and ranges are always safe.
     let range_plan = plan_range(method, request_headers, file_size, &etag, &modified);
     if matches!(range_plan, RangePlan::NotSatisfiable) {
         return Ok(build_416(file_size)?);
@@ -3014,14 +3028,18 @@ mod tests {
         assert!(response.headers().get(header::VARY).is_none());
     }
 
+    /// One byte past the top of the compression window, so the file streams
+    /// however compressible it looks and whatever the client accepts.
+    const ABOVE_COMPRESSION_WINDOW: usize = 3 * 1024 * 1024 + 1;
+
     #[tokio::test]
     async fn test_serve_range_for_streamed_compressible_with_brotli() {
-        // Files above the cache limit stream from disk and are never
-        // compressed, so no brotli representation of them exists anywhere —
-        // disabling ranges there would break resumption for zero benefit.
+        // A file too large to compress streams from disk, so no encoded
+        // representation of it exists anywhere — disabling ranges there would
+        // break resumption for zero benefit.
         let dir = TempDir::new().unwrap();
         let file_path = dir.path().join("app.js");
-        let size = MAX_CACHE_FILE_SIZE + 1;
+        let size = ABOVE_COMPRESSION_WINDOW;
         fs::write(&file_path, vec![b'x'; size]).unwrap();
 
         let cache = FileCache::new(10);
@@ -3049,6 +3067,89 @@ mod tests {
         // Streamed responses are identity for every client — no Vary.
         assert!(response.headers().get(header::VARY).is_none());
         assert_eq!(body_bytes(response).await.len(), 10);
+    }
+
+    /// A file between the cache limit and the top of the compression window.
+    /// Large enough that streaming it is the obvious thing to do, and exactly
+    /// the size where doing so costs the client megabytes.
+    fn band_css(dir: &TempDir, name: &str) -> std::path::PathBuf {
+        let file_path = dir.path().join(name);
+        let body = css_body().repeat(800);
+        assert!(body.len() > MAX_CACHE_FILE_SIZE && body.len() < ABOVE_COMPRESSION_WINDOW);
+        fs::write(&file_path, &body).unwrap();
+        file_path
+    }
+
+    #[tokio::test]
+    async fn test_file_above_the_cache_limit_is_read_whole_for_a_coding_client() {
+        // The compression layer encodes a body it holds whole and passes a
+        // stream through, so serving this one as a stream is the same as
+        // serving it uncompressed. It is read instead — and the exact size
+        // hint is the property the compression layer actually keys on.
+        let dir = TempDir::new().unwrap();
+        let file_path = band_css(&dir, "app.css");
+        let size = fs::metadata(&file_path).unwrap().len();
+
+        let cache = FileCache::new(10);
+        let response = serve_br(&file_path, &dir, &cache).await;
+
+        assert_eq!(
+            hyper::body::Body::size_hint(response.body()).exact(),
+            Some(size)
+        );
+        // Ranges are off for the same reason they are off for a cached file
+        // this client would get encoded: identity fragments cannot be spliced
+        // onto an encoded prefix.
+        assert!(response.headers().get(header::ACCEPT_RANGES).is_none());
+        assert_eq!(
+            response.headers().get(header::VARY).unwrap(),
+            "Accept-Encoding"
+        );
+        // Read for this request only: putting it in the cache would spend the
+        // budget meant for small files on one that does not fit it.
+        assert!(cache
+            .lookup(
+                &file_path.to_string_lossy(),
+                &HeaderMap::new(),
+                false,
+                Some(Coding::Br)
+            )
+            .is_none());
+    }
+
+    #[tokio::test]
+    async fn test_the_same_file_still_streams_for_an_identity_client() {
+        // Nothing would encode this body, so reading it whole would buy the
+        // client nothing and cost the server the whole file in memory.
+        let dir = TempDir::new().unwrap();
+        let file_path = band_css(&dir, "app.css");
+
+        let cache = FileCache::new(10);
+        let response = serve_with(&file_path, &dir, &cache, HeaderMap::new()).await;
+
+        assert_eq!(hyper::body::Body::size_hint(response.body()).exact(), None);
+        assert_eq!(
+            response.headers().get(header::ACCEPT_RANGES).unwrap(),
+            "bytes"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_an_incompressible_type_in_the_band_still_streams() {
+        // Size alone does not decide it: these bytes carry their own
+        // compression, so the coding the client accepts is never applied.
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("photo.png");
+        fs::write(&file_path, vec![b'x'; MAX_CACHE_FILE_SIZE + 4096]).unwrap();
+
+        let cache = FileCache::new(10);
+        let response = serve_br(&file_path, &dir, &cache).await;
+
+        assert_eq!(hyper::body::Body::size_hint(response.body()).exact(), None);
+        assert_eq!(
+            response.headers().get(header::ACCEPT_RANGES).unwrap(),
+            "bytes"
+        );
     }
 
     #[tokio::test]
