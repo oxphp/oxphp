@@ -64,7 +64,12 @@ pub struct Config {
     /// (including `oxphp config --check`), not just once TLS is turned on.
     pub tls_min_version: TlsMinVersion,
     pub error_pages_dir: Option<String>,
+    /// Brotli quality, 0-11. Zero disables compression outright, not just
+    /// brotli — the meaning it has carried since brotli was the only coding.
     pub compression_level: i32,
+    /// Gzip level, 0-9. Zero offers gzip to nobody, leaving clients that do
+    /// not accept brotli with an identity response.
+    pub gzip_level: i32,
     pub access_log: AccessLogLevel,
     pub max_query_body: usize,
     /// Canonical entry script. `None` = direct file mapping (legacy traditional).
@@ -480,6 +485,20 @@ impl Config {
             },
             Err(_) => 4,
         };
+        // Level 6 is zlib's own default and the point the benchmark put the
+        // knee at: over real assets it matches or beats brotli's default
+        // quality on size, and costs less than half of level 9.
+        let gzip_level: i32 = match std::env::var("GZIP_LEVEL") {
+            Ok(val) => match val.parse::<i32>() {
+                Ok(v) if (0..=9).contains(&v) => v,
+                _ => {
+                    return Err(
+                        format!("GZIP_LEVEL must be 0-9 (got {val:?}), 0 = disabled").into(),
+                    );
+                }
+            },
+            Err(_) => 6,
+        };
         let access_log = match std::env::var("ACCESS_LOG").as_deref() {
             Ok("all") => AccessLogLevel::All,
             Ok("error") => AccessLogLevel::Error,
@@ -599,6 +618,7 @@ impl Config {
             tls_min_version,
             error_pages_dir,
             compression_level,
+            gzip_level,
             access_log,
             max_query_body,
             entry_file,
@@ -649,6 +669,7 @@ impl Config {
             tls_min_version: TlsMinVersion::V12,
             error_pages_dir: None,
             compression_level: 4,
+            gzip_level: 6,
             access_log: AccessLogLevel::Off,
             max_query_body: 512 * 1024,
             entry_file: None,
@@ -724,6 +745,7 @@ impl Config {
             "tls_min_version": self.tls_min_version.to_string(),
             "error_pages_dir": self.error_pages_dir,
             "compression_level": self.compression_level,
+            "gzip_level": self.gzip_level,
             "access_log": self.access_log.to_string(),
             "max_query_body": self.max_query_body,
             "worker_mode_enabled": self.worker_mode_enabled,

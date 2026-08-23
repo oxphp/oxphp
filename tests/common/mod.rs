@@ -30,7 +30,24 @@ pub async fn start_test_server(
     h2: &H2Config,
     entry_file: Option<&str>,
     metrics: Arc<Metrics>,
+    dispatcher: EventDispatcher,
+) -> (SocketAddr, Arc<Server>) {
+    // Compression off: most suites assert on body bytes and would have to
+    // decode first.
+    let off = oxphp::server::compression::Levels { brotli: 0, gzip: 0 };
+    start_test_server_with_compression(document_root, h2, entry_file, metrics, dispatcher, off)
+        .await
+}
+
+/// Same, with the compression levels spelled out — for the suite that is
+/// about content codings.
+pub async fn start_test_server_with_compression(
+    document_root: &Path,
+    h2: &H2Config,
+    entry_file: Option<&str>,
+    metrics: Arc<Metrics>,
     mut dispatcher: EventDispatcher,
+    compression: oxphp::server::compression::Levels,
 ) -> (SocketAddr, Arc<Server>) {
     let config = ServerConfig::new("127.0.0.1:0".to_string(), document_root.to_path_buf());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -47,8 +64,8 @@ pub async fn start_test_server(
         executor,
         metrics,
         Arc::new(dispatcher),
-        None,       // no TLS — cleartext
-        0,          // compression disabled in tests
+        None, // no TLS — cleartext
+        compression,
         512 * 1024, // max_query_body: 512 KB
         entry_file.map(|name| document_root.join(name)),
         false, // worker_mode_enabled

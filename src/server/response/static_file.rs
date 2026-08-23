@@ -13,6 +13,7 @@ use lru::LruCache;
 use parking_lot::{Mutex, RwLock};
 use tokio_util::io::ReaderStream;
 
+use crate::server::compression::Coding;
 use crate::types::{full_body, ResponseBody};
 
 /// Maximum individual file size eligible for content caching (1 MiB).
@@ -45,15 +46,16 @@ struct ContentEntry {
     /// When this entry's mtime was last verified against disk. Used by TTL-based
     /// revalidation to skip the `stat()` while the window is still open.
     last_checked: Instant,
-    /// Brotli representation of `bytes`, built once in the background and
-    /// served to clients that accept it. Kept inside the entry rather than in
-    /// a cache of its own so it shares the identity bytes' validator: when
-    /// revalidation evicts the entry because the file changed on disk, the
-    /// artifact cannot outlive the bytes it was made from.
-    artifact: ArtifactState,
+    /// One encoded representation of `bytes` per content coding, each built
+    /// once in the background and served to clients that negotiated it. Kept
+    /// inside the entry rather than in a cache of its own so they share the
+    /// identity bytes' validator: when revalidation evicts the entry because
+    /// the file changed on disk, no artifact can outlive the bytes it was made
+    /// from. Indexed by [`Coding::slot`].
+    artifacts: [ArtifactState; Coding::COUNT],
 }
 
-/// Where an entry stands with respect to its Brotli artifact.
+/// Where an entry stands with respect to one coding's artifact.
 #[derive(Clone)]
 pub enum ArtifactState {
     /// Not built yet — a hit on this entry asks for one.
@@ -62,19 +64,23 @@ pub enum ArtifactState {
     Ready(Bytes),
     /// Compression did not make these bytes smaller. Recorded so the entry
     /// stops asking: without it every hit on an incompressible file would
-    /// spawn another q11 compression that throws its result away.
+    /// spawn another top-of-range compression that throws its result away.
     Rejected,
 }
 
 impl ContentEntry {
-    /// Bytes this entry charges against the cache budget — identity plus any
+    /// Bytes this entry charges against the cache budget — identity plus every
     /// artifact hanging off it.
     fn footprint(&self) -> usize {
         self.bytes.len()
-            + match &self.artifact {
-                ArtifactState::Ready(bytes) => bytes.len(),
-                ArtifactState::Absent | ArtifactState::Rejected => 0,
-            }
+            + self
+                .artifacts
+                .iter()
+                .map(|artifact| match artifact {
+                    ArtifactState::Ready(bytes) => bytes.len(),
+                    ArtifactState::Absent | ArtifactState::Rejected => 0,
+                })
+                .sum::<usize>()
     }
 }
 
@@ -93,7 +99,10 @@ pub enum Lookup {
         modified: SystemTime,
         etag: Arc<str>,
         last_modified_str: Arc<str>,
-        /// Where this entry stands with respect to its Brotli artifact.
+        /// Where this entry stands with respect to the artifact for the
+        /// coding this request negotiated. `Absent` when it negotiated none —
+        /// a client that accepts no coding has no artifact to consider, and
+        /// the caller does not look.
         artifact: ArtifactState,
     },
 }
@@ -106,14 +115,15 @@ pub enum Lookup {
 #[derive(Clone, Copy)]
 pub struct PrecompressedSaving(pub usize);
 
-/// Asks the caller to build the Brotli artifact for a cached entry that does
-/// not have one yet. Static serving decides (it holds the cache and the
+/// Asks the caller to build one coding's artifact for a cached entry that does
+/// not have it yet. Static serving decides (it holds the cache and the
 /// request), the caller acts (it holds the runtime handle and an owned cache
 /// reference) — so the decision stays where the state is and the side effect
 /// stays where the machinery is.
 #[derive(Clone)]
 pub struct ArtifactWanted {
     pub key: String,
+    pub coding: Coding,
     pub bytes: Bytes,
     pub modified: SystemTime,
 }
@@ -147,10 +157,10 @@ pub struct FileCache {
     /// most once per `ttl` window; entries whose mtime changed are evicted.
     /// `None` disables revalidation (cached bytes served until LRU eviction).
     revalidate_ttl: Option<Duration>,
-    /// Keys whose Brotli artifact is being built right now. Its own lock:
+    /// Artifacts being built right now, keyed by cache key and coding. Its own lock:
     /// claiming must not queue behind the content lock, which static serving
     /// holds on every hit.
-    artifacts_in_flight: Mutex<std::collections::HashSet<String>>,
+    artifacts_in_flight: Mutex<std::collections::HashSet<(String, Coding)>>,
 }
 
 /// Holds a single-flight claim on one key's artifact for as long as the job
@@ -160,6 +170,7 @@ pub struct FileCache {
 pub struct ArtifactClaim {
     cache: Arc<FileCache>,
     key: String,
+    coding: Coding,
 }
 
 impl ArtifactClaim {
@@ -170,7 +181,12 @@ impl ArtifactClaim {
 
 impl Drop for ArtifactClaim {
     fn drop(&mut self) {
-        self.cache.artifacts_in_flight.lock().remove(&self.key);
+        // The set is keyed by a tuple, which has no borrowed form to look up
+        // by — so the key is moved into a throwaway one rather than cloned.
+        self.cache
+            .artifacts_in_flight
+            .lock()
+            .remove(&(std::mem::take(&mut self.key), self.coding));
     }
 }
 
@@ -206,7 +222,12 @@ impl FileCache {
 
     /// Build a [`Lookup`] from a live cache entry, applying the conditional
     /// (304) check when `try_304` is set.
-    fn build_lookup(entry: &ContentEntry, headers: &HeaderMap, try_304: bool) -> Lookup {
+    fn build_lookup(
+        entry: &ContentEntry,
+        headers: &HeaderMap,
+        try_304: bool,
+        coding: Option<Coding>,
+    ) -> Lookup {
         if try_304 && check_not_modified(headers, &entry.etag, &entry.modified) {
             Lookup::NotModified {
                 etag: entry.etag.clone(),
@@ -219,7 +240,9 @@ impl FileCache {
                 modified: entry.modified,
                 etag: entry.etag.clone(),
                 last_modified_str: entry.last_modified_str.clone(),
-                artifact: entry.artifact.clone(),
+                artifact: coding.map_or(ArtifactState::Absent, |coding| {
+                    entry.artifacts[coding.slot()].clone()
+                }),
             }
         }
     }
@@ -228,8 +251,16 @@ impl FileCache {
     /// conditional check and content fetch together so a served request stats
     /// the file at most once (and only when the revalidation window elapsed).
     /// `try_304` should be set only when a 304 is actually serviceable
-    /// (conditional method + a Cache-Control to echo).
-    pub fn lookup(&self, key: &str, headers: &HeaderMap, try_304: bool) -> Option<Lookup> {
+    /// (conditional method + a Cache-Control to echo). `coding` is the content
+    /// coding this request negotiated, which selects the artifact reported
+    /// back in [`Lookup::Content`].
+    pub fn lookup(
+        &self,
+        key: &str,
+        headers: &HeaderMap,
+        try_304: bool,
+        coding: Option<Coding>,
+    ) -> Option<Lookup> {
         // Fast path: read lock. The entry is served directly when revalidation
         // is off, or the window has not elapsed — no syscall, full reader
         // parallelism. LRU order is not promoted here (would need a write lock);
@@ -240,7 +271,7 @@ impl FileCache {
             let stale =
                 matches!(self.revalidate_ttl, Some(ttl) if entry.last_checked.elapsed() >= ttl);
             if !stale {
-                return Some(Self::build_lookup(entry, headers, try_304));
+                return Some(Self::build_lookup(entry, headers, try_304, coding));
             }
         }
         // Slow path: window elapsed. Claim the revalidation under the write
@@ -268,7 +299,7 @@ impl FileCache {
                 // Another caller already revalidated this window — serve fresh
                 // without a stat. (Reached for `None` only on a TOCTOU race
                 // where revalidation was disabled meanwhile; serving is safe.)
-                _ => return Some(Self::build_lookup(entry, headers, try_304)),
+                _ => return Some(Self::build_lookup(entry, headers, try_304, coding)),
             }
         };
         // stat() with no lock held — only the claiming caller reaches here.
@@ -279,7 +310,7 @@ impl FileCache {
             guard
                 .entries
                 .peek(key)
-                .map(|entry| Self::build_lookup(entry, headers, try_304))
+                .map(|entry| Self::build_lookup(entry, headers, try_304, coding))
         } else {
             // Changed on disk: evict so the caller re-reads. Guard the pop on
             // the mtime we stat'd against so a concurrently-reinserted fresh
@@ -345,7 +376,7 @@ impl FileCache {
     /// [`lookup`]: Self::lookup
     #[cfg(test)]
     pub fn check_not_modified(&self, key: &str, headers: &HeaderMap) -> Option<bool> {
-        match self.lookup(key, headers, true)? {
+        match self.lookup(key, headers, true, None)? {
             Lookup::NotModified { .. } => Some(true),
             Lookup::Content { .. } => Some(false),
         }
@@ -361,7 +392,7 @@ impl FileCache {
         &self,
         key: &str,
     ) -> Option<(Bytes, Arc<str>, SystemTime, Arc<str>, Arc<str>)> {
-        match self.lookup(key, &HeaderMap::new(), false)? {
+        match self.lookup(key, &HeaderMap::new(), false, None)? {
             Lookup::Content {
                 bytes,
                 mime_type,
@@ -416,40 +447,51 @@ impl FileCache {
                 etag,
                 last_modified_str,
                 last_checked: Instant::now(),
-                artifact: ArtifactState::Absent,
+                artifacts: std::array::from_fn(|_| ArtifactState::Absent),
             },
         );
     }
 
-    /// Claim the right to build `key`'s Brotli artifact. `None` means another
-    /// request is already building it — the caller serves this request the
-    /// per-request way and lets that one finish. Without the claim, a cold
-    /// cache under load spends one q11 compression per concurrent request on
-    /// the same file, all but one of them thrown away.
-    pub fn claim_artifact(self: &Arc<Self>, key: &str) -> Option<ArtifactClaim> {
-        if !self.artifacts_in_flight.lock().insert(key.to_string()) {
+    /// Claim the right to build `key`'s artifact for `coding`. `None` means
+    /// another request is already building that one — the caller serves this
+    /// request the per-request way and lets that one finish. Without the
+    /// claim, a cold cache under load spends one top-of-range compression per
+    /// concurrent request on the same file, all but one of them thrown away.
+    pub fn claim_artifact(self: &Arc<Self>, key: &str, coding: Coding) -> Option<ArtifactClaim> {
+        if !self
+            .artifacts_in_flight
+            .lock()
+            .insert((key.to_string(), coding))
+        {
             return None;
         }
         Some(ArtifactClaim {
             cache: Arc::clone(self),
             key: key.to_string(),
+            coding,
         })
     }
 
-    /// Attach a Brotli artifact to the entry for `key`. The write is dropped
+    /// Attach `coding`'s artifact to the entry for `key`. The write is dropped
     /// unless the entry still describes `modified`: between the read that
     /// started the compression and its result the file may have changed on
     /// disk and the entry been replaced, and pairing new identity bytes with
     /// an artifact built from the old ones would serve two different
     /// representations under one validator.
-    pub fn insert_artifact(&self, key: &str, modified: SystemTime, artifact: Bytes) {
+    pub fn insert_artifact(
+        &self,
+        key: &str,
+        coding: Coding,
+        modified: SystemTime,
+        artifact: Bytes,
+    ) {
         let mut guard = self.content.write();
         // Promote first so the eviction loop below cannot pop the very entry
         // we are about to grow.
         match guard.entries.get(key) {
             Some(entry)
                 if entry.modified == modified
-                    && matches!(entry.artifact, ArtifactState::Absent) => {}
+                    && matches!(entry.artifacts[coding.slot()], ArtifactState::Absent) => {}
             _ => return,
         }
         while guard.total_bytes + artifact.len() > MAX_CACHE_TOTAL_BYTES {
@@ -468,21 +510,23 @@ impl FileCache {
         }
         let len = artifact.len();
         if let Some(entry) = guard.entries.get_mut(key) {
-            entry.artifact = ArtifactState::Ready(artifact);
+            entry.artifacts[coding.slot()] = ArtifactState::Ready(artifact);
             guard.total_bytes += len;
         }
     }
 
-    /// Record that `key`'s bytes do not compress, so hits stop asking for an
-    /// artifact. Same staleness guard as [`insert_artifact`]: a verdict about
-    /// bytes the entry no longer holds is discarded.
+    /// Record that `key`'s bytes do not compress under `coding`, so hits stop
+    /// asking for that artifact. Same staleness guard as [`insert_artifact`]:
+    /// a verdict about bytes the entry no longer holds is discarded.
     ///
     /// [`insert_artifact`]: Self::insert_artifact
-    pub fn reject_artifact(&self, key: &str, modified: SystemTime) {
+    pub fn reject_artifact(&self, key: &str, coding: Coding, modified: SystemTime) {
         let mut guard = self.content.write();
         if let Some(entry) = guard.entries.get_mut(key) {
-            if entry.modified == modified && matches!(entry.artifact, ArtifactState::Absent) {
-                entry.artifact = ArtifactState::Rejected;
+            if entry.modified == modified
+                && matches!(entry.artifacts[coding.slot()], ArtifactState::Absent)
+            {
+                entry.artifacts[coding.slot()] = ArtifactState::Rejected;
             }
         }
     }
@@ -768,14 +812,14 @@ fn add_cache_headers(
 }
 
 /// Should range handling apply to a buffered response with this MIME type
-/// and size? Disabled when the client accepts brotli and the representation
-/// would be served compressed instead: the client's stored copy may be a
-/// brotli body that identity 206 fragments would corrupt, and neither
-/// If-Range form can distinguish the representations (nginx clears
+/// and size? Disabled when the client accepts a content coding and the
+/// representation would be served compressed instead: the client's stored copy
+/// may be an encoded body that identity 206 fragments would corrupt, and
+/// neither If-Range form can distinguish the representations (nginx clears
 /// `allow_ranges` in its gzip filter for the same reason). Only buffered
 /// responses are ever compressed — the streaming path is exempt.
-fn ranges_allowed(supports_brotli: bool, mime_type: &str, size: u64) -> bool {
-    !(supports_brotli && crate::server::compression::would_compress(mime_type, size))
+fn ranges_allowed(will_encode: bool, mime_type: &str, size: u64) -> bool {
+    !(will_encode && crate::server::compression::would_compress(mime_type, size))
 }
 
 /// Build a 200 or 206 response for a fully buffered body, honoring the
@@ -796,7 +840,8 @@ fn respond_bytes(
     let size = bytes.len() as u64;
     // A representation in the compression window is answered differently
     // depending on Accept-Encoding: encoded body with ranges disabled for
-    // brotli clients, identity with ranges (200/206/416) otherwise. Shared
+    // clients that accept a coding, identity with ranges (200/206/416) for the
+    // rest. Shared
     // caches must key on the header for every variant — the compression
     // layer only appends Vary when it actually encodes, which would let an
     // identity response be cached without it and served to brotli clients.
@@ -814,8 +859,9 @@ fn respond_bytes(
             Some(format!("bytes {start}-{end}/{size}")),
         ),
         RangePlan::NotSatisfiable => {
-            // A brotli client would have gotten a full 200 here (ranges
-            // disabled), so even the 416 varies by Accept-Encoding.
+            // A client that accepts a coding would have gotten a full 200
+            // here (ranges disabled), so even the 416 varies by
+            // Accept-Encoding.
             let mut response = build_416(size)?;
             if varies_by_encoding {
                 response.headers_mut().insert(
@@ -832,7 +878,7 @@ fn respond_bytes(
         .header(header::CONTENT_TYPE, mime_type)
         .header(header::CONTENT_LENGTH, body.len());
     // Advertise ranges only when this request would actually honor them.
-    // Compression removes the header too, but brotli can decline to encode
+    // Compression removes the header too, but an encoder can decline to encode
     // (output not smaller) — relying on that removal would leave an identity
     // response advertising ranges the server just ignored.
     if allow_ranges {
@@ -855,8 +901,8 @@ fn respond_bytes(
 /// Files ≤ 1 MiB are cached in memory. Files > 1 MiB are streamed from disk.
 /// Single-range `Range` requests (RFC 9110 §14) are honored for GET/HEAD with
 /// 206/416; multi-range requests fall back to the full 200 response.
-/// When `supports_brotli` is set and a buffered response would be served
-/// compressed, range handling is disabled for it (see [`ranges_allowed`]);
+/// When `coding` is set and a buffered response would be served compressed,
+/// range handling is disabled for it (see [`ranges_allowed`]);
 /// streamed files are never compressed, so their ranges always work.
 /// Re-validates the file path at serve time against `canonical_root`
 /// to mitigate TOCTOU symlink swap attacks.
@@ -869,7 +915,7 @@ pub async fn serve(
     method: &http::Method,
     request_headers: &HeaderMap,
     cache_control: Option<&str>,
-    supports_brotli: bool,
+    coding: Option<Coding>,
 ) -> Result<Response<ResponseBody>, crate::types::BoxError> {
     let cache_key = file_path.to_string_lossy();
 
@@ -884,7 +930,7 @@ pub async fn serve(
     // conditional check and the content fetch. 304 is only serviceable for a
     // conditional method with a Cache-Control to echo.
     let try_304 = conditional && cache_control.is_some();
-    match cache.lookup(&cache_key, request_headers, try_304) {
+    match cache.lookup(&cache_key, request_headers, try_304, coding) {
         Some(Lookup::NotModified {
             etag,
             last_modified_str,
@@ -905,7 +951,7 @@ pub async fn serve(
             artifact,
         }) => {
             let identity_len = bytes.len();
-            let allow_ranges = ranges_allowed(supports_brotli, &mime_type, identity_len as u64);
+            let allow_ranges = ranges_allowed(coding.is_some(), &mime_type, identity_len as u64);
             let mut response = respond_bytes(
                 bytes.clone(),
                 &mime_type,
@@ -921,12 +967,12 @@ pub async fn serve(
             // compression layer would encode for this client, so a false here
             // means `respond_bytes` produced a full 200 and the body can be
             // swapped for the encoded one without disturbing a range plan.
-            if supports_brotli && !allow_ranges {
+            if let Some(coding) = coding.filter(|_| !allow_ranges) {
                 match artifact {
                     ArtifactState::Ready(artifact) => {
                         let saved = identity_len.saturating_sub(artifact.len());
                         *response.body_mut() = full_body(artifact);
-                        crate::server::compression::mark_encoded(&mut response, "br");
+                        crate::server::compression::mark_encoded(&mut response, coding);
                         response.extensions_mut().insert(PrecompressedSaving(saved));
                     }
                     // No artifact yet: this request is served the per-request
@@ -934,6 +980,7 @@ pub async fn serve(
                     ArtifactState::Absent => {
                         response.extensions_mut().insert(ArtifactWanted {
                             key: cache_key.into_owned(),
+                            coding,
                             bytes,
                             modified,
                         });
@@ -1044,7 +1091,7 @@ pub async fn serve(
             last_modified_arc.clone(),
         );
 
-        let allow_ranges = ranges_allowed(supports_brotli, &mime_type, file_size);
+        let allow_ranges = ranges_allowed(coding.is_some(), &mime_type, file_size);
         return Ok(respond_bytes(
             bytes,
             &mime_type,
@@ -1062,7 +1109,8 @@ pub async fn serve(
     //    Streamed responses are never compressed (the compression layer
     //    passes through bodies without an exact size hint), so the identity
     //    bytes are the only representation that exists — ranges are always
-    //    safe here, even for compressible MIME types and brotli clients.
+    //    safe here, even for compressible MIME types and clients that accept
+    //    a coding.
     let range_plan = plan_range(method, request_headers, file_size, &etag, &modified);
     if matches!(range_plan, RangePlan::NotSatisfiable) {
         return Ok(build_416(file_size)?);
@@ -1230,7 +1278,7 @@ mod tests {
             &http::Method::GET,
             &HeaderMap::new(),
             Some("public, max-age=86400"),
-            false,
+            None,
         )
         .await
         .unwrap();
@@ -1254,7 +1302,7 @@ mod tests {
             &http::Method::GET,
             &HeaderMap::new(),
             Some("public, max-age=86400"),
-            false,
+            None,
         )
         .await
         .unwrap();
@@ -1279,7 +1327,7 @@ mod tests {
             &http::Method::GET,
             &HeaderMap::new(),
             Some("public, max-age=86400"),
-            false,
+            None,
         )
         .await
         .unwrap();
@@ -1304,7 +1352,7 @@ mod tests {
             &http::Method::GET,
             &HeaderMap::new(),
             Some("public, max-age=86400"),
-            false,
+            None,
         )
         .await
         .unwrap();
@@ -1536,7 +1584,7 @@ mod tests {
             &http::Method::GET,
             &HeaderMap::new(),
             Some("public, max-age=86400"),
-            false,
+            None,
         )
         .await
         .unwrap();
@@ -1556,7 +1604,7 @@ mod tests {
             &http::Method::GET,
             &HeaderMap::new(),
             Some("public, max-age=86400"),
-            false,
+            None,
         )
         .await
         .unwrap();
@@ -1683,7 +1731,7 @@ mod tests {
             &http::Method::GET,
             &HeaderMap::new(),
             Some("public, max-age=3600"),
-            false,
+            None,
         )
         .await
         .unwrap();
@@ -1717,7 +1765,7 @@ mod tests {
             &http::Method::GET,
             &HeaderMap::new(),
             None,
-            false,
+            None,
         )
         .await
         .unwrap();
@@ -1745,7 +1793,7 @@ mod tests {
             &http::Method::GET,
             &HeaderMap::new(),
             Some("public, max-age=86400"),
-            false,
+            None,
         )
         .await
         .unwrap();
@@ -1768,7 +1816,7 @@ mod tests {
             &http::Method::GET,
             &headers,
             Some("public, max-age=86400"),
-            false,
+            None,
         )
         .await
         .unwrap();
@@ -1792,7 +1840,7 @@ mod tests {
             &http::Method::GET,
             &headers,
             Some("public, max-age=86400"),
-            false,
+            None,
         )
         .await
         .unwrap();
@@ -1816,7 +1864,7 @@ mod tests {
             &http::Method::GET,
             &HeaderMap::new(),
             Some("public, max-age=86400"),
-            false,
+            None,
         )
         .await
         .unwrap();
@@ -1839,7 +1887,7 @@ mod tests {
             &http::Method::GET,
             &headers,
             Some("public, max-age=86400"),
-            false,
+            None,
         )
         .await
         .unwrap();
@@ -2174,12 +2222,22 @@ mod tests {
         );
     }
 
-    /// Serve as a client that accepts Brotli — the only clients the artifact
-    /// cache is reachable from.
+    /// Serve as a client that accepts Brotli — the coding the artifact tests
+    /// use unless they are about the choice between codings.
     async fn serve_br(
         file_path: &std::path::Path,
         dir: &TempDir,
         cache: &FileCache,
+    ) -> Response<ResponseBody> {
+        serve_as(file_path, dir, cache, Coding::Br).await
+    }
+
+    /// Serve as a client that negotiated `coding`.
+    async fn serve_as(
+        file_path: &std::path::Path,
+        dir: &TempDir,
+        cache: &FileCache,
+        coding: Coding,
     ) -> Response<ResponseBody> {
         serve(
             file_path,
@@ -2189,10 +2247,30 @@ mod tests {
             &http::Method::GET,
             &HeaderMap::new(),
             Some("public, max-age=86400"),
-            true,
+            Some(coding),
         )
         .await
         .unwrap()
+    }
+
+    /// Run the background job the response asked for, inline.
+    fn build_wanted_artifact(cache: &FileCache, wanted: &ArtifactWanted) {
+        let artifact = crate::server::compression::compress_artifact(&wanted.bytes, wanted.coding)
+            .expect("css compresses");
+        cache.insert_artifact(
+            &wanted.key,
+            wanted.coding,
+            wanted.modified,
+            Bytes::from(artifact),
+        );
+    }
+
+    fn wanted_by(response: &Response<ResponseBody>) -> ArtifactWanted {
+        response
+            .extensions()
+            .get::<ArtifactWanted>()
+            .expect("a cached compressible entry with no artifact asks for one")
+            .clone()
     }
 
     /// A body that is both compressible and over the compression floor.
@@ -2229,11 +2307,16 @@ mod tests {
         assert_eq!(&wanted.bytes[..], body.as_bytes());
 
         // Stand in for the background job.
-        let artifact =
-            crate::server::compression::compress_artifact(&wanted.bytes).expect("css compresses");
+        let artifact = crate::server::compression::compress_artifact(&wanted.bytes, wanted.coding)
+            .expect("css compresses");
         let artifact_len = artifact.len();
         assert!(artifact_len < body.len());
-        cache.insert_artifact(&wanted.key, wanted.modified, Bytes::from(artifact));
+        cache.insert_artifact(
+            &wanted.key,
+            wanted.coding,
+            wanted.modified,
+            Bytes::from(artifact),
+        );
 
         // Third hit is served from the artifact.
         let third = serve_br(&file_path, &dir, &cache).await;
@@ -2263,6 +2346,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_gzip_client_gets_a_gzip_artifact() {
+        use std::io::Read;
+
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("app.css");
+        let body = css_body();
+        fs::write(&file_path, &body).unwrap();
+        let cache = Arc::new(FileCache::new(10));
+
+        serve_as(&file_path, &dir, &cache, Coding::Gzip).await;
+        let second = serve_as(&file_path, &dir, &cache, Coding::Gzip).await;
+        let wanted = wanted_by(&second);
+        assert_eq!(wanted.coding, Coding::Gzip);
+        build_wanted_artifact(&cache, &wanted);
+
+        let third = serve_as(&file_path, &dir, &cache, Coding::Gzip).await;
+        assert_eq!(third.headers()[header::CONTENT_ENCODING], "gzip");
+        assert!(third.extensions().get::<ArtifactWanted>().is_none());
+
+        // The stored bytes are a gzip stream, not brotli wearing a gzip label.
+        let served = body_bytes(third).await;
+        let mut decoded = Vec::new();
+        flate2::read::GzDecoder::new(&served[..])
+            .read_to_end(&mut decoded)
+            .unwrap();
+        assert_eq!(decoded, body.as_bytes());
+    }
+
+    #[tokio::test]
+    async fn test_one_codings_artifact_is_never_served_to_another() {
+        let dir = TempDir::new().unwrap();
+        let file_path = dir.path().join("app.css");
+        fs::write(&file_path, css_body()).unwrap();
+        let cache = Arc::new(FileCache::new(10));
+
+        // Give the entry a brotli artifact.
+        serve_br(&file_path, &dir, &cache).await;
+        let second = serve_br(&file_path, &dir, &cache).await;
+        build_wanted_artifact(&cache, &wanted_by(&second));
+
+        // A gzip client must not be handed those bytes: it would decode them
+        // as gzip and fail. It gets identity, and asks for its own artifact.
+        let gzip_hit = serve_as(&file_path, &dir, &cache, Coding::Gzip).await;
+        assert!(gzip_hit.headers().get(header::CONTENT_ENCODING).is_none());
+        assert_eq!(wanted_by(&gzip_hit).coding, Coding::Gzip);
+
+        // Building it leaves the brotli artifact in place — both are stored,
+        // and each client keeps getting its own.
+        build_wanted_artifact(&cache, &wanted_by(&gzip_hit));
+        assert_eq!(
+            serve_as(&file_path, &dir, &cache, Coding::Gzip)
+                .await
+                .headers()[header::CONTENT_ENCODING],
+            "gzip"
+        );
+        assert_eq!(
+            serve_br(&file_path, &dir, &cache).await.headers()[header::CONTENT_ENCODING],
+            "br"
+        );
+    }
+
+    #[tokio::test]
     async fn test_no_artifact_path_without_brotli_support() {
         let dir = TempDir::new().unwrap();
         let file_path = dir.path().join("app.css");
@@ -2278,8 +2423,9 @@ mod tests {
         let key = file_path.to_string_lossy().to_string();
         let modified = fs::metadata(&file_path).unwrap().modified().unwrap();
         let artifact =
-            crate::server::compression::compress_artifact(css_body().as_bytes()).unwrap();
-        cache.insert_artifact(&key, modified, Bytes::from(artifact));
+            crate::server::compression::compress_artifact(css_body().as_bytes(), Coding::Br)
+                .unwrap();
+        cache.insert_artifact(&key, Coding::Br, modified, Bytes::from(artifact));
 
         let identity = serve_with(&file_path, &dir, &cache, HeaderMap::new()).await;
         assert!(identity.headers().get(header::CONTENT_ENCODING).is_none());
@@ -2326,12 +2472,12 @@ mod tests {
             .expect("a compressible MIME type asks before it knows the bytes resist")
             .clone();
         assert!(
-            crate::server::compression::compress_artifact(&wanted.bytes).is_none(),
+            crate::server::compression::compress_artifact(&wanted.bytes, wanted.coding).is_none(),
             "the fixture must not compress, or this test proves nothing"
         );
 
         // What the background job does when compression does not pay off.
-        cache.reject_artifact(&wanted.key, wanted.modified);
+        cache.reject_artifact(&wanted.key, wanted.coding, wanted.modified);
 
         let after = serve_br(&file_path, &dir, &cache).await;
         assert!(
@@ -2347,18 +2493,18 @@ mod tests {
     fn test_artifact_claim_is_single_flight() {
         let cache = Arc::new(FileCache::new(10));
         let claim = cache
-            .claim_artifact("/w/app.css")
+            .claim_artifact("/w/app.css", Coding::Br)
             .expect("first claim wins");
         assert_eq!(claim.key(), "/w/app.css");
         assert!(
-            cache.claim_artifact("/w/app.css").is_none(),
+            cache.claim_artifact("/w/app.css", Coding::Br).is_none(),
             "a second claim on the same key must not start a second compression"
         );
         // A different file is unaffected.
-        assert!(cache.claim_artifact("/w/other.css").is_some());
+        assert!(cache.claim_artifact("/w/other.css", Coding::Br).is_some());
         drop(claim);
         assert!(
-            cache.claim_artifact("/w/app.css").is_some(),
+            cache.claim_artifact("/w/app.css", Coding::Br).is_some(),
             "the claim must be released when the job's guard drops"
         );
     }
@@ -2381,20 +2527,21 @@ mod tests {
         // entry no longer holds.
         cache.insert_artifact(
             &key,
+            Coding::Br,
             modified + Duration::from_secs(1),
             Bytes::from_static(b"x"),
         );
         assert!(matches!(
-            cache.content.read().entries.peek(&key).unwrap().artifact,
+            cache.content.read().entries.peek(&key).unwrap().artifacts[Coding::Br.slot()],
             ArtifactState::Absent
         ));
 
         // Matching mtime is accepted, and charged to the budget.
         let before = cache.content.read().total_bytes;
-        cache.insert_artifact(&key, modified, Bytes::from_static(b"xy"));
+        cache.insert_artifact(&key, Coding::Br, modified, Bytes::from_static(b"xy"));
         let guard = cache.content.read();
         assert!(matches!(
-            &guard.entries.peek(&key).unwrap().artifact,
+            &guard.entries.peek(&key).unwrap().artifacts[Coding::Br.slot()],
             ArtifactState::Ready(bytes) if &bytes[..] == b"xy"
         ));
         assert_eq!(guard.total_bytes, before + 2);
@@ -2413,13 +2560,13 @@ mod tests {
             "\"tag\"".into(),
             "date".into(),
         );
-        cache.insert_artifact(&key, modified, Bytes::from_static(b"first"));
+        cache.insert_artifact(&key, Coding::Br, modified, Bytes::from_static(b"first"));
         let charged = cache.content.read().total_bytes;
-        cache.insert_artifact(&key, modified, Bytes::from_static(b"second"));
+        cache.insert_artifact(&key, Coding::Br, modified, Bytes::from_static(b"second"));
         let guard = cache.content.read();
         assert!(
             matches!(
-                &guard.entries.peek(&key).unwrap().artifact,
+                &guard.entries.peek(&key).unwrap().artifacts[Coding::Br.slot()],
                 ArtifactState::Ready(bytes) if &bytes[..] == b"first"
             ),
             "a late second job must not overwrite a stored artifact"
@@ -2441,7 +2588,7 @@ mod tests {
             &http::Method::GET,
             &headers,
             Some("public, max-age=86400"),
-            false,
+            None,
         )
         .await
         .unwrap()
@@ -2702,7 +2849,7 @@ mod tests {
             &http::Method::HEAD,
             &range_headers("bytes=0-0"),
             Some("public, max-age=86400"),
-            false,
+            None,
         )
         .await
         .unwrap();
@@ -2729,7 +2876,7 @@ mod tests {
             &http::Method::POST,
             &range_headers("bytes=0-4"),
             Some("public, max-age=86400"),
-            false,
+            None,
         )
         .await
         .unwrap();
@@ -2765,7 +2912,7 @@ mod tests {
             &http::Method::POST,
             &headers,
             Some("public, max-age=86400"),
-            false,
+            None,
         )
         .await
         .unwrap();
@@ -2806,7 +2953,7 @@ mod tests {
             &http::Method::GET,
             &range_headers("bytes=0-9"),
             Some("public, max-age=86400"),
-            true, // client accepts brotli
+            Some(Coding::Br),
         )
         .await
         .unwrap();
@@ -2826,7 +2973,7 @@ mod tests {
             &http::Method::GET,
             &range_headers("bytes=0-9"),
             Some("public, max-age=86400"),
-            false,
+            None,
         )
         .await
         .unwrap();
@@ -2851,7 +2998,7 @@ mod tests {
             &http::Method::GET,
             &range_headers("bytes=0-9"),
             Some("public, max-age=86400"),
-            true,
+            Some(Coding::Br),
         )
         .await
         .unwrap();
@@ -2883,7 +3030,7 @@ mod tests {
             &http::Method::GET,
             &range_headers("bytes=0-9"),
             Some("public, max-age=86400"),
-            true, // client accepts brotli — irrelevant on the streaming path
+            Some(Coding::Br), // irrelevant on the streaming path
         )
         .await
         .unwrap();
