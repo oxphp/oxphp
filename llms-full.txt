@@ -3066,7 +3066,9 @@ This is a tie-break, not an override: a client that writes `br;q=0.2, gzip;q=0.9
 
 A client that accepts none of the three receives the response unencoded. In practice gzip is the fallback: every HTTP client of the last twenty years accepts it, while Zstandard needs a browser released in 2024 or later. Browsers also gate the newer codings on the connection rather than on their age alone: `br` and `zstd` are advertised over HTTPS and withheld over plain HTTP, so a site served without TLS is a gzip site whatever its visitors are running.
 
-Because the answer depends on the request header, compressed responses carry `Vary: Accept-Encoding`, and static representations inside the compression window carry it whether or not they end up compressed. Two cases do not carry it. A *dynamic* response that ends up unencoded — the client sent no `Accept-Encoding`, or the body did not shrink — has none, so a shared cache in front of OxPHP may hand those identity bytes to a client that would have taken a compressed body. And a `304` carries neither `Vary` nor `Content-Encoding`: it freshens a representation the client already holds rather than describing a new one.
+Because the answer depends on the request header, every response inside the compression window carries `Vary: Accept-Encoding` — compressed or not, static or dynamic. A representation the server would encode for some client varies by that header even when this client is being handed the identity bytes, and a shared cache told otherwise would pass those bytes on to a client that had asked for a coding.
+
+Two things sit outside that rule. A body the server never holds whole carries no `Vary`, because it cannot be compressed under any header and so genuinely does not vary. And a `304` carries neither `Vary` nor `Content-Encoding`: it freshens a representation the client already holds rather than describing a new one.
 
 `Vary` is added as its own header line rather than merged into one the application already sent, so a response that set `Vary: Cookie` goes out with two `Vary` lines. That is legal, and OxPHP reads all of them before appending so `Accept-Encoding` is never duplicated — but an intermediary that reads only the first line will miss it.
 
@@ -3129,7 +3131,7 @@ Brotli defaults to 5 rather than 4 because its quality knee — a change of hash
 
 ## Compressible Content Types
 
-The list is closed and matched exactly — there is no prefix or wildcard rule, so a type that is not named here is never compressed even when it would compress well. Parameters and surrounding whitespace are ignored, so `text/html; charset=utf-8` matches `text/html`.
+The list is closed — there is no prefix or wildcard rule, so a type absent from it is never compressed even when it would compress well. Within it the match is forgiving: parameters and surrounding whitespace are dropped and the type itself is compared case-insensitively, so `text/html; charset=utf-8` and `Application/JSON` both match.
 
 **Text types:**
 - `text/html`
@@ -3214,7 +3216,7 @@ Look for `Content-Encoding` in the response headers. If it is absent, check that
 
 1. `COMPRESSION_ENCODINGS` still lists the coding you asked for, and its level is not `0`
 2. The response body is at least 256 bytes and no larger than 3 MiB
-3. The response `Content-Type` is in the compressible list above — exactly, since the list is closed
+3. The response `Content-Type` is on the compressible list above. Case and parameters make no difference; being absent from the list does
 4. The handler does not stream. A script that calls `oxphp_stream_flush()`, sends Server-Sent Events, or otherwise starts writing before the length is known is passed through untouched, and this is the most common cause in an application that flushes
 
 ### Different clients get different codings
