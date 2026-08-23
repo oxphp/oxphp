@@ -3010,7 +3010,7 @@ OxPHP compresses HTTP responses using Brotli encoding by default. Compression ap
 
 ## How It Works
 
-1. **Accept-Encoding check** — the client's `Accept-Encoding` header is parsed for `br` (Brotli) support. Requests without `br` in this header are never compressed.
+1. **Accept-Encoding check** — the client's `Accept-Encoding` header is parsed for `br` (Brotli) support, following RFC 9110 §12.5.3. Coding names are matched case-insensitively; `br;q=0` is read as a refusal rather than as support; and a `*` covers Brotli when the header does not name it explicitly. Requests whose header neither accepts `br` nor carries a `*` are never compressed.
 2. **Content type check** — the response MIME type is verified against the list of compressible types.
 3. **Already encoded check** — responses with an existing `Content-Encoding` header are skipped to avoid double-compression.
 4. **Size range check** — only responses between 256 bytes and 3 MB are compressed. Smaller responses see little benefit; larger responses are streamed without buffering.
@@ -3060,7 +3060,7 @@ Compression applies to the following MIME types:
 
 Responses are sent without compression when any of the following conditions are met:
 
-- The client does not advertise `br` in the `Accept-Encoding` header
+- The client does not advertise `br` in the `Accept-Encoding` header, or advertises it with a zero weight (`br;q=0`)
 - The response already has a `Content-Encoding` header (e.g. pre-compressed content)
 - The response body is smaller than 256 bytes or larger than 3 MB
 - The content type is not in the compressible list (e.g. `image/png`, `image/jpeg`, `font/woff2`, `application/zip` — these formats already use internal compression)
@@ -3080,7 +3080,9 @@ When compression is applied, OxPHP sets the following headers:
 
 ### Responses are not compressed
 
-Verify that the client sends `Accept-Encoding: br`. Most modern browsers do, but some HTTP testing tools do not include it by default.
+Verify that the client sends `Accept-Encoding: br`. Most modern browsers do, but some HTTP testing tools do not include it by default. Note that Chromium-based browsers advertise `br` only over HTTPS, so a site served over plain HTTP receives uncompressed responses from them.
+
+A weight of zero is a refusal, not a preference: `Accept-Encoding: br;q=0` disables compression for that request as surely as omitting `br` entirely.
 
 **Check** with curl:
 

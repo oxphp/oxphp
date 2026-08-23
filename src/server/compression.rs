@@ -173,10 +173,64 @@ pub(crate) fn would_compress(content_type: &str, size: u64) -> bool {
 }
 
 pub(crate) fn accepts_brotli(accept_encoding: &str) -> bool {
-    accept_encoding.split(',').any(|enc| {
-        let name = enc.trim().split(';').next().unwrap_or("").trim();
-        name == "br"
-    })
+    qvalue(accept_encoding, "br") > 0
+}
+
+/// The weight the client attached to `coding`, in thousandths. RFC 9110 caps a
+/// qvalue at three decimals, so thousandths hold every legal value exactly and
+/// spare us float comparison.
+///
+/// Zero means "do not send this coding": either the client wrote `;q=0`, which
+/// §12.5.3 defines as "not acceptable" rather than "supported", or the coding is
+/// absent from a header that carries no `*` to cover it. An empty field value
+/// therefore refuses everything, which is what it means — only identity remains.
+///
+/// A coding named twice is read at its first weight; the field grammar does not
+/// define duplicates, and no ordering is more defensible than another.
+fn qvalue(accept_encoding: &str, coding: &str) -> u16 {
+    let mut wildcard = None;
+    for element in accept_encoding.split(',') {
+        let mut parts = element.split(';');
+        let name = parts.next().unwrap_or("").trim();
+        if name.is_empty() {
+            continue;
+        }
+        // A weight we cannot parse is not a refusal: the coding is still listed,
+        // so it keeps the default weight rather than being dropped over a
+        // malformed parameter.
+        let weight = parts.find_map(parse_weight).unwrap_or(1000);
+        if name.eq_ignore_ascii_case(coding) {
+            return weight;
+        }
+        if name == "*" {
+            wildcard = Some(weight);
+        }
+    }
+    wildcard.unwrap_or(0)
+}
+
+/// Reads `q=<qvalue>` out of one parameter. `None` for any other parameter and
+/// for a weight outside the grammar, letting the caller fall back to the default.
+fn parse_weight(parameter: &str) -> Option<u16> {
+    let (name, value) = parameter.split_once('=')?;
+    if !name.trim().eq_ignore_ascii_case("q") {
+        return None;
+    }
+    // qvalue = ( "0" [ "." 0*3DIGIT ] ) / ( "1" [ "." 0*3("0") ] )
+    let value = value.trim();
+    let (integer, fraction) = value.split_once('.').unwrap_or((value, ""));
+    let mut weight: u16 = match integer {
+        "0" => 0,
+        "1" => 1000,
+        _ => return None,
+    };
+    if fraction.len() > 3 || !fraction.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    for (digit, scale) in fraction.bytes().zip([100, 10, 1]) {
+        weight += u16::from(digit - b'0') * scale;
+    }
+    Some(weight.min(1000))
 }
 
 /// Check if the MIME type should be compressed.
@@ -248,6 +302,48 @@ mod tests {
         assert!(!accepts_brotli("deflate"));
         assert!(!accepts_brotli(""));
         assert!(!accepts_brotli("brand")); // must not match prefix
+    }
+
+    #[test]
+    fn test_zero_qvalue_is_a_refusal() {
+        // RFC 9110 §12.5.3: "a qvalue of 0 means 'not acceptable'".
+        assert!(!accepts_brotli("br;q=0"));
+        assert!(!accepts_brotli("br;q=0.0"));
+        assert!(!accepts_brotli("br;q=0.000"));
+        assert!(!accepts_brotli("gzip, br;q=0"));
+        // A refusal of one coding says nothing about another.
+        assert!(accepts_brotli("gzip;q=0, br"));
+        // The smallest non-zero weight still accepts.
+        assert!(accepts_brotli("br;q=0.001"));
+    }
+
+    #[test]
+    fn test_wildcard() {
+        // "*" covers codings the header does not name.
+        assert!(accepts_brotli("*"));
+        assert!(accepts_brotli("gzip, *"));
+        assert!(!accepts_brotli("*;q=0"));
+        // An explicit entry wins over the wildcard, in both directions.
+        assert!(!accepts_brotli("*, br;q=0"));
+        assert!(accepts_brotli("*;q=0, br"));
+    }
+
+    #[test]
+    fn test_syntax_tolerance() {
+        // Coding names are case-insensitive, and OWS is allowed around the
+        // separators.
+        assert!(accepts_brotli("BR"));
+        assert!(accepts_brotli("gzip , BR ; q=0.9"));
+        assert!(accepts_brotli("br;Q=1"));
+        assert!(!accepts_brotli("BR;Q=0"));
+        // Parameters other than q are ignored.
+        assert!(accepts_brotli("br;foo=bar"));
+        assert!(!accepts_brotli("br;foo=bar;q=0"));
+        // A malformed weight is not a refusal — the coding stays listed.
+        assert!(accepts_brotli("br;q=nonsense"));
+        assert!(accepts_brotli("br;q="));
+        // Empty elements are skipped rather than swallowing the list.
+        assert!(accepts_brotli(", ,br"));
     }
 
     #[test]
