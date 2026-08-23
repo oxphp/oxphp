@@ -294,17 +294,19 @@ fn compression_level(name: &str, max: i32, default: i32) -> Result<i32, crate::t
 /// Read the compression configuration out of the environment.
 fn compression_from_env() -> Result<Levels, crate::types::BoxError> {
     let levels = Levels {
-        // Brotli's quality knee sits between 4 and 5, where it changes hasher:
-        // 4 is cheap and weak, 5 costs about 80% more for 6% fewer bytes.
-        brotli: compression_level("BROTLI_LEVEL", 11, 4)?,
+        // Brotli's quality knee sits between 4 and 5, where it changes hasher,
+        // and 5 is the level at which preferring brotli over gzip pays for
+        // itself: at 4 it produced more bytes than gzip's own default on JSON
+        // above 4 KB and on real minified assets, and spent more CPU doing it.
+        brotli: compression_level("BROTLI_LEVEL", 11, 5)?,
         // Level 6 is zlib's own default and the point the benchmark put the
-        // knee at: over real assets it matches or beats brotli's default
-        // quality on size, and costs less than half of level 9.
+        // knee at: on real assets level 9 costs about twice as much for a
+        // percent or two of size.
         gzip: compression_level("GZIP_LEVEL", 9, 6)?,
         // Level 6 rather than zstd's own default of 3: on bodies over 4 KB it
-        // still undercuts brotli's default quality on time while producing
-        // fewer bytes, so nothing regresses against what this server sent
-        // before zstd existed.
+        // produces fewer bytes in less time than the brotli quality earlier
+        // releases compressed everything with, so no deployment sends more
+        // bytes after the upgrade than before it.
         zstd: compression_level("ZSTD_LEVEL", 19, 6)?,
     };
     // An exactly-empty value is an unset one on both, the way it is for every
@@ -744,7 +746,7 @@ impl Config {
             tls_min_version: TlsMinVersion::V12,
             error_pages_dir: None,
             compression: Levels {
-                brotli: 4,
+                brotli: 5,
                 gzip: 6,
                 zstd: 6,
             },
@@ -983,7 +985,7 @@ mod tests {
     /// What the level variables parse to when none of them are set.
     fn shipped_levels() -> Levels {
         Levels {
-            brotli: 4,
+            brotli: 5,
             gzip: 6,
             zstd: 6,
         }
@@ -1009,7 +1011,7 @@ mod tests {
         assert_eq!(levels.zstd, 6);
         // Spelled the way a settings file reads rather than the way the header
         // does, and in whatever case and spacing it was typed.
-        assert_eq!(resolve(Some(" BROTLI "), None).brotli, 4);
+        assert_eq!(resolve(Some(" BROTLI "), None).brotli, 5);
         assert_eq!(resolve(Some(" BROTLI "), None).zstd, 0);
     }
 

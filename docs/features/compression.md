@@ -31,7 +31,7 @@ Weights tie in the usual case, since browsers send every coding they support wit
 | The response is | Preferred coding | Why |
 |---|---|---|
 | A cached static file | Brotli, then Zstandard, then gzip | The bytes are compressed once at maximum quality and served from memory from then on, so nothing but size counts — and at the top of its range Brotli is the smallest of the three |
-| Everything else | Zstandard, then Brotli, then gzip | The bytes are compressed while the client waits and discarded afterwards, so the cost is paid on every request — and at levels a request can afford, Zstandard measured smaller than Brotli in less than half the CPU |
+| Everything else | Zstandard, then Brotli, then gzip | The bytes are compressed while the client waits and discarded afterwards, so the cost is paid on every request — and at levels a request can afford, Zstandard measured within a few percent of Brotli on size for well under half the CPU |
 
 A client that accepts none of the three receives the response unencoded. In practice gzip is the fallback: every HTTP client of the last twenty years accepts it, while Zstandard needs a browser released in 2024 or later, and Chromium-based browsers advertise `br` only over HTTPS.
 
@@ -41,7 +41,7 @@ Because the answer depends on the request header, every compressible response ca
 
 A static file small enough to sit in the content cache (1 MiB or less) is compressed once rather than on every request. Once such a file has been served twice to a client accepting a given coding, OxPHP compresses it at that coding's maximum level on a background thread and keeps the result next to the cached bytes; every later request that negotiates the same coding is answered from that stored copy.
 
-This is invisible from the outside apart from the response getting smaller — maximum quality typically produces 12–19% less than the per-request level. No request waits for the compression: the one that triggers it, and any that arrive while it runs, are served at the configured per-request level as before. Response headers do not change.
+This is invisible from the outside apart from the response getting smaller — maximum quality typically produces 8–12% less than the per-request level. No request waits for the compression: the one that triggers it, and any that arrive while it runs, are served at the configured per-request level as before. Response headers do not change.
 
 Each coding gets its own stored copy, built on demand: a file only ever served to gzip clients never costs a Brotli compression. All of them share the cached file's validator, so they are discarded together with the cached bytes when [`STATIC_REVALIDATE`](static-files.md) notices the file changed on disk, and they count against the same content-cache budget. Bytes that do not compress are marked and not retried.
 
@@ -52,14 +52,14 @@ Because the two preferences above differ, a client that accepts both Brotli and 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `COMPRESSION_ENCODINGS` | `br,zstd,gzip` | Which codings the server offers, comma-separated. Accepts `br` (or `brotli`), `zstd`, `gzip`, and `off` to switch compression off entirely. The order written here is ignored — the server picks per response, see [Choosing a coding](#choosing-a-coding) |
-| `BROTLI_LEVEL` | `4` | Brotli quality (0–11) |
+| `BROTLI_LEVEL` | `5` | Brotli quality (0–11) |
 | `ZSTD_LEVEL` | `6` | Zstandard level (0–19) |
 | `GZIP_LEVEL` | `6` | Gzip level (0–9) |
 | `COMPRESSION_LEVEL` | *(unset)* | Deprecated name for `BROTLI_LEVEL`, kept for existing deployments together with the second meaning it carried when Brotli was the only coding: `COMPRESSION_LEVEL=0` switches off all compression. Setting it logs a warning at startup, and an explicit `BROTLI_LEVEL` overrides it |
 
 A coding is offered when it is listed in `COMPRESSION_ENCODINGS` **and** its level is not `0`; either one alone withdraws it. An unknown name in the list is a startup error rather than a silently dropped coding.
 
-Levels 9–11 of Brotli are better suited for offline or build-time compression than for per-request work; cached static files use them anyway, because that cost is paid once. Gzip level 6 is zlib's own default and close to the point of diminishing returns — level 9 costs roughly twice as much for a percent or two. Zstandard defaults to 6 rather than to its own default of 3: on bodies over a few kilobytes level 6 still costs less time than Brotli's default quality while producing fewer bytes, so nothing regresses against what earlier releases sent.
+Brotli defaults to 5 rather than 4 because its quality knee — a change of hasher — sits between the two: at 4 it produced *more* bytes than gzip does at its own default on JSON above 4 KB and on real minified assets, and spent more CPU doing it, which leaves no reason to prefer it over gzip at all. At 5 it is the smaller of the two on every body measured, for roughly twice gzip's CPU. Levels 9–11 are better suited for offline or build-time compression than for per-request work; cached static files use them anyway, because that cost is paid once. Gzip level 6 is zlib's own default and close to the point of diminishing returns — level 9 costs roughly twice as much for a percent or two. Zstandard defaults to 6 rather than to its own default of 3: on bodies over a few kilobytes level 6 costs less time than the Brotli quality earlier releases compressed everything with, while producing fewer bytes, so nothing regresses against what those releases sent.
 
 ## Compressible Content Types
 
@@ -147,7 +147,7 @@ For very small responses (under a few hundred bytes), framing overhead occasiona
 
 Higher quality levels (8–11) compress significantly better but use much more CPU. If you observe high CPU consumption from compression:
 
-**Fix:** Lower `BROTLI_LEVEL` to `4` or `5`, `ZSTD_LEVEL` to `3`, and `GZIP_LEVEL` to `4`–`6`. These levels provide 80–90% of the size reduction of maximum quality at a fraction of the CPU cost. Static files are unaffected either way: their compressed copies are built once in the background, not per request.
+**Fix:** Lower `ZSTD_LEVEL` to `3` and `GZIP_LEVEL` to `4`. These levels provide 80–90% of the size reduction of maximum quality at a fraction of the CPU cost. Brotli is the expensive coding of the three, but lowering `BROTLI_LEVEL` to `4` is not the way to save that CPU — at 4 it produces more bytes than gzip does at its own default while still costing more than gzip. Drop `br` from `COMPRESSION_ENCODINGS` instead: clients that accept Brotli then get gzip, which on real bodies is 2–6% larger for roughly half the CPU. Static files cost nothing per request whichever codings remain, since their compressed copies are built once in the background.
 
 ### Pre-compressed assets are being compressed again
 
