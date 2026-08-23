@@ -87,9 +87,9 @@ parking_lot = "0.12"
 brotli = "8"
 
 # Zstandard. The coding dynamic responses are compressed with when the client
-# accepts it: over real bodies above ~4 KB it produced fewer bytes than brotli's
-# per-request quality in under half the CPU, and its lead grew rather than
-# shrank on x86-64. Default features off — legacy-format decoding and the
+# accepts it: over real bodies above ~4 KB it comes within a few percent of
+# brotli's per-request quality on size for well under half the CPU, and that
+# margin widens rather than narrows on x86-64. Default features off — legacy-format decoding and the
 # dictionary trainer are dead weight in a server that only ever compresses.
 zstd = { version = "0.13", default-features = false }
 

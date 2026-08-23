@@ -39,10 +39,12 @@ impl Coding {
     pub(crate) const COUNT: usize = Self::ALL.len();
 
     /// Server preference for a body compressed while the request waits, best
-    /// first. Zstandard leads because it is the only coding that is cheaper
-    /// *and* smaller than the others at the levels a request can afford: over
-    /// real bodies above 4 KB it beat brotli's default quality on both, by
-    /// wider margins on x86-64 than on arm64.
+    /// first. Zstandard leads because it buys nearly all of brotli's
+    /// compression for a fraction of its cost: over real bodies above 4 KB it
+    /// came within a few percent of brotli's per-request quality on size while
+    /// spending well under half the CPU, and that ratio is better on x86-64
+    /// than on arm64. Brotli sits ahead of gzip because at the quality it runs
+    /// at here it is smaller than gzip on every body measured.
     const PER_REQUEST: [Coding; Self::COUNT] = [Coding::Zstd, Coding::Br, Coding::Gzip];
 
     /// Server preference for a cached static file, best first. Brotli leads
@@ -249,9 +251,12 @@ pub async fn maybe_compress(
 }
 
 /// The body size above which compressing at this level goes to the blocking
-/// pool. Both codings are cheap enough at their lower levels that a 64 KB body
-/// costs well under a millisecond inline; both climb steeply near the top of
-/// their range, where even a few kilobytes is worth handing off.
+/// pool. Every coding is cheap enough at its lower levels that a 64 KB body
+/// costs well under a millisecond inline; all of them climb steeply higher up
+/// their range, where even a few kilobytes is worth handing off. Brotli's knee
+/// is the hasher change at 5, which is also the level it ships at, so brotli
+/// hands off from 4 KB by default — the CPU that buys its ratio is exactly the
+/// CPU an async thread must not spend.
 fn blocking_threshold(coding: Coding, level: i32) -> usize {
     let steep = match coding {
         Coding::Br => level > 4,
@@ -418,9 +423,9 @@ fn is_compressible(content_type: &str) -> bool {
 
 /// The level to build an artifact at — one that will be cached and served many
 /// times. The cost is paid once, so the only thing worth optimizing is size:
-/// over real assets top-of-range brotli lands 12–19% below what the
-/// per-request default produces, at a price (tens of milliseconds per file) no
-/// request should ever pay directly.
+/// over real assets top-of-range brotli lands 8–12% below what the per-request
+/// default produces, at a price (tens of milliseconds per file) no request
+/// should ever pay directly.
 pub(crate) fn artifact_level(coding: Coding) -> i32 {
     match coding {
         Coding::Br => 11,
@@ -504,7 +509,7 @@ mod tests {
 
     /// Everything on, at the shipped defaults.
     fn all() -> Levels {
-        levels(4, 6, 6)
+        levels(5, 6, 6)
     }
 
     fn per_request(accept_encoding: &str, levels: Levels) -> Option<Coding> {
@@ -661,6 +666,28 @@ mod tests {
 
         let collected = result.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(collected.len(), cl);
+    }
+
+    /// The level brotli ships at sits above `blocking_threshold`'s steepness
+    /// line, so a page-sized body is compressed on the blocking pool rather
+    /// than inline. Same bytes out, different thread — and this is the path
+    /// most brotli responses now take.
+    #[tokio::test]
+    async fn a_page_sized_brotli_body_survives_the_blocking_pool() {
+        let body = "body { color: rebeccapurple; margin: 0 }\n".repeat(200);
+        assert!(body.len() > blocking_threshold(Coding::Br, 5));
+        let response = build_response("text/css", body.as_bytes());
+
+        let result = maybe_compress(response, Coding::Br, 5).await;
+
+        assert_eq!(
+            result.headers().get(header::CONTENT_ENCODING).unwrap(),
+            "br"
+        );
+        let compressed = result.into_body().collect().await.unwrap().to_bytes();
+        let mut decoded = Vec::new();
+        brotli::BrotliDecompress(&mut compressed.as_ref(), &mut decoded).unwrap();
+        assert_eq!(decoded, body.as_bytes());
     }
 
     #[tokio::test]

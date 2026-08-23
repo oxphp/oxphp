@@ -84,7 +84,7 @@ async fn a_gzip_only_client_gets_a_readable_gzip_body() {
     let addr = start_server(
         dir.path(),
         Levels {
-            brotli: 4,
+            brotli: 5,
             gzip: 6,
             zstd: 6,
         },
@@ -104,7 +104,7 @@ async fn a_client_that_accepts_everything_gets_zstd() {
     let addr = start_server(
         dir.path(),
         Levels {
-            brotli: 4,
+            brotli: 5,
             gzip: 6,
             zstd: 6,
         },
@@ -126,7 +126,7 @@ async fn a_cached_static_file_hands_over_to_its_brotli_copy() {
     let addr = start_server(
         dir.path(),
         Levels {
-            brotli: 4,
+            brotli: 5,
             gzip: 6,
             zstd: 6,
         },
@@ -161,7 +161,7 @@ async fn a_clients_weights_outrank_server_preference() {
     let addr = start_server(
         dir.path(),
         Levels {
-            brotli: 4,
+            brotli: 5,
             gzip: 6,
             zstd: 6,
         },
@@ -181,7 +181,7 @@ async fn a_refused_coding_is_not_sent() {
     let addr = start_server(
         dir.path(),
         Levels {
-            brotli: 4,
+            brotli: 5,
             gzip: 6,
             zstd: 6,
         },
@@ -202,7 +202,7 @@ async fn no_accept_encoding_means_no_encoding() {
     let addr = start_server(
         dir.path(),
         Levels {
-            brotli: 4,
+            brotli: 5,
             gzip: 6,
             zstd: 6,
         },
@@ -222,7 +222,7 @@ async fn gzip_level_zero_leaves_a_gzip_only_client_unencoded() {
     let addr = start_server(
         dir.path(),
         Levels {
-            brotli: 4,
+            brotli: 5,
             gzip: 0,
             zstd: 0,
         },
