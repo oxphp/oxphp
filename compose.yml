@@ -138,12 +138,15 @@ services:
 
       # ── Response ──────────────────────────────────────────────────
 
-      # Brotli compression quality level (0-11). 0 disables compression
-      # entirely, gzip included.
-      # - COMPRESSION_LEVEL=4
+      # Content codings offered, comma-separated: br, zstd, gzip, or "off"
+      # to switch compression off entirely. Order here is ignored — cached
+      # static files prefer brotli, everything else prefers zstd.
+      # - COMPRESSION_ENCODINGS=br,zstd,gzip
 
-      # Gzip level (0-9) for clients that do not accept Brotli. 0 disables
-      # gzip alone.
+      # Per-coding effort. A coding is offered only when it is listed above
+      # and its level is not 0.
+      # - BROTLI_LEVEL=4
+      # - ZSTD_LEVEL=6
       # - GZIP_LEVEL=6
 
       # Directory containing custom error pages ({status}.html, e.g. 404.html, 500.html).

@@ -25,7 +25,7 @@
 
 - [Access Logging](docs/features/access-logging.md): Structured JSON access logs for every HTTP request in OxPHP, with configurable modes for all requests or errors only.
 - [Async Promises](docs/features/async-promises.md): Run PHP closures in background threads and await results without blocking the worker pool.
-- [Compression](docs/features/compression.md): OxPHP compresses responses with Brotli or gzip, reducing transfer sizes for text, JSON, SVG, and other compressible content types.
+- [Compression](docs/features/compression.md): OxPHP compresses responses with Brotli, Zstandard, or gzip, reducing transfer sizes for text, JSON, SVG, and other compressible content types.
 - [Custom Error Pages](docs/features/error-pages.md): Serve branded HTML error pages for 4xx and 5xx responses in OxPHP, loaded once at startup and served from memory.
 - [Decorators](docs/features/decorators.md): Intercept PHP function and method calls with attribute-based decorators for logging, timing, caching, and access control.
 - [Distributed Tracing & APM](docs/features/distributed-tracing.md): W3C Trace Context propagation, OpenTelemetry integration, automatic instrumentation, PHP tracing SDK, and end-to-end observability with OxPHP.

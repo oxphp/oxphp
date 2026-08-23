@@ -251,9 +251,10 @@ impl FileCache {
     /// conditional check and content fetch together so a served request stats
     /// the file at most once (and only when the revalidation window elapsed).
     /// `try_304` should be set only when a 304 is actually serviceable
-    /// (conditional method + a Cache-Control to echo). `coding` is the content
-    /// coding this request negotiated, which selects the artifact reported
-    /// back in [`Lookup::Content`].
+    /// (conditional method + a Cache-Control to echo). `coding` is the coding
+    /// this request negotiated *for stored copies* — the one whose artifact is
+    /// reported back in [`Lookup::Content`], which is not necessarily the one
+    /// the request path would compress with.
     pub fn lookup(
         &self,
         key: &str,
@@ -901,7 +902,9 @@ fn respond_bytes(
 /// Files ≤ 1 MiB are cached in memory. Files > 1 MiB are streamed from disk.
 /// Single-range `Range` requests (RFC 9110 §14) are honored for GET/HEAD with
 /// 206/416; multi-range requests fall back to the full 200 response.
-/// When `coding` is set and a buffered response would be served compressed,
+/// `coding` is the coding this client negotiated for stored copies: it selects
+/// which artifact is served, and which one is asked for when none is stored
+/// yet. When it is set and a buffered response would be served compressed,
 /// range handling is disabled for it (see [`ranges_allowed`]);
 /// streamed files are never compressed, so their ranges always work.
 /// Re-validates the file path at serve time against `canonical_root`

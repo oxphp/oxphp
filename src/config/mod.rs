@@ -11,6 +11,7 @@ mod workers;
 use std::fmt;
 use std::path::{Path, PathBuf};
 
+use crate::server::compression::{Coding, Levels};
 #[allow(unused_imports)] // consumed by feature-gated plugins
 pub(crate) use env_bool::parse_bool_opt;
 pub(crate) use env_bool::{parse_bool_strict, parse_env_bool};
@@ -64,12 +65,10 @@ pub struct Config {
     /// (including `oxphp config --check`), not just once TLS is turned on.
     pub tls_min_version: TlsMinVersion,
     pub error_pages_dir: Option<String>,
-    /// Brotli quality, 0-11. Zero disables compression outright, not just
-    /// brotli — the meaning it has carried since brotli was the only coding.
-    pub compression_level: i32,
-    /// Gzip level, 0-9. Zero offers gzip to nobody, leaving clients that do
-    /// not accept brotli with an identity response.
-    pub gzip_level: i32,
+    /// Per-coding compression level, already resolved against
+    /// `COMPRESSION_ENCODINGS`: a coding left out of the offered set arrives
+    /// here as zero, which is the one representation the server reads.
+    pub compression: Levels,
     pub access_log: AccessLogLevel,
     pub max_query_body: usize,
     /// Canonical entry script. `None` = direct file mapping (legacy traditional).
@@ -274,6 +273,108 @@ fn parse_knob(name: &str, default: usize) -> Result<usize, crate::types::BoxErro
     }
 }
 
+/// One coding's compression level. Unset or empty (`${VAR:-}` substitution)
+/// yields `default`; a value outside the coding's range is a hard error rather
+/// than a clamp, since a clamped level looks exactly like a working one in
+/// every log line afterwards.
+fn compression_level(name: &str, max: i32, default: i32) -> Result<i32, crate::types::BoxError> {
+    match std::env::var(name) {
+        Err(_) => Ok(default),
+        Ok(val) if val.trim().is_empty() => Ok(default),
+        Ok(val) => match val.trim().parse::<i32>() {
+            Ok(level) if (0..=max).contains(&level) => Ok(level),
+            _ => Err(format!(
+                "{name} must be 0-{max} (got {val:?}), 0 = the coding is not offered"
+            )
+            .into()),
+        },
+    }
+}
+
+/// Read the compression configuration out of the environment.
+fn compression_from_env() -> Result<Levels, crate::types::BoxError> {
+    let levels = Levels {
+        // Brotli's quality knee sits between 4 and 5, where it changes hasher:
+        // 4 is cheap and weak, 5 costs about 80% more for 6% fewer bytes.
+        brotli: compression_level("BROTLI_LEVEL", 11, 4)?,
+        // Level 6 is zlib's own default and the point the benchmark put the
+        // knee at: over real assets it matches or beats brotli's default
+        // quality on size, and costs less than half of level 9.
+        gzip: compression_level("GZIP_LEVEL", 9, 6)?,
+        // Level 6 rather than zstd's own default of 3: on bodies over 4 KB it
+        // still undercuts brotli's default quality on time while producing
+        // fewer bytes, so nothing regresses against what this server sent
+        // before zstd existed.
+        zstd: compression_level("ZSTD_LEVEL", 19, 6)?,
+    };
+    // An exactly-empty value is an unset one on both, the way it is for every
+    // other knob here — a `${VAR:-}` substitution must not abort startup.
+    let set = |name: &str| std::env::var(name).ok().filter(|v| !v.trim().is_empty());
+    resolve_compression(
+        set("COMPRESSION_ENCODINGS").as_deref(),
+        set("COMPRESSION_LEVEL").as_deref(),
+        levels,
+        set("BROTLI_LEVEL").is_some(),
+    )
+}
+
+/// Decide which codings this server offers, and at what level each one runs.
+///
+/// `COMPRESSION_ENCODINGS` chooses the set and the level variables choose the
+/// effort; the two compose by AND, so a coding is produced when it is listed
+/// and its level is not zero. The order codings are listed in carries no
+/// meaning: which one a client is served depends on whether the compressed
+/// bytes are kept and reused or thrown away after the response, and no single
+/// ordering can express both.
+fn resolve_compression(
+    encodings: Option<&str>,
+    legacy_level: Option<&str>,
+    mut levels: Levels,
+    brotli_level_set: bool,
+) -> Result<Levels, crate::types::BoxError> {
+    if let Some(val) = legacy_level {
+        let level = match val.trim().parse::<i32>() {
+            Ok(level) if (0..=11).contains(&level) => level,
+            _ => {
+                return Err(
+                    format!("COMPRESSION_LEVEL must be 0-11 (got {val:?}), 0 = disabled").into(),
+                );
+            }
+        };
+        tracing::warn!(
+            "COMPRESSION_LEVEL is deprecated: use BROTLI_LEVEL for brotli's quality and COMPRESSION_ENCODINGS to choose which codings are offered"
+        );
+        if level == 0 {
+            // The switch it has always been. A deployment that set it to turn
+            // compression off must not start emitting zstd because this server
+            // learned a coding it had never heard of.
+            return Ok(Levels::default());
+        }
+        // An explicit BROTLI_LEVEL is the newer statement of the same thing,
+        // so it wins over the variable it replaces.
+        if !brotli_level_set {
+            levels.brotli = level;
+        }
+    }
+
+    let Some(val) = encodings.map(str::trim).filter(|val| !val.is_empty()) else {
+        return Ok(levels);
+    };
+    let mut offered = Levels::default();
+    if !val.eq_ignore_ascii_case("off") && !val.eq_ignore_ascii_case("none") {
+        for token in val.split(',').map(str::trim).filter(|t| !t.is_empty()) {
+            let Some(coding) = Coding::from_name(token) else {
+                return Err(format!(
+                    "COMPRESSION_ENCODINGS: unknown coding {token:?} — expected a comma-separated list of br, gzip, zstd, or \"off\""
+                )
+                .into());
+            };
+            offered.set(coding, levels.level(coding));
+        }
+    }
+    Ok(offered)
+}
+
 /// Default cap on the bodies parked in the waiting set, in bytes.
 ///
 /// Chosen against the places cap rather than against host memory, which is
@@ -473,32 +574,7 @@ impl Config {
         }
         let tls_min_version = TlsMinVersion::from_env()?;
         let error_pages_dir = std::env::var("ERROR_PAGES_DIR").ok();
-        let compression_level: i32 = match std::env::var("COMPRESSION_LEVEL") {
-            Ok(val) => match val.parse::<i32>() {
-                Ok(v) if (0..=11).contains(&v) => v,
-                _ => {
-                    return Err(format!(
-                        "COMPRESSION_LEVEL must be 0-11 (got {val:?}), 0 = disabled"
-                    )
-                    .into());
-                }
-            },
-            Err(_) => 4,
-        };
-        // Level 6 is zlib's own default and the point the benchmark put the
-        // knee at: over real assets it matches or beats brotli's default
-        // quality on size, and costs less than half of level 9.
-        let gzip_level: i32 = match std::env::var("GZIP_LEVEL") {
-            Ok(val) => match val.parse::<i32>() {
-                Ok(v) if (0..=9).contains(&v) => v,
-                _ => {
-                    return Err(
-                        format!("GZIP_LEVEL must be 0-9 (got {val:?}), 0 = disabled").into(),
-                    );
-                }
-            },
-            Err(_) => 6,
-        };
+        let compression = compression_from_env()?;
         let access_log = match std::env::var("ACCESS_LOG").as_deref() {
             Ok("all") => AccessLogLevel::All,
             Ok("error") => AccessLogLevel::Error,
@@ -617,8 +693,7 @@ impl Config {
             tls_key,
             tls_min_version,
             error_pages_dir,
-            compression_level,
-            gzip_level,
+            compression,
             access_log,
             max_query_body,
             entry_file,
@@ -668,8 +743,11 @@ impl Config {
             tls_key: None,
             tls_min_version: TlsMinVersion::V12,
             error_pages_dir: None,
-            compression_level: 4,
-            gzip_level: 6,
+            compression: Levels {
+                brotli: 4,
+                gzip: 6,
+                zstd: 6,
+            },
             access_log: AccessLogLevel::Off,
             max_query_body: 512 * 1024,
             entry_file: None,
@@ -744,8 +822,9 @@ impl Config {
             "tls_enabled": self.tls_cert.is_some() && self.tls_key.is_some(),
             "tls_min_version": self.tls_min_version.to_string(),
             "error_pages_dir": self.error_pages_dir,
-            "compression_level": self.compression_level,
-            "gzip_level": self.gzip_level,
+            "brotli_level": self.compression.brotli,
+            "gzip_level": self.compression.gzip,
+            "zstd_level": self.compression.zstd,
             "access_log": self.access_log.to_string(),
             "max_query_body": self.max_query_body,
             "worker_mode_enabled": self.worker_mode_enabled,
@@ -900,6 +979,108 @@ fn check_file(label: &str, path: &Path, errors: &mut Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// What the level variables parse to when none of them are set.
+    fn shipped_levels() -> Levels {
+        Levels {
+            brotli: 4,
+            gzip: 6,
+            zstd: 6,
+        }
+    }
+
+    fn resolve(encodings: Option<&str>, legacy: Option<&str>) -> Levels {
+        resolve_compression(encodings, legacy, shipped_levels(), false).expect("valid")
+    }
+
+    #[test]
+    fn compression_offers_every_coding_by_default() {
+        let levels = resolve(None, None);
+        for coding in Coding::ALL {
+            assert!(levels.level(coding) > 0, "{} is not offered", coding.name());
+        }
+    }
+
+    #[test]
+    fn compression_encodings_withdraws_the_codings_it_leaves_out() {
+        let levels = resolve(Some("zstd, gzip"), None);
+        assert_eq!(levels.brotli, 0);
+        assert_eq!(levels.gzip, 6);
+        assert_eq!(levels.zstd, 6);
+        // Spelled the way a settings file reads rather than the way the header
+        // does, and in whatever case and spacing it was typed.
+        assert_eq!(resolve(Some(" BROTLI "), None).brotli, 4);
+        assert_eq!(resolve(Some(" BROTLI "), None).zstd, 0);
+    }
+
+    #[test]
+    fn compression_can_be_switched_off_without_the_deprecated_variable() {
+        for spelling in ["off", "none", "OFF"] {
+            let levels = resolve(Some(spelling), None);
+            for coding in Coding::ALL {
+                assert_eq!(levels.level(coding), 0, "{spelling} left {coding:?} on");
+            }
+        }
+    }
+
+    #[test]
+    fn an_empty_encodings_list_is_an_unset_one() {
+        // `COMPRESSION_ENCODINGS=${VAR:-}` must not silently turn compression
+        // off — "off" is how that is asked for.
+        assert_eq!(resolve(Some(""), None).zstd, 6);
+        assert_eq!(resolve(Some("  "), None).zstd, 6);
+    }
+
+    #[test]
+    fn an_unknown_coding_is_a_startup_error() {
+        // A typo that quietly withdrew a coding would show up as a bandwidth
+        // bill, months later.
+        let err = resolve_compression(Some("zstd, deflate"), None, shipped_levels(), false)
+            .expect_err("deflate is not a coding this server produces");
+        assert!(err.to_string().contains("deflate"), "{err}");
+    }
+
+    #[test]
+    fn a_listed_coding_at_level_zero_is_still_not_offered() {
+        let levels = Levels {
+            brotli: 0,
+            ..shipped_levels()
+        };
+        let resolved = resolve_compression(Some("br, zstd"), None, levels, true).expect("valid");
+        assert_eq!(resolved.brotli, 0);
+        assert_eq!(resolved.zstd, 6);
+    }
+
+    #[test]
+    fn the_deprecated_level_variable_keeps_both_of_its_meanings() {
+        // Zero meant "no compression at all" when brotli was the only coding,
+        // and a deployment that set it must not start emitting zstd.
+        let off = resolve(None, Some("0"));
+        for coding in Coding::ALL {
+            assert_eq!(off.level(coding), 0, "{coding:?} survived the off switch");
+        }
+        // Anything else named brotli's quality, and still does.
+        let raised = resolve(None, Some("9"));
+        assert_eq!(raised.brotli, 9);
+        assert_eq!(raised.zstd, 6);
+    }
+
+    #[test]
+    fn an_explicit_brotli_level_wins_over_the_variable_it_replaces() {
+        let levels = Levels {
+            brotli: 11,
+            ..shipped_levels()
+        };
+        let resolved = resolve_compression(None, Some("2"), levels, true).expect("valid");
+        assert_eq!(resolved.brotli, 11);
+    }
+
+    #[test]
+    fn an_out_of_range_legacy_level_is_still_rejected() {
+        let err = resolve_compression(None, Some("12"), shipped_levels(), false)
+            .expect_err("brotli quality stops at 11");
+        assert!(err.to_string().contains("COMPRESSION_LEVEL"), "{err}");
+    }
 
     #[test]
     fn validate_flags_half_configured_tls() {

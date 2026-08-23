@@ -86,6 +86,13 @@ parking_lot = "0.12"
 # Compression
 brotli = "8"
 
+# Zstandard. The coding dynamic responses are compressed with when the client
+# accepts it: over real bodies above ~4 KB it produced fewer bytes than brotli's
+# per-request quality in under half the CPU, and its lead grew rather than
+# shrank on x86-64. Default features off — legacy-format decoding and the
+# dictionary trainer are dead weight in a server that only ever compresses.
+zstd = { version = "0.13", default-features = false }
+
 # HTTP date formatting (RFC 7231)
 httpdate = "1"
 
@@ -174,6 +181,8 @@ bytes = "1"
 # Decodes the gzip responses the compression suite asserts on. Same backend
 # as the main dependency above — a build selects one for the whole crate.
 flate2 = { version = "1", default-features = false, features = ["zlib-rs"] }
+# Decodes the zstd responses the compression suite asserts on.
+zstd = { version = "0.13", default-features = false }
 criterion = { version = "0.5", default-features = false, features = ["async_tokio"] }
 h2 = "0.4"
 http = "1"
