@@ -64,7 +64,7 @@ See the full [Quick Start guide](docs/getting-started/quick-start.md) for more d
 
 ## Why OxPHP?
 
-OxPHP replaces nginx + PHP-FPM with a single container. The server works out of the box — TLS, Brotli compression, rate limiting, Prometheus metrics, health checks, and structured JSON logs are configured via environment variables.
+OxPHP replaces nginx + PHP-FPM with a single container. The server works out of the box — TLS, compression, rate limiting, Prometheus metrics, health checks, and structured JSON logs are configured via environment variables.
 
 | | nginx + PHP-FPM | FrankenPHP | RoadRunner | **OxPHP** |
 |---|---|---|---|---|
@@ -153,7 +153,7 @@ Process-wide concurrent primitives that let PHP workers coordinate mutable state
 ### Performance
 - **LRU file cache** for static files (in-memory ≤1 MB, streaming for larger) — see [Static files](docs/features/static-files.md)
 - **HTTP caching** with ETag, Last-Modified, and 304 Not Modified
-- **Brotli compression** for text responses (256 B – 3 MB range) — see [Compression](docs/features/compression.md)
+- **Compression** for text responses (256 B – 3 MB range) — Brotli, Zstandard and gzip, negotiated per client — see [Compression](docs/features/compression.md)
 - **mimalloc** allocator for lower allocation latency under contention
 - **Configurable HTTP server threads** — multi-threaded by default (CPU/2), tunable via `TOKIO_WORKERS`
 

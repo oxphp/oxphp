@@ -205,9 +205,12 @@ pub async fn maybe_compress(
     // Split response and check body size hint before collecting
     let (parts, body) = response.into_parts();
 
-    // Streaming bodies have no upper size bound: compressing one would mean
-    // buffering the entire stream in memory until it ends, destroying
-    // time-to-first-byte for flush()-style PHP responses. Pass them through.
+    // A body with no upper size bound is passed through. Not because the
+    // codings cannot encode a stream — all three have incremental encoders,
+    // and a flush per chunk is what nginx's gzip filter has always done — but
+    // because this function is one-shot by construction: it takes a whole body
+    // and returns a whole body. Encoding incrementally would mean an encoder
+    // held open per connection for as long as the stream lasts.
     // Buffered bodies (`Full`) always report an exact upper bound.
     let Some(upper) = hyper::body::Body::size_hint(&body).upper() else {
         return Response::from_parts(parts, body);
@@ -616,6 +619,14 @@ mod tests {
         assert!(!is_compressible("font/woff"));
         assert!(!is_compressible("font/woff2"));
         assert!(!is_compressible("application/zip"));
+
+        // An event stream is excluded by type, not only by the shape of its
+        // body: a script that sets the header and never flushes produces a
+        // buffered response that would otherwise qualify. Widening this list
+        // to a `text/*` prefix would start compressing Server-Sent Events,
+        // which browsers accept and intermediaries then hold onto.
+        assert!(!is_compressible("text/event-stream"));
+        assert!(!is_compressible("text/event-stream; charset=utf-8"));
     }
 
     #[test]
