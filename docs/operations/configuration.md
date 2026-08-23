@@ -486,6 +486,6 @@ curl -s http://localhost:9090/config | jq .
 - [TLS](../features/tls.md) — TLS setup and certificate requirements
 - [Rate Limiting](../features/rate-limiting.md) — per-IP rate limiting details
 - [Worker Mode](../features/worker-mode.md) — persistent PHP worker architecture
-- [Compression](../features/compression.md) — Brotli compression details
+- [Compression](../features/compression.md) — codec selection and per-coding levels
 - [Static Files](../features/static-files.md) — caching and file serving
 - [Distributed Tracing & APM](../features/distributed-tracing.md) — OTel export, auto-instrumentation, and PHP tracing SDK

@@ -207,7 +207,7 @@ Each streaming script should call `set_time_limit(0)` at the top so the per-requ
 
 ## Notes
 
-- Brotli compression is automatically skipped for streaming responses. Compression only applies to fully buffered responses.
+- Event streams are never compressed, by either of two independent rules: `text/event-stream` is not a compressible media type, and a response whose length is unknown when the headers go out is passed through whatever the client accepts. That holds for every coding OxPHP offers — Brotli, Zstandard and gzip alike — so no configuration can turn compression on for a stream.
 - `oxphp_stream_flush()` returns `false` if `oxphp_finish_request()` was already called on the same request.
 - In worker mode, the worker remains occupied for the full duration of the stream and handles the next request only after the PHP script exits.
 
@@ -230,4 +230,4 @@ A handler blocked inside a single long-running **native** call (a native `sleep(
 - [Worker Mode](worker-mode.md) -- persistent PHP processes for reduced bootstrap overhead
 - [Timeouts](timeouts.md) -- configuring or disabling the request timeout for long-lived connections
 - [PHP Functions](../php/functions.md) -- full reference for `oxphp_stream_flush()` and `oxphp_is_streaming()`
-- [Compression](compression.md) -- Brotli compression behavior and which responses are compressed
+- [Compression](compression.md) -- which responses are compressed, and with which coding

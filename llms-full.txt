@@ -3099,8 +3099,8 @@ Responses are sent without compression when any of the following conditions are 
 - The client accepts none of `br`, `zstd`, and `gzip` in the `Accept-Encoding` header, or accepts them only with a zero weight (`br;q=0, zstd;q=0, gzip;q=0`)
 - The response already has a `Content-Encoding` header (e.g. pre-compressed content)
 - The response body is smaller than 256 bytes or larger than 3 MB
-- The content type is not in the compressible list (e.g. `image/png`, `image/jpeg`, `font/woff2`, `application/zip` — these formats already use internal compression)
-- The response is streamed — its length is unknown when headers are sent (PHP scripts using `oxphp_stream_flush()`, Server-Sent Events). Compressing a stream would require buffering it entirely in memory, destroying time-to-first-byte, so streamed responses always pass through uncompressed
+- The content type is not in the compressible list — `image/png`, `image/jpeg`, `font/woff2` and `application/zip` because those formats already carry their own compression, and `text/event-stream` because an event stream must reach the client event by event
+- The response is streamed — its length is unknown when the headers are sent (PHP scripts using `oxphp_stream_flush()`, Server-Sent Events, and static files above 1 MiB, which are read from disk as they are sent). OxPHP compresses a response in one piece, so a body it does not yet hold in full is passed through. Brotli, Zstandard and gzip can all encode incrementally, so this is a limit of the server rather than of the codings
 
 ## Response Headers
 
@@ -6925,7 +6925,7 @@ Each streaming script should call `set_time_limit(0)` at the top so the per-requ
 
 ## Notes
 
-- Brotli compression is automatically skipped for streaming responses. Compression only applies to fully buffered responses.
+- Event streams are never compressed, by either of two independent rules: `text/event-stream` is not a compressible media type, and a response whose length is unknown when the headers go out is passed through whatever the client accepts. That holds for every coding OxPHP offers — Brotli, Zstandard and gzip alike — so no configuration can turn compression on for a stream.
 - `oxphp_stream_flush()` returns `false` if `oxphp_finish_request()` was already called on the same request.
 - In worker mode, the worker remains occupied for the full duration of the stream and handles the next request only after the PHP script exits.
 
@@ -6948,7 +6948,7 @@ A handler blocked inside a single long-running **native** call (a native `sleep(
 - [Worker Mode](worker-mode.md) -- persistent PHP processes for reduced bootstrap overhead
 - [Timeouts](timeouts.md) -- configuring or disabling the request timeout for long-lived connections
 - [PHP Functions](../php/functions.md) -- full reference for `oxphp_stream_flush()` and `oxphp_is_streaming()`
-- [Compression](compression.md) -- Brotli compression behavior and which responses are compressed
+- [Compression](compression.md) -- which responses are compressed, and with which coding
 
 ---
 
@@ -7120,7 +7120,7 @@ services:
 
 ## See Also
 
-- [Compression](compression.md) — Brotli compression for compressible static file responses
+- [Compression](compression.md) — how compressible static files are compressed and cached per coding
 - [Routing](routing.md) — how URL paths are resolved to files on disk
 - [Configuration Reference](../operations/configuration.md) — full list of environment variables
 
@@ -14525,7 +14525,7 @@ curl -s http://localhost:9090/config | jq .
 - [TLS](../features/tls.md) — TLS setup and certificate requirements
 - [Rate Limiting](../features/rate-limiting.md) — per-IP rate limiting details
 - [Worker Mode](../features/worker-mode.md) — persistent PHP worker architecture
-- [Compression](../features/compression.md) — Brotli compression details
+- [Compression](../features/compression.md) — codec selection and per-coding levels
 - [Static Files](../features/static-files.md) — caching and file serving
 - [Distributed Tracing & APM](../features/distributed-tracing.md) — OTel export, auto-instrumentation, and PHP tracing SDK
 

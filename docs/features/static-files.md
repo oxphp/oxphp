@@ -170,6 +170,6 @@ services:
 
 ## See Also
 
-- [Compression](compression.md) — Brotli compression for compressible static file responses
+- [Compression](compression.md) — how compressible static files are compressed and cached per coding
 - [Routing](routing.md) — how URL paths are resolved to files on disk
 - [Configuration Reference](../operations/configuration.md) — full list of environment variables
