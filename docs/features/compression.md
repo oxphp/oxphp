@@ -30,8 +30,8 @@ flowchart TD
     AE["Accept-Encoding, read once per request"]
     W["Ranked by weight. A coding the server<br/>does not offer scores zero and drops out"]
     Q{"Is a stored copy<br/>being served?"}
-    A["Tie broken br, then zstd, then gzip.<br/>Built once at 11 / 19 / 9"]
-    P["Tie broken zstd, then br, then gzip.<br/>Compressed now at the configured 5 / 6 / 6"]
+    A["Tie broken br, then zstd, then gzip.<br/>Built once at br 11, zstd 19, gzip 9"]
+    P["Tie broken zstd, then br, then gzip.<br/>Compressed now at the configured<br/>zstd 6, br 5, gzip 6"]
     H["Content-Encoding, recomputed Content-Length,<br/>Vary, weakened ETag, no Accept-Ranges"]
     AE --> W
     W --> Q
@@ -67,7 +67,7 @@ A client that accepts none of the three receives the response unencoded. In prac
 
 Because the answer depends on the request header, every response inside the compression window carries `Vary: Accept-Encoding` — compressed or not, static or dynamic. A representation the server would encode for some client varies by that header even when this client is being handed the identity bytes, and a shared cache told otherwise would pass those bytes on to a client that had asked for a coding.
 
-Two things sit outside that rule. A body the server never holds whole carries no `Vary`, because it cannot be compressed under any header and so genuinely does not vary. And a `304` carries neither `Vary` nor `Content-Encoding`: it freshens a representation the client already holds rather than describing a new one.
+Two things sit outside that rule. A dynamic response the server never holds whole — anything streamed as PHP produces it — carries no `Vary`: that path cannot compress under any header, so the response genuinely does not vary. A *static* file large enough to be streamed is not in that group, and does carry the header: the same file is read whole and compressed for a client that negotiated a coding, so the bytes on the wire depend on the request after all. And a `304` carries neither `Vary` nor `Content-Encoding`: it freshens a representation the client already holds rather than describing a new one.
 
 `Vary` is added as its own header line rather than merged into one the application already sent, so a response that set `Vary: Cookie` goes out with two `Vary` lines. That is legal, and OxPHP reads all of them before appending so `Accept-Encoding` is never duplicated — but an intermediary that reads only the first line will miss it.
 
@@ -86,6 +86,8 @@ Because the two preferences above differ, a client that accepts both Brotli and 
 ### Files too large to cache
 
 Between the cache limit and the top of the compression window — 1 MiB to 3 MiB, where framework bundles, source maps and WebAssembly modules live — a file is read whole and compressed **for every request**, whenever the client negotiated a coding and the type is compressible. It is not cached and never gets a stored copy, so this is the most expensive compression the server does per request. Put a CDN in front of assets in that range, or keep them under the cache limit, and the work is done once.
+
+Reading such a file holds it in memory until the response has been written, so only a bounded number of them are read at a time. A request arriving over that limit is served the file streamed and unencoded rather than waiting for room — the same response it would have received before this path existed. Under sustained load on a large asset, some clients therefore get it compressed and some do not; both answers are correct for the URL, and `Vary: Accept-Encoding` is on them either way.
 
 Outside that case a file above 1 MiB is streamed from disk untouched: an incompressible type, a client that accepts no coding, or anything above 3 MiB.
 

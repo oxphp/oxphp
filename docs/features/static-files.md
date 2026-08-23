@@ -45,7 +45,7 @@ OxPHP uses an in-memory cache to reduce disk I/O for frequently requested files:
 
 - Files **up to 1 MiB** (1,048,576 bytes) are read into memory and cached. The total cache budget is 64 MiB (67,108,864 bytes). When the budget is exceeded, the least recently used entries are evicted to make room.
 - Files **larger than 1 MiB** are streamed directly from disk instead of being cached. The `Content-Length` header is set from file metadata so the client knows the total size upfront.
-- One exception to the streaming: a compressible file that still fits the [compression](compression.md) window (3 MiB) is read in full for clients that accept a content coding, because a body the server does not hold whole cannot be encoded. It is compressed for that request and, being over the cache limit, compressed again for the next one — put a CDN in front of assets in this range, or keep them under 1 MiB, and the work is done once.
+- One exception to the streaming: a compressible file that still fits the [compression](compression.md) window (3 MiB) is read in full for clients that accept a content coding, because a body the server does not hold whole cannot be encoded. It is compressed for that request and, being over the cache limit, compressed again for the next one — put a CDN in front of assets in this range, or keep them under 1 MiB, and the work is done once. Only a bounded number of such files are held at a time; a request arriving over that limit is streamed the file unencoded rather than made to wait for room.
 
 The file cache is populated on the first request to each file and retained across subsequent requests. By default, cache entries persist until evicted by the LRU policy.
 
