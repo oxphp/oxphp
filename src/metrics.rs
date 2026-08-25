@@ -1114,7 +1114,7 @@ impl Metrics {
 
             let _ = writeln!(
                 out,
-                "# HELP oxphp_worker_memory_bytes Current PHP heap per worker."
+                "# HELP oxphp_worker_memory_bytes PHP heap held by each worker at the end of its last request."
             );
             let _ = writeln!(out, "# TYPE oxphp_worker_memory_bytes gauge");
             let _ = writeln!(

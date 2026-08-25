@@ -372,7 +372,6 @@ extern "C" {
     pub fn oxphp_bridge_get_requests_done() -> u64;
     pub fn oxphp_bridge_increment_requests_done() -> u64;
     pub fn oxphp_bridge_get_rss_bytes() -> u64;
-    pub fn oxphp_bridge_get_memory_usage() -> u64;
     pub fn oxphp_bridge_get_max_memory_bytes() -> u64;
 
     // ─── Worker unhandled-exception capture ─────────────

@@ -77,3 +77,8 @@ input/test_php_input_multipart_empty | POST | -F "field=value" | |
 # matters.
 worker/test_upload_tmp_cleaned_after_request >> ?phase=upload | POST | -F "doc=@$FIXTURES_DIR/small.txt" | |
 worker/test_upload_tmp_cleaned_after_request >> ?phase=check
+
+# Last in the file on purpose: the gauge is written at the end of a request, so
+# a worker only has one to report once it has served something. By here the pool
+# has served the whole suite.
+worker/test_worker_memory_metric_populated
