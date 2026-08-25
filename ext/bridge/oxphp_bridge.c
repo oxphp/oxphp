@@ -1939,7 +1939,6 @@ void oxphp_bridge_set_worker_mode(uint64_t max_memory_mib) {
     ctx.requests_done = 0;
     ctx.exit_reason = 0;
     ctx.exit_scheduled = false;
-    ctx.current_memory_bytes = 0;
 }
 
 bool oxphp_bridge_is_worker_mode(void) {
@@ -2130,10 +2129,6 @@ uint64_t oxphp_bridge_get_requests_done(void) {
 
 uint64_t oxphp_bridge_increment_requests_done(void) {
     return ++ctx.requests_done;
-}
-
-uint64_t oxphp_bridge_get_memory_usage(void) {
-    return ctx.current_memory_bytes;
 }
 
 /* Per-thread cached fd for /proc/self/statm. -1 = not opened, -2 = unavailable
@@ -4680,11 +4675,11 @@ uint8_t oxphp_bridge_is_profiling_paused(void) {
 }
 
 int64_t oxphp_bridge_get_memory_usage_bytes(void) {
-    /* zend_memory_usage(0) returns the current allocated bytes
-     * across all opcaches for this request. Outside a PHP request
-     * (e.g. between RINIT/RSHUTDOWN) the engine returns 0 by
-     * convention. The MemoryThresholdDecorator uses this for
-     * delta-based threshold detection. */
+    /* Bytes currently allocated on this thread's Zend heap; per-thread
+     * under ZTS. Used by MemoryThresholdDecorator for delta-based
+     * threshold detection, and by the per-worker memory gauge at the end
+     * of each worker-mode request. Not request-scoped: the engine returns
+     * AG(mm_heap)->size with no check for an in-flight request. */
     return (int64_t)zend_memory_usage(0);
 }
 

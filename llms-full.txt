@@ -15127,7 +15127,7 @@ These metrics are only emitted when worker mode is active (`WORKER_MODE_ENABLED=
 
 | Metric | Type | Description |
 |--------|------|-------------|
-| `oxphp_worker_memory_bytes` | gauge | Current PHP heap usage per worker. Label: `worker` (slot index, e.g., `"0"`, `"1"`) |
+| `oxphp_worker_memory_bytes` | gauge | PHP heap held by each worker at the end of its last request — the quantity `memory_get_usage()` returns inside a handler, and the one `WORKER_MAX_MEMORY_MIB` is measured against. It is read a little earlier in the loop than that ceiling check, while the finished request's superglobals are still on the heap, so it sits a few KB above the figure that actually trips a recycle: set an alert below the ceiling rather than at it. Written when a request finishes, so a worker that has never served one reads zero. Label: `worker` (slot index, e.g., `"0"`, `"1"` — a recycled worker reuses its predecessor's slot and its last value with it, until the replacement finishes a request of its own) |
 | `oxphp_worker_uptime_seconds` | gauge | Seconds since each worker was spawned. Label: `worker` |
 | `oxphp_worker_requests_count` | gauge | Requests handled by each worker instance. Label: `worker` |
 

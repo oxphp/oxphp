@@ -5404,9 +5404,9 @@ ZEND_METHOD(OxPHP_Server_Worker, requestCount) {
 /* {{{ OxPHP\Server\Worker::memoryUsage(): int */
 ZEND_METHOD(OxPHP_Server_Worker, memoryUsage) {
     ZEND_PARSE_PARAMETERS_NONE();
-    /* Live Zend allocator usage. Bridge's stored value is updated only
-     * post-request — mid-handler we want what the script is using right
-     * now, so call zend_memory_usage() directly. */
+    /* Live Zend allocator usage — the same source the per-worker memory
+     * gauge is sampled from at the end of each request, read here at the
+     * moment the script asks. */
     RETURN_LONG((zend_long)zend_memory_usage(0));
 }
 /* }}} */

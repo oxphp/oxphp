@@ -3055,8 +3055,16 @@ unsafe fn worker_request_teardown() {
 /// Called from worker_send_callback after each request.
 unsafe fn record_worker_request_metrics() {
     // Read memory and requests_done from bridge.
+    // The Zend allocator is per-thread under ZTS, so this is what this worker
+    // thread alone is holding — every request fiber multiplexed on it included,
+    // not just the one ending here. Read at the end of a request rather than
+    // between two: the ending request's superglobals are still on the heap,
+    // being dropped by the fiber finalize only after this callback returns.
+    // Its buffered body is not — that is released just before the send. The
+    // Rust-side teardown this call leads is irrelevant either way; it frees
+    // thread-local Vecs and senders, nothing the Zend allocator counts.
     // requests_done is read BEFORE C-side increment, so add 1.
-    let memory = bindings::oxphp_bridge_get_memory_usage();
+    let memory = bindings::oxphp_bridge_get_memory_usage_bytes().max(0) as u64;
     let requests_done = bindings::oxphp_bridge_get_requests_done() + 1;
 
     // Update per-worker stats

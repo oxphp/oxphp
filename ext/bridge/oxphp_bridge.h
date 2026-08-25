@@ -101,9 +101,6 @@ typedef struct {
     /** Consecutive handler errors (bailout). Resets on success, worker exits at threshold. */
     uint32_t consecutive_errors;
 
-    /** Current PHP heap usage in bytes (updated after each request). */
-    uint64_t current_memory_bytes;
-
     /** Whether this thread is an async worker (not a request worker). */
     int is_async_worker;
 
@@ -1209,9 +1206,6 @@ uint64_t oxphp_bridge_get_requests_done(void);
  *  in scheduler). Thread-local; survives per-request resets. */
 uint64_t oxphp_bridge_increment_requests_done(void);
 
-/** Get the current PHP memory usage (set after each request). */
-uint64_t oxphp_bridge_get_memory_usage(void);
-
 /** Process resident set size (RSS) in bytes.
  *  Linux: parses /proc/self/status VmRSS line (KiB → bytes).
  *  macOS / other: getrusage(RUSAGE_SELF, &ru).ru_maxrss (bytes on Darwin).
@@ -1785,9 +1779,15 @@ void oxphp_bridge_set_profiling_paused(uint8_t paused);
 /* Read the per-thread paused flag. */
 uint8_t oxphp_bridge_is_profiling_paused(void);
 
-/* Read zend_memory_usage(0) — current allocated bytes for this
- * thread's request (used by MemoryThresholdDecorator).
- * Returns 0 if not inside a PHP request. */
+/* Read zend_memory_usage(0) — bytes currently allocated on this
+ * thread's Zend heap. Per-thread under ZTS, so it describes one
+ * worker rather than the process. Two callers: MemoryThresholdDecorator
+ * (delta-based threshold detection) and the per-worker memory gauge,
+ * sampled at the end of each worker-mode request.
+ * Not request-scoped despite the name — zend_memory_usage() returns
+ * AG(mm_heap)->size unconditionally, with no check for whether a
+ * request is in flight, so between requests it reports the floor the
+ * thread is holding rather than zero. */
 int64_t oxphp_bridge_get_memory_usage_bytes(void);
 
 /* ─── Profiler observer filters ─────────────────
