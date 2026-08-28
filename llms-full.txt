@@ -15053,6 +15053,40 @@ Use this histogram to track overall latency, identify slow endpoints, and measur
 | `oxphp_pending_requests` | gauge | PHP requests accepted but not yet answered — waiting for a queue slot, queued, or executing. Only requests routed to PHP: a static file, a 404 or a denied path is answered without the queue and never appears here |
 | `oxphp_dropped_requests_total` | counter | Requests where the PHP worker failed after accepting the request |
 | `oxphp_admission_refused_total` | counter | Requests answered without reaching a worker. Label: `reason` — `wait_timeout` (waited the full `QUEUE_WAIT_TIMEOUT_MS`, give the pool more headroom), `waiting_full` (already `QUEUE_MAX_WAITING` requests waiting, raise that or `MAX_CONNECTIONS`), `waiting_bytes` (the bodies already parked fill `QUEUE_MAX_WAITING_BYTES`, so this request's body had nowhere to sit — raise that, or lower how much a client may upload), `queue_full` (`QUEUE_WAIT_TIMEOUT_MS=0`, waiting is off), `shutting_down` (the drain deadline passed while the request was still waiting for admission), `pool_unavailable` (no worker thread is left to hand the request to — the pool is gone, not busy). Only the first four are overload and answer 529; `shutting_down` answers 503 like the rest of graceful drain, and `pool_unavailable` answers 500. Alert on overload with those four specifically: the metric as a whole also moves on a restart. Excluded from `oxphp_queue_wait_us` |
+| `oxphp_queue_depth` | gauge | Requests sitting in the worker queue right now: admitted, not yet picked up by a worker. Present only for the SAPI executor, which is the only one with a queue |
+| `oxphp_queue_capacity` | gauge | Queue slots in total — `QUEUE_CAPACITY`, the bound `oxphp_queue_depth` is read against |
+| `oxphp_admission_slots_available` | gauge | Admission permits nobody is holding. A request takes one before it enters the queue and gives it back when a worker picks it up, so this is the free capacity a new arrival can claim without waiting. During a graceful drain the gate is closed and admits nothing regardless of what this reads |
+
+### Reading queue depth against admission slots
+
+The two gauges answer different halves of one question and are only meaningful together, and the question is not "is the queue deep" but "is anything moving". `oxphp_queue_depth` says what is waiting; `oxphp_admission_slots_available` says whether anything more can be let in. Read both against `oxphp_busy_workers`.
+
+| slots available | queue depth | reading |
+|---|---|---|
+| `> 0` | `0` | nothing waiting — normal |
+| `> 0` | `> 0` and falling between scrapes | ordinary backlog: the pool is behind but working through it |
+| `> 0` | `> 0` and **not** falling, with `oxphp_busy_workers` at `0` | the pool has stopped taking work off the queue while admission still has room. This is a wedge in its first phase: arrivals are still being admitted, so no refusal counter moves and every other series reads as healthy |
+| `0` | at `oxphp_queue_capacity` | the same wedge once the queue has filled, or an ordinary overload the pool is far behind on. `oxphp_busy_workers` at `0` sustained across scrapes separates them — a single sample can read that way under overload too, because a worker refusing a request whose budget expired at pickup is never marked busy |
+| `0` | at or near `0` | the permits are held outside the queue. For a single scrape that can be requests in flight between admission and dispatch, a window of microseconds; **sustained across scrapes it is permits taken and never given back** — nothing is queued, nothing can be admitted, and the server refuses every PHP request until it is restarted |
+
+The last three rows are the shapes a stalled pool takes, and they are the reason these gauges exist. In each of them every other series reads as healthy — no busy worker, both health probes `200`, static files served normally — while no PHP request completes. `oxphp_pending_requests` is no help either way: it counts requests from the moment they are routed to PHP, so it rises with the stuck queue while clients are still connected and falls back to zero as they time out and give up, without either movement meaning anything about the pool. Only the fourth row is also reachable under ordinary overload, and its own text says how to tell the two apart. The third row is the shape the fault takes first, and the one that had no signal at all before: the queue is nowhere near full, so nothing is refused and nothing is slow, there is simply a growing set of requests that will never be answered.
+
+The server notices it too. Whenever two consecutive scans see work waiting — requests in the queue, or refusals climbing — with at least one worker idle and the pool getting nothing done, it logs
+
+```json
+{"timestamp":"2026-08-28T10:56:59.015691Z","level":"WARN","fields":{"message":"PHP requests are waiting while the pool has idle workers and got nothing done since the last scan","queue_depth":22,"queue_capacity":512,"admission_slots_available":490,"workers_idle":4}}
+```
+
+The fields sit under `fields`, which is where this server's JSON formatter puts them — an alert rule wants `.fields.queue_depth`, not `.queue_depth`.
+
+once on entry and about once a minute for as long as it lasts, and an `INFO PHP pool is reaching workers again` once work starts moving. Three things keep it from crying wolf. Two scans rather than one, because a request occupies the queue for the microseconds between admission and pickup and a single sample of that is not a fault. Progress measured as what the workers finished rather than what clients received, so a storm of client aborts — where the client is gone before any completion can be recorded, while the workers' own count still sees every one of those requests end — reads as the busy pool it is. And nothing at all reported until the pool has finished its first request, so the application bootstrap at startup is not mistaken for a wedge.
+
+That last guard covers the process's first bootstrap only. The counter behind it is pool-wide and monotonic, so once any request has been served it never reads zero again — while a worker recycled later, on the memory ceiling or on `Worker::scheduleExit()`, boots its application again from scratch. The pool counts that worker as present the moment its thread is spawned, and it reads as idle until it takes its first request, so a bootstrap that runs into seconds looks exactly like a wedge. On a pool of one worker there is nothing else that can move the counter meanwhile, and each such recycle under traffic produces one spurious warning followed by its recovery notice; on a larger pool it takes every other worker being inside a request for the whole two-scan window. Treat a warning that clears itself within seconds of a recycle as this, not as a wedge — `oxphp_workers_spawned_total` moving at the same moment is what distinguishes them.
+
+The warning is emitted in worker mode only. That second guard needs a count of what the workers finished, and worker mode is the only pool that keeps one; without it the rule would be left judging progress by completions, which is the misreading it exists to avoid. Nothing is lost: the state is a worker parked with a request it will never run, which cannot arise where a worker blocks on the queue itself. The three gauges are exported in every mode regardless.
+
+Note the queue does not have to be full for this: the fault starts as a queue nobody is draining, where arrivals are still admitted and nothing is refused at all, and only becomes 529s once the queue fills. The warning fires in the first phase, which is why it does not wait for a refusal counter to move.
+
 
 ## Worker Pool Metrics
 

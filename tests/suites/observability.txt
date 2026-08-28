@@ -7,6 +7,12 @@
 # supervisor wrote a non-zero age into oxphp_worker_request_age_seconds.
 observability/test_request_age_metric
 
+# The queue gauges are read off the live admission gate by a probe the
+# executor installs. Unit tests install their own probe, so only a real
+# scrape proves the wiring exists; the test also pins the healthy
+# reading — a serving pool has admission slots free.
+observability/test_queue_gauges
+
 # Cancellation counters are wired through the dispatch side (see
 # `Metrics::observe_cancelled` and `ScriptResponse::cancel_reason`).
 # An end-to-end test would assert

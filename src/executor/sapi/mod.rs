@@ -303,15 +303,34 @@ impl SapiExecutor {
             idle_timeout_seconds,
         );
 
+        let admission = Arc::new(Admission::new(
+            queue_capacity,
+            config.queue_wait_timeout_ms,
+            max_waiting,
+            max_waiting_bytes,
+        ));
+
+        // Publish the queue itself, so `/metrics` and the supervisor can read
+        // where its capacity went rather than infer it. Deliberately a
+        // `Receiver` clone and never a `Sender` one: a sender held here would
+        // outlive `request_tx` and keep the channel open, and the worker
+        // threads' `recv()` would never come back `Disconnected` on shutdown.
+        // A receiver costs nothing of the sort — the executor holds one for
+        // its whole life already.
+        {
+            let admission = Arc::clone(&admission);
+            let queue = request_rx.clone();
+            metrics.set_queue_probe(Box::new(move || crate::metrics::QueueSnapshot {
+                depth: queue.len(),
+                capacity: admission.capacity(),
+                slots_available: admission.slots_available(),
+            }));
+        }
+
         Self {
             request_tx: Some(request_tx),
             request_rx,
-            admission: Arc::new(Admission::new(
-                queue_capacity,
-                config.queue_wait_timeout_ms,
-                max_waiting,
-                max_waiting_bytes,
-            )),
+            admission,
             workers: Arc::new(Mutex::new(managed_workers)),
             mode,
             strategy,
