@@ -3237,6 +3237,18 @@ Expected for a compressible file inside the compression window when the client a
 
 A body that does not compress — a base64 blob, a payload of random identifiers, an already-compressed image wrapped as `image/svg+xml` — can come back from any of the three codings no smaller than it went in. OxPHP compares the two and sends the original whenever compression did not help, so this needs no configuration. It cannot be a small-response problem: 256 bytes is the floor for attempting compression at all.
 
+### Throughput fell when compression was turned on
+
+Compression is not a one-way gain. Which way it goes depends on what the server was short of before it was switched on, and the same setting on the same server can move throughput several times in either direction.
+
+Against a saturated link it is the largest win available: a text response that shrinks eightfold is delivered eightfold faster, and the CPU it spends was idle waiting on the wire.
+
+Against a narrow async runtime it is a cost. A body under the hand-off threshold is compressed on an async worker thread, and the runtime sizes itself at half the machine's threads by default — so that work is taken out of the pool carrying every open connection, while the rest of the machine may have capacity to spare. It does not take much to fill: two runtime threads compressing 1.5 KB JSON bodies are saturated by that work alone. The reading that identifies it: throughput falls while the machine and the PHP worker pool both get *less* busy, because neither of them is what ran out.
+
+**What to check:** whether the runtime is narrower than the machine. `TOKIO_WORKERS` defaults to half the available cores, and raising it lets this work use more of the machine — how much more depends on the machine and on what else is running, so measure rather than assume. Measure the worker pool as you do: its threads are separate from the runtime's, so on a deployment already CPU-bound in PHP, a wider runtime takes cycles from the application rather than finding new ones.
+
+Sending small bodies to the blocking pool instead is not the fix it appears to be. On a two-thread runtime, a 1.5 KB JSON body compressed inline occupies about 7 µs of a runtime thread; handed to the blocking pool and collected back, it occupies 13–19 µs of one — submitting the work, parking and waking are themselves runtime work, and they cost more of it than the compression they were meant to move. Throughput on that runtime falls to between a third and a half, and the wait of everything else on the runtime goes up rather than down. That is what the size thresholds are drawn for.
+
 ### High CPU usage from compression
 
 Compression cost climbs steeply at the top of every coding's range — Brotli 8–11, gzip 8–9, Zstandard 12–19 — and the per-request defaults sit well below that. If you observe high CPU consumption from compression:
