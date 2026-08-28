@@ -159,6 +159,10 @@ pub struct Admission {
     /// `None` = fail fast: a request that finds no free slot is shed
     /// immediately rather than waiting.
     budget: Option<Duration>,
+    /// How many permits `slots` was built with. Kept because the semaphore
+    /// reports how many are free and not how many there are, and the two are
+    /// only readable against each other.
+    capacity: usize,
 }
 
 impl Admission {
@@ -186,7 +190,24 @@ impl Admission {
                 held: AtomicUsize::new(0),
             }),
             budget: (wait_timeout_ms > 0).then(|| Duration::from_millis(wait_timeout_ms)),
+            capacity,
         }
+    }
+
+    /// Queue slots free right now — permits nobody is holding.
+    ///
+    /// Zero here with an empty queue is not backpressure but a permit that was
+    /// taken and never given back: a request holds one from admission until a
+    /// worker picks it up, so the two quantities only mean something read
+    /// together.
+    pub fn slots_available(&self) -> usize {
+        self.slots.available_permits()
+    }
+
+    /// How many slots there are in total — the queue capacity this gate was
+    /// built against.
+    pub fn capacity(&self) -> usize {
+        self.capacity
     }
 
     /// How long a request may spend not executing, or `None` for fail-fast.

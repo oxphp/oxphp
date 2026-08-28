@@ -153,6 +153,33 @@ impl Drop for PendingGuard<'_> {
     }
 }
 
+/// What the queue between admission and the worker pool is holding right now.
+///
+/// Read as one reading, because either number alone is ambiguous. A request
+/// takes an admission permit before it enters the channel and gives it back
+/// only when a worker picks it up, so `capacity - slots_available` is the
+/// permits in circulation and `depth` is how many of them are messages nobody
+/// has taken yet. A pool refusing everything with `slots_available == 0` is
+/// either a queue full of requests no worker is consuming (`depth` at
+/// capacity) or permits held outside the queue (`depth` at zero) — two
+/// different faults that every other series in this file renders identically.
+/// The second reading needs more than one sample to mean anything: a permit is
+/// held for the microseconds between admission and dispatch, so only a zero
+/// that persists across scrapes is a permit that was never given back.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct QueueSnapshot {
+    /// Requests sitting in the worker channel, taken but not yet picked up.
+    pub depth: usize,
+    /// `QUEUE_CAPACITY` — the channel's bound and the permit count.
+    pub capacity: usize,
+    /// Admission permits nobody holds.
+    pub slots_available: usize,
+}
+
+/// Reads [`QueueSnapshot`] off the live executor. Installed once by the
+/// executor that owns the queue; absent for executors that have none.
+type QueueProbe = Box<dyn Fn() -> QueueSnapshot + Send + Sync>;
+
 /// Lock-free atomic metrics counters for the server.
 /// All operations use `Relaxed` ordering — counters are approximate and don't
 /// need happens-before guarantees with other data.
@@ -178,6 +205,10 @@ pub struct Metrics {
     workers_spawned_total: AtomicU64,
     workers_retired_total: AtomicU64,
     worker_metrics: std::sync::OnceLock<Arc<WorkerMetrics>>,
+    /// Live view of the admission queue, installed by the executor that owns
+    /// it. A `OnceLock` for the same reason `worker_metrics` is one: the
+    /// executor is built after the metrics it publishes into.
+    queue_probe: std::sync::OnceLock<QueueProbe>,
 
     // ── New metrics ──
     /// Request duration histogram (all requests, not just worker mode).
@@ -324,6 +355,7 @@ impl Metrics {
             workers_spawned_total: AtomicU64::new(0),
             workers_retired_total: AtomicU64::new(0),
             worker_metrics: std::sync::OnceLock::new(),
+            queue_probe: std::sync::OnceLock::new(),
             request_duration_buckets: std::array::from_fn(|_| AtomicU64::new(0)),
             request_bytes_total: AtomicU64::new(0),
             response_bytes_total: AtomicU64::new(0),
@@ -578,6 +610,64 @@ impl Metrics {
         self.worker_metrics.get()
     }
 
+    /// Publish a live view of the admission queue. Called once, by the
+    /// executor that owns the queue.
+    pub fn set_queue_probe(&self, probe: QueueProbe) {
+        self.queue_probe.set(probe).ok();
+    }
+
+    /// The queue as it stands, or `None` for an executor without one.
+    pub fn queue_snapshot(&self) -> Option<QueueSnapshot> {
+        self.queue_probe.get().map(|probe| probe())
+    }
+
+    /// Requests refused for overload — the four reasons that answer 529.
+    ///
+    /// `shutting_down` and `pool_unavailable` are left out on purpose: both
+    /// move during an ordinary restart, and a stall detector that counted them
+    /// would call every teardown a stall.
+    pub fn admission_refused_overload_total(&self) -> u64 {
+        crate::executor::admission::ShedReason::ALL
+            .iter()
+            .zip(self.admission_refusals.iter())
+            .filter(|(reason, _)| {
+                use crate::executor::admission::ShedReason as R;
+                matches!(
+                    reason,
+                    R::QueueFull | R::WaitTimeout | R::WaitingFull | R::WaitingBytes
+                )
+            })
+            .map(|(_, count)| count.load(Ordering::Relaxed))
+            .sum()
+    }
+
+    /// Cumulative work the pool has got through, or `None` where the pool does
+    /// not count it.
+    ///
+    /// This is what its workers finished, counted on the worker side as each
+    /// request ends. A request whose client hung up mid-flight is still work
+    /// the pool did, and it ends without a completion being recorded, because
+    /// by then there is no connection left to record one against. Judging
+    /// progress by completions would therefore read a storm of client aborts —
+    /// a pool handling thousands of requests a second — as a pool that had
+    /// stopped, and that is precisely the traffic under which a pool really
+    /// does stop.
+    ///
+    /// Finished rather than picked up, deliberately. A count of pickups would
+    /// keep moving while a worker sat in a request it would never end, which
+    /// is the very state the caller is watching for.
+    ///
+    /// Only worker mode publishes such a counter. There is deliberately no
+    /// fallback to completions: it would reinstate exactly the misreading
+    /// above, in the one mode where nothing else could catch it, so a caller
+    /// that needs to know whether the pool is moving is told `None` and must
+    /// say nothing rather than guess.
+    pub fn pool_progress_total(&self) -> Option<u64> {
+        self.worker_metrics
+            .get()
+            .map(|wm| wm.requests_handled_total.load(Ordering::Relaxed))
+    }
+
     pub fn set_async_inflight(&self, inflight: Arc<crate::executor::async_fiber::InFlightCounter>) {
         self.async_inflight.set(inflight).ok();
     }
@@ -712,6 +802,36 @@ impl Metrics {
                 "oxphp_admission_refused_total{{reason=\"{}\"}} {}",
                 reason.as_str(),
                 count.load(Ordering::Relaxed)
+            );
+        }
+
+        // Read off the live queue rather than counted here, and absent
+        // entirely for an executor that has no queue — zeros would read as an
+        // idle queue rather than as none.
+        if let Some(queue) = self.queue_snapshot() {
+            let _ = writeln!(
+                out,
+                "# HELP oxphp_queue_depth Requests sitting in the worker queue right now: admitted, not yet picked up by a worker. Read against oxphp_queue_capacity and oxphp_admission_slots_available."
+            );
+            let _ = writeln!(out, "# TYPE oxphp_queue_depth gauge");
+            let _ = writeln!(out, "oxphp_queue_depth {}", queue.depth);
+
+            let _ = writeln!(
+                out,
+                "# HELP oxphp_queue_capacity Queue slots in total (QUEUE_CAPACITY). The bound oxphp_queue_depth is read against."
+            );
+            let _ = writeln!(out, "# TYPE oxphp_queue_capacity gauge");
+            let _ = writeln!(out, "oxphp_queue_capacity {}", queue.capacity);
+
+            let _ = writeln!(
+                out,
+                "# HELP oxphp_admission_slots_available Admission permits nobody is holding. A request holds one from admission until a worker picks it up, so zero here with oxphp_queue_depth at zero means the permits are held outside the queue: in flight between admission and dispatch, or — if it persists across scrapes — taken and never returned."
+            );
+            let _ = writeln!(out, "# TYPE oxphp_admission_slots_available gauge");
+            let _ = writeln!(
+                out,
+                "oxphp_admission_slots_available {}",
+                queue.slots_available
             );
         }
 
@@ -1471,6 +1591,114 @@ mod tests {
         assert!(out.contains("oxphp_admission_refused_total{reason=\"waiting_full\"} 1"));
         assert!(out.contains("oxphp_admission_refused_total{reason=\"pool_unavailable\"} 1"));
         assert!(out.contains("oxphp_admission_refused_total{reason=\"queue_full\"} 0"));
+    }
+
+    #[test]
+    fn queue_gauges_separate_a_stuck_queue_from_lost_permits() {
+        // A pool that refuses every request while reporting free workers and
+        // no pending requests has lost its admission permits, and there are
+        // two ways to lose them: a queue full of requests nobody is consuming,
+        // or permits taken and never given back. Both leave every other series
+        // in this file reading exactly the same, which is why a live
+        // twenty-minute snapshot of the state could not say which had
+        // happened. These two gauges are the whole difference.
+        let stuck_queue = Metrics::new();
+        stuck_queue.set_queue_probe(Box::new(|| QueueSnapshot {
+            depth: 512,
+            capacity: 512,
+            slots_available: 0,
+        }));
+        let out = stuck_queue.to_prometheus();
+        assert!(out.contains("oxphp_queue_depth 512"), "{out}");
+        assert!(out.contains("oxphp_queue_capacity 512"), "{out}");
+        assert!(out.contains("oxphp_admission_slots_available 0"), "{out}");
+
+        let lost_permits = Metrics::new();
+        lost_permits.set_queue_probe(Box::new(|| QueueSnapshot {
+            depth: 0,
+            capacity: 512,
+            slots_available: 0,
+        }));
+        let out = lost_permits.to_prometheus();
+        assert!(out.contains("oxphp_queue_depth 0"), "{out}");
+        assert!(out.contains("oxphp_admission_slots_available 0"), "{out}");
+    }
+
+    #[test]
+    fn queue_gauges_absent_without_a_queue() {
+        // The stub executor has no queue at all. Rendering zeros for one would
+        // read as an idle queue rather than as no queue, the same way the
+        // per-worker section stays absent outside worker mode.
+        let m = Metrics::new();
+        let out = m.to_prometheus();
+        assert!(!out.contains("oxphp_queue_depth"), "{out}");
+        assert!(!out.contains("oxphp_admission_slots_available"), "{out}");
+    }
+
+    #[test]
+    fn overload_refusals_exclude_teardown_reasons() {
+        // A restart moves `shutting_down`; a dead pool moves
+        // `pool_unavailable`. Neither is overload, and a stall detector fed
+        // from this number must not read a teardown as one.
+        use crate::executor::admission::ShedReason;
+        // One increment each and a sum of four would be satisfied by any
+        // filter that kept four of the six reasons — including one that
+        // counted `shutting_down`, which is the mistake this is named after
+        // and which would fire the stall warning on every restart. A distinct
+        // power of two per reason makes the total name which slots were
+        // counted rather than merely how many.
+        let m = Metrics::new();
+        for (reason, times) in [
+            (ShedReason::QueueFull, 1),
+            (ShedReason::WaitTimeout, 2),
+            (ShedReason::WaitingFull, 4),
+            (ShedReason::WaitingBytes, 8),
+            (ShedReason::ShuttingDown, 16),
+            (ShedReason::PoolUnavailable, 32),
+        ] {
+            for _ in 0..times {
+                m.request_admission_refused(reason);
+            }
+        }
+        assert_eq!(m.admission_refused_overload_total(), 1 + 2 + 4 + 8);
+    }
+
+    #[test]
+    fn a_refusal_is_not_a_completion() {
+        // The queue-wait histogram counts only requests that reached a worker
+        // and came back; the metrics reference states as much. Nothing else
+        // asserts it now that the progress signal has stopped reading this
+        // counter, and a refusal leaking into it would make an overloaded
+        // server look like a busy one in the one series that says how long
+        // requests actually waited.
+        let m = Metrics::new();
+        m.request_admission_refused(crate::executor::admission::ShedReason::WaitTimeout);
+        assert_eq!(m.queue_wait_count.load(Ordering::Relaxed), 0);
+        m.record_queue_wait(120);
+        assert_eq!(m.queue_wait_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn pool_progress_is_what_the_workers_took_off_the_queue_or_nothing() {
+        // A client that hangs up mid-request is answered with no connection
+        // left to record a completion against, while the worker's own count
+        // still sees the work. Under a storm of aborts that is the difference
+        // between a pool reading as busy and a pool reading as stopped — so
+        // where that count does not exist the answer has to be "unknown", not
+        // a completion count standing in for it.
+        let m = Metrics::new();
+        m.record_queue_wait(50);
+        assert_eq!(
+            m.pool_progress_total(),
+            None,
+            "completions are the misreading, not a fallback"
+        );
+
+        let wm = Arc::new(WorkerMetrics::new(4));
+        wm.requests_handled_total
+            .fetch_add(5_000, Ordering::Relaxed);
+        m.set_worker_metrics(wm);
+        assert_eq!(m.pool_progress_total(), Some(5_000));
     }
 
     #[test]
