@@ -1,0 +1,55 @@
+# Worker mode with a function observer installed.
+#
+# The profiler registers a Zend observer that returns a begin/end pair for
+# every user function, which is what puts a request's frames on the engine's
+# observed-frame chain. Nothing else in the test matrix combines that chain
+# with worker mode, and the chain is per-worker state that worker mode never
+# tears down between requests — so this profile is where a request that ends
+# in a fatal, and the worker teardown that walks the chain afterwards, meet.
+#
+# One worker, so the retire test takes the whole pool with it: a worker that
+# cannot finish tearing down leaves nobody to answer the request after it.
+#
+# Standalone usage:
+#   docker compose -f compose.yml -f compose.fiberobs.yml up
+services:
+  oxphp-fiberobs:
+    build:
+      context: ..
+      dockerfile: docker/dev/Dockerfile
+      args:
+        CARGO_FEATURES: "plugin-apm,plugin-async,plugin-profiler"
+    ports:
+      - "80"
+    networks: [test-net]
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    environment:
+      LOG_LEVEL: error
+      INTERNAL_ADDR: 0.0.0.0:9090
+      WORKER_FILE: /var/www/html/worker/worker_entry.php
+      PHP_WORKERS: "1"
+      # The pool notices a retired worker on the health monitor's next 500 ms
+      # tick and only then spawns the replacement, which still has to boot the
+      # entry file. With one worker there is nobody serving in the meantime, so
+      # the request that follows a retire has to be allowed to wait for it: the
+      # 1 s default refuses it, and a queue refusal in that spot reads exactly
+      # like the wedge this profile is here to catch.
+      QUEUE_WAIT_TIMEOUT_MS: "10000"
+      # Read once at MINIT: it decides whether the observer is registered at
+      # all, and the observer is the whole point of the profile. No profile is
+      # ever started here — the frames go on the chain either way.
+      PROFILER_ENABLED: "true"
+      PROFILER_AUTH_TOKEN: "test-token"
+    volumes:
+      - ../www:/var/www/html
+      - ./php:/var/www/html/public/tests
+      - ./fixtures/worker:/var/www/html/worker
+networks:
+  test-net:
+    driver: bridge

@@ -26,6 +26,7 @@
 #include "Zend/zend_closures.h"   /* ZEND_CLOSURE_OBJECT: a frame a fatal abandons can hold one */
 #include "Zend/zend_generators.h" /* zend_generator: a frame a fatal abandons can be one */
 #include "Zend/zend_gc.h"         /* gc_protect: a bailout raises the collector's guard too */
+#include "Zend/zend_observer.h"   /* fcall_end_all: a bailout leaves observed calls open */
 #include "Zend/zend_modules.h"    /* module_registry: ext/filter's own RSHUTDOWN resets its input storage */
 #include "main/php_main.h"
 #include "main/php_output.h"
@@ -429,6 +430,63 @@ static inline void oxphp_vm_stack_rewind(const oxphp_vm_stack_mark *mark) {
  * logged: without a line here a worker retired for this reads, everywhere it
  * can be read, as an application that asked to be recycled. */
 static void oxphp_recover_from_bailout(const oxphp_vm_stack_mark *mark) {
+    /* Close the observer handlers the fatal left open, before anything below
+     * touches the frames they were opened on.
+     *
+     * An observed call is put on a chain the engine keeps per fiber, and taken
+     * off it by the return that runs its end handler. A bailout returns from
+     * nothing, so every frame it abandons stays on that chain — which is why a
+     * request shutdown closes them all as its first step. A worker does not run
+     * one between requests, and the rewind below puts the VM stack back exactly
+     * where this request started. A request that returns from what it calls
+     * leaves that chain as it found it, but the next bailout does not: it
+     * abandons frames at the same addresses, so the frame it leaves at the
+     * bottom takes the stale head as the frame before it — and the stale head
+     * is an address the frame above it has just been written over. The chain
+     * then has no end. Nothing reads it while it is merely stale; the loop is
+     * found later, by the walk the engine runs on the switch away from a fiber
+     * that has died, and that walk does not come back. Meanwhile the frames it
+     * names are freed just below, so even a chain that does end names functions
+     * that no longer exist.
+     *
+     * Every open handler, not only the ones above the mark: taking a single
+     * frame off the chain is the engine's own arithmetic over the frame layout,
+     * and it does not export it. The frames below the mark are the worker's
+     * own, and get their end here rather than when the worker finally returns
+     * from them.
+     *
+     * Guarded because an end handler reaches ordinary application code: a
+     * decorator's is a call to the attribute class's after(). A fatal raised in
+     * there arrives at a point where nothing has been put back yet — the frames
+     * are still held, the stack is still where the fatal left it, both flags are
+     * still up — and the bailout target it would take is the caller's, past
+     * every one of those. The recovery would be skipped entirely, which for the
+     * callers that run this to keep a worker serving is the whole failure they
+     * exist to prevent. Caught here instead, and the rest of the recovery runs.
+     * The chain is safe to abandon mid-walk: the engine empties the head before
+     * walking, so what a fatal drops is the ends still owed, not the loop.
+     *
+     * An exception the walk leaves standing is dropped for the same reason —
+     * this returns a worker to serving, and the engine refuses every call made
+     * while one is pending, so carrying it out of here would silently empty the
+     * rest of the request's teardown. Only one the walk itself raised: an
+     * exception already standing on the way in belongs to the caller, which
+     * reads it after this returns, and a pending one makes the engine skip the
+     * userland halves of the walk anyway. Through zend_clear_exception() for the
+     * reason the fiber loop's own discard gives: releasing the object the slot
+     * still names is a fatal error in the engine, for an exception class that
+     * declares __destruct.
+     * SYNC: php-src/main/main.c php_request_shutdown() step 0 */
+    if (ZEND_OBSERVER_ENABLED) {
+        zend_object *ex_on_entry = EG(exception);
+        zend_try {
+            zend_observer_fcall_end_all();
+        } zend_end_try();
+        if (EG(exception) && EG(exception) != ex_on_entry) {
+            zend_clear_exception();
+        }
+    }
+
     oxphp_release_abandoned_frames(mark);
     oxphp_vm_stack_rewind(mark);
     CG(unclean_shutdown) = 0;

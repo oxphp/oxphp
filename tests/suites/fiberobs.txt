@@ -1,0 +1,9 @@
+# profile: fiberobs
+# description: worker mode with an observer installed — a fatal must not outlive the request that took it
+
+fiberobs/test_fatal_under_observer | GET | | 500 |
+fiberobs/test_worker_serves_after_fatal
+fiberobs/test_fatal_under_observer_again | GET | | 500 |
+fiberobs/test_worker_serves_after_fatal
+fiberobs/test_worker_retires
+fiberobs/test_pool_serves_after_retire
