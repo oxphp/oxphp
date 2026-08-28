@@ -3691,6 +3691,16 @@ int oxphp_scheduler_tick(oxphp_fiber_scheduler *sched) {
             sched, sched->shared_fci, sched->shared_fcc);
         if (!fiber) break;
 
+        /* Say what the worker is carrying before running the handler, the way
+         * the fast path does. The serve loop publishes the census once per
+         * turn, and a turn spans this whole tick — so between here and the
+         * loop's next reading stands the handler below, for as long as it
+         * takes. A scrape landing in that window would otherwise read the
+         * count from before this request was admitted, and where the loop
+         * entered the tick only to poll deferred drains that is a nought
+         * reported by a worker executing a request. */
+        oxphp_bridge_report_request_fibers(sched->fiber_count);
+
         /* Fresh or recycled, a new request is always a start, never a resume. */
         oxphp_scheduler_start_fiber(sched, fiber);
 

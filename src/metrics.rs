@@ -13,6 +13,16 @@ pub struct WorkerStats {
     pub requests_done: AtomicU64,
     /// Unix epoch milliseconds when the worker thread was spawned.
     pub spawn_time_ms: AtomicU64,
+    /// Request fibers the worker's scheduler is currently carrying, published
+    /// by the worker itself from its serve loop: once per turn, and again for
+    /// each request the loop admits before it enters that request's handler.
+    ///
+    /// Written from the loop rather than from the end of a request on purpose:
+    /// a worker that has stopped finishing requests is precisely the state this
+    /// number exists to describe, and a value refreshed at completion would
+    /// stand frozen at its last healthy reading exactly then. The loop keeps
+    /// turning either way, so the figure keeps moving either way.
+    pub fibers_active: AtomicU64,
     pub active: AtomicBool,
 }
 
@@ -28,6 +38,7 @@ impl WorkerStats {
             memory_bytes: AtomicU64::new(0),
             requests_done: AtomicU64::new(0),
             spawn_time_ms: AtomicU64::new(0),
+            fibers_active: AtomicU64::new(0),
             active: AtomicBool::new(false),
         }
     }
@@ -1247,6 +1258,11 @@ impl Metrics {
                 "# HELP oxphp_worker_requests_count Requests handled by this worker instance."
             );
             let _ = writeln!(out, "# TYPE oxphp_worker_requests_count gauge");
+            let _ = writeln!(
+                out,
+                "# HELP oxphp_worker_request_fibers_active Request fibers each worker is currently carrying."
+            );
+            let _ = writeln!(out, "# TYPE oxphp_worker_request_fibers_active gauge");
 
             for (i, slot) in wm.slots.iter().enumerate() {
                 if !slot.active.load(Ordering::Relaxed) {
@@ -1255,6 +1271,7 @@ impl Metrics {
                 let mem = slot.memory_bytes.load(Ordering::Relaxed);
                 let reqs = slot.requests_done.load(Ordering::Relaxed);
                 let spawn = slot.spawn_time_ms.load(Ordering::Relaxed);
+                let fibers = slot.fibers_active.load(Ordering::Relaxed);
                 let uptime_s = now_ms.saturating_sub(spawn) / 1000;
 
                 let _ = writeln!(out, "oxphp_worker_memory_bytes{{worker=\"{i}\"}} {mem}");
@@ -1263,6 +1280,10 @@ impl Metrics {
                     "oxphp_worker_uptime_seconds{{worker=\"{i}\"}} {uptime_s}"
                 );
                 let _ = writeln!(out, "oxphp_worker_requests_count{{worker=\"{i}\"}} {reqs}");
+                let _ = writeln!(
+                    out,
+                    "oxphp_worker_request_fibers_active{{worker=\"{i}\"}} {fibers}"
+                );
             }
 
             // Histogram
@@ -1874,6 +1895,54 @@ mod tests {
         assert!(output.contains("oxphp_worker_request_duration_us_bucket{le=\"+Inf\"} 2"));
         assert!(output.contains("oxphp_worker_request_duration_us_sum 3150"));
         assert!(output.contains("oxphp_worker_request_duration_us_count 2"));
+    }
+
+    #[test]
+    fn worker_request_fibers_are_rendered_per_worker() {
+        // The census of request fibers a worker is carrying is the one number
+        // that says whether it is idle, busy, or jammed against the scheduler's
+        // per-worker fiber ceiling. Three workers, three different answers —
+        // a render that reported a fixed number, or one worker's number for
+        // all of them, would satisfy at most one of these three lines.
+        let m = Metrics::new();
+        let wm = Arc::new(WorkerMetrics::new(3));
+
+        for slot in wm.slots.iter() {
+            slot.active.store(true, Ordering::Relaxed);
+        }
+        wm.slots[0].fibers_active.store(0, Ordering::Relaxed);
+        wm.slots[1].fibers_active.store(7, Ordering::Relaxed);
+        wm.slots[2].fibers_active.store(256, Ordering::Relaxed);
+
+        m.set_worker_metrics(wm);
+        let output = m.to_prometheus();
+
+        assert!(
+            output.contains("oxphp_worker_request_fibers_active{worker=\"0\"} 0"),
+            "{output}"
+        );
+        assert!(
+            output.contains("oxphp_worker_request_fibers_active{worker=\"1\"} 7"),
+            "{output}"
+        );
+        assert!(
+            output.contains("oxphp_worker_request_fibers_active{worker=\"2\"} 256"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn worker_request_fibers_absent_outside_worker_mode() {
+        // Request fibers exist only in worker mode. Rendering a zero for a
+        // server that has no fiber scheduler would read as an idle scheduler
+        // rather than as no scheduler, the same way the rest of the per-worker
+        // section stays absent.
+        let m = Metrics::new();
+        let output = m.to_prometheus();
+        assert!(
+            !output.contains("oxphp_worker_request_fibers_active"),
+            "{output}"
+        );
     }
 
     #[test]

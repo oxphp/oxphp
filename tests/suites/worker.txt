@@ -82,3 +82,4 @@ worker/test_upload_tmp_cleaned_after_request >> ?phase=check
 # a worker only has one to report once it has served something. By here the pool
 # has served the whole suite.
 worker/test_worker_memory_metric_populated
+worker/test_worker_fiber_census_populated

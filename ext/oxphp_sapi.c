@@ -4117,6 +4117,14 @@ static void oxphp_serve_loop(zend_fcall_info *fci, zend_fcall_info_cache *fcc)
     #define WORKER_MAX_CONSECUTIVE_ERRORS 3
 
     while (1) {
+        /* Publish the fiber census from the loop, which keeps turning whatever
+         * happens to the requests, rather than from the end of a request, which
+         * is the event a jammed worker stops producing. Both branches below are
+         * reached through here, so the blocking branch — which by its own
+         * condition carries no fibers — publishes the zero that says this worker
+         * is idle instead of leaving its last event-loop reading standing. */
+        oxphp_bridge_report_request_fibers(sched.fiber_count);
+
         if (sched.fiber_count == 0 && !oxphp_bridge_has_deferred_drains()) {
             /* ── No active fibers and no deferred promise drains: block-wait
              * for the next request. When deferred drains remain, fall through
@@ -4142,6 +4150,13 @@ static void oxphp_serve_loop(zend_fcall_info *fci, zend_fcall_info_cache *fcc)
             /* Create or reuse a fiber for the request */
             oxphp_request_fiber *fiber = oxphp_scheduler_create_fiber(&sched, fci, fcc);
             if (!fiber) break;
+
+            /* The loop is about to disappear into the handler for as long as
+             * this request takes, and it is the only thing that publishes the
+             * census. Say what is being carried before going in, or a scrape
+             * taken during a slow request on an otherwise idle worker reads the
+             * zero this branch was entered with. */
+            oxphp_bridge_report_request_fibers(sched.fiber_count);
 
             /* Fresh or recycled, a new request is always a start, never a resume. */
             oxphp_scheduler_start_fiber(&sched, fiber);
