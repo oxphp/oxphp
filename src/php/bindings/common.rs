@@ -208,6 +208,12 @@ extern "C" {
     // PHP function call.
     pub fn oxphp_bridge_set_tick_ptr(ptr: *const std::sync::atomic::AtomicU64);
 
+    // Request-fiber census pointer, published once per worker at thread boot.
+    // The worker's serve loop stores its scheduler's fiber count through this
+    // pointer on every turn; see the bridge header for why the loop and not
+    // request completion is the place that writes it.
+    pub fn oxphp_bridge_set_request_fibers_ptr(ptr: *const std::sync::atomic::AtomicU64);
+
     // ─── Profiler observer ──────────────
     // Defined in ext/bridge/oxphp_bridge.c. Safe Rust wrappers
     // live in src/profiling/flush.rs.

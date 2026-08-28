@@ -103,6 +103,15 @@ fn worker_mode_thread(
     }
     sapi::set_worker_last_active(last_active);
     sapi::set_worker_stats(Arc::clone(&stats));
+    // Hand the worker's serve loop the cell it publishes its request-fiber
+    // count into. The slot is owned by `WorkerMetrics`, which outlives every
+    // worker thread, so the address stays valid for as long as the loop that
+    // writes through it.
+    unsafe {
+        bindings::oxphp_bridge_set_request_fibers_ptr(
+            &stats.fibers_active as *const std::sync::atomic::AtomicU64,
+        );
+    }
     sapi::set_worker_metrics(Arc::clone(&worker_metrics));
     sapi::set_server_metrics(server_metrics);
 
@@ -112,6 +121,11 @@ fn worker_mode_thread(
         .unwrap_or_default()
         .as_millis() as u64;
     stats.spawn_time_ms.store(spawn_ms, Ordering::Relaxed);
+    // A replacement worker inherits its predecessor's slot. Clear the census
+    // before the slot goes visible again, so the bootstrap script — which runs
+    // before the serve loop turns for the first time — is not reported as
+    // carrying the fibers of the worker that died.
+    stats.fibers_active.store(0, Ordering::Relaxed);
     stats.active.store(true, Ordering::Relaxed);
 
     tracing::info!(worker = %thread_name, file = %config.entry_file.display(), "Worker mode thread started");

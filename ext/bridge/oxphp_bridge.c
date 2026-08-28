@@ -2089,6 +2089,12 @@ void oxphp_bridge_set_tick_ptr(_Atomic(uint64_t)* ptr) {
     g_tick_ptr = ptr;
 }
 
+_Thread_local _Atomic(uint64_t)* g_request_fibers_ptr = NULL;
+
+void oxphp_bridge_set_request_fibers_ptr(_Atomic(uint64_t)* ptr) {
+    g_request_fibers_ptr = ptr;
+}
+
 
 void oxphp_bridge_set_vm_interrupt_addr(void* addr) {
     ctx.vm_interrupt_addr = addr;

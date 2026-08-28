@@ -1180,6 +1180,33 @@ static inline void oxphp_bridge_tick(void) {
     }
 }
 
+/* ── Request-fiber census ──
+ *
+ * How many request fibers the worker-mode scheduler is carrying right now.
+ * The scheduler is a stack local of the serve loop and its count is thread
+ * state, so a scraper running on another thread cannot read it: the worker
+ * pushes the figure out instead, through a pointer into the per-worker stats
+ * slot handed over at thread boot.
+ *
+ * Published from the serve loop — once per turn, and again for each request the
+ * loop admits before it enters that request's handler, since a turn spans the
+ * whole event-loop tick and the tick runs the requests it admits. Not at the end
+ * of a request: a worker that has stopped completing requests is exactly the
+ * state this number exists to describe, and a figure written at completion would
+ * stand frozen at its last healthy reading precisely then. Cost is one relaxed
+ * store per turn and one per admitted request.
+ * The caller keeps the address valid; the slot outlives the worker thread. */
+extern _Thread_local _Atomic(uint64_t)* g_request_fibers_ptr;
+
+void oxphp_bridge_set_request_fibers_ptr(_Atomic(uint64_t)* ptr);
+
+static inline void oxphp_bridge_report_request_fibers(uint32_t count) {
+    _Atomic(uint64_t)* p = g_request_fibers_ptr;
+    if (p) {
+        atomic_store_explicit(p, (uint64_t)count, memory_order_relaxed);
+    }
+}
+
 
 /** Execute PHP script with zend_try protection. Returns 1 on success, 0 on bailout. */
 int oxphp_execute_script_safe(void *file_handle);
