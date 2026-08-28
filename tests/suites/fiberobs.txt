@@ -7,3 +7,28 @@ fiberobs/test_fatal_under_observer_again | GET | | 500 |
 fiberobs/test_worker_serves_after_fatal
 fiberobs/test_worker_retires
 fiberobs/test_pool_serves_after_retire
+
+# A fatal the recovery itself runs into. The request abandons a frame holding a
+# stream handle with a userland filter on it; giving that handle back is what
+# calls the filter's onclose(), and the fatal raised there is raised inside the
+# recovery — past the point where the bailout target belongs to the caller's
+# caller again. The request after it says whether the loop that serves requests
+# is still there and whether the recovery finished rather than merely survived.
+fiberobs/test_fatal_in_filter_close | GET | | 500 |
+fiberobs/test_worker_serves_after_filter_close_fatal
+
+# The same bomb again, because the first one is not where its whole cost shows.
+# Userland the recovery reaches is observed like any other, so the frame it
+# fatals in stays on the observer chain — and that chain outlives the request
+# while the frame does not. The walk that reads it is the one at the head of the
+# next recovery, which is what this second bomb is for.
+fiberobs/test_fatal_in_filter_close | GET | | 500 |
+fiberobs/test_worker_serves_after_filter_close_fatal
+
+# The other way that userland ends: by throwing. It reaches the same fatal by a
+# longer road — the throw is reported as uncaught, the report ends by releasing
+# the exception, and releasing it runs a __destruct the walk's own flag does not
+# cover, because the object was built after the request fataled. Same guard,
+# same cost without it, and the worker answers the request after.
+fiberobs/test_throw_in_filter_close | GET | | 500 |
+fiberobs/test_worker_serves_after_filter_close_fatal
