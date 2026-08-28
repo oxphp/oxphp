@@ -349,8 +349,8 @@ impl Xoshiro256 {
         let mut seed = [0u8; 32];
         let _ = getrandom::fill(&mut seed);
         let mut s = [0u64; 4];
-        for (i, chunk) in seed.chunks_exact(8).enumerate() {
-            s[i] = u64::from_le_bytes(chunk.try_into().unwrap());
+        for (i, chunk) in seed.as_chunks::<8>().0.iter().enumerate() {
+            s[i] = u64::from_le_bytes(*chunk);
         }
         // xoshiro requires non-zero state.
         if s == [0, 0, 0, 0] {
