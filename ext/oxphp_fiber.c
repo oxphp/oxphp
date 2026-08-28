@@ -478,6 +478,16 @@ static void oxphp_recover_from_bailout(const oxphp_vm_stack_mark *mark) {
      * declares __destruct.
      * SYNC: php-src/main/main.c php_request_shutdown() step 0 */
     if (ZEND_OBSERVER_ENABLED) {
+        /* The frame the request fataled on, held across the walk. The walk sets
+         * EG(current_execute_data) to each observed frame in turn, and a fatal
+         * raised by an end handler is recorded by the error callback like any
+         * other — so it would leave behind the frame the walk had reached
+         * instead of the one the request bailed out of. The two are not
+         * interchangeable: the walk's frame lies further down the chain than the
+         * frames it had already passed, and the release below, following that
+         * chain, would never reach them. Nothing in the walk reads this, so it
+         * simply goes back afterwards. */
+        zend_execute_data *bailout_frame = oxphp_bailout_frame;
         zend_object *ex_on_entry = EG(exception);
         zend_try {
             zend_observer_fcall_end_all();
@@ -485,9 +495,113 @@ static void oxphp_recover_from_bailout(const oxphp_vm_stack_mark *mark) {
         if (EG(exception) && EG(exception) != ex_on_entry) {
             zend_clear_exception();
         }
+        oxphp_bailout_frame = bailout_frame;
     }
 
-    oxphp_release_abandoned_frames(mark);
+    /* Guarded for the same reason the walk above is, and it is the same code it
+     * reaches: giving a frame back gives back what its variables held, and a
+     * stream handle is not a leaf — closing one disposes its filter chains, and
+     * disposing a userland filter calls the filter object's onclose(). A fatal
+     * raised in there is raised inside the recovery, at a point where zend_catch
+     * has already handed the bailout target back to the caller's caller, so
+     * unguarded it jumps over everything below — the rewind, both flags — and
+     * out of the loop that serves requests, which for a worker carrying other
+     * requests is the whole failure the callers of this run it to prevent.
+     *
+     * Deliberately not a destructor, which is the shape this would be written
+     * in if it worked: the engine flags every live object as already destructed
+     * on its way into a fatal (zend_objects_store_mark_destructed, just before
+     * the bailout), so nothing given back here can run a __destruct. A filter's
+     * onclose() is an ordinary method call made by the filter's own dtor, which
+     * that flag does not cover.
+     *
+     * The interrupted walk is not resumed. Its cursor is a local that the
+     * longjmp took with it, and the frame it was in the middle of has had some
+     * of its variables given back and not others — zend_free_compiled_variables
+     * leaves no mark behind it, so a second pass over that frame would give the
+     * same values up twice. What is left unreleased is the remainder of one
+     * request's frames, held for the life of the worker; the worker itself, and
+     * every request multiplexed on it, is what the alternative costs. */
+    {
+        zend_object *ex_on_entry = EG(exception);
+        zend_try {
+            oxphp_release_abandoned_frames(mark);
+        } zend_end_try();
+        if (EG(exception) && EG(exception) != ex_on_entry) {
+            /* Under a guard of its own, because dropping one runs a
+             * destructor. The flag that keeps the walk above from running any is
+             * put on the objects that existed when the fatal was raised, and an
+             * exception built afterwards is not one of them — so the engine
+             * calls its __destruct, and that would fatal from a point where the
+             * guard above has already been unwound.
+             *
+             * Defensive rather than a path that has been measured: what userland
+             * throws inside the walk does not arrive here. The calls the walk
+             * makes run with no current frame beneath them, so the engine hands
+             * such a throw to its uncaught-exception reporting, which clears the
+             * slot and releases the object there — inside the guard above, which
+             * is where a destructor of its own then fatals. What can still
+             * arrive is an Error the engine raised in C and returned with, and
+             * those carry no userland destructor. Kept because it costs one
+             * jmp_buf on a path taken once per fatal, and because what runs on
+             * this step is not this function's to know. */
+            zend_try {
+                zend_clear_exception();
+            } zend_end_try();
+        }
+    }
+
+    if (ZEND_OBSERVER_ENABLED) {
+        /* And close what the recovery's own calls opened. Every call the engine
+         * observes goes on the chain as it is made, and comes off it when it
+         * returns — so the userland this function reaches puts frames on the
+         * chain that a fatal in that same userland then leaves there. They are
+         * frames above the mark, which is memory the rewind below hands back,
+         * and the chain outlives the request that built it — it belongs to the
+         * fiber, and the fiber is handed the next request: a head left naming
+         * one of those frames is read by the next walk, on whatever that request
+         * has since written over it.
+         *
+         * That is the failure the drain at the top of this function exists to
+         * prevent, arriving through the door this function opens rather than
+         * through the request's own frames — and reachable only now that the
+         * recovery is something a worker survives.
+         *
+         * Emptied outright rather than only drained. The drain closes what it
+         * can, and a fatal inside it is no worse than a fatal inside the first
+         * one — the engine takes the head before it walks, so what is dropped
+         * are ends still owed. But the calls the drain makes go on the chain as
+         * it makes them, so a fatal in one of those leaves a fresh head behind,
+         * and looping on that would hand a handler that fatals every time the
+         * power to keep this function from returning. An observer left thinking
+         * a call is still open is a wrong number; a frame still named here is a
+         * pointer into the stack the next request runs on. */
+        zend_object *ex_on_entry = EG(exception);
+        zend_try {
+            zend_observer_fcall_end_all();
+        } zend_end_try();
+        EG(current_observed_frame) = NULL;
+        /* And an exception this walk leaves standing goes the way the first
+         * walk's does, and for the same reason: an end handler's after() is
+         * allowed to throw, and the engine answers every call made while one is
+         * pending by not making it and reporting success. Carried out of here
+         * that reads as a request whose shutdown functions all ran, when not one
+         * of them did. Only one this walk raised, and under a guard, because
+         * dropping an exception runs its destructor. */
+        if (EG(exception) && EG(exception) != ex_on_entry) {
+            zend_try {
+                zend_clear_exception();
+            } zend_end_try();
+        }
+    }
+
+    /* Every fatal above recorded its own frame on the way out, and those frames
+     * are on the stack the rewind below is about to give back. Left standing,
+     * the next recovery in this same request would follow one into frames this
+     * one has already released. The walk clears this itself on the path where it
+     * returns; these are the paths where it does not. */
+    oxphp_bailout_frame = NULL;
+
     oxphp_vm_stack_rewind(mark);
     CG(unclean_shutdown) = 0;
 
