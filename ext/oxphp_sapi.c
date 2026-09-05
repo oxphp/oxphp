@@ -2757,6 +2757,614 @@ static bool oxphp_pdo_attr_call_is_local(zend_execute_data *execute_data, bool s
 }
 #endif
 
+/* ── Persistent PDO connections ──────────────────────────────
+ *
+ * PDO::ATTR_PERSISTENT keeps the driver's connection in a pool that outlives the
+ * request, and reaches that pool in two steps which are safe apart and not
+ * together once fibers share a worker: the constructor looks a pooled connection
+ * up before it connects, and registers what it built afterwards.
+ *
+ * Two constructors overlapping therefore both miss the pool, both connect, and
+ * the second registration replaces the first entry — which frees the pdo_dbh_t
+ * behind it. That closes the connection under whichever fiber is mid-exchange on
+ * it, and leaves the PDO object still holding that handle pointing at freed
+ * memory, since a pooled handle is freed without regard to how many objects
+ * reference it. Overlapping is the normal case rather than a rare one: a handler
+ * beginning `static $pdo ??= new PDO(...)` is reached by every request that
+ * arrives before the first connect completes, and a connect is exactly the kind
+ * of wait that lets those requests run.
+ *
+ * The other step goes wrong differently, and quietly. Before handing a pooled
+ * connection over, PDO pings it — and a ping sent while the fiber holding that
+ * connection is parked on it waiting for its reply is refused, so PDO reads
+ * "dead", drops the pool entry and connects again. That step frees nothing and the
+ * fiber mid-exchange keeps both its connection and its reply; what is lost is the
+ * sharing, since the pool now holds a second connection while the first is still
+ * in use and every constructor arriving mid-exchange adds another. It also feeds the step above: a dropped
+ * entry stays in the pool with its type cleared, which every constructor reads as
+ * a miss, so they all connect and the second of them to register replaces a live
+ * entry.
+ *
+ * Both are answered here. Constructors asking for a persistent connection run one
+ * at a time per worker thread, which is the whole width of a pool since
+ * EG(persistent_list) is per-thread, so the second one finds what the first
+ * registered. And a pooled connection another fiber holds is reported alive
+ * without a ping: sending one would itself be a command landing inside that
+ * fiber's exchange, which is what the claim exists to prevent, and a connection
+ * being used is the plainest evidence there is that it lives.
+ *
+ * That second answer is given only to a constructor that would change nothing on
+ * the handle, because PDO does not stop at handing a pooled connection over — it
+ * writes to it, and on a connection in use those writes are the holder's. The
+ * rule below says what counts as changing nothing and why. A constructor that
+ * would change something is told the connection is dead, which costs it the
+ * sharing and gives it a connection of its own; that is what PDO did with every
+ * such constructor before any of this, and it is safe here because the entry it
+ * drops is only blanked, while the gate above keeps its own registration from
+ * landing on a live one. A connection nobody holds is pinged as before, so one
+ * that really has died is still replaced. */
+#ifdef OXPHP_HAVE_PDO_HEADERS
+
+/* The key persistent constructors serialise on. A thread-local address: claims
+ * are per-thread already, and the address of a static cannot collide with the
+ * stream and connection pointers the rest of the table is keyed by. */
+static __thread char oxphp_pdo_ctor_gate;
+
+/* Whether these constructor options ask for a persistent connection, read the way
+ * PDO reads them: a non-empty non-numeric string names a pool key, anything else
+ * is a boolean. Nothing is converted — a value this cannot read is treated as
+ * persistent, because being wrong that way costs one constructor a wait, while
+ * being wrong the other way costs a connection. */
+static bool oxphp_pdo_opts_persistent(zval *opts)
+{
+    if (opts == NULL) return false;
+    if (Z_TYPE_P(opts) == IS_REFERENCE) opts = Z_REFVAL_P(opts);
+    if (Z_TYPE_P(opts) != IS_ARRAY) return false;
+
+    zval *attr = zend_hash_index_find_deref(Z_ARRVAL_P(opts), PDO_ATTR_PERSISTENT);
+    if (attr == NULL) return false;
+
+    switch (Z_TYPE_P(attr)) {
+        case IS_NULL:
+        case IS_FALSE:
+            return false;
+        case IS_TRUE:
+            return true;
+        case IS_LONG:
+            return Z_LVAL_P(attr) != 0;
+        case IS_DOUBLE:
+            return Z_DVAL_P(attr) != 0.0;
+        case IS_STRING:
+            if (Z_STRLEN_P(attr) == 0) return false;
+            if (!is_numeric_string(Z_STRVAL_P(attr), Z_STRLEN_P(attr), NULL, NULL, 0)) return true;
+            return ZEND_STRTOL(Z_STRVAL_P(attr), NULL, 10) != 0;
+        default:
+            return true;
+    }
+}
+
+/* Wait for the fiber ahead of us to finish its own persistent constructor.
+ *
+ * Its own wait rather than the one the client entry points use: what is waited
+ * for here is not a connection, and that wait's messages name one — a command
+ * that would land in someone's exchange, a client left to answer for itself.
+ * Neither is what a constructor queueing behind a constructor is. The budget and
+ * the poll are the same, because the reason for them is: a wait inside a request
+ * is bounded by that request's own deadline.
+ *
+ * One gate for the thread rather than one per data source. Telling sources apart
+ * would mean reproducing PDO's own pool key, which is the thing this has to agree
+ * with, and while every source answers it would buy back only the microseconds a
+ * constructor spends connecting. It is not free when one does not: a handshake to
+ * an unreachable server holds the gate for as long as its own read allows —
+ * mysqlnd sets its streams to mysqlnd.net_read_timeout, which ships as a day — and
+ * every persistent constructor to a healthy source on this thread then spends its
+ * whole budget here before going ahead unserialised, which is the race this exists
+ * to prevent. The bound below is what keeps that from being a stall without end,
+ * and a per-source gate is what would keep it from happening at all. */
+static oxphp_stream_claim_result oxphp_pdo_ctor_gate_await(oxphp_request_fiber *self)
+{
+    int64_t budget_ns = oxphp_claim_budget_ns();
+    struct timespec started;
+    clock_gettime(CLOCK_MONOTONIC, &started);
+
+    uint64_t step_us = OXPHP_STREAM_CLAIM_POLL_US;
+    for (;;) {
+        int rc = oxphp_fiber_sleep_us(step_us);
+        if (rc == OXPHP_FIBER_UNWIND) {
+            /* Unwinding with an exception already pending — the request is being
+             * torn down, so return to PHP and add nothing of our own. The caller
+             * returns on this the same way it does on a cancellation. */
+            return OXPHP_CLAIM_THREW;
+        }
+        if (rc < 0) {
+            oxphp_throw_exception("OxPHP\\Async\\AsyncException",
+                                  "Async task cancelled", 0);
+            return OXPHP_CLAIM_THREW;
+        }
+        if (rc > 0) {
+            oxphp_request_fiber *owner = oxphp_claim_owner(&oxphp_pdo_ctor_gate);
+            if (owner == NULL || owner == self) return OXPHP_CLAIM_OK;
+
+            struct timespec now;
+            clock_gettime(CLOCK_MONOTONIC, &now);
+            int64_t spent_ns = (int64_t)(now.tv_sec - started.tv_sec) * 1000000000
+                               + (int64_t)(now.tv_nsec - started.tv_nsec);
+            if (spent_ns < budget_ns) {
+                step_us *= 2;
+                if (step_us > OXPHP_STREAM_CLAIM_POLL_MAX_US) {
+                    step_us = OXPHP_STREAM_CLAIM_POLL_MAX_US;
+                }
+                continue;
+            }
+        }
+
+        /* Out of budget, or nothing to suspend into at all — a userland fiber
+         * scheduler owns this context, and blocking the thread would deadlock
+         * against the constructor that needs it. Both leave the constructor
+         * running as it ran before this gate existed, so both say the same
+         * thing. */
+        {
+            static __thread int64_t last_ns = 0;
+            if (oxphp_contended_log_ready(&last_ns)) {
+                php_log_err("oxphp: built a persistent PDO connection without waiting for the "
+                            "fiber that was building one on this worker — it did not finish in "
+                            "time, or this context cannot be suspended cooperatively. Both may "
+                            "end up with a connection of their own, and the one registered "
+                            "second replaces the first in the pool. That frees the first while a "
+                            "PDO object still points at it: the fiber reading on it is ended by a "
+                            "fatal, and the object left holding the freed handle can take the "
+                            "whole worker down when it is destroyed (logged at most once a second "
+                            "on this thread)");
+            }
+        }
+        return OXPHP_CLAIM_REFUSED;
+    }
+}
+
+/* What the persistent constructor now running on this fiber would write onto the
+ * handle it adopts, for the rule below. Read off the options array before the
+ * original handler runs and kept as plain numbers rather than as a pointer into
+ * it: a bailout inside the constructor jumps over the restore, and a stale number
+ * is a wrong answer while a stale pointer would be freed memory.
+ *
+ * Tagged with the fiber it was read for and stamped with the call that read it,
+ * because saving and restoring around the original handler is a stack discipline
+ * over a stretch the fiber can be taken off in — a `uri:` DSN opens a stream
+ * before PDO reaches the pool at all. The tag is what stops the fiber that
+ * resumes from reading another request's options as its own. The stamp is what
+ * stops it from reading its own earlier ones: a constructor finishing inside that
+ * window would otherwise put back the snapshot it found on the way in, which is
+ * whatever ran last rather than what is running now — and one of its own,
+ * restored under a later constructor of the same fiber, passes the tag. So the
+ * slot is given back only while it still holds what this call put there. */
+typedef struct {
+    oxphp_request_fiber *fiber; /* whose constructor this was read for */
+    uint64_t call;              /* which call of theirs read it */
+    bool present;               /* a guarded constructor is running */
+    bool only_stores;           /* every option it visits is stored on the handle, nothing more */
+    zend_long auto_commit;      /* written whether asked for or not */
+    zend_long error_mode;       /* same */
+    bool has_case;
+    zend_long desired_case;
+    bool has_oracle_nulls;
+    zend_long oracle_nulls;
+    bool has_fetch_mode;
+    zend_long fetch_mode;
+} oxphp_pdo_ctor_writes;
+
+static __thread oxphp_pdo_ctor_writes oxphp_pdo_ctor_now = {0};
+static __thread uint64_t oxphp_pdo_ctor_calls = 0;
+
+/* Read one option the way PDO's own writes read it, refusing anything that is not
+ * already an integer or a bool. PDO converts; converting here as well would run
+ * whatever a conversion emits twice, and a value this cannot read is a value this
+ * cannot promise anything about. */
+static bool oxphp_pdo_opt_long(zval *v, zend_long *out)
+{
+    if (v == NULL) return false;
+    ZVAL_DEREF(v);
+    switch (Z_TYPE_P(v)) {
+        case IS_LONG:  *out = Z_LVAL_P(v);  return true;
+        case IS_TRUE:  *out = 1;            return true;
+        case IS_FALSE: *out = 0;            return true;
+        default:       return false;
+    }
+}
+
+static bool oxphp_pdo_opt_long_or(HashTable *opts, unsigned attr, zend_long defval, zend_long *out)
+{
+    zval *v = zend_hash_index_find(opts, attr);
+    if (v == NULL) {
+        *out = defval;
+        return true;
+    }
+    return oxphp_pdo_opt_long(v, out);
+}
+
+/* Read what this constructor would write, so the rule below can be answered
+ * against a handle this one has not seen yet.
+ *
+ * PDO does not stop at handing a pooled connection over. It writes auto_commit
+ * and error_mode onto it from the options — with PDO's own defaults when they are
+ * absent, so an options array naming nothing but the pool key still writes both —
+ * and then runs every integer option through the same attribute setter on the
+ * same handle. On a connection another fiber is using, all of that is that
+ * fiber's, and none of it raises anything.
+ *
+ * Those writes divide in two, and only one half can be answered for. An option
+ * PDO's own switch stores on the handle and returns from — the error mode, the
+ * case folding, the null handling, the default fetch mode — writes a field and
+ * does nothing else, so writing the value the field already holds is genuinely
+ * nothing. Every other option is handed to the driver, which is free to put it on
+ * the wire: PDO::ATTR_AUTOCOMMIT sends SET AUTOCOMMIT, PDO::ATTR_STRINGIFY_FETCHES
+ * reaches mysqlnd's int_and_float_native and is read once per decoded row, and a
+ * driver-private attribute can do anything at all. A command on the wire is the
+ * one thing that must not happen here — it lands inside the holder's exchange,
+ * where a write the claim refuses reads to the client as a server that has gone
+ * away — so an option that reaches the driver is not answerable at any value and
+ * the adoption is refused outright.
+ *
+ * PDO::ATTR_PERSISTENT is in the options of every persistent constructor by
+ * definition, and PDO's switch has no case for it, so it takes the driver path
+ * like any attribute PDO does not know: PDO_DBH_CLEAR_ERR() and then
+ * set_attribute. The driver call is answered by the shadow table below instead of
+ * being forwarded. What is left of it is PDO_DBH_CLEAR_ERR(), which clears the
+ * handle's error code and destroys the statement a failed query() parked on it —
+ * nothing at all on a handle whose error state is clean, which is what the rule
+ * checks, and the holder's to lose on one whose is not. */
+static oxphp_pdo_ctor_writes oxphp_pdo_ctor_reads_opts(zval *opts)
+{
+    oxphp_pdo_ctor_writes w = {0};
+    w.fiber = oxphp_current_fiber;
+    if (opts == NULL) return w;
+    if (Z_TYPE_P(opts) == IS_REFERENCE) opts = Z_REFVAL_P(opts);
+    if (Z_TYPE_P(opts) != IS_ARRAY) return w;
+    HashTable *ht = Z_ARRVAL_P(opts);
+
+    w.present = true;
+    w.only_stores = true;
+    if (!oxphp_pdo_opt_long_or(ht, PDO_ATTR_AUTOCOMMIT, 1, &w.auto_commit) ||
+        !oxphp_pdo_opt_long_or(ht, PDO_ATTR_ERRMODE, PDO_ERRMODE_EXCEPTION, &w.error_mode)) {
+        w.only_stores = false;
+        return w;
+    }
+
+    zend_ulong key;
+    zend_string *str_key;
+    zval *val;
+    ZEND_HASH_FOREACH_KEY_VAL(ht, key, str_key, val) {
+        /* PDO's own loop skips string keys, so they change nothing. */
+        if (str_key != NULL) continue;
+        switch (key) {
+            case PDO_ATTR_PERSISTENT: /* the pool key itself; see above */
+            case PDO_ATTR_ERRMODE:    /* carried in error_mode already */
+                continue;
+            case PDO_ATTR_CASE:
+                w.has_case = oxphp_pdo_opt_long(val, &w.desired_case);
+                if (w.has_case) continue;
+                break;
+            case PDO_ATTR_ORACLE_NULLS:
+                w.has_oracle_nulls = oxphp_pdo_opt_long(val, &w.oracle_nulls);
+                if (w.has_oracle_nulls) continue;
+                break;
+            case PDO_ATTR_DEFAULT_FETCH_MODE:
+                w.has_fetch_mode = oxphp_pdo_opt_long(val, &w.fetch_mode);
+                if (w.has_fetch_mode) continue;
+                break;
+            default:
+                /* PDO_ATTR_STRINGIFY_FETCHES is here on purpose: PDO's switch does
+                 * take it, but it calls the driver afterwards whatever the value.
+                 * So is PDO_ATTR_STATEMENT_CLASS, which on a persistent handle
+                 * raises rather than stores. */
+                break;
+        }
+        w.only_stores = false;
+        break;
+    } ZEND_HASH_FOREACH_END();
+
+    return w;
+}
+
+/* Whether adopting this pooled handle would leave it exactly as it is. */
+static bool oxphp_pdo_adoption_is_neutral(pdo_dbh_t *dbh, const oxphp_pdo_ctor_writes *w)
+{
+    if (!w->only_stores) return false;
+
+    /* The two writes PDO makes whether the options ask for them or not.
+     * auto_commit is a single bit, and PDO stores its long straight into it. */
+    if ((unsigned)(w->auto_commit & 1) != dbh->auto_commit) return false;
+    if (w->error_mode != (zend_long) dbh->error_mode) return false;
+
+    if (w->has_case && w->desired_case != (zend_long) dbh->desired_case) return false;
+    if (w->has_oracle_nulls && w->oracle_nulls != (zend_long) dbh->oracle_nulls) return false;
+    if (w->has_fetch_mode && w->fetch_mode != (zend_long) dbh->default_fetch_type) return false;
+
+    /* Clean error state, so the trip PDO::ATTR_PERSISTENT makes through the
+     * unknown-attribute path clears nothing the holder would miss. */
+    if (dbh->query_stmt != NULL) return false;
+    return strcmp(dbh->error_code, PDO_ERR_NONE) == 0;
+}
+
+/* One shadow method table per driver table, for the life of the process. The copy
+ * differs from the driver's in one entry and carries no per-thread state, so
+ * threads share it; it has to outlive every pooled handle pointing at it, and a
+ * handle lives as long as its thread's pool does, so it is allocated once and
+ * never given back. Few enough that a fixed set is the whole story: one entry per
+ * PDO driver a process actually opens a persistent connection with. */
+#define OXPHP_PDO_SHADOW_MAX 8
+static struct {
+    const struct pdo_dbh_methods *orig;
+    struct pdo_dbh_methods shadow;
+} oxphp_pdo_shadows[OXPHP_PDO_SHADOW_MAX];
+static size_t oxphp_pdo_shadow_count = 0;
+static pthread_mutex_t oxphp_pdo_shadow_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* The driver table a shadow was copied from, or NULL if this handle carries no
+ * shadow of ours. */
+static const struct pdo_dbh_methods *oxphp_pdo_shadow_orig(const pdo_dbh_t *dbh)
+{
+    const struct pdo_dbh_methods *orig = NULL;
+    pthread_mutex_lock(&oxphp_pdo_shadow_lock);
+    for (size_t i = 0; i < oxphp_pdo_shadow_count; i++) {
+        if (&oxphp_pdo_shadows[i].shadow == dbh->methods) {
+            orig = oxphp_pdo_shadows[i].orig;
+            break;
+        }
+    }
+    pthread_mutex_unlock(&oxphp_pdo_shadow_lock);
+    return orig;
+}
+
+/* PDO::ATTR_PERSISTENT reaches a driver at all only because PDO's own switch has
+ * no case for it while the constructor puts every integer option through that
+ * switch. Nothing is being asked of the driver by it — the value is the pool key
+ * PDO has already used — so on a connection another fiber is using it is answered
+ * here rather than forwarded, where a driver would be free to put something on
+ * the wire inside that fiber's exchange. What PDO does with the answer is
+ * nothing: a constructor's options ignore it, and `setAttribute(ATTR_PERSISTENT,
+ * …)` from userland is refused by the drivers anyway. Every other attribute goes
+ * to the driver as before — those arrive through claimed entry points, so the
+ * caller already owns the connection. */
+static bool oxphp_pdo_set_attribute(pdo_dbh_t *dbh, zend_long attr, zval *val)
+{
+    if (attr == PDO_ATTR_PERSISTENT) {
+        oxphp_request_fiber *owner = oxphp_claim_owner(dbh);
+        if (owner != NULL && owner != oxphp_current_fiber) return false;
+    }
+
+    const struct pdo_dbh_methods *orig = oxphp_pdo_shadow_orig(dbh);
+    if (orig == NULL || orig->set_attribute == NULL) return false;
+    return orig->set_attribute(dbh, attr, val);
+}
+
+static zend_result oxphp_pdo_check_liveness(pdo_dbh_t *dbh)
+{
+    /* Held by another fiber: alive, and not ours to ask. The ping is a command
+     * like any other, so sending it here would land in the middle of that fiber's
+     * exchange — and PDO's answer to a ping that cannot go is to drop the pooled
+     * connection and open another, which leaves that fiber's reply alone but ends
+     * the sharing the application asked for.
+     *
+     * Said only to a constructor that would leave the handle as it is. One that
+     * would write to it is told the connection is dead, and PDO gives it a
+     * connection of its own rather than letting it change one in use; the entry it
+     * drops on the way is blanked rather than freed, and the gate keeps the
+     * registration that follows from landing on a live one.
+     *
+     * With no options read for this fiber, this is not a constructor of ours — PDO
+     * asks for a liveness check nowhere else, and a snapshot belonging to some
+     * other fiber says nothing about this one — so nothing can be promised and the
+     * sharing answer is not given.
+     *
+     * Outside a fiber none of this is said and the driver's ping runs as it always
+     * did. Such a constructor holds no claim and cannot wait for one, and the
+     * snapshot's fiber does not tell it apart from anything else: with no current
+     * fiber that tag is NULL and matches every snapshot written outside a fiber
+     * as well as its own, so an answer given here would hand a connection a
+     * parked fiber is holding to code whose queries are guarded by nothing and
+     * would land in that fiber's exchange.
+     *
+     * None of it applies where nothing but the pool holds the handle, which is
+     * what a claim outliving the object it was taken for looks like: a claim is
+     * given up at the end of the request, an object can be dropped long before
+     * that, and without an object there is no call in flight and so no exchange to
+     * land in. The driver's ping runs there as it always did — it is the only
+     * thing that notices a connection that has really died, and answering in its
+     * place would cost more here than a refusal costs PDO anywhere else, since
+     * `pdbh->refcount--` takes the count to zero on a connection that is alive
+     * while the entry it drops is only blanked, leaving it open with nothing left
+     * that could ever close it. */
+    oxphp_request_fiber *self = oxphp_current_fiber;
+    oxphp_request_fiber *owner = oxphp_claim_owner(dbh);
+    if (self != NULL && owner != NULL && owner != self && dbh->refcount > 1) {
+        const oxphp_pdo_ctor_writes *w = &oxphp_pdo_ctor_now;
+        if (w->present && w->fiber == self && oxphp_pdo_adoption_is_neutral(dbh, w)) {
+            return SUCCESS;
+        }
+
+        static __thread int64_t last_ns = 0;
+        if (oxphp_contended_log_ready(&last_ns)) {
+            php_log_err("oxphp: opened a second connection rather than share the pooled one "
+                        "another fiber is using, because adopting it would not have left it as "
+                        "it is. PDO writes a constructor's options onto the handle it adopts, "
+                        "and on a connection in use those writes are the holder's — an error "
+                        "mode or fetch mode changing under it, or, for an option the driver has "
+                        "to be told about such as PDO::ATTR_AUTOCOMMIT or "
+                        "PDO::ATTR_STRINGIFY_FETCHES, a command sent inside its exchange. To "
+                        "share one connection, construct it with the same values everywhere and "
+                        "with no option the driver has to be told about (logged at most once a "
+                        "second on this thread)");
+        }
+        return FAILURE;
+    }
+
+    const struct pdo_dbh_methods *orig = oxphp_pdo_shadow_orig(dbh);
+
+    /* No original to consult — unreachable, since this function is only ever
+     * installed together with its entry. Answering "alive" is the harmless half
+     * of being wrong: a dead connection reports itself on its first query, while
+     * a live one reported dead is dropped from under whoever is using it. */
+    if (orig == NULL || orig->check_liveness == NULL) return SUCCESS;
+
+    return orig->check_liveness(dbh);
+}
+
+/* Put the shadow table on a pooled handle, so the next constructor's liveness
+ * check goes through the rule above. On the handle rather than on the driver,
+ * because the driver's own table is shared by every connection it opens, is
+ * const, and is not ours to change.
+ *
+ * Installed whether or not the driver has a liveness check of its own. A driver
+ * that has none — pdo_sqlite and pdo_dblib are the two in the tree — is the case
+ * that needs the rule most rather than least: PDO asks nothing at all before
+ * handing a pooled connection over, so a constructor's options are written onto a
+ * handle another fiber is using with nothing in between. The rule answers "alive"
+ * where there is no original to consult, so a connection nobody is using is
+ * adopted exactly as it was before. */
+static void oxphp_pdo_install_shadow(pdo_dbh_t *dbh)
+{
+    if (dbh == NULL || !dbh->is_persistent || dbh->methods == NULL) return;
+    if (dbh->methods->check_liveness == oxphp_pdo_check_liveness) return;
+
+    const struct pdo_dbh_methods *shadow = NULL;
+    bool full = false;
+
+    pthread_mutex_lock(&oxphp_pdo_shadow_lock);
+    for (size_t i = 0; i < oxphp_pdo_shadow_count; i++) {
+        if (oxphp_pdo_shadows[i].orig == dbh->methods) {
+            shadow = &oxphp_pdo_shadows[i].shadow;
+            break;
+        }
+    }
+    if (shadow == NULL) {
+        if (oxphp_pdo_shadow_count < OXPHP_PDO_SHADOW_MAX) {
+            size_t i = oxphp_pdo_shadow_count;
+            oxphp_pdo_shadows[i].orig = dbh->methods;
+            oxphp_pdo_shadows[i].shadow = *dbh->methods;
+            oxphp_pdo_shadows[i].shadow.check_liveness = oxphp_pdo_check_liveness;
+            /* A driver with no setter of its own keeps none: PDO's unknown-attribute
+             * path checks for one and goes to its failure branch before it clears
+             * the handle's error state, which is one less thing to answer for. */
+            if (dbh->methods->set_attribute != NULL) {
+                oxphp_pdo_shadows[i].shadow.set_attribute = oxphp_pdo_set_attribute;
+            }
+            oxphp_pdo_shadow_count = i + 1;
+            shadow = &oxphp_pdo_shadows[i].shadow;
+        } else {
+            full = true;
+        }
+    }
+    pthread_mutex_unlock(&oxphp_pdo_shadow_lock);
+
+    if (full) {
+        /* More PDO drivers opening persistent connections than there is room for.
+         * The connection works; what it loses is the rule above, so say so once
+         * rather than leave a silently unprotected handle. */
+        static atomic_flag warned = ATOMIC_FLAG_INIT;
+        if (!atomic_flag_test_and_set(&warned)) {
+            php_log_err("oxphp: too many PDO drivers with persistent connections to guard them "
+                        "all; a pooled connection opened through this driver is handed to the "
+                        "next constructor the way PDO hands it over — pinged while another "
+                        "fiber is mid-exchange on it and so read as dead and replaced rather "
+                        "than shared, or, where the driver has no ping of its own, adopted and "
+                        "written to while that fiber is using it");
+        }
+        return;
+    }
+
+    if (shadow != NULL) dbh->methods = shadow;
+}
+
+/* The body PDO::__construct and PDO::connect() share. `built` is where the object
+ * PDO makes ends up — ZEND_THIS for the constructor, the return value for
+ * connect() — and is read only after the original has run. */
+static void oxphp_pdo_construct_guarded(zif_handler orig, zval *built,
+                                        INTERNAL_FUNCTION_PARAMETERS)
+{
+    oxphp_request_fiber *self = oxphp_current_fiber;
+    /* Read without touching it: the original handler is still the one that
+     * validates and consumes the arguments. */
+    zval *opts = ZEND_NUM_ARGS() >= 4 ? ZEND_CALL_ARG(execute_data, 4) : NULL;
+    bool gated = false;
+
+    if (self != NULL && oxphp_pdo_opts_persistent(opts)) {
+        void *key = &oxphp_pdo_ctor_gate;
+        oxphp_request_fiber *owner = oxphp_claim_owner(key);
+        bool ours = (owner == NULL || owner == self);
+
+        if (!ours) {
+            switch (oxphp_pdo_ctor_gate_await(self)) {
+                case OXPHP_CLAIM_THREW:
+                    return; /* cancelled; the exception is already pending */
+                case OXPHP_CLAIM_OK:
+                    ours = true;
+                    break;
+                default:
+                    /* Gave up. The constructor goes ahead unserialised, which is
+                     * what it did before any of this: refusing it would fail a
+                     * request that has done nothing wrong. The gate is left with
+                     * the fiber that holds it, which is still inside its own
+                     * constructor and still has to be able to release it. */
+                    break;
+            }
+        }
+
+        /* Failure means the claim table could not grow, which the socket path
+         * already reports; the constructor goes ahead either way. */
+        if (ours) gated = oxphp_claim_acquire(key, self);
+    }
+
+    uint64_t call = ++oxphp_pdo_ctor_calls;
+    oxphp_pdo_ctor_writes prev = oxphp_pdo_ctor_now;
+    oxphp_pdo_ctor_now = oxphp_pdo_ctor_reads_opts(opts);
+    oxphp_pdo_ctor_now.call = call;
+    orig(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+    /* Only what this call put there is this call's to take back. Anything else in
+     * the slot was written by a constructor that started later and has not
+     * finished — on this fiber, nested inside this one, or on another fiber this
+     * one was suspended for — and putting an older snapshot over it would answer
+     * that constructor with options that are not its own. Left alone, it is
+     * cleared by whoever wrote it. */
+    if (oxphp_pdo_ctor_now.call == call) oxphp_pdo_ctor_now = prev;
+
+    /* A bailout inside the constructor jumps over this, and over the install
+     * below. What it leaves in the slot is read by no one: every constructor
+     * writes its own snapshot on the way in, and a liveness check is asked for
+     * nowhere else. The gate is released at the end of the request either way —
+     * every claim this fiber holds is — so what a bailout costs is the rest of
+     * that one request's unwind, during which another constructor waits. */
+    if (gated) oxphp_claim_forget(&oxphp_pdo_ctor_gate);
+
+    if (built != NULL && Z_TYPE_P(built) == IS_OBJECT) {
+        oxphp_pdo_install_shadow(php_pdo_dbh_fetch_inner(Z_OBJ_P(built)));
+    }
+}
+#endif
+
+static zif_handler oxphp_db_orig_pdo_ctor = NULL;
+static zif_handler oxphp_db_orig_pdo_connect = NULL;
+
+static ZEND_NAMED_FUNCTION(oxphp_db_hook_pdo_ctor)
+{
+#ifdef OXPHP_HAVE_PDO_HEADERS
+    oxphp_pdo_construct_guarded(oxphp_db_orig_pdo_ctor, ZEND_THIS,
+                                INTERNAL_FUNCTION_PARAM_PASSTHRU);
+#else
+    oxphp_db_orig_pdo_ctor(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+#endif
+}
+
+static ZEND_NAMED_FUNCTION(oxphp_db_hook_pdo_connect)
+{
+#ifdef OXPHP_HAVE_PDO_HEADERS
+    oxphp_pdo_construct_guarded(oxphp_db_orig_pdo_connect, return_value,
+                                INTERNAL_FUNCTION_PARAM_PASSTHRU);
+#else
+    oxphp_db_orig_pdo_connect(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+#endif
+}
+
 static ZEND_NAMED_FUNCTION(oxphp_db_hook_pdo_getattr)
 {
     if (oxphp_pdo_attr_call_is_local(execute_data, false)) {
@@ -2791,6 +3399,10 @@ static const struct oxphp_db_hook oxphp_db_hooks[] = {
 #undef OXPHP_DB_ROW
     { "pdo", "getattribute", oxphp_db_hook_pdo_getattr, &oxphp_db_orig_pdo_getattr },
     { "pdo", "setattribute", oxphp_db_hook_pdo_setattr, &oxphp_db_orig_pdo_setattr },
+    /* Not calls on a connection but the two that reach the pool of them: which
+     * connection a persistent constructor ends up on is decided inside these. */
+    { "pdo", "__construct", oxphp_db_hook_pdo_ctor, &oxphp_db_orig_pdo_ctor },
+    { "pdo", "connect", oxphp_db_hook_pdo_connect, &oxphp_db_orig_pdo_connect },
 };
 
 /* Point every internal copy of one method's handler at `to`, wherever a class
