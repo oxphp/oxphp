@@ -125,7 +125,9 @@ fn handle_internal_request(
     }
     let response = match req.uri().path() {
         "/health/liveness" | "/healthz" => liveness_response(),
-        "/health/readiness" | "/readyz" => readiness_response(executor, plugin_manager, shutdown),
+        "/health/readiness" | "/readyz" => {
+            readiness_response(metrics, executor, plugin_manager, shutdown)
+        }
         "/health/startup" | "/startupz" => startup_response(executor),
         "/health" => health_response(metrics, executor, plugin_manager),
         "/metrics" => metrics_response(metrics, plugin_manager),
@@ -163,12 +165,14 @@ fn liveness_response() -> Response<ResponseBody> {
 }
 
 fn readiness_response(
+    metrics: &Metrics,
     executor: &dyn ScriptExecutor,
     plugin_manager: &PluginManager,
     shutdown: &AtomicBool,
 ) -> Response<ResponseBody> {
     let is_ready = !shutdown.load(Ordering::SeqCst)
         && executor.is_healthy()
+        && !metrics.pool_stalled()
         && !plugin_manager
             .health_all()
             .iter()
@@ -201,11 +205,17 @@ fn startup_response(executor: &dyn ScriptExecutor) -> Response<ResponseBody> {
         .unwrap()
 }
 
-fn health_response(
+/// Build the `/health` body and the status that goes with it.
+///
+/// Split out so the two can be asserted together: the JSON says which
+/// subsystem is at fault and the status is what a dashboard alerts on, and a
+/// body that named a fault under a `200` would be read as a healthy server by
+/// everything that does not parse it.
+fn build_health_json(
     metrics: &Metrics,
     executor: &dyn ScriptExecutor,
     plugin_manager: &PluginManager,
-) -> Response<ResponseBody> {
+) -> (StatusCode, serde_json::Value) {
     let executor_healthy = executor.is_healthy();
 
     // Check plugin health
@@ -214,12 +224,14 @@ fn health_response(
         .iter()
         .any(|(_, h)| *h == crate::plugin::PluginHealth::Failed);
 
-    let status_str = if !executor_healthy || any_failed {
-        "degraded"
-    } else {
-        "ok"
-    };
-    let http_status = if !executor_healthy || any_failed {
+    // A wedged pool leaves every worker thread alive, so `executor_healthy`
+    // stays true through it and carries none of this; it is a separate fact
+    // about the same pool and gets a field of its own.
+    let pool_stalled = metrics.pool_stalled();
+
+    let degraded = !executor_healthy || any_failed || pool_stalled;
+    let status_str = if degraded { "degraded" } else { "ok" };
+    let http_status = if degraded {
         StatusCode::SERVICE_UNAVAILABLE
     } else {
         StatusCode::OK
@@ -238,8 +250,19 @@ fn health_response(
         "total_requests": metrics.total_requests(),
         "active_connections": metrics.active_connections(),
         "executor_healthy": executor_healthy,
+        "pool_stalled": pool_stalled,
         "plugins": plugins_json,
     });
+
+    (http_status, body)
+}
+
+fn health_response(
+    metrics: &Metrics,
+    executor: &dyn ScriptExecutor,
+    plugin_manager: &PluginManager,
+) -> Response<ResponseBody> {
+    let (http_status, body) = build_health_json(metrics, executor, plugin_manager);
 
     Response::builder()
         .status(http_status)
@@ -427,7 +450,7 @@ mod tests {
         let executor = StubExecutor::new();
         let pm = PluginManager::new();
         let shutdown = AtomicBool::new(false);
-        let resp = readiness_response(&executor, &pm, &shutdown);
+        let resp = readiness_response(&Metrics::new(), &executor, &pm, &shutdown);
         assert_eq!(resp.status(), StatusCode::OK);
     }
 
@@ -436,7 +459,7 @@ mod tests {
         let executor = StubExecutor::new();
         let pm = PluginManager::new();
         let shutdown = AtomicBool::new(true);
-        let resp = readiness_response(&executor, &pm, &shutdown);
+        let resp = readiness_response(&Metrics::new(), &executor, &pm, &shutdown);
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
@@ -445,7 +468,7 @@ mod tests {
         let executor = UnhealthyExecutor;
         let pm = PluginManager::new();
         let shutdown = AtomicBool::new(false);
-        let resp = readiness_response(&executor, &pm, &shutdown);
+        let resp = readiness_response(&Metrics::new(), &executor, &pm, &shutdown);
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
     }
 
@@ -457,7 +480,73 @@ mod tests {
         let mut dispatcher = EventDispatcher::new();
         pm.init_all(&mut dispatcher).unwrap();
         let shutdown = AtomicBool::new(false);
-        let resp = readiness_response(&executor, &pm, &shutdown);
+        let resp = readiness_response(&Metrics::new(), &executor, &pm, &shutdown);
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    /// Metrics carrying the supervisor's verdict that the pool is wedged.
+    fn stalled_metrics() -> Metrics {
+        let metrics = Metrics::new();
+        metrics.set_pool_stalled(true);
+        metrics
+    }
+
+    #[test]
+    fn readiness_is_503_while_the_pool_is_wedged() {
+        // A wedged pool keeps every thread alive and every plugin happy, so
+        // the three conditions readiness had all read healthy while nothing
+        // the instance was sent could ever be answered. The probe reaches the
+        // internal listener, which goes through neither the connection budget
+        // nor admission, so it is the one thing still able to say so.
+        let executor = StubExecutor::new();
+        let pm = PluginManager::new();
+        let shutdown = AtomicBool::new(false);
+        let resp = readiness_response(&stalled_metrics(), &executor, &pm, &shutdown);
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[test]
+    fn readiness_is_200_while_the_pool_is_merely_overloaded() {
+        // Shedding is not a fault: an instance answering 529 is answering, and
+        // taking it out of rotation moves its load onto its neighbours, which
+        // under an even overload takes every replica out at once. Nothing but
+        // a wedge sets the flag, and this pins that the probe reads that flag
+        // rather than any of the load series beside it.
+        let metrics = Metrics::new();
+        metrics.request_admission_refused(crate::executor::admission::ShedReason::WaitTimeout);
+        metrics.request_admission_refused(crate::executor::admission::ShedReason::WaitingFull);
+        metrics.accept_stall_begin();
+        assert!(!metrics.pool_stalled());
+
+        let executor = StubExecutor::new();
+        let pm = PluginManager::new();
+        let shutdown = AtomicBool::new(false);
+        let resp = readiness_response(&metrics, &executor, &pm, &shutdown);
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[test]
+    fn health_reports_a_wedged_pool_as_degraded() {
+        // `/health` is what dashboards and container health checks read, and
+        // its body is where the reason lives: `executor_healthy` stays true
+        // through a wedge — the threads are all there — so without a field of
+        // its own the state has no name in this response.
+        let executor = StubExecutor::new();
+        let pm = PluginManager::new();
+
+        let (status, body) = build_health_json(&Metrics::new(), &executor, &pm);
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["pool_stalled"], serde_json::json!(false));
+        assert_eq!(body["status"], serde_json::json!("ok"));
+
+        let (status, body) = build_health_json(&stalled_metrics(), &executor, &pm);
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["pool_stalled"], serde_json::json!(true));
+        assert_eq!(body["status"], serde_json::json!("degraded"));
+        assert_eq!(
+            body["executor_healthy"],
+            serde_json::json!(true),
+            "the threads are alive — the wedge is a separate field, not this one"
+        );
     }
 }

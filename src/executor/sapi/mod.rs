@@ -461,6 +461,44 @@ impl ScriptExecutor for SapiExecutor {
         // No-op: cleanup handled in Drop
     }
 
+    /// Whether any worker thread is still running.
+    ///
+    /// The pool is judged by its threads because that is the part of it a
+    /// health probe can be wrong about in a way nothing else would catch: a
+    /// pool whose every thread has ended answers nothing at all, and the
+    /// monitor that replaces them runs on the Tokio runtime, so a pool left
+    /// with no workers and no monitor stays that way. `is_finished` is exactly
+    /// the question — the thread has returned or panicked — and it is asked of
+    /// the same list the monitor maintains, so a worker it has already
+    /// replaced is not counted twice.
+    ///
+    /// Deliberately not a judgement on whether the pool is *working*: a wedged
+    /// worker is a live thread and reads healthy here. That state is watched
+    /// for separately, by the supervisor, and reaches the probes through
+    /// [`Metrics::pool_stalled`](crate::metrics::Metrics::pool_stalled).
+    ///
+    /// A pool is never legitimately empty for long: `PHP_WORKERS` never
+    /// resolves a minimum below one, so no scale-down reaches this, and the
+    /// only other thing that clears the list outright is `Drop`, which joins
+    /// every worker on its way out. A worker that ends does leave the pool
+    /// short until the monitor reaps and replaces it, and on a single-worker
+    /// pool that window reads unhealthy here — which is literally true: until
+    /// the replacement lands there is nothing to serve on. What bounds the
+    /// window is the monitor's poll rather than the spawn: a finished thread
+    /// still in the list already answers `false`, and the monitor looks every
+    /// 500 ms.
+    fn is_healthy(&self) -> bool {
+        // Read through a poisoned lock rather than panicking: the `Vec` is
+        // intact whatever panicked while holding it, and a probe that panics
+        // answers a connection error, which an orchestrator reads as a failed
+        // check for a reason that has nothing to do with the pool.
+        let workers = match self.workers.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        workers.iter().any(|w| !w.handle.is_finished())
+    }
+
     fn close_admission(&self) {
         // Requests parked here are invisible to the worker registry's hard
         // cancel — they have no worker yet — so this is the only thing that
@@ -672,6 +710,115 @@ mod tests {
             "a freed slot inside the budget must admit, not shed"
         );
 
+        forget_executor(executor);
+    }
+
+    /// A pool entry whose thread runs until `shutdown` is raised, or one whose
+    /// thread has already ended.
+    fn managed_worker(id: usize, keep_running: bool) -> ManagedWorker {
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let flag = Arc::clone(&shutdown);
+        let handle = std::thread::spawn(move || {
+            while keep_running && !flag.load(Ordering::Relaxed) {
+                std::thread::sleep(WORKER_RETIRE_POLL);
+            }
+        });
+        if !keep_running {
+            // `is_finished` is about the thread's closure having returned, so
+            // wait for that rather than for a scheduling window.
+            while !handle.is_finished() {
+                std::thread::yield_now();
+            }
+        }
+        ManagedWorker {
+            id,
+            handle,
+            shutdown,
+            last_active: Arc::new(crate::executor::idle_clock::LastActive::now()),
+        }
+    }
+
+    #[test]
+    fn health_follows_the_worker_threads_and_not_the_gauge() {
+        // Readiness and the container health check both go through this, and
+        // before it existed the trait's default answered `true` for every
+        // pool in every state — including one whose threads had all ended,
+        // which answers nothing and, with the monitor gone with the runtime,
+        // never gets a replacement.
+        let executor = test_executor(4, 0);
+        assert!(
+            !executor.is_healthy(),
+            "a pool with no threads at all serves nothing"
+        );
+
+        executor
+            .workers
+            .lock()
+            .unwrap()
+            .push(managed_worker(0, false));
+        assert!(
+            !executor.is_healthy(),
+            "a thread that has ended is not a worker"
+        );
+
+        executor
+            .workers
+            .lock()
+            .unwrap()
+            .push(managed_worker(1, true));
+        assert!(
+            executor.is_healthy(),
+            "one live thread beside a dead one is a pool that can still serve"
+        );
+
+        for worker in executor.workers.lock().unwrap().iter() {
+            worker.shutdown.store(true, Ordering::Relaxed);
+        }
+        for worker in executor.workers.lock().unwrap().drain(..) {
+            let _ = worker.handle.join();
+        }
+        forget_executor(executor);
+    }
+
+    #[test]
+    fn health_answers_through_a_poisoned_pool_lock() {
+        // The probe is served by the internal listener, whose whole purpose is
+        // to answer when the rest of the server cannot. Unwrapping the lock
+        // would turn a panic that happened somewhere else into a connection
+        // error on the probe, and an orchestrator would read that as a failed
+        // check for a reason that has nothing to do with the pool.
+        let executor = test_executor(4, 0);
+        executor
+            .workers
+            .lock()
+            .unwrap()
+            .push(managed_worker(0, true));
+
+        let workers = Arc::clone(&executor.workers);
+        let _ = std::thread::spawn(move || {
+            let _guard = workers.lock().unwrap();
+            panic!("poisoning the pool lock on purpose");
+        })
+        .join();
+        assert!(
+            executor.workers.is_poisoned(),
+            "the lock has to be poisoned"
+        );
+
+        assert!(
+            executor.is_healthy(),
+            "a running worker is still a running worker behind a poisoned lock"
+        );
+
+        let mut workers = match executor.workers.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        for worker in workers.drain(..) {
+            worker.shutdown.store(true, Ordering::Relaxed);
+            let _ = worker.handle.join();
+        }
+        drop(workers);
         forget_executor(executor);
     }
 

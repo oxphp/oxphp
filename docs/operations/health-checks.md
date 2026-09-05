@@ -26,19 +26,36 @@ OxPHP provides dedicated endpoints for each Kubernetes probe type. Each endpoint
 | Endpoint | Alias | Checks | 200 | 503 |
 |----------|-------|--------|-----|-----|
 | `/health/liveness` | `/healthz` | None (alive if responding) | Always | Never |
-| `/health/readiness` | `/readyz` | Not shutting down, executor healthy, no failed plugins | Ready | Not ready |
-| `/health/startup` | `/startupz` | Executor healthy | Ready | Not ready |
+| `/health/readiness` | `/readyz` | Not shutting down, worker threads running, pool not wedged, no failed plugins | Ready | Not ready |
+| `/health/startup` | `/startupz` | Worker threads running | Ready | Not ready |
 
 **Liveness** always returns `200 OK`. If the process can respond to the HTTP request, it is alive. No executor or plugin checks are performed — this prevents Kubernetes from restarting pods due to transient worker pool issues.
 
 **Readiness** returns `503 Service Unavailable` when:
 - The server is shutting down (graceful shutdown in progress)
-- The PHP worker pool is unhealthy
+- Every PHP worker thread has ended (the pool has nothing left to hand a request to)
+- The pool is wedged: requests are waiting for workers that are idle and getting nothing done. Detected in worker mode only — see below
 - Any plugin reports a failure
 
 During graceful shutdown, readiness immediately returns `503`, causing Kubernetes to remove the pod from Service endpoints before the drain completes.
 
-**Startup** returns `503 Service Unavailable` when the executor is not yet ready. Use this probe to prevent premature liveness kills during slow initialization.
+**Startup** returns `503 Service Unavailable` while no worker thread is running. Use this probe to prevent premature liveness kills during slow initialization — it reports the threads, which exist as soon as the pool is created, not the application's own bootstrap running inside them.
+
+### The wedged-pool signal
+
+A pool can stop taking work off its queue while every thread it owns is alive: requests pile up, no worker is busy, and nothing is ever answered. Every other signal reads healthy through it — the threads are all there, the plugins are all fine, static files are served normally — and a pool still in that state a minute later is not generally getting out of it on its own, which is why readiness carries it.
+
+The server detects it by watching for a combination a serving pool does not sustain: work waiting (queued requests, or admission refusals climbing) while at least one worker is idle and the pool has finished nothing since the previous scan. A working pool can show that shape briefly — on a pool whose workers have all stopped at once, a single worker being the ordinary case, a replacement re-running the application's bootstrap produces exactly it — so two consecutive one-second scans are enough for a log line, but readiness waits a further minute on top of them: the new worker is serving again long before the minute is out, and pulling the replica from rotation early would take away the very traffic it needs in order to show that. Readiness turns back only when a worker actually finishes a request: a wedged pool that has run out of traffic is not a recovered one.
+
+This needs the count of requests the workers get through, which only worker mode (`WORKER_MODE_ENABLED=true`) keeps, so **the signal exists in worker mode alone**. Elsewhere readiness answers on the other three conditions, and `oxphp_pool_stalled` is not exported at all rather than being exported as a constant `0`.
+
+### What the probes do not report
+
+**Load.** An overloaded server stays `Ready`. Once the admission queue is full and the wait budget is spent, requests are refused with `529 Site is overloaded` — and a replica doing that is still answering, quickly, on a pool that is working. Taking it out of rotation would move its traffic onto its neighbours, and under an even overload that removes every replica in turn until the Service has no endpoints left: a degraded site becomes an unreachable one, with the load still there. Watch `oxphp_admission_refused_total{reason=...}` for it instead and add capacity — see [Prometheus Metrics](metrics.md).
+
+**An exhausted connection budget.** When `MAX_CONNECTIONS` permits run out the accept loop parks and new clients get no answer at all, but the internal listener does not go through that budget, so the probes keep responding. This is also load rather than a fault, and for the same reason it does not change readiness; `oxphp_accept_stalled` reports it.
+
+**Slow responses.** Nothing here measures latency. A pool that answers everything late is `Ready`.
 
 All probe endpoints return `Content-Type: text/plain` with the probe name as the body (e.g., `readiness`). Kubernetes only inspects the HTTP status code.
 
@@ -64,6 +81,7 @@ curl http://localhost:9090/health
   "total_requests": 48203,
   "active_connections": 7,
   "executor_healthy": true,
+  "pool_stalled": false,
   "plugins": {}
 }
 ```
@@ -77,17 +95,19 @@ curl http://localhost:9090/health
   "total_requests": 48203,
   "active_connections": 7,
   "executor_healthy": false,
+  "pool_stalled": false,
   "plugins": {}
 }
 ```
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `status` | string | `"ok"` when all subsystems are healthy, `"degraded"` otherwise |
+| `status` | string | `"ok"` when all subsystems are healthy, `"degraded"` otherwise. Load is not a subsystem fault: a server shedding `529` under overload reports `"ok"` |
 | `uptime_secs` | integer | Seconds since the server started |
 | `total_requests` | integer | Total HTTP requests processed on the main port |
 | `active_connections` | integer | Currently open connections on the main port |
-| `executor_healthy` | boolean | Whether the PHP worker pool is accepting requests |
+| `executor_healthy` | boolean | Whether any PHP worker thread is still running. `false` means the pool has no thread left to hand a request to |
+| `pool_stalled` | boolean | Whether the pool is wedged: requests waiting for workers that are idle and getting nothing done. Always `false` outside worker mode, where the state is not detected — see [The wedged-pool signal](#the-wedged-pool-signal). `true` switches the HTTP status to 503 |
 | `plugins` | `object<string, string>` | Per-plugin health: keys are plugin names, values are `"ok"`, `"degraded"`, or `"failed"`. Empty `{}` when no plugins report health. A `"failed"` plugin causes the HTTP status to switch to 503; `"degraded"` appears here but keeps the status at 200. |
 
 ## GET /metrics

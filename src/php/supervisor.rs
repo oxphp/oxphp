@@ -154,6 +154,11 @@ const DEFAULT_STUCK_THRESHOLD_US: u64 = 60 * 1_000_000;
 /// period that is one line a minute — often enough that a wedge which started
 /// hours ago is still saying so in the last page of the log, rare enough that
 /// it does not bury the traffic around it.
+///
+/// It is also how long readiness waits before reporting the wedge, since the
+/// flag goes up on the first repeat rather than on the first confirmation.
+/// Retuning this for log noise retunes that too, and the delay is quoted as
+/// "a minute" in the metric's HELP text and in the operations documentation.
 const STALL_REPEAT_SCANS: u64 = 60;
 
 /// Consecutive stalled scans before the state is announced.
@@ -347,9 +352,10 @@ impl Supervisor {
     /// The state is derivable from series that already exist, and that is
     /// exactly the problem: an operator has to think to pair them, and the
     /// pairing only occurs to someone who already suspects the fault. A pool
-    /// wedged this way answers `200` on both health probes and serves static
-    /// files normally, so this line is the first thing that will say anything
-    /// is wrong.
+    /// wedged this way answers `200` on liveness for good and on readiness
+    /// for the first minute — readiness turns only once the state has
+    /// persisted that long — and serves static files normally, so this line is
+    /// the first thing that will say anything is wrong.
     ///
     /// The numbers on it are what makes the line diagnostic rather than merely
     /// alarming: `queue_depth` short of `queue_capacity` with slots still free
@@ -398,20 +404,45 @@ impl Supervisor {
             progress_total,
             idle_workers: workers_idle,
         });
+        // Published as well as logged: the readiness probe cannot read the
+        // log, and it is the only reader that can act on this state on its
+        // own. `Quiet` deliberately leaves the flag where it is — the watch
+        // holds the state through a lull, and so must the instance's place in
+        // rotation.
+        //
+        // The flag waits for the repeat rather than going up with the first
+        // warning. Two scans are enough to say something on a line an
+        // operator reads with the rest of the context; they are not enough to
+        // take an instance out of rotation, because a worker that exited on
+        // its memory ceiling and is re-running the application's bootstrap
+        // presents exactly this shape — the pool still counts it, it has
+        // begun no request so it reads idle, the queue behind it fills, and
+        // nothing completes. That is a healthy pool a second or two from
+        // serving again, and removing it from rotation takes away the very
+        // traffic whose completion is the only thing that clears the state.
+        // A bootstrap that is still running a minute later is not that.
         match transition {
-            StallTransition::Entered | StallTransition::Persisting => tracing::warn!(
-                queue_depth = queue.depth,
-                queue_capacity = queue.capacity,
-                admission_slots_available = queue.slots_available,
-                workers_idle,
-                "PHP requests are waiting while the pool has idle workers and got nothing done since the last scan"
-            ),
-            StallTransition::Recovered => tracing::info!(
-                queue_depth = queue.depth,
-                admission_slots_available = queue.slots_available,
-                workers_idle,
-                "PHP pool is reaching workers again"
-            ),
+            StallTransition::Entered | StallTransition::Persisting => {
+                if transition == StallTransition::Persisting {
+                    self.metrics.set_pool_stalled(true);
+                }
+                tracing::warn!(
+                    queue_depth = queue.depth,
+                    queue_capacity = queue.capacity,
+                    admission_slots_available = queue.slots_available,
+                    workers_idle,
+                    "PHP requests are waiting while the pool has idle workers and got nothing done since the last scan"
+                );
+            }
+            StallTransition::Recovered => {
+                self.metrics.set_pool_stalled(false);
+                tracing::info!(
+                    queue_depth = queue.depth,
+                    admission_slots_available = queue.slots_available,
+                    workers_idle,
+                    "PHP pool is reaching workers again"
+                );
+            }
             StallTransition::Quiet => {}
         }
         transition
@@ -737,6 +768,70 @@ mod tests {
         assert_eq!(
             supervisor.report_admission_stall_with(&mut watch, 0),
             StallTransition::Recovered
+        );
+    }
+
+    #[test]
+    fn the_supervisor_publishes_the_wedge_for_the_readiness_probe() {
+        // The log line reaches an operator reading logs. A probe cannot read
+        // logs, and the internal listener answers it without going through
+        // admission or the connection budget — which is why a wedged instance
+        // stayed in rotation while it served nothing. The flag is the only
+        // thing that carries the state out of this thread.
+        let (metrics, supervisor) = wedged_supervisor(45);
+        let mut watch = StallWatch::default();
+        assert!(!metrics.pool_stalled(), "nothing seen yet");
+
+        supervisor.report_admission_stall_with(&mut watch, 0);
+        supervisor.report_admission_stall_with(&mut watch, 0);
+        assert!(
+            !metrics.pool_stalled(),
+            "a single unconfirmed scan must not take an instance out of rotation"
+        );
+
+        assert_eq!(
+            supervisor.report_admission_stall_with(&mut watch, 0),
+            StallTransition::Entered
+        );
+        assert!(
+            !metrics.pool_stalled(),
+            "the first confirmation is worth a warning, not a removal from rotation: \
+             a worker re-running the application's bootstrap after a recycle reads \
+             exactly like this and is seconds from serving"
+        );
+
+        // Still there a minute later, which a bootstrap is not.
+        let mut transition = StallTransition::Quiet;
+        for _ in 0..STALL_REPEAT_SCANS {
+            transition = supervisor.report_admission_stall_with(&mut watch, 0);
+        }
+        assert_eq!(transition, StallTransition::Persisting);
+        assert!(
+            metrics.pool_stalled(),
+            "the wedge has to be readable from outside the supervisor thread"
+        );
+
+        // A lull is neither progress nor a stall: the watch holds the state,
+        // and so must the flag — or a wedged pool with no traffic on it would
+        // read as recovered and go straight back into rotation.
+        assert_eq!(
+            supervisor.report_admission_stall_with(&mut watch, 0),
+            StallTransition::Quiet
+        );
+        assert!(metrics.pool_stalled(), "quiet is not recovery");
+
+        metrics
+            .worker_metrics()
+            .expect("worker metrics were published above")
+            .requests_handled_total
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(
+            supervisor.report_admission_stall_with(&mut watch, 0),
+            StallTransition::Recovered
+        );
+        assert!(
+            !metrics.pool_stalled(),
+            "a pool serving again must come back into rotation without a restart"
         );
     }
 
