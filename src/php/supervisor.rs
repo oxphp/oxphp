@@ -161,6 +161,24 @@ const DEFAULT_STUCK_THRESHOLD_US: u64 = 60 * 1_000_000;
 /// "a minute" in the metric's HELP text and in the operations documentation.
 const STALL_REPEAT_SCANS: u64 = 60;
 
+/// Scans without the stall shape before an announced state is dropped.
+///
+/// The state's other exit — a worker getting a request through — cannot be
+/// reached from outside once readiness carries the flag: the 503 is exactly
+/// what stops requests arriving. Anything the watch got wrong would therefore
+/// stay wrong for the life of the process, and a wedge is not the only thing
+/// that wears its shape. A replacement worker whose bootstrap waits on a
+/// dependency that is down wears it for as long as that dependency takes to
+/// answer, and a connect left to time out on retries runs to minutes — well
+/// past the delay that was chosen to sit out a framework's bootstrap. Dropping
+/// the state after a minute in which the pool has not looked wedged gives it a
+/// way back that needs no traffic.
+///
+/// It cannot release a pool that is actually wedged. The shape needs work
+/// waiting, and the queue of a pool nothing is draining does not empty:
+/// requests leave it only when a worker takes one.
+const STALL_CLEAR_SCANS: u64 = 60;
+
 /// Consecutive stalled scans before the state is announced.
 ///
 /// One is not enough. A request occupies the queue for the microseconds
@@ -200,6 +218,10 @@ pub enum StallTransition {
     Persisting,
     /// It served a request again.
     Recovered,
+    /// It stopped looking wedged without having served anything: the work that
+    /// was waiting is no longer waiting, so whatever produced the shape has
+    /// passed.
+    Subsided,
 }
 
 /// Watches for the one state the pool's own metrics each read as healthy: work
@@ -235,6 +257,10 @@ pub struct StallWatch {
     /// and leaves it standing, which is what keeps a wedged pool with no
     /// traffic on it from reading as recovered.
     stalled_scans: u64,
+    /// Consecutive scans since the state was announced in which the pool has
+    /// not looked wedged. The state's own exit needs a completed request, and
+    /// nothing guarantees one arrives — see [`STALL_CLEAR_SCANS`].
+    quiet_scans: u64,
 }
 
 impl StallWatch {
@@ -264,6 +290,7 @@ impl StallWatch {
         let work_waiting = scan.queue_depth > 0 || refused_delta > 0;
         if work_waiting && progress_delta == 0 && scan.idle_workers > 0 {
             self.stalled_scans += 1;
+            self.quiet_scans = 0;
             return match self.stalled_scans {
                 n if n < STALL_CONFIRM_SCANS => StallTransition::Quiet,
                 n if n == STALL_CONFIRM_SCANS => StallTransition::Entered,
@@ -278,6 +305,7 @@ impl StallWatch {
         // nothing to take back: drop the count and stay quiet.
         if self.stalled_scans < STALL_CONFIRM_SCANS {
             self.stalled_scans = 0;
+            self.quiet_scans = 0;
             return StallTransition::Quiet;
         }
 
@@ -289,7 +317,24 @@ impl StallWatch {
         // rather than the fault.
         if progress_delta > 0 {
             self.stalled_scans = 0;
+            self.quiet_scans = 0;
             return StallTransition::Recovered;
+        }
+
+        // Which leaves the pool that is not getting through anything and no
+        // longer has anything waiting either. That is not recovery, and for a
+        // wedge it does not happen: the queue empties only as workers take
+        // requests off it, so one nothing is draining stays full. What it is,
+        // is the way out for a reading that was wrong — a bootstrap that ran
+        // long enough to be called a wedge, whose worker has since gone on to
+        // serve, or a pool whose backlog expired unserved. Sitting in the
+        // state costs an instance its place in rotation, and the exit above is
+        // one the 503 itself prevents anything from reaching.
+        self.quiet_scans += 1;
+        if self.quiet_scans >= STALL_CLEAR_SCANS {
+            self.stalled_scans = 0;
+            self.quiet_scans = 0;
+            return StallTransition::Subsided;
         }
 
         StallTransition::Quiet
@@ -418,9 +463,11 @@ impl Supervisor {
         // presents exactly this shape — the pool still counts it, it has
         // begun no request so it reads idle, the queue behind it fills, and
         // nothing completes. That is a healthy pool a second or two from
-        // serving again, and removing it from rotation takes away the very
-        // traffic whose completion is the only thing that clears the state.
-        // A bootstrap that is still running a minute later is not that.
+        // serving again, and removing it from rotation takes away the traffic
+        // whose completion is what clears the state. A bootstrap that is still
+        // running a minute later is not that — and for the readings that are
+        // wrong anyway, the state also comes down after a minute in which the
+        // pool has not looked wedged, which needs no traffic at all.
         match transition {
             StallTransition::Entered | StallTransition::Persisting => {
                 if transition == StallTransition::Persisting {
@@ -441,6 +488,15 @@ impl Supervisor {
                     admission_slots_available = queue.slots_available,
                     workers_idle,
                     "PHP pool is reaching workers again"
+                );
+            }
+            StallTransition::Subsided => {
+                self.metrics.set_pool_stalled(false);
+                tracing::info!(
+                    queue_depth = queue.depth,
+                    admission_slots_available = queue.slots_available,
+                    workers_idle,
+                    "PHP pool no longer has work waiting on idle workers; clearing the stall state without a completed request"
                 );
             }
             StallTransition::Quiet => {}
@@ -666,6 +722,37 @@ mod tests {
     /// Metrics wired up the way a wedged server presents: `depth` requests
     /// queued in a 512-deep queue with the rest of the permits free, four
     /// workers, none busy, and a progress counter that stands still.
+    /// As [`wedged_supervisor`], but the queue depth can be changed afterwards
+    /// — the wedge shape has to be able to go away for the clearing path to be
+    /// testable at all.
+    fn wedged_supervisor_draining(
+        depth: usize,
+    ) -> (
+        Arc<Metrics>,
+        Supervisor,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        let live_depth = Arc::new(std::sync::atomic::AtomicUsize::new(depth));
+        let metrics = Arc::new(Metrics::new_with_workers(4));
+        let probe_depth = Arc::clone(&live_depth);
+        metrics.set_queue_probe(Box::new(move || {
+            let depth = probe_depth.load(std::sync::atomic::Ordering::Relaxed);
+            crate::metrics::QueueSnapshot {
+                depth,
+                capacity: 512,
+                slots_available: 512 - depth,
+            }
+        }));
+        metrics.set_workers_current(4);
+        let wm = Arc::new(crate::metrics::WorkerMetrics::new(4));
+        wm.requests_handled_total
+            .fetch_add(176_438, std::sync::atomic::Ordering::Relaxed);
+        metrics.set_worker_metrics(Arc::clone(&wm));
+        let supervisor =
+            Supervisor::with_threshold(Arc::clone(&metrics), 500_000, Duration::from_millis(1));
+        (metrics, supervisor, live_depth)
+    }
+
     fn wedged_supervisor(depth: usize) -> (Arc<Metrics>, Supervisor) {
         let metrics = Arc::new(Metrics::new_with_workers(4));
         metrics.set_queue_probe(Box::new(move || crate::metrics::QueueSnapshot {
@@ -768,6 +855,55 @@ mod tests {
         assert_eq!(
             supervisor.report_admission_stall_with(&mut watch, 0),
             StallTransition::Recovered
+        );
+    }
+
+    #[test]
+    fn the_wedge_comes_down_when_the_pool_stops_looking_wedged() {
+        // The flag's only way down was a worker getting a request through, and
+        // the 503 it causes is what stops requests arriving. So a reading the
+        // watch got wrong had no way back: a replacement worker whose
+        // bootstrap sat on a connect to a dependency that was down holds the
+        // shape for as long as that connect takes to fail, which on SYN
+        // retries is minutes — past the delay chosen to sit out a framework
+        // bootstrap. By the time the dependency returns the pool is healthy,
+        // idle and out of rotation, with liveness answering 200 so nothing
+        // restarts it either. On a shared dependency that is every replica at
+        // once.
+        let (metrics, supervisor, depth) = wedged_supervisor_draining(45);
+        let mut watch = StallWatch::default();
+
+        for _ in 0..=(STALL_CONFIRM_SCANS + STALL_REPEAT_SCANS) {
+            supervisor.report_admission_stall_with(&mut watch, 0);
+        }
+        assert!(
+            metrics.pool_stalled(),
+            "the shape has to be published before there is anything to clear"
+        );
+
+        // Holding the shape is not a lull, however quiet the log has gone: a
+        // pool that is still not draining its queue is still wedged.
+        for _ in 0..STALL_CLEAR_SCANS {
+            supervisor.report_admission_stall_with(&mut watch, 0);
+        }
+        assert!(
+            metrics.pool_stalled(),
+            "work is still waiting on idle workers; nothing has changed"
+        );
+
+        // The queue drains — requests whose budget expired are refused at
+        // pickup, which is not progress — and no traffic follows, so a
+        // completed request is a condition the pool cannot meet.
+        depth.store(0, std::sync::atomic::Ordering::Relaxed);
+        let mut transition = StallTransition::Quiet;
+        for _ in 0..STALL_CLEAR_SCANS {
+            transition = supervisor.report_admission_stall_with(&mut watch, 0);
+        }
+        assert_eq!(transition, StallTransition::Subsided);
+        assert!(
+            !metrics.pool_stalled(),
+            "a pool that has not looked wedged for a minute must return to \
+             rotation on its own"
         );
     }
 

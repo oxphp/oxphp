@@ -153,7 +153,7 @@ If the `INTERNAL_ADDR` variable is set, OxPHP starts a separate HTTP server on t
 | `GET /metrics` | Prometheus-format metrics — request counters, response time, queue wait time, worker statistics, compression savings. |
 | `GET /config` | Snapshot of the active configuration in JSON. TLS file paths are redacted. |
 
-The internal server does not go through the PHP worker pool or the bounded queue — it responds directly from the async HTTP layer, so it remains accessible even when the PHP pool is fully loaded. This makes `/health` suitable for Kubernetes liveness/readiness probes.
+The internal server does not go through the PHP worker pool or the bounded queue — it responds directly from the async HTTP layer, so it remains accessible even when the PHP pool is fully loaded. This makes it suitable for Kubernetes probes — pointed at the dedicated endpoints, `/health/liveness`, `/health/readiness` and `/health/startup`, rather than at the aggregate `/health`, which answers `503` on states a restart does not fix and does not track the shutdown flag a draining server sets.
 
 For details, see [Internal Server](../features/internal-server.md).
 
