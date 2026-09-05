@@ -17,7 +17,7 @@ A typical PHP application in production is several containers: nginx, PHP-FPM, s
 
 The server works out of the box with sensible defaults. Fine-tuning is done through [environment variables](operations/configuration.md): [TLS](features/tls.md) is enabled with two variables (`TLS_CERT`, `TLS_KEY`), [rate limiting](features/rate-limiting.md) with one (`RATE_LIMIT`), and [compression](features/compression.md) is on by default. No need to edit nginx configs or build separate modules.
 
-On a dedicated [internal port](features/internal-server.md), [health checks](operations/health-checks.md) (`/health`), [Prometheus metrics](operations/metrics.md) (`/metrics`), and a configuration snapshot (`/config`) are available. This is enough for Kubernetes liveness/readiness probes and connecting Grafana without additional sidecar containers.
+On a dedicated [internal port](features/internal-server.md), [health checks](operations/health-checks.md) (`/health`, plus a dedicated endpoint per Kubernetes probe type), [Prometheus metrics](operations/metrics.md) (`/metrics`), and a configuration snapshot (`/config`) are available. This is enough for Kubernetes liveness/readiness probes and connecting Grafana without additional sidecar containers.
 
 [Logs](features/access-logging.md) are structured JSON: method, path, status, response time, and [request ID](features/request-ids.md) in every line. They are easy to parse in Loki, Elasticsearch, or any other tool without additional grok patterns.
 

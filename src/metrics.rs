@@ -890,7 +890,7 @@ impl Metrics {
         if self.pool_stall_watched() {
             let _ = writeln!(
                 out,
-                "# HELP oxphp_pool_stalled Set to 1 while requests are waiting for workers that are idle and getting nothing done — a pool that has stopped taking work off its queue. Set once that has held for a minute, so a worker re-loading the application after a recycle does not raise it, and cleared when a worker gets a request through. Needs both the queue and the count of requests the workers get through, so it is exported in worker mode only."
+                "# HELP oxphp_pool_stalled Set to 1 while requests are waiting for workers that are idle and getting nothing done — a pool that has stopped taking work off its queue. Set once that has held for a minute, so a worker re-loading the application after a recycle does not raise it, and cleared either by a worker getting a request through or by a minute in which the pool has not looked wedged — the second exit matters because the readiness 503 this drives is itself what stops requests arriving. Needs both the queue and the count of requests the workers get through, so it is exported in worker mode only."
             );
             let _ = writeln!(out, "# TYPE oxphp_pool_stalled gauge");
             let _ = writeln!(

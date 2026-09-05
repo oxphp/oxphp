@@ -166,7 +166,7 @@ Full guide: [Distributed tracing](docs/features/distributed-tracing.md).
 - **`#[OxPHP\Apm\Trace]` decorator** — annotate any function or method with a PHP 8 attribute to create spans automatically
 - **PHP tracing SDK** — 10 `oxphp_apm_*()` functions (`start`, `end`, `attribute`, `event`, `error`, `status`, `header`, `trace`, `trace_id`, `span_id`) for manual span creation, attributes, events, error recording, and trace context propagation
 - **Prometheus metrics** at `/metrics` — per-worker, zero dependencies — see [Metrics](docs/operations/metrics.md)
-- **Health check** at `/health` — ready for K8s readiness probes — see [Health checks](docs/operations/health-checks.md)
+- **Health checks** at `/health/liveness`, `/health/readiness` and `/health/startup`, with `/health` aggregating them for dashboards — see [Health checks](docs/operations/health-checks.md)
 - **Internal server** on a separate port for health, metrics, and runtime config — see [Internal server](docs/features/internal-server.md)
 - **Structured error logging** — PHP errors appear in the server log with `php_error_type`, `php_file`, `php_line` fields
 - **JSON access logging** with optional `trace_id`/`span_id` fields (levels: `all`, `error`, off via `ACCESS_LOG`) — see [Access logging](docs/features/access-logging.md)
