@@ -401,7 +401,7 @@ HEALTHCHECK --interval=10s --timeout=5s --retries=3 --start-period=5s \
     CMD wget --quiet --tries=1 --spider http://localhost:9090/health || exit 1
 ```
 
-The `/health` endpoint returns `200` when the server is healthy and `503` when degraded. The response JSON includes uptime, total request count, and active connection count. For Kubernetes, use the same endpoint as both a liveness and readiness probe.
+The `/health` endpoint returns `200` when the server is healthy and `503` when degraded. The response JSON includes uptime, total request count, and active connection count. For Kubernetes, use the dedicated probe endpoints instead — `/health/liveness`, `/health/readiness` and `/health/startup`, each of which answers the question its probe type asks; see [Health Checks](../operations/health-checks.md).
 
 ## What's Next
 

@@ -33,7 +33,7 @@ OxPHP runs a separate HTTP server on a dedicated port for health checks, Prometh
 
 ### GET /health
 
-Returns a JSON health status. Use this for Kubernetes readiness and liveness probes.
+Returns a JSON health status for dashboards and container health checks. For Kubernetes use the dedicated probe endpoints below, which are what the probe types expect: `/health` reports every subsystem at once, so a failure in any of them would restart the pod if it were wired to liveness.
 
 **200 OK** — all systems healthy:
 
@@ -44,6 +44,7 @@ Returns a JSON health status. Use this for Kubernetes readiness and liveness pro
   "total_requests": 48203,
   "active_connections": 7,
   "executor_healthy": true,
+  "pool_stalled": false,
   "plugins": {
     "otel": "ok"
   }
@@ -59,13 +60,14 @@ Returns a JSON health status. Use this for Kubernetes readiness and liveness pro
   "total_requests": 48203,
   "active_connections": 7,
   "executor_healthy": true,
+  "pool_stalled": false,
   "plugins": {
     "otel": "failed"
   }
 }
 ```
 
-The `plugins` object lists every loaded plugin with its health status: `"ok"`, `"degraded"`, or `"failed"`. The endpoint returns 503 when any plugin reports `"failed"` **or** the script executor is unhealthy (`executor_healthy: false`). `"degraded"` plugins appear in the JSON body but the HTTP status remains 200.
+The `plugins` object lists every loaded plugin with its health status: `"ok"`, `"degraded"`, or `"failed"`. The endpoint returns 503 when any plugin reports `"failed"`, when no PHP worker thread is left running (`executor_healthy: false`), or when the pool is wedged (`pool_stalled: true` — worker mode only, see [Health Checks](../operations/health-checks.md)). `"degraded"` plugins appear in the JSON body but the HTTP status remains 200. Load is not a fault here either: a server shedding `529` under overload reports `"ok"`.
 
 ### GET /metrics
 
@@ -145,29 +147,31 @@ Any path not matching a built-in or plugin endpoint returns `404 Not Found`.
 
 ## Kubernetes Integration
 
+Wire each probe to the endpoint made for it rather than pointing all three at `/health`: that one aggregates every subsystem into a single status, so on liveness it answers a plugin failure or a wedged pool with a pod restart.
+
 ### Readiness Probe
 
-Use `/health` to control whether Kubernetes routes traffic to the pod:
+`/health/readiness` controls whether Kubernetes routes traffic to the pod:
 
 ```yaml
 readinessProbe:
   httpGet:
-    path: /health
+    path: /health/readiness
     port: 9090
   initialDelaySeconds: 2
   periodSeconds: 5
 ```
 
-When `/health` returns 503, Kubernetes removes the pod from the Service endpoint list. Traffic resumes when the endpoint returns 200 again.
+When it returns 503, Kubernetes removes the pod from the Service endpoint list. Traffic resumes when it returns 200 again. It reports faults, not load — an overloaded pod stays in rotation; see [Health Checks](../operations/health-checks.md).
 
 ### Liveness Probe
 
-Use the same endpoint to restart pods that become unresponsive:
+`/health/liveness` answers 200 whenever the process can serve an HTTP request at all, which is what liveness should mean — a restart cannot fix an overloaded pool and takes its in-flight work with it:
 
 ```yaml
 livenessProbe:
   httpGet:
-    path: /health
+    path: /health/liveness
     port: 9090
   initialDelaySeconds: 5
   periodSeconds: 10
@@ -181,7 +185,7 @@ For applications with slow bootstrap (large frameworks, heavy autoloaders):
 ```yaml
 startupProbe:
   httpGet:
-    path: /health
+    path: /health/startup
     port: 9090
   initialDelaySeconds: 1
   periodSeconds: 2

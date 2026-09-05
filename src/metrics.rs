@@ -202,6 +202,9 @@ pub struct Metrics {
     accept_stalled: AtomicUsize,
     /// Connections accepted but made to wait for a MAX_CONNECTIONS permit.
     accept_stalls_total: AtomicU64,
+    /// 1 while the supervisor holds the pool to be wedged: work waiting, idle
+    /// workers, nothing getting through. Written by the supervisor alone.
+    pool_stalled: AtomicUsize,
     pending_requests: AtomicUsize,
     dropped_requests: AtomicU64,
     /// One slot per [`ShedReason`], indexed by its position in
@@ -354,6 +357,7 @@ impl Metrics {
             active_connections: AtomicUsize::new(0),
             accept_stalled: AtomicUsize::new(0),
             accept_stalls_total: AtomicU64::new(0),
+            pool_stalled: AtomicUsize::new(0),
             pending_requests: AtomicUsize::new(0),
             dropped_requests: AtomicU64::new(0),
             admission_refusals: std::array::from_fn(|_| AtomicU64::new(0)),
@@ -491,6 +495,40 @@ impl Metrics {
 
     pub fn accept_stall_end(&self) {
         self.accept_stalled.store(0, Ordering::Relaxed);
+    }
+
+    /// Publish whether the pool is wedged, as the supervisor's stall watch
+    /// last read it.
+    ///
+    /// Deliberately a state rather than a count: nothing else can answer "is
+    /// this instance serving PHP right now", and that question is asked by a
+    /// readiness probe, which has one reading to go on and no window to take a
+    /// rate over. The watch it comes from already debounces, and the
+    /// supervisor waits past its first warning before writing here — a worker
+    /// re-running the application's bootstrap wears the same shape for a scan
+    /// or two — so what arrives is a decision about a state that has held for
+    /// a minute, not a sample.
+    pub fn set_pool_stalled(&self, stalled: bool) {
+        self.pool_stalled
+            .store(usize::from(stalled), Ordering::Relaxed);
+    }
+
+    /// Whether the pool was wedged as of the supervisor's last scan.
+    ///
+    /// False where nothing watches: the watch needs both a queue to read and a
+    /// pool that counts the requests its workers get through, which together
+    /// mean worker mode.
+    /// Everywhere else this stays false for the life of the process.
+    pub fn pool_stalled(&self) -> bool {
+        self.pool_stalled.load(Ordering::Relaxed) != 0
+    }
+
+    /// Whether the stall watch has the two readings it needs to judge the
+    /// pool: the queue between admission and the workers, and the work those
+    /// workers have got through. Both together mean worker mode; without them
+    /// the supervisor says nothing and [`Metrics::pool_stalled`] never moves.
+    fn pool_stall_watched(&self) -> bool {
+        self.queue_probe.get().is_some() && self.pool_progress_total().is_some()
     }
 
     /// Count a request as in flight and hand back the guard that discounts it.
@@ -843,6 +881,22 @@ impl Metrics {
                 out,
                 "oxphp_admission_slots_available {}",
                 queue.slots_available
+            );
+        }
+
+        // Absent wherever nothing watches for the state, for the same reason
+        // the queue gauges are: a series pinned at 0 by a supervisor that
+        // never looks reads exactly like one held at 0 by a healthy pool.
+        if self.pool_stall_watched() {
+            let _ = writeln!(
+                out,
+                "# HELP oxphp_pool_stalled Set to 1 while requests are waiting for workers that are idle and getting nothing done — a pool that has stopped taking work off its queue. Set once that has held for a minute, so a worker re-loading the application after a recycle does not raise it, and cleared when a worker gets a request through. Needs both the queue and the count of requests the workers get through, so it is exported in worker mode only."
+            );
+            let _ = writeln!(out, "# TYPE oxphp_pool_stalled gauge");
+            let _ = writeln!(
+                out,
+                "oxphp_pool_stalled {}",
+                self.pool_stalled.load(Ordering::Relaxed)
             );
         }
 
@@ -1643,6 +1697,46 @@ mod tests {
         let out = lost_permits.to_prometheus();
         assert!(out.contains("oxphp_queue_depth 0"), "{out}");
         assert!(out.contains("oxphp_admission_slots_available 0"), "{out}");
+    }
+
+    #[test]
+    fn pool_stalled_gauge_renders_only_where_the_state_is_watched() {
+        // The watch needs a queue to read and a count of what the workers took
+        // off it. Without both, nothing ever sets the flag, and a series
+        // pinned at 0 by a supervisor that never looks is indistinguishable
+        // from one held at 0 by a pool that is fine.
+        let unwatched = Metrics::new();
+        assert!(!unwatched.to_prometheus().contains("oxphp_pool_stalled"));
+
+        // A queue alone is not enough: outside worker mode there is no count
+        // of picked-up work, and the supervisor stays quiet.
+        let queue_only = Metrics::new();
+        queue_only.set_queue_probe(Box::new(|| QueueSnapshot {
+            depth: 0,
+            capacity: 512,
+            slots_available: 512,
+        }));
+        assert!(!queue_only.to_prometheus().contains("oxphp_pool_stalled"));
+
+        let watched = Metrics::new();
+        watched.set_queue_probe(Box::new(|| QueueSnapshot {
+            depth: 7,
+            capacity: 512,
+            slots_available: 505,
+        }));
+        watched.set_worker_metrics(Arc::new(WorkerMetrics::new(4)));
+        let out = watched.to_prometheus();
+        assert!(out.contains("\noxphp_pool_stalled 0\n"), "{out}");
+
+        watched.set_pool_stalled(true);
+        assert!(watched.pool_stalled());
+        let out = watched.to_prometheus();
+        assert!(out.contains("\noxphp_pool_stalled 1\n"), "{out}");
+
+        watched.set_pool_stalled(false);
+        assert!(!watched.pool_stalled());
+        let out = watched.to_prometheus();
+        assert!(out.contains("\noxphp_pool_stalled 0\n"), "{out}");
     }
 
     #[test]
