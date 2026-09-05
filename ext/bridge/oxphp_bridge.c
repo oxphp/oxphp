@@ -1637,6 +1637,83 @@ int oxphp_call_php_native(const char *func_name, void *args, uint32_t argc, void
     return 0;
 }
 
+int oxphp_call_callable_native(void *callable_zval, void *args, uint32_t argc, void *result) {
+    ZVAL_NULL((zval*)result);
+    if (!callable_zval) {
+        return -1;
+    }
+
+    /* Resolve the callable in whatever form PHP handed it over — Closure,
+     * "func" / "Cls::method" string, [obj, 'method'] array, invokable object.
+     *
+     * Only three of the five resolved fields are carried into the call below,
+     * and that is complete: zend_call_function reads neither `calling_scope`
+     * nor `closure` (zend_call_known_function leaves both uninitialized in the
+     * cache it builds, which is only sound because they are never read). The
+     * `closure` we drop is a borrow in any case — zend_is_callable_ex assigns
+     * Z_OBJ_P without an addref, and the cache release on the call's own paths
+     * touches only a trampoline function handler, never the closure.
+     *
+     * A failed resolve leaks nothing, though not because nothing was
+     * allocated: the one path that builds a __call trampoline and then rejects
+     * it releases the cache itself (zend_is_callable_check_func,
+     * PHP-8.4.18 Zend/zend_API.c:4039). */
+    zend_fcall_info fci;
+    zend_fcall_info_cache fcc;
+    char *err = NULL;
+    if (zend_fcall_info_init((zval*)callable_zval, 0, &fci, &fcc, NULL, &err) != SUCCESS) {
+        if (err) efree(err);
+        /* Resolution is not inert: a "Cls::method" string goes through
+         * zend_lookup_class, which runs the autoloader, and the autoloader may
+         * throw. Report that as "an exception is pending" rather than "not
+         * callable" — a caller told -1 raises a TypeError about its own
+         * argument, which would name the wrong cause and bury the real
+         * exception as `previous`. */
+        return EG(exception) ? -2 : -1;
+    }
+    if (err) efree(err);
+
+    /* Arguments stay owned by the caller: zend_call_function ZVAL_COPY's each
+     * one into the callee frame rather than taking it over. A __call
+     * trampoline, if resolution produced one, is consumed by this call — so
+     * `fcc.function_handler` must not be read afterwards. */
+    zend_call_known_function(fcc.function_handler,
+                             fcc.object,
+                             fcc.called_scope,
+                             (zval*)result,
+                             argc, (zval*)args, NULL);
+
+    /* An internal function must not hand a reference back to userland, and a
+     * callable declared `function &cb()` returns one. call_user_func unwraps it
+     * for the same reason (PHP-8.4.18 ext/standard/basic_functions.c:1462). */
+    if (Z_ISREF_P((zval*)result)) {
+        zend_unwrap_reference((zval*)result);
+    }
+
+    /* The result slot is droppable unconditionally, but not for the reason a
+     * first reading suggests: the zval_ptr_dtor + ZVAL_UNDEF pair inside
+     * zend_call_function (Zend/zend_execute_API.c:1035) sits in the
+     * ZEND_INTERNAL_FUNCTION branch only. For a user function — a Closure, the
+     * common case here — the retval is simply the ZVAL_UNDEF written at :804
+     * that ZEND_RETURN never got to overwrite. Either way the dtor below is a
+     * no-op or a correct release, and re-NULLing keeps that true for the Rust
+     * owner. EG(exception) stays set for the caller to propagate.
+     *
+     * -2 means "an exception is pending after the attempt", not the stronger
+     * "the callable threw". Resolving "self::m" / "parent::m" / "static::m"
+     * emits E_DEPRECATED — check_flags is 0, so IS_CALLABLE_SUPPRESS_DEPRECATIONS
+     * is unset (Zend/zend_API.c:3780) — and under a throwing error handler that
+     * leaves an exception pending on a *successful* resolve. zend_call_function
+     * then releases the cache and returns without invoking anything (:810-814):
+     * nothing leaks, but the callable did not run. */
+    if (EG(exception)) {
+        zval_ptr_dtor((zval*)result);
+        ZVAL_NULL((zval*)result);
+        return -2;
+    }
+    return 0;
+}
+
 /* ── TSRM cache update ── */
 
 void oxphp_bridge_tsrm_update(void) {
@@ -2271,11 +2348,22 @@ void oxphp_exception_get(const char **class_out, const char **message_out, int64
         *class_out = exc_class_buf;
     }
 
-    /* Message — read the 'message' property directly */
+    /* Message — read the 'message' property directly.
+     *
+     * The scope is the object's own class, not zend_ce_exception. `message` and
+     * `code` are protected and are declared *twice* upstream — once in
+     * Exception, once in Error (PHP-8.4.18 Zend/zend_exceptions_arginfo.h,
+     * register_class_Exception and register_class_Error) — and the two
+     * hierarchies are unrelated. Reading an Error with Exception as the scope
+     * fails is_protected_compatible_scope (Zend/zend_object_handlers.c:282-286,
+     * used at :422), and because these reads are silent the failure is not an
+     * error but ZEND_WRONG_PROPERTY_OFFSET → &EG(uninitialized_zval) → an empty
+     * message and a zero code for every TypeError, ValueError,
+     * DivisionByZeroError and the rest of the Error side. */
     if (message_out) {
         zval rv;
         zval *msg_prop = zend_read_property(
-            zend_ce_exception, exc, "message", sizeof("message") - 1, 1, &rv);
+            exc->ce, exc, "message", sizeof("message") - 1, 1, &rv);
         if (msg_prop && Z_TYPE_P(msg_prop) == IS_STRING) {
             size_t len = Z_STRLEN_P(msg_prop);
             if (len >= sizeof(exc_message_buf)) len = sizeof(exc_message_buf) - 1;
@@ -2292,7 +2380,7 @@ void oxphp_exception_get(const char **class_out, const char **message_out, int64
     if (code_out) {
         zval rv;
         zval *code_prop = zend_read_property(
-            zend_ce_exception, exc, "code", sizeof("code") - 1, 1, &rv);
+            exc->ce, exc, "code", sizeof("code") - 1, 1, &rv);
         if (code_prop && Z_TYPE_P(code_prop) == IS_LONG) {
             *code_out = (int64_t)Z_LVAL_P(code_prop);
         } else {

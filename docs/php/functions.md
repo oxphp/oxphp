@@ -642,17 +642,32 @@ oxphp_register_decorator(LogDecorator::class);
 ## oxphp_apm_trace()
 
 ```php
-oxphp_apm_trace(string $name, callable $callback, ?array $attributes = null): void
+oxphp_apm_trace(string $name, callable $callback, ?array $attributes = null): mixed
 ```
 
-Executes a callback inside a named span. The span is opened before the callback runs and closed after it returns. Reserved for future enhanced callback integration.
+Executes a callback inside a named span. The span is opened before the callback runs and closed after it returns or throws, so no `oxphp_apm_end()` call is needed.
+
+The callback receives the span's local ID as its only argument, which can be passed to `oxphp_apm_attribute()`, `oxphp_apm_event()` or `oxphp_apm_status()` to target this span explicitly rather than whichever span is current.
+
+If the callback throws, the span is marked as error and an `exception` event carrying `exception.type` and `exception.message` is recorded on it, then the exception propagates unchanged. No `exception.stacktrace` is recorded — collecting one costs a re-entry into PHP on every throw, which this path takes far more often than `oxphp_apm_error()` does. Call `oxphp_apm_error($e)` explicitly if you need the stacktrace.
+
+When APM is disabled (`OTEL_APM_ENABLED` unset or falsy — it accepts `on`, `true`, `1` and `yes`, case-insensitively), the callback still runs and its return value is still forwarded; it receives `0` as the span ID and nothing is recorded.
+
+A `$callback` that is not callable raises a `TypeError`. If resolving it raises an exception of its own instead — an autoloader that throws on a `'Class::method'` string, an error handler that throws on the deprecation notice for a `'self::method'` string — that exception propagates as it is and the callback does not run.
 
 **Parameters:**
 - `$name` — Span name
-- `$callback` — Callable to execute inside the span
+- `$callback` — Callable to execute inside the span; receives `int $span_id`
 - `$attributes` — Optional associative array of string key-value attributes
 
-**Returns:** `void`
+**Returns:** `mixed` — whatever `$callback` returned
+
+```php
+$user = oxphp_apm_trace('user.fetch', function (int $span) use ($id) {
+    oxphp_apm_attribute('user.id', (string) $id, $span);
+    return User::find($id);
+}, ['db.system' => 'mysql']);
+```
 
 ---
 

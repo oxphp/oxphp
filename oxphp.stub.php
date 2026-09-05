@@ -2253,8 +2253,10 @@ namespace OxPHP\Profile {
 /**
  * Execute a callback inside a child span. The span is automatically
  * closed when the callback returns or throws. On exception, the span
- * is marked as error with an exception event, then the exception
- * is re-thrown.
+ * is marked as error with an exception event carrying exception.type
+ * and exception.message, then the exception is re-thrown. No
+ * exception.stacktrace is recorded — call oxphp_apm_error() explicitly
+ * where the trace is worth a re-entry into PHP.
  *
  * When APM is disabled (OTEL_APM_ENABLED != true): calls $callback
  * directly with no overhead. $span_id passed to callback is 0.
@@ -2263,6 +2265,11 @@ namespace OxPHP\Profile {
  * @param callable $callback   Receives (int $span_id) as argument
  * @param array    $attributes Initial span attributes ['key' => 'value']
  * @return mixed   Return value of $callback
+ * @throws TypeError if $callback is not callable. An exception raised while
+ *         resolving $callback (a throwing autoloader behind a 'Cls::method'
+ *         string, an error handler that throws on the deprecation notice for
+ *         'self::method') propagates as itself instead, and $callback does
+ *         not run.
  *
  * @example
  * $user = oxphp_apm_trace('user.fetch', function(int $span) use ($id) {
@@ -2270,7 +2277,7 @@ namespace OxPHP\Profile {
  *     return User::find($id);
  * });
  */
-function oxphp_apm_trace(string $name, callable $callback, array $attributes = []): mixed {}
+function oxphp_apm_trace(string $name, callable $callback, ?array $attributes = null): mixed {}
 
 /**
  * Start a new child span manually. Returns a span ID that MUST be
@@ -2345,7 +2352,8 @@ function oxphp_apm_event(string $name, array $attributes = [], ?int $span_id = n
  *
  * The span is NOT closed -- use in catch blocks to record the error
  * while continuing execution. Inside oxphp_apm_trace() callbacks,
- * exceptions are recorded automatically.
+ * exceptions are recorded automatically, but without a stacktrace;
+ * call this explicitly where the stacktrace is worth the cost.
  *
  * @param \Throwable $exception The caught exception
  * @param int|null   $span_id   Target span, or null for current span

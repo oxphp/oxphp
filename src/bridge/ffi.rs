@@ -166,6 +166,16 @@ extern "C" {
         result: *mut c_void,
     ) -> c_int;
 
+    /// Invoke a callable *value* (Closure, callable string, `[obj, 'method']`
+    /// array, invokable object) rather than a function looked up by name.
+    /// `0` = ran, `-1` = not callable, `-2` = threw (PHP exception pending).
+    pub fn oxphp_call_callable_native(
+        callable_zval: *mut c_void,
+        args: *mut c_void,
+        argc: u32,
+        result: *mut c_void,
+    ) -> c_int;
+
     // ── Object construction helpers ──
     //
     // Used by Rust handlers for value-typed return classes

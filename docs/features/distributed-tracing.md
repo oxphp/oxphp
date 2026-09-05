@@ -274,7 +274,7 @@ If the decorated function throws an exception, the span's status is set to error
 
 ## APM: PHP Tracing SDK
 
-The APM plugin registers 10 `oxphp_apm_*()` functions for manual span management. All functions are safe no-ops when APM is disabled, so your code works without modification in any environment.
+The APM plugin registers 10 `oxphp_apm_*()` functions for manual span management. They are all registered whether or not APM is enabled, so your code works without modification in any environment. With APM disabled the span functions become no-ops returning sentinel values (`0` for IDs, `""` for strings); the one exception is `oxphp_apm_trace()`, which still runs the callback it was given and still returns its value — a tracing helper that swallowed business logic when tracing happens to be off would be worse than no helper at all.
 
 ### Creating Spans
 
@@ -351,7 +351,7 @@ $response = file_get_contents('https://api.example.com/data', false,
 
 | Function | Returns | Description |
 |----------|---------|-------------|
-| `oxphp_apm_trace(name, callback, ?attributes)` | `void` | Execute a callback inside a span (reserved for future use) |
+| `oxphp_apm_trace(name, callback, ?attributes)` | `mixed` | Execute a callback inside a span and return its value. The callback receives the span's local ID; a throw marks the span as error with an `exception` event (type and message, no stacktrace) and propagates |
 | `oxphp_apm_start(name, ?attributes)` | `int` | Open a span and return its local ID. `0` when APM is disabled |
 | `oxphp_apm_end(span_id)` | `void` | Close the span with the given local ID |
 | `oxphp_apm_attribute(key, value, ?span_id)` | `void` | Set an attribute on the current or specified span |

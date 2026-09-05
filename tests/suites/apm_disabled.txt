@@ -1,0 +1,6 @@
+# profile: default
+# description: APM PHP SDK with APM turned off
+
+# oxphp_apm_trace() must still run the callback when OTEL_APM_ENABLED is unset —
+# the span is what disappears, not the business logic.
+apm/test_trace_callback_disabled
