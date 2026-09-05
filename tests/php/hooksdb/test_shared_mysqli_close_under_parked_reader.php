@@ -17,6 +17,17 @@ $t = new TestCase('shared_mysqli_close_under_parked_reader', 'hooksdb');
 // original handler — which closes the connection out from under the parked
 // reader. The bound in this image is two seconds (default_socket_timeout), the
 // holder's query nine, so the give-up branch is the one taken here.
+//
+// That reading only holds while the two limits differ. This image starts with
+// max_execution_time at 0, which imposes no limit at all, so without the line
+// below default_socket_timeout would be both the smaller and the larger and the
+// timing check further down would pass even on a regression that started taking
+// the larger. A request limit of thirty seconds separates them again without
+// touching the startup value the rest of the profile is built on:
+// max_execution_time is read as the request currently has it, so the wait below
+// must still come out at two seconds and not at thirty.
+set_time_limit(30);
+
 $task = oxphp_async(function (): array {
     $sock = stream_socket_client('tcp://127.0.0.1:80', $errno, $errstr, 3.0);
     if ($sock === false) {
@@ -57,8 +68,16 @@ $inner = oxphp_async_await($task);
 $waited = microtime(true) - $started;
 
 // It really was the give-up branch: close() waited its bound before delegating,
-// so the holder was still parked on the connection when it was closed.
+// so the holder was still parked on the connection when it was closed. Both ends
+// of that wait, because one without the other is satisfied by the two things this
+// is here to tell apart — a close that never waited at all, and one that waited
+// out max_execution_time instead of the smaller limit.
 $t->assertGreaterThan('close() waited for the holder before giving up', $closeTook, 1.5);
+$t->assertLessThan(
+    'and gave up at the smaller of the two limits rather than at the request one',
+    $closeTook,
+    5.0
+);
 
 $t->assertNotContains(
     'the parked request did not go on using the connection closed under it',

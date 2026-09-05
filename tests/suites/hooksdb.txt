@@ -40,6 +40,35 @@ hooksdb/test_shared_pdo_attribute_filter
 # The other half of the guarantee: what a fiber gets when the wait does not win.
 hooksdb/test_shared_redis_wait_gives_up
 
+# A persistent connection is put into the pool, or found there, while another
+# fiber is mid-exchange on it. Registering a second one replaces the pool entry
+# and frees the connection behind it, which ends the request that was reading its
+# reply there; a ping PDO could not send is read instead as a dead connection, and
+# costs the sharing rather than the connection. Unlike the tests above, the second
+# fiber here is not making a query but building a handle, which passes through
+# none of the calls a query goes through. The two after it are the limit of that
+# sharing, from its two sides: adopting a pooled connection is also how a
+# constructor writes its own options onto a connection someone else is using, so
+# one that would write a different value gets a connection of its own, and so does
+# one carrying an option the driver has to be told about — being told is a command,
+# and its value being the one already set does not make it less of one. The last
+# two are the other half of that answer, which must stay an answer about
+# connections a call can be in flight on: a claim is held to the end of a request
+# while the handle it was taken for can be dropped at any point inside it, so a
+# constructor meeting a claimed connection nothing is using shares it — with the
+# option the busy case is refused for — and one that has actually died is still
+# replaced. One more asks the same question of a driver that supplies no
+# liveness check at all: PDO asks nothing before handing a pooled connection over
+# to such a constructor, so an answer installed only where the question is already
+# asked would leave that driver's connections rewritten under the fiber using them.
+hooksdb/test_persistent_ctor_race_one_connection
+hooksdb/test_persistent_ctor_under_parked_holder
+hooksdb/test_persistent_ctor_options_differ
+hooksdb/test_persistent_ctor_driver_option_not_shared
+hooksdb/test_persistent_ctor_shares_idle_connection
+hooksdb/test_persistent_ctor_dead_connection_replaced
+hooksdb/test_persistent_ctor_driver_without_liveness
+
 # Last, because both of these end by destroying the connection they hold: a fiber
 # parked inside a socket read holds the stream across the suspension, and another
 # fiber closing that same stream frees it under the reader. Once through a raw

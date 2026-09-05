@@ -32,12 +32,38 @@ RUN set -eux; \
     php -m | grep -E '^(pdo_mysql|mysqli|redis)$'
 
 # The bound on waiting for a connection another fiber holds is the smaller of
-# max_execution_time and default_socket_timeout. This image carries no php.ini and
-# sets neither, so both stand at the engine's defaults for a server SAPI — measured
-# in this image, max_execution_time=30 and default_socket_timeout=60 — and two
-# seconds here is what keeps the test that reaches the give-up branch to a few
-# seconds instead of half a minute. Anyone raising it past 30 should know the other
-# one becomes the bound. Shipped as a startup value rather than set from a test,
-# because the server reads the value the process started with: a request that lowers
-# it for an fsockopen() of its own must not shorten the bound for everyone else.
-RUN printf 'default_socket_timeout=2\n' > /usr/local/etc/php/conf.d/zz-hooksdb.ini
+# max_execution_time and default_socket_timeout. Left alone both stand at the
+# engine's defaults for a server SAPI — measured in this image, 30 and 60 — which
+# would put that bound at half a minute, so default_socket_timeout is set to two
+# seconds and that is what keeps the test reaching the give-up branch to a few
+# seconds. Shipped as a startup value rather than set from a test, because the
+# server reads the value the process started with: a request that lowers it for an
+# fsockopen() of its own must not shorten the bound for everyone else.
+#
+# max_execution_time is set to 0 for a different reason, and it leaves the bound
+# where it was: the bound is the smaller of the two limits that impose one, and
+# with max_execution_time imposing none it is default_socket_timeout's two seconds
+# either way. It does cost something, and not the bound: with 30 and 2, a test
+# whose timing assertions read the bound was separating the smaller of the two
+# limits from the larger, since taking the larger would have waited half a minute
+# and failed them. With 0 and 2 both answers are two seconds, so a regression that
+# started taking the larger would pass unseen. The two tests that read the bound
+# that way — test_shared_redis_wait_gives_up and
+# test_shared_mysqli_close_under_parked_reader — call set_time_limit(30)
+# themselves for that reason, which puts the two limits back at 30 and 2 for the
+# request making the assertion and leaves this startup value alone for everyone
+# else.
+#
+# What 0 removes is a clock this profile's results would otherwise be read
+# against. An async worker thread arms its execution timer once, in the
+# php_request_startup() it does when the thread starts — the pool runs one
+# long-lived request for the lifetime of the thread — and never re-arms or
+# disarms it: the reset between tasks zeroes the limit the engine compares
+# against but leaves the timer running. So roughly max_execution_time seconds
+# into the process, whichever task is running then is killed, reported as
+# "Maximum execution time of 0 seconds exceeded" because the limit the message
+# names has since been zeroed. All but three of the tests here dispatch async
+# tasks, so which one is holding a task at that moment decides which one turns
+# red, and adding a test anywhere earlier in the suite moves the target. At 0 the
+# timer is never armed.
+RUN printf 'default_socket_timeout=2\nmax_execution_time=0\n' > /usr/local/etc/php/conf.d/zz-hooksdb.ini
