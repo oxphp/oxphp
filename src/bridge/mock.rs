@@ -235,6 +235,15 @@ pub unsafe fn oxphp_call_php_native(
     -1 // always fails in mock
 }
 
+pub unsafe fn oxphp_call_callable_native(
+    _callable_zval: *mut c_void,
+    _args: *mut c_void,
+    _argc: u32,
+    _result: *mut c_void,
+) -> c_int {
+    -1 // host tests have no VM to call into: reads as "not callable"
+}
+
 // ── Object construction helpers (mock) ──
 //
 // Host tests cannot construct PHP objects — these always fail so that

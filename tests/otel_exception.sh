@@ -15,6 +15,16 @@
 # Scenario MANUAL: oxphp_apm_error($e) on an explicit span → the same three
 # attributes on that span's exception event.
 #
+# Scenario TRACE-CB: oxphp_apm_trace($name, $callback) runs the callback inside a
+# span it owns for the callback's whole lifetime — the returning half exports a
+# span carrying the $attributes argument plus whatever the callback set through
+# the span id it was handed, and the throwing half exports one marked Error with
+# exception.type and exception.message but deliberately no exception.stacktrace.
+# The throwing half is asserted twice, once per throwable hierarchy: Exception
+# and Error declare their own protected $message and neither derives from the
+# other, so a capture helper reading that property with the wrong scope keeps
+# working for one hierarchy while silently losing the message for the other.
+#
 # Root-span auto-capture scenarios: UNCAUGHT (raw uncaught exception), FATAL
 # (classless E_USER_ERROR), CHAINED (outer wraps a cause — must bucket on the
 # thrown class, not the root cause), FORGE (a message forging a "\n\nNext
@@ -80,6 +90,7 @@ docker run -d --name "$COL" --network "$NET" \
 docker run -d --name "$SRV" --network "$NET" \
 	-v "$FIX/auto.php":/var/www/html/public/auto.php:ro \
 	-v "$FIX/manual.php":/var/www/html/public/manual.php:ro \
+	-v "$FIX/trace_cb.php":/var/www/html/public/trace_cb.php:ro \
 	-v "$FIX/latin1.php":/var/www/html/public/latin1.php:ro \
 	-v "$FIX/reason.php":/var/www/html/public/reason.php:ro \
 	-v "$FIX/anon.php":/var/www/html/public/anon.php:ro \
@@ -140,6 +151,11 @@ docker run --rm --network "$NET" curlimages/curl:latest \
 	-s -o /dev/null -w "manual HTTP %{http_code}\n" "http://$SRV:80/manual.php"
 docker run --rm --network "$NET" curlimages/curl:latest \
 	-s -o /dev/null -w "latin1 HTTP %{http_code}\n" "http://$SRV:80/latin1.php"
+# trace_cb's body carries the callback's return value and the re-thrown message,
+# neither of which reaches the collector — capture it rather than discarding it.
+TRACE_CB_BODY="$(docker run --rm --network "$NET" curlimages/curl:latest \
+	-s "http://$SRV:80/trace_cb.php")"
+echo "trace_cb body: $(echo "$TRACE_CB_BODY" | tr '\n' '|')"
 docker run --rm --network "$NET" curlimages/curl:latest \
 	-s -o /dev/null -w "reason HTTP %{http_code}\n" "http://$SRV:80/reason.php"
 docker run --rm --network "$NET" curlimages/curl:latest \
@@ -230,6 +246,63 @@ echo "$LOGS" | grep -qF 'exception.message: Str(manual path: bad state)' \
 	&& ok "manual: exception.message" || bad "manual: exception.message"
 echo "$LOGS" | grep -qE 'Name +: manual_span' \
 	&& ok "manual: recorded on explicit span" || bad "manual: recorded on explicit span"
+
+# Print one span's debug-exporter block — from its "Span #" header up to the
+# next one. Scenarios that need to assert what is NOT on their span cannot use a
+# whole-log grep: every other scenario's spans are in the same log.
+span_block() {
+	echo "$LOGS" | awk -v want="$1" '
+		/^Span #/ { if (hit) exit; buf = $0 "\n"; next }
+		{ buf = buf $0 "\n"; if ($0 ~ ("Name +: " want "$")) hit = 1 }
+		END { if (hit) printf "%s", buf }
+	'
+}
+
+# Scenario TRACE-CB: oxphp_apm_trace() runs the callback inside a span it owns.
+# The returning half and the throwing half are asserted separately, and both on
+# their own span rather than anywhere in the log.
+echo "$TRACE_CB_BODY" | grep -qF 'trace_cb returned 42' \
+	&& ok "trace_cb: callback return value forwarded" || bad "trace_cb: callback return value forwarded"
+echo "$TRACE_CB_BODY" | grep -qF 'trace_cb rethrew: trace cb path: out of range' \
+	&& ok "trace_cb: exception re-thrown to the caller" || bad "trace_cb: exception re-thrown to the caller"
+
+TRACE_CB_OK="$(span_block 'trace_cb.ok')"
+[ -n "$TRACE_CB_OK" ] \
+	&& ok "trace_cb: returning callback exports its span" || bad "trace_cb: returning callback exports its span"
+echo "$TRACE_CB_OK" | grep -qF 'component: Str(trace-cb)' \
+	&& ok "trace_cb: \$attributes land on the span" || bad "trace_cb: \$attributes land on the span"
+# The callback set this through the span id it was handed, so its presence is
+# what proves that id addresses this span.
+echo "$TRACE_CB_OK" | grep -qF 'trace_cb.inner: Str(set-from-callback)' \
+	&& ok "trace_cb: span id argument addresses this span" || bad "trace_cb: span id argument addresses this span"
+
+TRACE_CB_BOOM="$(span_block 'trace_cb.boom')"
+echo "$TRACE_CB_BOOM" | grep -qE 'Status code *: Error' \
+	&& ok "trace_cb: throwing callback marks the span Error" || bad "trace_cb: throwing callback marks the span Error"
+echo "$TRACE_CB_BOOM" | grep -qF 'exception.type: Str(RangeException)' \
+	&& ok "trace_cb: exception.type" || bad "trace_cb: exception.type"
+echo "$TRACE_CB_BOOM" | grep -qF 'exception.message: Str(trace cb path: out of range)' \
+	&& ok "trace_cb: exception.message" || bad "trace_cb: exception.message"
+# No stacktrace on this path, by design. The AUTO span below is the control that
+# keeps this from passing because span_block returned nothing useful.
+echo "$TRACE_CB_BOOM" | grep -qF 'exception.stacktrace' \
+	&& bad "trace_cb: no stacktrace on the callback path" || ok "trace_cb: no stacktrace on the callback path"
+span_block 'chargeCard' | grep -qF 'exception.stacktrace' \
+	&& ok "trace_cb: control — span_block does surface a stacktrace when there is one" \
+	|| bad "trace_cb: control — span_block does surface a stacktrace when there is one"
+
+# Error and Exception each declare their own protected $message and neither
+# derives from the other, so the boom span above — a RangeException — cannot
+# show whether the Error half of PHP's throwables keeps its message.
+echo "$TRACE_CB_BODY" | grep -qF 'trace_cb rethrew error-hierarchy: trace cb path: wrong type' \
+	&& ok "trace_cb: Error-hierarchy exception re-thrown" || bad "trace_cb: Error-hierarchy exception re-thrown"
+TRACE_CB_ERR="$(span_block 'trace_cb.error_hierarchy')"
+echo "$TRACE_CB_ERR" | grep -qE 'Status code *: Error' \
+	&& ok "trace_cb: Error-hierarchy marks the span Error" || bad "trace_cb: Error-hierarchy marks the span Error"
+echo "$TRACE_CB_ERR" | grep -qF 'exception.type: Str(TypeError)' \
+	&& ok "trace_cb: Error-hierarchy exception.type" || bad "trace_cb: Error-hierarchy exception.type"
+echo "$TRACE_CB_ERR" | grep -qF 'exception.message: Str(trace cb path: wrong type)' \
+	&& ok "trace_cb: Error-hierarchy exception.message" || bad "trace_cb: Error-hierarchy exception.message"
 
 # Scenario LATIN1: a non-UTF-8 (latin1) message must survive (lossily) rather
 # than being dropped. The tail after the invalid 0xE9 byte proves it.

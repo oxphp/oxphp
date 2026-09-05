@@ -249,7 +249,7 @@ A coding is offered when `COMPRESSION_ENCODINGS` lists it **and** its level is n
 | `OTEL_APM_STACKTRACE_MAX_BYTES` | `8192` | Maximum size in bytes of the `exception.stacktrace` attribute. Over the cap the stacktrace is truncated from the tail with a `…(truncated)` marker. `0` disables truncation |
 | `OTEL_APM_MESSAGE_MAX_BYTES` | `4096` | Maximum size in bytes of the `exception.message` attribute (default matches New Relic's per-attribute value limit). Over the cap the message is truncated from the tail with a `…(truncated)` marker. `0` disables truncation |
 
-When APM is enabled, OxPHP automatically hooks 33 internal PHP functions (PDO, mysqli, cURL, Redis, Memcached, file I/O) to create child spans. The `oxphp_apm_*()` PHP functions are registered regardless of whether APM is enabled — when disabled, they are safe no-ops.
+When APM is enabled, OxPHP automatically hooks 33 internal PHP functions (PDO, mysqli, cURL, Redis, Memcached, file I/O) to create child spans. The `oxphp_apm_*()` PHP functions are registered regardless of whether APM is enabled — when disabled, the span functions are no-ops returning sentinel values. `oxphp_apm_trace()` is the exception: it still runs its callback and returns the callback's value, so disabling APM never changes what your application computes.
 
 ## Async Workers
 

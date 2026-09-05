@@ -1,9 +1,13 @@
 //! PHP SDK functions for APM tracing (`oxphp_apm_*`).
 //!
 //! All 10 functions are registered regardless of whether APM is enabled.
-//! When disabled, they are safe no-ops so PHP code never errors.
+//! When disabled, the span functions are no-ops returning sentinel values.
+//! `oxphp_apm_trace` is the exception on both counts: it runs its callback
+//! either way — dropping it would drop business logic, not just a span — so
+//! it also propagates whatever that callback throws, and rejects a second
+//! argument that is not callable, with APM on or off.
 
-use crate::bridge::call::NativeCall;
+use crate::bridge::call::{CallableOutcome, NativeCall};
 use crate::plugin::types::{PhpType, PhpValue};
 use crate::plugin::PluginContext;
 
@@ -13,7 +17,8 @@ use crate::profiling::{now_ns, SpanEvent, SpanEventKind, PROFILING_CONTEXT};
 ///
 /// The `enabled` flag controls runtime behavior: when `false`, functions
 /// return sentinel values (0 for IDs, "" for strings) without touching
-/// the span stack.
+/// the span stack — except `oxphp_apm_trace`, which returns whatever its
+/// callback returned and is handed span id 0 in place of a real one.
 pub fn register_functions(
     ctx: &mut PluginContext,
     enabled: bool,
@@ -23,11 +28,64 @@ pub fn register_functions(
         .param("name", PhpType::String)
         .param("callback", PhpType::Mixed)
         .optional_param("attributes", PhpType::Array, PhpValue::Null)
-        .returns(PhpType::Void)
+        .returns(PhpType::Mixed)
         .handler(move |call: &mut NativeCall| {
-            // Callback invocation will be wired later; for now no-op.
-            let _ = (call, enabled);
-            Ok(())
+            // With APM off the span is what disappears, not the business logic:
+            // the callback still runs and still gets its value forwarded, it is
+            // just handed span id 0 and nothing is recorded.
+            if !enabled {
+                let outcome = call.call_arg_callable(1, 1, |b| b.long(0));
+                return finish_trace_callback(call, outcome);
+            }
+
+            let name = match call.arg_str(0) {
+                Ok(s) => s.to_string(),
+                Err(_) => {
+                    let outcome = call.call_arg_callable(1, 1, |b| b.long(0));
+                    return finish_trace_callback(call, outcome);
+                }
+            };
+            let attrs = collect_attributes(call, 2);
+
+            // Push, then drop the borrow before the callback runs: the callback
+            // is free to call oxphp_apm_attribute() / _event() / _span_id(),
+            // all of which borrow PROFILING_CONTEXT again.
+            let span_id = PROFILING_CONTEXT
+                .with(|stack| stack.borrow_mut().push(std::sync::Arc::from(name), attrs));
+
+            let outcome = call.call_arg_callable(1, 1, |b| b.long(span_id as i64));
+
+            // Read the exception before taking the borrow, as oxphp_apm_error()
+            // does — so borrow-safety here does not rest on what reading a
+            // Throwable's class and message happens to touch.
+            let captured = match &outcome {
+                Ok(CallableOutcome::Threw) => Some(capture_pending_exception()),
+                _ => None,
+            };
+
+            // Close the span on every path — returned, threw, or refused.
+            PROFILING_CONTEXT.with(|stack| {
+                let mut stack = stack.borrow_mut();
+                if let Some((class, message)) = &captured {
+                    if let Some(span) = stack.get_mut(span_id) {
+                        span.status_code = 2; // Error
+                        super::push_exception_event(
+                            span,
+                            class,
+                            Some(message.as_str()),
+                            // No stacktrace: unlike the decorator path, this one
+                            // runs on every exception that escapes a traced
+                            // call, and getTraceAsString() re-enters the VM.
+                            None,
+                            super::MESSAGE_MAX_BYTES.load(std::sync::atomic::Ordering::Relaxed),
+                            super::STACKTRACE_MAX_BYTES.load(std::sync::atomic::Ordering::Relaxed),
+                        );
+                    }
+                }
+                stack.pop(span_id);
+            });
+
+            finish_trace_callback(call, outcome)
         })?;
 
     // 2. oxphp_apm_start(name, ?attributes)
@@ -49,23 +107,7 @@ pub fn register_functions(
                 }
             };
 
-            // Collect attributes from optional array arg
-            let mut attrs: Vec<(std::sync::Arc<str>, std::sync::Arc<str>)> = Vec::new();
-            if call.argc() > 1 {
-                if let Ok(false) = call.arg_is_null(1) {
-                    let _ = call.arg_array_foreach(1, |k, v| {
-                        let key: std::sync::Arc<str> = match k {
-                            crate::bridge::call::ArrayKey::Str(s) => std::sync::Arc::from(s),
-                            crate::bridge::call::ArrayKey::Int(i) => {
-                                std::sync::Arc::from(i.to_string().as_str())
-                            }
-                        };
-                        let val: std::sync::Arc<str> =
-                            std::sync::Arc::from(v.as_str().unwrap_or(""));
-                        attrs.push((key, val));
-                    });
-                }
-            }
+            let attrs = collect_attributes(call, 1);
 
             let local_id = PROFILING_CONTEXT
                 .with(|stack| stack.borrow_mut().push(std::sync::Arc::from(name), attrs));
@@ -157,23 +199,7 @@ pub fn register_functions(
                 Err(_) => return Ok(()),
             };
 
-            // Collect event attributes
-            let mut attrs: Vec<(std::sync::Arc<str>, std::sync::Arc<str>)> = Vec::new();
-            if call.argc() > 1 {
-                if let Ok(false) = call.arg_is_null(1) {
-                    let _ = call.arg_array_foreach(1, |k, v| {
-                        let key: std::sync::Arc<str> = match k {
-                            crate::bridge::call::ArrayKey::Str(s) => std::sync::Arc::from(s),
-                            crate::bridge::call::ArrayKey::Int(i) => {
-                                std::sync::Arc::from(i.to_string())
-                            }
-                        };
-                        let val: std::sync::Arc<str> =
-                            std::sync::Arc::from(v.as_str().unwrap_or(""));
-                        attrs.push((key, val));
-                    });
-                }
-            }
+            let attrs = collect_attributes(call, 1);
 
             let explicit_id = if call.argc() > 2 {
                 match call.arg_is_null(2) {
@@ -428,6 +454,85 @@ pub fn register_functions(
     Ok(())
 }
 
+/// Turn the result of invoking the `oxphp_apm_trace()` callback into the
+/// function's own outcome: forward the return value, let a pending exception
+/// propagate untouched, or reject a second argument that was never callable.
+///
+/// The pending-exception path deliberately returns `Ok(())`. Returning `Err`
+/// would send the dispatcher through `oxphp_throw_exception()`, replacing the
+/// exception already in flight — the callback's, or one raised while resolving
+/// the callback — with one of ours.
+fn finish_trace_callback(
+    call: &mut NativeCall,
+    outcome: Result<CallableOutcome, crate::plugin::php::PhpError>,
+) -> Result<(), crate::plugin::php::PhpError> {
+    match outcome? {
+        CallableOutcome::Returned(value) => {
+            // retval is the IS_NULL slot Zend initialized for this internal
+            // function and nothing here has written it, so overwriting the
+            // bytes releases nothing.
+            value.write_into(call.retval_ptr());
+            Ok(())
+        }
+        CallableOutcome::Threw => Ok(()),
+        CallableOutcome::NotCallable => Err(crate::plugin::php::PhpError::Exception {
+            class: "TypeError".to_string(),
+            message: "oxphp_apm_trace(): Argument #2 ($callback) must be a valid callback"
+                .to_string(),
+            code: 0,
+        }),
+    }
+}
+
+/// Class and message of the pending PHP exception, empty strings if none.
+fn capture_pending_exception() -> (String, String) {
+    use crate::bridge::ffi as bridge_ffi;
+    use std::ffi::CStr;
+
+    let mut class_p: *const std::os::raw::c_char = std::ptr::null();
+    let mut msg_p: *const std::os::raw::c_char = std::ptr::null();
+    let mut code: i64 = 0;
+    unsafe {
+        if bridge_ffi::oxphp_exception_pending() != 0 {
+            bridge_ffi::oxphp_exception_get(&mut class_p, &mut msg_p, &mut code);
+        }
+    }
+    let to_string = |p: *const std::os::raw::c_char| -> String {
+        if p.is_null() {
+            String::new()
+        } else {
+            unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
+        }
+    };
+    (to_string(class_p), to_string(msg_p))
+}
+
+/// Collect the optional attribute array at argument `idx` into span attributes.
+///
+/// Shared by `oxphp_apm_trace`, `oxphp_apm_start` and `oxphp_apm_event`, which
+/// all take the same optional array in the same shape.
+fn collect_attributes(
+    call: &NativeCall,
+    idx: u32,
+) -> Vec<(std::sync::Arc<str>, std::sync::Arc<str>)> {
+    let mut attrs: Vec<(std::sync::Arc<str>, std::sync::Arc<str>)> = Vec::new();
+    if call.argc() > idx {
+        if let Ok(false) = call.arg_is_null(idx) {
+            let _ = call.arg_array_foreach(idx, |k, v| {
+                let key: std::sync::Arc<str> = match k {
+                    crate::bridge::call::ArrayKey::Str(s) => std::sync::Arc::from(s),
+                    crate::bridge::call::ArrayKey::Int(i) => {
+                        std::sync::Arc::from(i.to_string().as_str())
+                    }
+                };
+                let val: std::sync::Arc<str> = std::sync::Arc::from(v.as_str().unwrap_or(""));
+                attrs.push((key, val));
+            });
+        }
+    }
+    attrs
+}
+
 /// Read a mixed-type argument as a string representation.
 ///
 /// For non-critical attribute values, we convert whatever PHP passes
@@ -657,7 +762,9 @@ mod tests {
         let funcs = make_context_and_functions(true);
         let find = |name: &str| funcs.iter().find(|f| f.fqn == name).unwrap();
 
-        assert_eq!(find("oxphp_apm_trace").return_type, Some(PhpType::Void));
+        // `mixed`, not `void`: oxphp_apm_trace() hands back whatever the
+        // traced callback returned.
+        assert_eq!(find("oxphp_apm_trace").return_type, Some(PhpType::Mixed));
         assert_eq!(find("oxphp_apm_start").return_type, Some(PhpType::Int));
         assert_eq!(find("oxphp_apm_end").return_type, Some(PhpType::Void));
         assert_eq!(find("oxphp_apm_attribute").return_type, Some(PhpType::Void));

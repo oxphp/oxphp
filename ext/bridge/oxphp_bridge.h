@@ -873,6 +873,30 @@ int oxphp_call_php_native(
     const char *func_name, void *args, uint32_t argc, void *result
 );
 
+/**
+ * Invoke a PHP callable *value* — a Closure, a "func" / "Cls::method" string,
+ * an [obj, 'method'] array or an invokable object — without a name lookup and
+ * without an intermediate call_user_func() frame. `callable_zval` is the zval
+ * holding it, typically an argument of the calling plugin function.
+ *
+ * Arguments are built the same way as for oxphp_call_php_native and stay owned
+ * by the caller. `result` always holds a droppable zval on return — the
+ * callee's return value on success, NULL on either failure — and never a
+ * reference: a by-ref return is unwrapped, as call_user_func unwraps it.
+ *
+ * Returns:
+ *    0  the callable ran to completion,
+ *   -1  the zval is not callable — nothing ran and no exception is pending,
+ *   -2  an exception is pending; EG(exception) is left set for the caller to
+ *       propagate. Usually the callable threw, but it also covers an exception
+ *       raised while *resolving* the callable — a throwing autoloader, or an
+ *       error handler that throws on the E_DEPRECATED for a "self::m"-style
+ *       callable — in which case the callable itself never ran.
+ */
+int oxphp_call_callable_native(
+    void *callable_zval, void *args, uint32_t argc, void *result
+);
+
 /* ── TSRM cache ── */
 
 /**

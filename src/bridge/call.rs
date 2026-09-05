@@ -484,51 +484,12 @@ impl<'a> NativeCall<'a> {
         name_buf[..func_name.len()].copy_from_slice(func_name.as_bytes());
         let c_name = name_buf.as_ptr() as *const std::os::raw::c_char;
 
-        // Stack-allocate for <= 8 args, heap (via global allocator / mimalloc) for more.
-        // ZvalSlot has align(8) matching zval's alignment requirement. Zero-init
-        // (all-zero bytes = IS_UNDEF) so any slot a builder leaves unfilled is
-        // safe to pass through zval_ptr_dtor below.
-        let mut stack_args: [ZvalSlot; 8] = [const { ZvalSlot([0u8; 16]) }; 8];
-        let mut heap_args: Vec<ZvalSlot>;
-
-        let args_ptr = if argc == 0 {
-            std::ptr::null_mut()
-        } else if argc <= 8 {
-            stack_args.as_mut_ptr() as *mut c_void
-        } else {
-            // Vec uses the global allocator (mimalloc), not libc::calloc.
-            heap_args = vec![ZvalSlot([0u8; 16]); argc as usize];
-            heap_args.as_mut_ptr() as *mut c_void
-        };
-
-        // Build arguments
-        if argc > 0 {
-            let mut builder = ArgBuilder {
-                args: args_ptr,
-                idx: 0,
-            };
-            build_args(&mut builder);
-        }
-
         // Call — result is placed in an aligned, owned buffer.
         let mut result_slot = std::mem::MaybeUninit::<ZvalSlot>::uninit();
         let result_ptr = result_slot.as_mut_ptr() as *mut c_void;
-        let rc = unsafe { ffi::oxphp_call_php_native(c_name, args_ptr, argc, result_ptr) };
-
-        // Release each argument zval. `zend_call_known_function` copies args
-        // into the callee frame but does NOT take ownership — the caller owns
-        // them. Without this, any refcounted arg (a `b.str` zend_string, or an
-        // object forwarded via `b.zval_copy`'s ZVAL_COPY) leaks for the rest of
-        // the request. Scalars / IS_UNDEF dtor as no-ops. Runs on both the
-        // success and failure paths (args were built either way).
-        if !args_ptr.is_null() {
-            for i in 0..argc as usize {
-                let slot = unsafe { (args_ptr as *mut u8).add(i * ZVAL_SIZE) as *mut c_void };
-                unsafe { ffi::oxphp_zval_dtor(slot) };
-            }
-        }
-
-        // heap_args dropped here automatically (Vec destructor via mimalloc)
+        let rc = with_arg_buffer(argc, build_args, |args_ptr| unsafe {
+            ffi::oxphp_call_php_native(c_name, args_ptr, argc, result_ptr)
+        });
 
         if rc != 0 {
             unsafe { ffi::oxphp_zval_dtor(result_ptr) };
@@ -543,6 +504,48 @@ impl<'a> NativeCall<'a> {
         Ok(OwnedResult {
             slot: unsafe { result_slot.assume_init() },
         })
+    }
+
+    /// Invoke the callable held in argument `idx`, passing `argc` arguments
+    /// built by `build_args`.
+    ///
+    /// Unlike [`call_php`](Self::call_php) the target is a *value*, not a name,
+    /// so a Closure, a `"func"` / `"Cls::method"` string, an `[obj, 'method']`
+    /// array and an invokable object all work, and no `call_user_func()` frame
+    /// is interposed between the caller and the callback — which matters
+    /// wherever the resulting stack is itself recorded, and keeps the call
+    /// independent of the user's `disable_functions`.
+    ///
+    /// `Err` means the index is out of range; everything the PHP side can do is
+    /// a [`CallableOutcome`].
+    pub fn call_arg_callable(
+        &self,
+        idx: u32,
+        argc: u32,
+        build_args: impl FnOnce(&mut ArgBuilder),
+    ) -> Result<CallableOutcome, PhpError> {
+        self.check_idx(idx)?;
+        let callable = unsafe { self.raw_arg_ptr(idx) };
+
+        // The shim writes NULL into the slot before doing anything else, and
+        // the host mock leaves it untouched (all-zero = IS_UNDEF); both are
+        // safe to drop, so no path here can release an uninitialized zval.
+        let mut result = OwnedResult::undef();
+        let rc = with_arg_buffer(argc, build_args, |args_ptr| unsafe {
+            ffi::oxphp_call_callable_native(callable, args_ptr, argc, result.as_mut_ptr())
+        });
+
+        match rc {
+            0 => Ok(CallableOutcome::Returned(result)),
+            -1 => Ok(CallableOutcome::NotCallable),
+            -2 => Ok(CallableOutcome::Threw),
+            // Not folded into `NotCallable`: a code this side does not know
+            // about is a changed contract, and reading it as "the user passed
+            // a bad value" would blame the caller for it.
+            other => Err(PhpError::CallFailed(format!(
+                "oxphp_call_callable_native returned {other}"
+            ))),
+        }
     }
 
     // ── Private helpers ──
@@ -797,6 +800,77 @@ impl ArgBuilder {
         self.idx += 1;
         ptr
     }
+}
+
+/// Build `argc` argument zvals, hand the buffer to `invoke`, then release every
+/// slot and return whatever `invoke` returned.
+///
+/// Both callers need the same bookkeeping: the engine copies each argument into
+/// the callee frame (`ZVAL_COPY`) without taking ownership, so any refcounted
+/// argument — a `b.str` zend_string, an object forwarded by `b.zval_copy` — is
+/// still ours to release afterwards, on the failure path as much as on the
+/// success one. Leaving that out leaks for the rest of the request.
+fn with_arg_buffer<R>(
+    argc: u32,
+    build_args: impl FnOnce(&mut ArgBuilder),
+    invoke: impl FnOnce(*mut c_void) -> R,
+) -> R {
+    // Stack-allocate for <= 8 args, heap (via global allocator / mimalloc) for more.
+    // ZvalSlot has align(8) matching zval's alignment requirement. Zero-init
+    // (all-zero bytes = IS_UNDEF) so any slot a builder leaves unfilled is
+    // safe to pass through zval_ptr_dtor below.
+    let mut stack_args: [ZvalSlot; 8] = [const { ZvalSlot([0u8; 16]) }; 8];
+    let mut heap_args: Vec<ZvalSlot>;
+
+    let args_ptr = if argc == 0 {
+        std::ptr::null_mut()
+    } else if argc <= 8 {
+        stack_args.as_mut_ptr() as *mut c_void
+    } else {
+        // Vec uses the global allocator (mimalloc), not libc::calloc.
+        heap_args = vec![ZvalSlot([0u8; 16]); argc as usize];
+        heap_args.as_mut_ptr() as *mut c_void
+    };
+
+    if argc > 0 {
+        let mut builder = ArgBuilder {
+            args: args_ptr,
+            idx: 0,
+        };
+        build_args(&mut builder);
+    }
+
+    let out = invoke(args_ptr);
+
+    // Scalars / IS_UNDEF dtor as no-ops.
+    if !args_ptr.is_null() {
+        for i in 0..argc as usize {
+            let slot = unsafe { (args_ptr as *mut u8).add(i * ZVAL_SIZE) as *mut c_void };
+            unsafe { ffi::oxphp_zval_dtor(slot) };
+        }
+    }
+
+    // heap_args dropped here automatically (Vec destructor via mimalloc)
+    out
+}
+
+/// What came back from invoking a PHP callable value.
+///
+/// The split that matters to a caller is whether a PHP exception is already
+/// pending. `Threw` means one is, and it must be left alone to propagate;
+/// `NotCallable` means none is, and reporting the bad argument is the caller's
+/// job (usually a `TypeError` naming its own argument).
+pub enum CallableOutcome {
+    /// Ran to completion; carries its return value.
+    Returned(OwnedResult),
+    /// A PHP exception is pending and untouched. Usually the callable threw —
+    /// but resolving a callable can raise one too (a throwing autoloader
+    /// behind a `"Cls::method"` string, an error handler that throws on the
+    /// deprecation for `"self::m"`), and then nothing ran. Both propagate the
+    /// same way, so they are not worth telling apart here.
+    Threw,
+    /// The value was not callable: nothing ran and no exception is pending.
+    NotCallable,
 }
 
 /// Sizeof(zval) — 16 on all 64-bit PHP 8.x builds. Verified at runtime via
