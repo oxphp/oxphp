@@ -27,7 +27,12 @@ services:
       retries: 15
       start_period: 5s
     environment:
-      LOG_LEVEL: error
+      # warn, not error: the breaker's account of itself — one line per counted
+      # failure and one for the retire that follows the third — is written at
+      # that level, and this is the profile that makes it happen. At error those
+      # lines are dropped and a run of this suite says nothing about whether the
+      # server can explain a rotating pool.
+      LOG_LEVEL: warn
       INTERNAL_ADDR: 0.0.0.0:9090
       WORKER_FILE: /var/www/html/worker/worker_entry.php
       # One worker, so three fatals in a row are three fatals on the same

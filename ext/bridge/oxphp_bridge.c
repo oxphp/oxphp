@@ -2497,16 +2497,36 @@ void oxphp_bridge_set_sapi_callbacks(oxphp_ub_write_fn_t ub_write, oxphp_flush_f
     rust_flush    = flush;
 }
 
+/* Set once at MINIT by the extension, before any worker thread exists — same
+ * pattern as the worker and SAPI callbacks above, so no synchronisation. */
+static oxphp_cancel_mark_fn_t sapi_cancel_mark = NULL;
+
+void oxphp_bridge_set_cancel_mark_fn(oxphp_cancel_mark_fn_t fn) {
+    sapi_cancel_mark = fn;
+}
+
 /**
  * Check cancellation and bailout if needed.
  * Called from C — longjmp stays within C frames, never crosses Rust FFI.
  */
 static inline void check_cancelled_c(void) {
-    bool cancelled = ctx.cancel_ptr &&
-        atomic_load_explicit(ctx.cancel_ptr, memory_order_relaxed) != OXPHP_CANCEL_NONE;
-    if (cancelled) {
-        zend_bailout();
+    if (ctx.cancel_ptr == NULL) {
+        return;
     }
+    oxphp_cancel_reason_t reason = (oxphp_cancel_reason_t)
+        atomic_load_explicit(ctx.cancel_ptr, memory_order_relaxed);
+    if (reason == OXPHP_CANCEL_NONE) {
+        return;
+    }
+    /* Say what this bailout is before making it. It carries no message and no
+     * mark of its own, so whoever catches it sees what a fatal looks like —
+     * and the worker's consecutive-error breaker retires a worker over three
+     * of those. The SAPI's marker is what keeps a request the server ended
+     * from being read as a handler that failed. */
+    if (sapi_cancel_mark != NULL) {
+        sapi_cancel_mark(reason);
+    }
+    zend_bailout();
 }
 
 size_t oxphp_bridge_ub_write(const char *str, size_t str_length) {

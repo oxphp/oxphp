@@ -260,7 +260,7 @@ Enters the persistent worker mode loop. OxPHP calls `$handler` once for each inc
 
 The worker loop exits when any of the following conditions are met:
 - The server shuts down gracefully
-- The handler hits 3 consecutive fatal errors (an uncaught exception, and a request the server cancelled, are answered and do not count — see [Worker mode → Recycling](../features/worker-mode.md#recycling))
+- The handler hits 3 consecutive fatal errors (an uncaught exception is answered and does not count, and neither does a request the server cancelled unless a fatal was reported on it as well — see [Worker mode → Recycling](../features/worker-mode.md#recycling))
 - The worker exceeds `WORKER_MAX_MEMORY_MIB`
 - The application calls [`Worker::scheduleExit()`](worker-class.md#scheduleexit)
 

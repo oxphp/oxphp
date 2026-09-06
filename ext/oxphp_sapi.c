@@ -6636,6 +6636,55 @@ static void oxphp_zend_interrupt_handler(zend_execute_data *execute_data)
     /* unreachable: zend_error_noreturn calls zend_bailout() */
 }
 
+/* The same mark, for the cancellation that does not come through the handler
+ * above. The SAPI's write and flush wrappers read the request's cancel cell
+ * themselves and end the request there, with a bare bailout: a request whose
+ * client hung up while the worker was inside a call the interrupt cannot
+ * preempt reaches its next write before the next opcode, and one that called
+ * ignore_user_abort() is sent back by the handler above and reaches that write
+ * too. Either way the coroutine catches a bailout carrying nothing, files it as
+ * handler_failed, and three of them retire the worker — for a client going
+ * away, which the consecutive-error breaker is not meant to count.
+ *
+ * Same rule as above and deliberately so, _STUCK included: that one is a
+ * statement about the worker rather than about the client, and stays counted
+ * wherever it is delivered. The bridge calls this immediately before the
+ * bailout, so a fiber marked here is the fiber the bailout unwinds.
+ *
+ * One rule this arm needs and the interrupt handler does not: a request that has
+ * already reported a fatal is left alone. The interrupt unwinds a running
+ * handler, so there is nothing before it to overwrite; this one is reached from
+ * any write, shutdown-function writes and the message a fatal displays on its
+ * way out included. Reading such a request as a cancellation would wipe a
+ * failure that was established correctly — the engine state the fatal left is
+ * not put back by a client leaving afterwards, and an application that fatals on
+ * every request would keep its worker for as long as clients kept hanging up.
+ * Same rule, and for the same reason, as the one the shutdown window applies to
+ * a deadline.
+ *
+ * Which is why what is asked here is whether a fatal was reported, and not
+ * whether the fiber's failure flag is up. That flag is raised where the bailout
+ * is caught, and the catch is downstream of this: displaying a fatal's own
+ * message is a write, so a request dying of one arrives here with nothing on the
+ * fiber saying so yet. Asking for the flag would answer for a fatal from an
+ * earlier window of the same request and let every other one through — which
+ * covers a slow shutdown function after a fatal handler, and nothing else.
+ *
+ * What this raises is a claim rather than the verdict: unlike the interrupt
+ * handler, which only ever reaches a running handler, this arm is reached from
+ * any write at all — the flush the request loop does after the handler and the
+ * shutdown functions are through included. A request that got that far finished,
+ * and has to keep clearing the consecutive-error run whether or not anyone was
+ * left to read what it produced. The loop is the only place that knows which of
+ * the two this is, so it decides; see cancel_bailout_pending. */
+static void oxphp_mark_cancelled_bailout(oxphp_cancel_reason_t reason) {
+    if (oxphp_current_fiber != NULL
+        && reason != OXPHP_CANCEL_STUCK
+        && !oxphp_current_fiber->fatal_reported) {
+        oxphp_current_fiber->cancel_bailout_pending = true;
+    }
+}
+
 /* Own the max_execution_time ini handler so future revisions can
  * extend its behaviour without surgical patches. Today this is a thin
  * pass-through; worker-mode and the STARTUP/DEACTIVATE stages are
@@ -7357,6 +7406,7 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
     oxphp_bridge_set_current_fiber_id_fn(oxphp_fiber_current_id);
     oxphp_bridge_set_async_io_backoff_fn(oxphp_async_io_backoff_bridge);
     oxphp_bridge_set_async_next_deadline_fn(oxphp_async_sched_next_deadline_ns);
+    oxphp_bridge_set_cancel_mark_fn(oxphp_mark_cancelled_bailout);
 
     /* Build the callable that fibers run as. Once per process, before any
      * fiber exists. */

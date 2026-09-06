@@ -95,7 +95,7 @@ Not every failed request counts, because not every failure says the worker is un
 | Cancelled request — the client hung up, `max_execution_time` elapsed, the server is shutting down | Neutral |
 | Request completed, `exit()`/`die()` included | Clears the count |
 
-"Neutral" means exactly that: one of those in the middle of a run of fatals neither adds to the count nor clears it, so `fatal, exception, fatal, fatal` still recycles the worker. Where a failure was raised makes no difference to how it is read. PHP runs shutdown functions under protection of its own, so the worker sees a request that failed inside one return normally — but a fatal there leaves the same wreckage the next request on that worker would inherit from any other fatal, so it counts the same, and an exception there unwinds as cleanly as one from the handler, so it is neutral the same way. A deadline is the one thing that is read differently depending on when it lands: expiring while a shutdown function runs is still the server ending the request and stays neutral, unless the request had already failed on its own before that, in which case it stays counted. What none of this does is diagnose a worker that has wedged rather than failed: a request stuck in a syscall is reported through `oxphp_worker_stuck_total` for an operator to act on, not cancelled and not counted.
+"Neutral" means exactly that: one of those in the middle of a run of fatals neither adds to the count nor clears it, so `fatal, exception, fatal, fatal` still recycles the worker. Where a failure was raised makes no difference to how it is read. PHP runs shutdown functions under protection of its own, so the worker sees a request that failed inside one return normally — but a fatal there leaves the same wreckage the next request on that worker would inherit from any other fatal, so it counts the same, and an exception there unwinds as cleanly as one from the handler, so it is neutral the same way. A cancellation is neutral wherever it lands — a deadline expiring while a shutdown function runs, a client hanging up on a handler mid-write — but it does not undo a failure the request had already had. A client that leaves a request which has already hit a fatal, or a deadline that expires in a shutdown function of a handler that came apart, leaves that request counted: the engine state a fatal leaves is not put back by a client leaving afterwards. Shutting the server down is the one cancellation that is neutral unconditionally — a worker on its way out is not a worker being judged. What none of this does is diagnose a worker that has wedged rather than failed: a request stuck in a syscall is reported through `oxphp_worker_stuck_total` for an operator to act on, not cancelled and not counted.
 
 When a worker is recycled, the PHP process terminates and a new one starts, re-executing the outer scope of the worker script. For memory-based and scheduled exit, the current request completes normally before the worker exits. For error-based recycling, the worker exits after the failed request.
 
@@ -128,12 +128,14 @@ The worker memory limit is checked after each request using PHP's reported memor
 
 ### Worker recycles immediately (error limit)
 
-Three consecutive fatal errors trigger a recycle. Check your application logs for fatals in the request callback — not for uncaught exceptions or cancelled requests, which do not count.
+Three consecutive fatal errors trigger a recycle. Check your application logs for fatals in the request callback — not for uncaught exceptions, and not for cancelled requests, unless a fatal was reported on the cancelled request as well, before or after the cancellation.
+
+The server says so itself at `WARN`: one line per counted failure, naming the worker, where the failure came from and how many have run consecutively, and one line for the recycle that follows the third. The worker is named because the count is per worker — three lines from one worker are a recycle, three lines from three workers are not.
 
 **Check:** Look for errors in the access log or structured log output:
 
 ```bash
-docker logs <container> 2>&1 | grep '"level":"error"'
+docker logs <container> 2>&1 | grep -E '"level":"(ERROR|WARN)"'
 ```
 
 ### Database connection drops after idle

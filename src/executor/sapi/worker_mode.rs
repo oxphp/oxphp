@@ -232,9 +232,23 @@ fn worker_mode_thread(
     }
     sapi::clear_request_data();
 
-    tracing::info!(
-        worker = %thread_name,
-        exit_reason = exit_reason,
-        "Worker mode thread stopped"
-    );
+    // The consecutive-error retirement is the one exit an operator has to be
+    // told about without going looking: the others are asked for (a shutdown, a
+    // scheduled exit, a memory ceiling), while this one says the worker was
+    // taken out of service because three requests in a row came apart. It sat on
+    // INFO, which the production configurations in the documentation raise past,
+    // and that is how a rotating pool came to be observable only as a counter.
+    if exit_reason == 3 {
+        tracing::warn!(
+            worker = %thread_name,
+            exit_reason = exit_reason,
+            "Worker mode thread retired after consecutive request failures"
+        );
+    } else {
+        tracing::info!(
+            worker = %thread_name,
+            exit_reason = exit_reason,
+            "Worker mode thread stopped"
+        );
+    }
 }
