@@ -8,6 +8,8 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: oxphp/oxphp
+  DOCKERHUB_REGISTRY: docker.io
+  DOCKERHUB_IMAGE_NAME: oxphp/oxphp
 
 permissions:
   contents: read
@@ -41,6 +43,13 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.DOCKERHUB_REGISTRY }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Extract oxphp version from tag
         id: version
@@ -119,9 +128,11 @@ jobs:
           ALPINE_VER: ${{ matrix.alpine }}
           ARCH: ${{ matrix.arch }}
         run: |
-          TAG="${REGISTRY}/${IMAGE_NAME}:${VERSION}-php${PHP_MINOR}-alpine${ALPINE_VER}-${ARCH}"
-          docker tag oxphp:ci "$TAG"
-          docker push "$TAG"
+          for PREFIX in "${REGISTRY}/${IMAGE_NAME}" "${DOCKERHUB_REGISTRY}/${DOCKERHUB_IMAGE_NAME}"; do
+            TAG="${PREFIX}:${VERSION}-php${PHP_MINOR}-alpine${ALPINE_VER}-${ARCH}"
+            docker tag oxphp:ci "$TAG"
+            docker push "$TAG"
+          done
 
       - name: Push arch-specific patch-pinned tag
         env:
@@ -130,9 +141,11 @@ jobs:
           ALPINE_VER: ${{ matrix.alpine }}
           ARCH: ${{ matrix.arch }}
         run: |
-          TAG="${REGISTRY}/${IMAGE_NAME}:${VERSION}-php${PHP_PATCH}-alpine${ALPINE_VER}-${ARCH}"
-          docker tag oxphp:ci "$TAG"
-          docker push "$TAG"
+          for PREFIX in "${REGISTRY}/${IMAGE_NAME}" "${DOCKERHUB_REGISTRY}/${DOCKERHUB_IMAGE_NAME}"; do
+            TAG="${PREFIX}:${VERSION}-php${PHP_PATCH}-alpine${ALPINE_VER}-${ARCH}"
+            docker tag oxphp:ci "$TAG"
+            docker push "$TAG"
+          done
 
       - name: Record PHP patch for manifest-merge step
         env:
@@ -166,6 +179,8 @@ jobs:
     outputs:
       canonical_minor: ${{ steps.canonicals.outputs.minor }}
       canonical_patch: ${{ steps.canonicals.outputs.patch }}
+      canonical_minor_dh: ${{ steps.canonicals.outputs.minor_dh }}
+      canonical_patch_dh: ${{ steps.canonicals.outputs.patch_dh }}
     steps:
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v4
@@ -173,6 +188,13 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.DOCKERHUB_REGISTRY }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Extract oxphp version from tag
         id: version
@@ -201,20 +223,24 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          docker buildx imagetools create \
-            -t "${REGISTRY}/${IMAGE_NAME}:${VERSION}-php${PHP_MINOR}-alpine${ALPINE_VER}" \
-            "${REGISTRY}/${IMAGE_NAME}:${VERSION}-php${PHP_MINOR}-alpine${ALPINE_VER}-amd64" \
-            "${REGISTRY}/${IMAGE_NAME}:${VERSION}-php${PHP_MINOR}-alpine${ALPINE_VER}-arm64"
+          for PREFIX in "${REGISTRY}/${IMAGE_NAME}" "${DOCKERHUB_REGISTRY}/${DOCKERHUB_IMAGE_NAME}"; do
+            docker buildx imagetools create \
+              -t "${PREFIX}:${VERSION}-php${PHP_MINOR}-alpine${ALPINE_VER}" \
+              "${PREFIX}:${VERSION}-php${PHP_MINOR}-alpine${ALPINE_VER}-amd64" \
+              "${PREFIX}:${VERSION}-php${PHP_MINOR}-alpine${ALPINE_VER}-arm64"
+          done
 
       - name: Create patch-pinned multi-arch manifest
         env:
           VERSION: ${{ steps.version.outputs.version }}
           PHP_PATCH: ${{ steps.patch.outputs.patch }}
         run: |
-          docker buildx imagetools create \
-            -t "${REGISTRY}/${IMAGE_NAME}:${VERSION}-php${PHP_PATCH}-alpine${ALPINE_VER}" \
-            "${REGISTRY}/${IMAGE_NAME}:${VERSION}-php${PHP_MINOR}-alpine${ALPINE_VER}-amd64" \
-            "${REGISTRY}/${IMAGE_NAME}:${VERSION}-php${PHP_MINOR}-alpine${ALPINE_VER}-arm64"
+          for PREFIX in "${REGISTRY}/${IMAGE_NAME}" "${DOCKERHUB_REGISTRY}/${DOCKERHUB_IMAGE_NAME}"; do
+            docker buildx imagetools create \
+              -t "${PREFIX}:${VERSION}-php${PHP_PATCH}-alpine${ALPINE_VER}" \
+              "${PREFIX}:${VERSION}-php${PHP_MINOR}-alpine${ALPINE_VER}-amd64" \
+              "${PREFIX}:${VERSION}-php${PHP_MINOR}-alpine${ALPINE_VER}-arm64"
+          done
 
       - name: Export canonical tag names
         id: canonicals
@@ -224,6 +250,8 @@ jobs:
         run: |
           echo "minor=${REGISTRY}/${IMAGE_NAME}:${VERSION}-php${PHP_MINOR}-alpine${ALPINE_VER}" >> "$GITHUB_OUTPUT"
           echo "patch=${REGISTRY}/${IMAGE_NAME}:${VERSION}-php${PHP_PATCH}-alpine${ALPINE_VER}" >> "$GITHUB_OUTPUT"
+          echo "minor_dh=${DOCKERHUB_REGISTRY}/${DOCKERHUB_IMAGE_NAME}:${VERSION}-php${PHP_MINOR}-alpine${ALPINE_VER}" >> "$GITHUB_OUTPUT"
+          echo "patch_dh=${DOCKERHUB_REGISTRY}/${DOCKERHUB_IMAGE_NAME}:${VERSION}-php${PHP_PATCH}-alpine${ALPINE_VER}" >> "$GITHUB_OUTPUT"
 
   manifest-85:
     needs: build
@@ -235,6 +263,8 @@ jobs:
     outputs:
       canonical_minor: ${{ steps.canonicals.outputs.minor }}
       canonical_patch: ${{ steps.canonicals.outputs.patch }}
+      canonical_minor_dh: ${{ steps.canonicals.outputs.minor_dh }}
+      canonical_patch_dh: ${{ steps.canonicals.outputs.patch_dh }}
     steps:
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v4
@@ -242,6 +272,13 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.DOCKERHUB_REGISTRY }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Extract oxphp version from tag
         id: version
@@ -270,20 +307,24 @@ jobs:
         env:
           VERSION: ${{ steps.version.outputs.version }}
         run: |
-          docker buildx imagetools create \
-            -t "${REGISTRY}/${IMAGE_NAME}:${VERSION}-php${PHP_MINOR}-alpine${ALPINE_VER}" \
-            "${REGISTRY}/${IMAGE_NAME}:${VERSION}-php${PHP_MINOR}-alpine${ALPINE_VER}-amd64" \
-            "${REGISTRY}/${IMAGE_NAME}:${VERSION}-php${PHP_MINOR}-alpine${ALPINE_VER}-arm64"
+          for PREFIX in "${REGISTRY}/${IMAGE_NAME}" "${DOCKERHUB_REGISTRY}/${DOCKERHUB_IMAGE_NAME}"; do
+            docker buildx imagetools create \
+              -t "${PREFIX}:${VERSION}-php${PHP_MINOR}-alpine${ALPINE_VER}" \
+              "${PREFIX}:${VERSION}-php${PHP_MINOR}-alpine${ALPINE_VER}-amd64" \
+              "${PREFIX}:${VERSION}-php${PHP_MINOR}-alpine${ALPINE_VER}-arm64"
+          done
 
       - name: Create patch-pinned multi-arch manifest
         env:
           VERSION: ${{ steps.version.outputs.version }}
           PHP_PATCH: ${{ steps.patch.outputs.patch }}
         run: |
-          docker buildx imagetools create \
-            -t "${REGISTRY}/${IMAGE_NAME}:${VERSION}-php${PHP_PATCH}-alpine${ALPINE_VER}" \
-            "${REGISTRY}/${IMAGE_NAME}:${VERSION}-php${PHP_MINOR}-alpine${ALPINE_VER}-amd64" \
-            "${REGISTRY}/${IMAGE_NAME}:${VERSION}-php${PHP_MINOR}-alpine${ALPINE_VER}-arm64"
+          for PREFIX in "${REGISTRY}/${IMAGE_NAME}" "${DOCKERHUB_REGISTRY}/${DOCKERHUB_IMAGE_NAME}"; do
+            docker buildx imagetools create \
+              -t "${PREFIX}:${VERSION}-php${PHP_PATCH}-alpine${ALPINE_VER}" \
+              "${PREFIX}:${VERSION}-php${PHP_MINOR}-alpine${ALPINE_VER}-amd64" \
+              "${PREFIX}:${VERSION}-php${PHP_MINOR}-alpine${ALPINE_VER}-arm64"
+          done
 
       - name: Export canonical tag names
         id: canonicals
@@ -293,6 +334,8 @@ jobs:
         run: |
           echo "minor=${REGISTRY}/${IMAGE_NAME}:${VERSION}-php${PHP_MINOR}-alpine${ALPINE_VER}" >> "$GITHUB_OUTPUT"
           echo "patch=${REGISTRY}/${IMAGE_NAME}:${VERSION}-php${PHP_PATCH}-alpine${ALPINE_VER}" >> "$GITHUB_OUTPUT"
+          echo "minor_dh=${DOCKERHUB_REGISTRY}/${DOCKERHUB_IMAGE_NAME}:${VERSION}-php${PHP_MINOR}-alpine${ALPINE_VER}" >> "$GITHUB_OUTPUT"
+          echo "patch_dh=${DOCKERHUB_REGISTRY}/${DOCKERHUB_IMAGE_NAME}:${VERSION}-php${PHP_PATCH}-alpine${ALPINE_VER}" >> "$GITHUB_OUTPUT"
 
   # ──────────────────────────────────────────────────────────────
   # Job 3: cosign signing of canonical tags (per-version)
@@ -309,6 +352,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.DOCKERHUB_REGISTRY }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
 
@@ -316,8 +366,10 @@ jobs:
         env:
           CANONICAL_MINOR: ${{ needs.manifest-84.outputs.canonical_minor }}
           CANONICAL_PATCH: ${{ needs.manifest-84.outputs.canonical_patch }}
+          CANONICAL_MINOR_DH: ${{ needs.manifest-84.outputs.canonical_minor_dh }}
+          CANONICAL_PATCH_DH: ${{ needs.manifest-84.outputs.canonical_patch_dh }}
         run: |
-          for TAG in "$CANONICAL_MINOR" "$CANONICAL_PATCH"; do
+          for TAG in "$CANONICAL_MINOR" "$CANONICAL_PATCH" "$CANONICAL_MINOR_DH" "$CANONICAL_PATCH_DH"; do
             echo "Signing $TAG"
             cosign sign --yes "$TAG"
           done
@@ -334,6 +386,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.DOCKERHUB_REGISTRY }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
 
@@ -341,8 +400,10 @@ jobs:
         env:
           CANONICAL_MINOR: ${{ needs.manifest-85.outputs.canonical_minor }}
           CANONICAL_PATCH: ${{ needs.manifest-85.outputs.canonical_patch }}
+          CANONICAL_MINOR_DH: ${{ needs.manifest-85.outputs.canonical_minor_dh }}
+          CANONICAL_PATCH_DH: ${{ needs.manifest-85.outputs.canonical_patch_dh }}
         run: |
-          for TAG in "$CANONICAL_MINOR" "$CANONICAL_PATCH"; do
+          for TAG in "$CANONICAL_MINOR" "$CANONICAL_PATCH" "$CANONICAL_MINOR_DH" "$CANONICAL_PATCH_DH"; do
             echo "Signing $TAG"
             cosign sign --yes "$TAG"
           done
@@ -368,6 +429,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.DOCKERHUB_REGISTRY }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Install yq
         run: |
           sudo curl -sL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o /usr/local/bin/yq
@@ -383,15 +451,18 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Move aliases
+      - name: Move aliases (ghcr + Docker Hub)
         env:
           VERSION: ${{ steps.version.outputs.version }}
-          REGISTRY_OVERRIDE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          GHCR_PREFIX: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          DH_PREFIX: ${{ env.DOCKERHUB_REGISTRY }}/${{ env.DOCKERHUB_IMAGE_NAME }}
         run: |
-          REGISTRY="$REGISTRY_OVERRIDE" ./scripts/move-aliases.sh \
-            "$VERSION" \
-            "$PHP_MINOR" \
-            "$ALPINE_VER"
+          for PREFIX in "$GHCR_PREFIX" "$DH_PREFIX"; do
+            REGISTRY="$PREFIX" ./scripts/move-aliases.sh \
+              "$VERSION" \
+              "$PHP_MINOR" \
+              "$ALPINE_VER"
+          done
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
@@ -404,16 +475,18 @@ jobs:
           LATEST_OXPHP=$(yq '.oxphp_versions[0]' .github/supported-versions.yml)
           DEFAULT_PHP=$(yq '.default_php' .github/supported-versions.yml)
 
-          cosign sign --yes "${REGISTRY}/${IMAGE_NAME}:${VERSION}-php${PHP_MINOR}"
-          cosign sign --yes "${REGISTRY}/${IMAGE_NAME}:${SEMVER_MINOR}-php${PHP_MINOR}"
+          for PREFIX in "${REGISTRY}/${IMAGE_NAME}" "${DOCKERHUB_REGISTRY}/${DOCKERHUB_IMAGE_NAME}"; do
+            cosign sign --yes "${PREFIX}:${VERSION}-php${PHP_MINOR}"
+            cosign sign --yes "${PREFIX}:${SEMVER_MINOR}-php${PHP_MINOR}"
 
-          if [[ "$VERSION" == "$LATEST_OXPHP" ]]; then
-            cosign sign --yes "${REGISTRY}/${IMAGE_NAME}:php${PHP_MINOR}"
-            if [[ "$PHP_MINOR" == "$DEFAULT_PHP" ]]; then
-              cosign sign --yes "${REGISTRY}/${IMAGE_NAME}:${VERSION}"
-              cosign sign --yes "${REGISTRY}/${IMAGE_NAME}:latest"
+            if [[ "$VERSION" == "$LATEST_OXPHP" ]]; then
+              cosign sign --yes "${PREFIX}:php${PHP_MINOR}"
+              if [[ "$PHP_MINOR" == "$DEFAULT_PHP" ]]; then
+                cosign sign --yes "${PREFIX}:${VERSION}"
+                cosign sign --yes "${PREFIX}:latest"
+              fi
             fi
-          fi
+          done
 
   aliases-85:
     needs: sign-85
@@ -433,6 +506,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.DOCKERHUB_REGISTRY }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Install yq
         run: |
           sudo curl -sL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o /usr/local/bin/yq
@@ -448,15 +528,18 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
-      - name: Move aliases
+      - name: Move aliases (ghcr + Docker Hub)
         env:
           VERSION: ${{ steps.version.outputs.version }}
-          REGISTRY_OVERRIDE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          GHCR_PREFIX: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          DH_PREFIX: ${{ env.DOCKERHUB_REGISTRY }}/${{ env.DOCKERHUB_IMAGE_NAME }}
         run: |
-          REGISTRY="$REGISTRY_OVERRIDE" ./scripts/move-aliases.sh \
-            "$VERSION" \
-            "$PHP_MINOR" \
-            "$ALPINE_VER"
+          for PREFIX in "$GHCR_PREFIX" "$DH_PREFIX"; do
+            REGISTRY="$PREFIX" ./scripts/move-aliases.sh \
+              "$VERSION" \
+              "$PHP_MINOR" \
+              "$ALPINE_VER"
+          done
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
@@ -469,13 +552,15 @@ jobs:
           LATEST_OXPHP=$(yq '.oxphp_versions[0]' .github/supported-versions.yml)
           DEFAULT_PHP=$(yq '.default_php' .github/supported-versions.yml)
 
-          cosign sign --yes "${REGISTRY}/${IMAGE_NAME}:${VERSION}-php${PHP_MINOR}"
-          cosign sign --yes "${REGISTRY}/${IMAGE_NAME}:${SEMVER_MINOR}-php${PHP_MINOR}"
+          for PREFIX in "${REGISTRY}/${IMAGE_NAME}" "${DOCKERHUB_REGISTRY}/${DOCKERHUB_IMAGE_NAME}"; do
+            cosign sign --yes "${PREFIX}:${VERSION}-php${PHP_MINOR}"
+            cosign sign --yes "${PREFIX}:${SEMVER_MINOR}-php${PHP_MINOR}"
 
-          if [[ "$VERSION" == "$LATEST_OXPHP" ]]; then
-            cosign sign --yes "${REGISTRY}/${IMAGE_NAME}:php${PHP_MINOR}"
-            if [[ "$PHP_MINOR" == "$DEFAULT_PHP" ]]; then
-              cosign sign --yes "${REGISTRY}/${IMAGE_NAME}:${VERSION}"
-              cosign sign --yes "${REGISTRY}/${IMAGE_NAME}:latest"
+            if [[ "$VERSION" == "$LATEST_OXPHP" ]]; then
+              cosign sign --yes "${PREFIX}:php${PHP_MINOR}"
+              if [[ "$PHP_MINOR" == "$DEFAULT_PHP" ]]; then
+                cosign sign --yes "${PREFIX}:${VERSION}"
+                cosign sign --yes "${PREFIX}:latest"
+              fi
             fi
-          fi
+          done
