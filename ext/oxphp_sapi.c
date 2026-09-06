@@ -1785,12 +1785,17 @@ static void oxphp_stream_claim_refused_log(int fd, const char *why)
 
     /* Plain buffer rather than zend_strpprintf: this can be reached from a
      * shutdown path with no request arena, and the message is bounded. */
-    char msg[360];
+    char msg[768];
     snprintf(msg, sizeof(msg),
              "oxphp: refused a socket operation on fd %d because another fiber holds this "
              "stream (%s). One connection is shared between concurrent fibers, so the "
-             "operation fails the way a timeout would instead of corrupting the exchange "
-             "(further refusals on this thread are logged at most once a second)", fd, why);
+             "operation fails the way a timeout would rather than landing inside that "
+             "fiber's exchange. That can cost more than the call, on either side of an "
+             "exchange: a client is free to read a refused operation as the server having "
+             "gone, and mysqlnd does so for both — a write that sends nothing and a read "
+             "that comes away empty each mark the connection gone, and it is answered as "
+             "gone from then on, for as long as anything holds the handle (further "
+             "refusals on this thread are logged at most once a second)", fd, why);
     php_log_err(msg);
 }
 
@@ -2072,12 +2077,30 @@ static ssize_t oxphp_hooked_sockop_write(php_stream *stream, const char *buf, si
             oxphp_stream_claim(stream, sock, oxphp_current_fiber);
         if (claim == OXPHP_CLAIM_BUSY) {
             /* Nothing sent, which is what php_sockop_write() reports for a write
-             * that cannot proceed and was not going to wait. */
+             * that cannot proceed and was not going to wait. Costs whatever the
+             * refusal below costs, for a client that reads a short write the way
+             * mysqlnd does — it tests the count rather than the sign — but it is
+             * reached only on a stream that was not going to wait for room, which
+             * these clients do not set up. */
             return 0;
         }
         if (claim == OXPHP_CLAIM_REFUSED) {
             /* php_sockop_write()'s own timeout answer: mark the stream and report
-             * that nothing was sent. */
+             * that nothing was sent.
+             *
+             * Worth knowing what that answer costs, because it is more than the
+             * call, and not only on this side of an exchange. A client is free to
+             * read a refused operation as something worse than a failed command,
+             * and mysqlnd does so for both: a write that sends nothing marks the
+             * connection gone and closes it, and a read that comes away empty
+             * marks it gone where it stands. Every later command on it is then
+             * answered from that state without touching the wire, so what is lost
+             * is the connection rather than the call, for as long as anything
+             * holds the handle. The read side is reached the same way this one
+             * is, through the calls a claim does not stand in front of. That is
+             * what makes this the last resort rather than the mechanism — a
+             * guarded client's calls are kept from reaching here by the claim
+             * taken a level up, which waits. */
             sock->timeout_event = true;
             return -1;
         }
@@ -2416,8 +2439,12 @@ static void oxphp_restore_socket_ops(void)
  * exactly as the socket hooks do, until the holder's request ends. Which calls
  * those are, and which are deliberately left out, is set out at the table below.
  * One case has no hooked call in front of it either way — a statement object kept
- * across requests — and behaves as it does with no claim at all, which is what
- * giving up looks like here rather than something worse.
+ * across requests — and behaves as it does with no claim at all. Worth being plain
+ * about what that costs, because it is more than the call: such a call reaching
+ * the socket while any fiber is parked on the connection is refused there, and
+ * mysqlnd reads a refusal as the server having gone — the write that sends the
+ * command and the read that fetches the next row alike — so what is lost is the
+ * connection.
  *
  * What happens when the holder has not released within the bound below depends on
  * what the client does with a command it should not have sent. For PDO and mysqli
@@ -2625,7 +2652,9 @@ static void oxphp_db_guarded_call(zif_handler orig, bool conn_is_arg1, bool is_p
  * `fetch()` needs `query()` — so by then the fiber holds the connection. The
  * exception is a statement kept across requests, which has no claimed call in
  * front of it at all and behaves as it does with no claim; that case is out of
- * scope rather than covered here. */
+ * scope rather than covered here, and its cost is the one named above — for
+ * mysqlnd an operation refused at the socket is the connection, not the call,
+ * whichever side of the exchange it was on. */
 #define OXPHP_DB_ENTRIES(X)                                                      \
     X(pdo_query,                "pdo", "query",                    false, true)  \
     X(pdo_exec,                 "pdo", "exec",                     false, true)  \
@@ -2801,8 +2830,10 @@ static bool oxphp_pdo_attr_call_is_local(zend_execute_data *execute_data, bool s
  * sharing and gives it a connection of its own; that is what PDO did with every
  * such constructor before any of this, and it is safe here because the entry it
  * drops is only blanked, while the gate above keeps its own registration from
- * landing on a live one. A connection nobody holds is pinged as before, so one
- * that really has died is still replaced. */
+ * landing on a live one. A connection nobody holds is pinged, so one that really
+ * has died is still replaced — under a claim of the ping's own, since the ping is
+ * a command on that connection like any other and the fiber it parks is otherwise
+ * standing in front of nothing. */
 #ifdef OXPHP_HAVE_PDO_HEADERS
 
 /* The key persistent constructors serialise on. A thread-local address: claims
@@ -3166,12 +3197,21 @@ static zend_result oxphp_pdo_check_liveness(pdo_dbh_t *dbh)
      * would land in that fiber's exchange.
      *
      * None of it applies where nothing but the pool holds the handle, which is
-     * what a claim outliving the object it was taken for looks like: a claim is
-     * given up at the end of the request, an object can be dropped long before
-     * that, and without an object there is no call in flight and so no exchange to
-     * land in. The driver's ping runs there as it always did — it is the only
-     * thing that notices a connection that has really died, and answering in its
-     * place would cost more here than a refusal costs PDO anywhere else, since
+     * usually a claim outliving the object it was taken for: a claim is given up at
+     * the end of the request, an object can be dropped long before that, and such a
+     * claim names a connection nobody can start a call on. Usually rather than
+     * always — the claim taken below for the ping's own sake is on a connection
+     * with a call in flight and no object yet, since PDO adopts only after the
+     * check returns. Reaching this line while one of those stands takes a second
+     * constructor past the gate that serialises them, by either of two routes:
+     * that gate's own wait refused or spent, or the gate given up early, since a
+     * constructor nested inside another on the same fiber takes it as its own and
+     * clears it on the way out while the outer one is still inside PDO's. Neither
+     * can be told apart from the common case here, and waiting for that one would
+     * stall a constructor for the length of somebody else's request. The driver's
+     * ping runs there as it always did — it is the only thing that notices a
+     * connection that has really died, and answering in its place would cost more
+     * here than a refusal costs PDO anywhere else, since
      * `pdbh->refcount--` takes the count to zero on a connection that is alive
      * while the entry it drops is only blanked, leaving it open with nothing left
      * that could ever close it. */
@@ -3207,7 +3247,43 @@ static zend_result oxphp_pdo_check_liveness(pdo_dbh_t *dbh)
      * a live one reported dead is dropped from under whoever is using it. */
     if (orig == NULL || orig->check_liveness == NULL) return SUCCESS;
 
-    return orig->check_liveness(dbh);
+    /* The ping is going on the wire, so it is claimed like every other command on
+     * this connection — and it is the one command on it that nothing else claims
+     * for us. PDO asks for it from inside the constructor, straight through the
+     * driver's method table, so it passes through none of the hooked entry points
+     * that take the claim; and it is asked for in the state a pooled connection
+     * spends most of its life in, live and held by nobody, because a claim runs
+     * from a request's first query to the end of that request.
+     *
+     * Unclaimed, the ping's reply parks this fiber inside a socket read with
+     * nothing standing in front of the connection: a query arriving from another
+     * request finds it free, takes it, and writes into the middle of the exchange.
+     * The socket refuses that write, and for mysqlnd a refused write is not a
+     * failed call — it marks the connection gone and closes it, after which every
+     * command on it is answered "server has gone away" from that state alone,
+     * without touching the wire, for as long as anything holds the handle. An
+     * application keeping one connection per worker never gets it back.
+     *
+     * Claimed, that query waits for the ping instead, inside the same bounded wait
+     * every other contended call uses. Given up only where it was taken: a claim
+     * already this fiber's belongs to the request, not to this call, and forgetting
+     * it here would leave the rest of that request unguarded. Nothing else can have
+     * taken this key in between — every acquirer of a pdo_dbh_t key records the
+     * claim only after finding it free or its own — so the release needs no owner
+     * check of its own; that is an invariant of the acquirers, and a new one that
+     * broke it would have to give this its own check back. One held by another
+     * fiber is left alone — this is only reached with no live object on the
+     * connection, where the claim has almost always outlived the object it was
+     * taken for; the block above says what the exception is and why it is not
+     * waited on. A bailout out of the driver skips the release, and the claim is
+     * then given up at the end of the request like any other. */
+    bool claimed = (self != NULL && owner == NULL && oxphp_claim_acquire(dbh, self));
+
+    zend_result live = orig->check_liveness(dbh);
+
+    if (claimed) oxphp_claim_forget(dbh);
+
+    return live;
 }
 
 /* Put the shadow table on a pooled handle, so the next constructor's liveness
