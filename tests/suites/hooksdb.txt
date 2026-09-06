@@ -69,6 +69,25 @@ hooksdb/test_persistent_ctor_shares_idle_connection
 hooksdb/test_persistent_ctor_dead_connection_replaced
 hooksdb/test_persistent_ctor_driver_without_liveness
 
+# And the state that answer is not given in, which is most of a pooled
+# connection's life: live, referenced by the handle the worker keeps, and claimed
+# by nobody, because a claim runs from a request's first query to the end of that
+# request. The check reaches the wire there, and the fiber it parks is one no
+# claimed call stands in front of — so a query arriving from another request writes
+# into the middle of it. mysqlnd does not read a refused write as a failed call: it
+# marks the connection gone and closes it, and every command after that is answered
+# from that state alone, for as long as the worker keeps the handle.
+hooksdb/test_persistent_ctor_ping_under_concurrent_use
+
+# And the claim that check runs under, which belongs to the request rather than to
+# the call: the one place a liveness check is asked about a connection the asking
+# request already holds is a second handle built on a pool key that request has
+# already queried. A check giving the claim back there would leave the rest of
+# that request unguarded, and silently, since its next query takes the connection
+# again — so what is measured is the gap where nothing does, while the request
+# waits on something that is not the connection.
+hooksdb/test_persistent_ctor_nested_handle_keeps_claim
+
 # Last, because both of these end by destroying the connection they hold: a fiber
 # parked inside a socket read holds the stream across the suspension, and another
 # fiber closing that same stream frees it under the reader. Once through a raw
