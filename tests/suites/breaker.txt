@@ -124,3 +124,63 @@ breaker/test_breaker_shutdown_throw | GET | | 500 |
 breaker/test_breaker_fatal | GET | | 500 |
 breaker/test_breaker_fatal | GET | | 500 |
 breaker/test_breaker_shutdown_throw_does_not_clear
+
+# And the same client hanging up, reached the other way. ignore_user_abort()
+# makes the interrupt handler record the disconnect and return instead of
+# unwinding; and the worker keeps running a request whose client has left, so the
+# next one waits in the queue and is cancelled before any worker owns it, which
+# raises no interrupt at all. Either way what ends these requests is the
+# cancellation check on the SAPI's write path — a bailout with nothing said about
+# it. It is the same event as the abort above and has to read the same way: three
+# of them must leave the worker serving.
+breaker/test_breaker_abort_ignored | GET | --max-time 1 | 0 |
+breaker/test_breaker_abort_ignored | GET | --max-time 1 | 0 |
+breaker/test_breaker_abort_ignored | GET | --max-time 1 | 0 |
+breaker/test_breaker_abort_ignored_neutral
+
+# And the boundary of that case. A fatal raised on a request whose client has
+# already gone reaches the same cancellation check, because the message it
+# displays on its way out is a write like any other — and it gets there before
+# anything on the request says it is dying. It must still count: the engine
+# state a fatal leaves is not put back by the client leaving afterwards, and
+# reading it as a cancellation would keep a worker that fatals on every request
+# in the pool for as long as clients kept hanging up. No status expected, for
+# the same reason as the aborts above: the client is gone before the response.
+breaker/test_breaker_abort_ignored_fatal | GET | --max-time 1 | 0 |
+breaker/test_breaker_abort_ignored_fatal | GET | --max-time 1 | 0 |
+breaker/test_breaker_abort_ignored_fatal | GET | --max-time 1 | 0 |
+breaker/test_breaker_abort_ignored_fatal_counts
+
+# One abort on its own, against a worker free to take it — the only shape in
+# which the interrupt handler is reached with a running request and asked to
+# leave it alone. The three above cannot show that it does: the last of them was
+# cancelled in the queue, and a request no interrupt was raised against runs to
+# its own end regardless. This one's probe reads a marker on the far side of the
+# sleep, which only a request whose interrupt handler honoured the setting ever
+# writes.
+breaker/test_breaker_abort_ignored | GET | --max-time 1 | 0 |
+breaker/test_breaker_abort_ignored_honoured
+
+# And the other side of that write: a request that got all the way to its own
+# end, whose response the server then could not deliver. It buffers its output,
+# so the first write of the whole request is the flush the server does after the
+# handler is through — and that flush meets the same departed client. It has to
+# clear the run all the same, which only the arrangement below can show: two
+# fatals, this, then a third fatal. Cleared, the third fatal stands alone and the
+# worker serves on; carried, three failures stand in a row and the worker goes.
+breaker/test_breaker_fatal | GET | | 500 |
+breaker/test_breaker_fatal | GET | | 500 |
+breaker/test_breaker_abort_buffered | GET | --max-time 1 | 0 |
+breaker/test_breaker_fatal | GET | | 500 |
+breaker/test_breaker_abort_buffered_clears
+
+# And the same client leaving, followed by a fatal rather than by nothing. The
+# cancellation is established first — the echo meets the departed client, as in
+# the block above — and only then does the shutdown function fatal. Which of the
+# two the request is filed as is the whole question, and it has to be the fatal:
+# the client stopping its wait says nothing about the engine state the next
+# request on this worker would inherit. Three of them retire it.
+breaker/test_breaker_abort_then_shutdown_fatal | GET | --max-time 1 | 0 |
+breaker/test_breaker_abort_then_shutdown_fatal | GET | --max-time 1 | 0 |
+breaker/test_breaker_abort_then_shutdown_fatal | GET | --max-time 1 | 0 |
+breaker/test_breaker_abort_then_shutdown_fatal_counts

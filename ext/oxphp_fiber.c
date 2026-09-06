@@ -109,6 +109,15 @@ static oxphp_error_cb_t oxphp_next_error_cb = NULL;
 static void oxphp_bailout_frame_cb(int type, zend_string *file, const uint32_t line, zend_string *message) {
     if (type & OXPHP_BAILOUT_ERROR_TYPES) {
         oxphp_bailout_frame = EG(current_execute_data);
+        /* And that this request had a fatal at all, which is the one thing the
+         * cancellation mark on the write path cannot work out for itself: the
+         * engine displays the message before it bails, so the mark meets a
+         * fatal as an ordinary write on a request nothing has flagged yet, and
+         * would file a worker that fatals under an abort storm as healthy. Here
+         * is the last point ahead of that write. */
+        if (oxphp_current_fiber != NULL) {
+            oxphp_current_fiber->fatal_reported = true;
+        }
     }
     oxphp_next_error_cb(type, file, line, message);
 }
@@ -704,6 +713,7 @@ static void oxphp_fiber_end_after_refusals(oxphp_request_fiber *fiber) {
      * wait for a resume that will never come. */
     fiber->completed = true;
     fiber->handler_failed = true;
+    fiber->failure_source = "fiber refused to park";
 }
 
 static void oxphp_fiber_refuse_foreign_suspend(oxphp_request_fiber *fiber) {
@@ -755,6 +765,7 @@ void oxphp_fiber_enter(oxphp_request_fiber *fiber, zval *value) {
             oxphp_fiber_resume_token = NULL;
             fiber->completed = true;
             fiber->handler_failed = true;
+            fiber->failure_source = "fiber would not start";
             return;
         }
         oxphp_fiber_resume_token = NULL;
@@ -1703,6 +1714,7 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
             }
         } zend_catch {
             fiber->handler_failed = true;
+            fiber->failure_source = "bailout in the handler";
             /* max_execution_time does not come through the interrupt handler
              * that marks every other cancellation. The engine checks
              * EG(timed_out) itself, ahead of zend_interrupt_function, and calls
@@ -1802,6 +1814,9 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
                 fiber->cancelled = true;
             }
             fiber->handler_failed = true;
+            if (!came_apart) {
+                fiber->failure_source = "bailout in a shutdown function";
+            }
             oxphp_recover_from_bailout(&mark);
         }
         came_apart = fiber->handler_failed;
@@ -1811,6 +1826,9 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
                 fiber->cancelled = true;
             }
             fiber->handler_failed = true;
+            if (!came_apart) {
+                fiber->failure_source = "bailout freeing the shutdown functions";
+            }
             oxphp_recover_from_bailout(&mark);
         }
 
@@ -1861,6 +1879,39 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
             }
         }
 
+        /* Everything the request itself had to do is done, so a cancellation
+         * the write path claimed up to here ended a request that still had work
+         * left — file it. Past this line the same claim means something else,
+         * which is the whole reason the write path raises a claim instead of
+         * writing the verdict: what is left below is the loop's own flush, and a
+         * response nobody is there to read does not make the request that
+         * produced it a failure. Cleared after that flush, so the claim can
+         * never outlive the window it belongs to.
+         *
+         * One place for all of it because every way this request could have come
+         * apart — the handler's catch, either shutdown-function window, the
+         * display of an uncaught exception — passes through here on its way
+         * down, and none of them reads the verdict before this point.
+         *
+         * Which is also what makes the second half of the question answerable
+         * here and nowhere else. The write path only ever raises the claim for a
+         * request that had reported no fatal at the time, so a fatal standing now
+         * is one that came after — a shutdown function that ran out of memory, or
+         * redeclared, or overflowed the stack, on a request already on its way
+         * out. That is a failure of this worker's engine state, and it is not
+         * undone by the client having left first: the wreckage the next request
+         * on this worker would inherit is the same wreckage any other fatal
+         * leaves. So the claim answers for the cancellation and not for what
+         * happened afterwards. The other order — a fatal first, a cancellation
+         * after — is refused at the mark itself, for the same reason read the
+         * other way round. */
+        if (fiber->cancel_bailout_pending) {
+            fiber->cancel_bailout_pending = false;
+            if (!fiber->fatal_reported) {
+                fiber->cancelled = true;
+            }
+        }
+
         /* Close the request the way php_request_shutdown closes one, and for
          * the same two reasons. An output buffer the request left open holds
          * its response body: ended here it reaches the client that asked for
@@ -1887,6 +1938,10 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
         } zend_catch {
             oxphp_recover_from_bailout(&mark);
         } zend_end_try();
+        /* The flush above is the one write of the request that is not the
+         * request's: a client that left before it is a client that left after
+         * being served. Drop the claim rather than file it. */
+        fiber->cancel_bailout_pending = false;
 
         /* The request is over, so any socket stream this fiber claimed is free
          * for the next fiber that wants it. Here rather than in finalize because
@@ -1912,6 +1967,9 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
          * request's own prep has already run (oxphp_scheduler_start_fiber). */
         fiber->completed = false;
         fiber->handler_failed = false;
+        fiber->failure_source = NULL;
+        fiber->fatal_reported = false;
+        fiber->cancel_bailout_pending = false;
         fiber->handler_threw = false;
         fiber->cancelled = false;
     }
@@ -1966,6 +2024,9 @@ oxphp_request_fiber *oxphp_scheduler_create_fiber(
     fiber->fcc = fcc;
     oxphp_fiber_clear_suspend(fiber);
     fiber->handler_failed = false;
+    fiber->failure_source = NULL;
+    fiber->fatal_reported = false;
+    fiber->cancel_bailout_pending = false;
     fiber->handler_threw = false;
     fiber->cancelled = false;
     fiber->completed = false;
@@ -2952,6 +3013,34 @@ void oxphp_scheduler_finalize_fiber(oxphp_fiber_scheduler *sched, oxphp_request_
          * bailout, so it reaches here with handler_failed up, and it has to
          * keep winning — and so does a cancellation, for the same reason. */
         sched->consecutive_errors++;
+        /* The only account of this a worker retired here would otherwise leave
+         * is the recycle counter going up: a bailout says nothing on its way
+         * past, so three of them can rotate the pool with the log empty. Warn
+         * level (php_log_err is warn on the Rust side), one line per counted
+         * failure rather than one per trip, because the run-up is what says
+         * whether the three were one fault or three. */
+        char msg[192];
+        /* Named, because a pool is many of these and the count is per worker:
+         * without the id, three lines are indistinguishable from one worker
+         * failing three times and three workers failing once each — and only the
+         * first of those retires anything. Nothing else in the line carries the
+         * worker, and the log format the server writes does not add it. */
+        snprintf(msg, sizeof(msg),
+                 "oxphp: worker %d request failed (%s) — %d in a row",
+                 oxphp_bridge_get_worker_id(),
+                 fiber->failure_source ? fiber->failure_source : "source not recorded",
+                 sched->consecutive_errors);
+        /* Straight to the SAPI's logger rather than through php_log_err(). That
+         * one builds its line with emalloc when error_log names a file, and this
+         * arm runs before the request's memory is released — an out-of-memory is
+         * one of the failures counted here, so the line would trip the limit
+         * again and bail out of a function that has not yet answered the request
+         * nor torn the scheduler down. It also has to land where the operator is
+         * told to look: with error_log set, php_log_err writes to that file and
+         * the server log never sees it. */
+        if (sapi_module.log_message != NULL) {
+            sapi_module.log_message(msg, LOG_NOTICE);
+        }
     } else if (fiber->handler_threw) {
         /* neutral */
     } else {
@@ -4195,6 +4284,9 @@ int64_t oxphp_async_sched_spawn(void *op_array, void *static_vars,
     oxphp_fiber_clear_suspend(fiber);
     fiber->completed = false;
     fiber->handler_failed = false;
+    fiber->failure_source = NULL;
+    fiber->fatal_reported = false;
+    fiber->cancel_bailout_pending = false;
     fiber->handler_threw = false;
     fiber->cancelled = false;
     fiber->consecutive_errors = 0;

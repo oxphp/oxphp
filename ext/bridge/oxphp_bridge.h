@@ -1142,6 +1142,19 @@ bool oxphp_bridge_set_cancel_reason(oxphp_cancel_reason_t reason);
  * the fiber scheduler's drain sweep to mark each suspended fiber's own cell. */
 bool oxphp_bridge_set_cancel_reason_at(_Atomic(uint8_t)* ptr, oxphp_cancel_reason_t reason);
 
+/* Register the SAPI's "the server ended this request" marker.
+ *
+ * The write and flush wrappers below read the cancel cell themselves and end a
+ * cancelled request with a bare zend_bailout(), which at the catch site is
+ * indistinguishable from a fatal — and three of those in a row retire a worker.
+ * Only the SAPI can tell them apart: the mark lives on its per-fiber state,
+ * which the bridge has no way to reach. Called with the reason that was read,
+ * immediately before the bailout. Set once at MINIT, before any worker thread
+ * exists; no-op while unregistered (unit tests, bare CLI without the
+ * extension). */
+typedef void (*oxphp_cancel_mark_fn_t)(oxphp_cancel_reason_t reason);
+void oxphp_bridge_set_cancel_mark_fn(oxphp_cancel_mark_fn_t fn);
+
 /* Process-global graceful-shutdown drain latch (NOT the per-request cancel
  * reason above). Set by the Rust drain path at SIGTERM; read by the fiber
  * scheduler to wake suspended request fibers and by the stream-flush path.

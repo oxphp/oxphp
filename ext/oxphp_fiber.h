@@ -326,6 +326,36 @@ typedef struct _oxphp_request_fiber {
      *   over max_input_vars against an application whose error handler throws. */
     bool handler_failed;
     bool handler_threw;
+    /* Which of the handler_failed sites raised the flag, as a literal that
+     * outlives the fiber. The breaker retires a worker over three of these in a
+     * row and a bailout says nothing on its way past, so without this the only
+     * evidence a trip leaves is the recycle counter going up. Read only where
+     * the count is incremented; NULL whenever handler_failed is false. */
+    const char *failure_source;
+    /* A fatal error was reported for this request — E_ERROR and the four other
+     * types that end in a bailout, wherever they were raised. Set from the error
+     * callback the fiber module installs, which the engine runs before it
+     * displays the message and before it bails out. That ordering is the point
+     * of the flag: the display is itself a write, and the write path can end a
+     * request of its own accord, so without something raised ahead of it a fatal
+     * arrives at the cancellation mark looking exactly like an ordinary echo.
+     * Read there, and nowhere else. Guarded on oxphp_current_fiber, because the
+     * callback is global and fatals are raised outside request fibers too. */
+    bool fatal_reported;
+    /* The bailout about to happen is a cancellation. Raised by the SAPI's mark
+     * immediately before the bridge's write path bails out, and turned into
+     * `cancelled` by the request loop once the request's own work is over —
+     * which is the whole reason it is a flag of its own rather than `cancelled`
+     * written on the spot. The write path fires wherever the request happens to
+     * be writing, and that includes the flush the loop does after the handler
+     * and the shutdown functions are through. A request that got that far
+     * finished; that nobody was left to read its response says something about
+     * the client, not about the worker, and it has to keep clearing the
+     * consecutive-error run like any other request that finished. So the loop
+     * reads this flag before that last flush and clears it after, and only a
+     * cancellation raised while the request still had work to do becomes
+     * `cancelled`. Meaningless outside the request that raised it. */
+    bool cancel_bailout_pending;
     /* The server ended this request rather than the handler finishing it: a
      * client that hung up, max_execution_time, a shutdown, a userland cancel.
      * Set by the interrupt handler, which unwinds such a request through
@@ -334,17 +364,30 @@ typedef struct _oxphp_request_fiber {
      * read it as one. Neutral like drain_kill, which is the same decision for
      * the one cancellation reason that predates this flag.
      *
-     * Two writers, because a deadline does not arrive the way the others do:
-     * the interrupt handler for everything delivered as a cancel reason, and the
-     * coroutine's own zend_catch for max_execution_time, which the engine
-     * handles ahead of zend_interrupt_function and which is recognised there by
-     * the connection_status bit zend_timeout() leaves behind.
+     * Three writers, because neither a deadline nor an output write arrives the
+     * way the interrupt does: the interrupt handler for a cancellation delivered
+     * to a running request it is willing to unwind, the coroutine's own
+     * zend_catch for max_execution_time — which the engine handles ahead of
+     * zend_interrupt_function and which is recognised there by the
+     * connection_status bit php_on_timeout() raises from the signal handler,
+     * before the engine reports the deadline — and the SAPI's cancellation mark,
+     * for the request the bridge's write and flush wrappers end on the cancel
+     * cell.
      *
-     * Only ever true for a request that was RUNNING when it was cancelled: a
-     * suspended fiber reaches neither writer. What ends a suspended request is the drain sweep, which sets
-     * drain_kill; a client abort or a deadline does not reach one at all today.
+     * The third is not a fallback for the first. A request cancelled while its
+     * fiber was suspended reaches it when it resumes and writes, because its
+     * interrupt was raised against a worker that was not running it or never
+     * raised at all — the request was still queued. But so does a running
+     * request whose handler called ignore_user_abort(): the interrupt handler
+     * records the disconnect for that one and returns without unwinding, and
+     * what ends it is its next write. What ends a suspended request that never
+     * writes again is the drain sweep, which sets drain_kill.
      * A supervisor giving up on a stuck request is deliberately not marked — see
-     * the interrupt handler for why that one still counts. */
+     * the interrupt handler for why that one still counts. The write path has
+     * one rule of its own on top of that, which the interrupt handler does not
+     * share: it leaves a request alone once a fatal has been reported for it.
+     * See oxphp_mark_cancelled_bailout for why that rule is needed there and
+     * nowhere else. */
     bool cancelled;
     bool completed;          /* set by coroutine before final switch — low-level API never sets DEAD */
     int consecutive_errors;
