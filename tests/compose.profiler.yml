@@ -34,6 +34,21 @@ services:
       # the .collapsed extension.
       PROFILER_OUTPUT_DIR: "/tmp/oxphp-profiles"
       PROFILER_OUTPUT_FORMATS: "collapsed"
+      # One worker, so every test in this profile runs on the same PHP
+      # thread. The profiler's per-request bridge state is thread-local:
+      # test_truncated_after_cap only proves that the truncation flag is
+      # cleared between requests if it is guaranteed to run on the thread
+      # that raised it.
+      PHP_WORKERS: "1"
+      # Low enough that a test can reach it in a fraction of a second
+      # (test_truncated_over_cap), high enough that every other test in
+      # this profile stays far under it. Measured across a full suite
+      # run, the busiest profiled request is test_attr_sample at 48
+      # spans, then test_truncated_deep_stack at 45 — a probe's span
+      # count runs well above its own call count because the TestCase
+      # assertion helpers are observed too. Tenfold margin, so nothing
+      # else in the suite is truncated by this.
+      PROFILER_MAX_SPANS: "500"
     volumes:
       - ../www:/var/www/html
       - ./php:/var/www/html/public/tests

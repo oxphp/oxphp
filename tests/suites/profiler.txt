@@ -16,3 +16,8 @@ profiler/test_attr_tag
 profiler/test_attr_composition
 profiler/test_storage_files_present
 profiler/test_internal_routes
+profiler/test_truncated_under_cap
+profiler/test_truncated_deep_stack
+profiler/test_truncated_over_cap
+profiler/test_truncated_after_cap
+profiler/test_truncated_index

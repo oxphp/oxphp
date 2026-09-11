@@ -5295,7 +5295,7 @@ normalization — so list the literal path your framework uses.
 | `PROFILER_SAMPLE_RATE` | `0.0` | `[0.0; 1.0]`. Random sampling rate. |
 | `PROFILER_EXCLUDE_PATHS` | *(unset)* | CSV glob patterns (`PHP_DENY_PATHS` syntax) excluded from `PROFILER_SAMPLE_RATE`. Explicit triggers still profile them. Example: `/_profiler,/_profiler/**,/_wdt/**`. |
 | `PROFILER_INTERNAL` | `false` | Observe **internal** C functions (`strlen`, `json_encode`, …). Full coverage, but **2–5× overhead**. Use surgically. |
-| `PROFILER_MAX_SPANS` | `50000` | Hard cap on tree size per request. When exceeded, further spans are marked `truncated` and not written. |
+| `PROFILER_MAX_SPANS` | `50000` | Hard cap on tree size per request. Once it is reached no further spans are recorded, and the run is flagged `truncated`. |
 | `PROFILER_MAX_DEPTH` | `256` | Hard cap on stack depth. |
 | `PROFILER_OUTPUT_DIR` | `/tmp/oxphp-profiles` | Absolute path. Must be writable by `www-data`. |
 | `PROFILER_OUTPUT_FORMATS` | `xhprof,speedscope` | CSV subset of `xhprof`, `speedscope`, `pprof`, `collapsed`. |
@@ -5941,9 +5941,11 @@ or pass via env.
 
 - `PROFILER_INTERNAL=false` (this is the default).
 - `PROFILER_SAMPLE_RATE` in a reasonable range (0.0005..0.002).
-- Reasonable `PROFILER_MAX_SPANS` — when exceeded the tree is truncated
-  but capture still runs. For very large requests prefer a surgical
-  `start()`/`stop()` around the section of interest.
+- Reasonable `PROFILER_MAX_SPANS` — once it is reached no further spans
+  are recorded, the request itself is not interrupted, and the prefix
+  collected up to that point is written with `truncated: true`. For very
+  large requests prefer a surgical `start()`/`stop()` around the section
+  of interest.
 
 ### `truncated=true` in `index.json`
 

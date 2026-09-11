@@ -214,6 +214,24 @@ pub fn is_profiling_paused() -> bool {
     }
 }
 
+/// True when the C observer stopped recording spans because the
+/// `PROFILER_MAX_SPANS` cap was reached, so at least one call went
+/// unrecorded. Read on the PHP worker thread at
+/// `ProfilingContext::finalize`, before `set_profiling_mode(OFF)`
+/// clears it — the flag lives in the bridge's per-thread profiler
+/// state, so a call from the Tokio side would read that thread's own
+/// copy, which no observer ever writes, rather than the worker's.
+pub fn profiler_was_truncated() -> bool {
+    #[cfg(feature = "php")]
+    unsafe {
+        crate::php::bindings::oxphp_bridge_profiler_was_truncated() != 0
+    }
+    #[cfg(not(feature = "php"))]
+    {
+        false
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

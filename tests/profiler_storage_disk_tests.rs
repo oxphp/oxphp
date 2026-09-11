@@ -32,6 +32,7 @@ fn fixture_tree() -> Arc<SpanTree> {
         trace_id: "trace".into(),
         root_span_id: "root".into(),
         mode: ProfilingMode::ProfileAll,
+        truncated: false,
     })
 }
 

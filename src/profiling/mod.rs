@@ -8,8 +8,8 @@ pub mod filter;
 pub mod flush;
 
 pub use flush::{
-    get_profiling_mode, is_profiling_paused, profiler_rshutdown_flush, set_profiling_mode,
-    set_profiling_paused, snapshot_open_stack, OxSpanEvent,
+    get_profiling_mode, is_profiling_paused, profiler_rshutdown_flush, profiler_was_truncated,
+    set_profiling_mode, set_profiling_paused, snapshot_open_stack, OxSpanEvent,
 };
 
 use std::cell::{Cell, RefCell};
@@ -158,6 +158,13 @@ pub struct SpanTree {
 
     /// Mode that was active during collection.
     pub mode: ProfilingMode,
+
+    /// `true` when the C observer stopped recording spans because
+    /// `PROFILER_MAX_SPANS` was reached, so this tree holds only the
+    /// calls that started before the cap and not the whole call
+    /// graph. Carried on the tree because the bridge flag that
+    /// reports it is visible only on the PHP worker thread.
+    pub truncated: bool,
 }
 
 impl SpanTree {
@@ -550,6 +557,13 @@ impl ProfilingContext {
             trace_id: Arc::clone(&self.trace_id),
             root_span_id: Arc::clone(&self.root_span_id),
             mode: self.mode,
+            // Read here rather than at the consumer: the bridge keeps
+            // the flag in per-thread profiler state, and finalize is
+            // the last point that runs on the PHP worker thread while
+            // it still holds this request's value — the executors call
+            // `set_profiling_mode(Off)`, which clears it, immediately
+            // after.
+            truncated: crate::profiling::profiler_was_truncated(),
         })
     }
 

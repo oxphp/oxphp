@@ -251,6 +251,7 @@ mod tests {
     fn sample_tree() -> SpanTree {
         SpanTree {
             mode: ProfilingMode::ProfileAll,
+            truncated: false,
             trace_id: Arc::<str>::from(""),
             root_span_id: Arc::<str>::from("root"),
             finished: vec![mk_span("Foo::bar", "s1", "root", 450)],

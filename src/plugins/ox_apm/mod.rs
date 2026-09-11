@@ -847,6 +847,7 @@ mod tests {
             trace_id: "aaaaaaaaaaaaaaaabbbbbbbbbbbbbbbb".into(),
             root_span_id: "2222222222222222".into(),
             mode: ProfilingMode::ApmOnly,
+            truncated: false,
         });
 
         let handler = ApmCompleteHandler {

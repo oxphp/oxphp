@@ -56,6 +56,7 @@ mod tests {
             trace_id: "t".into(),
             root_span_id: "r".into(),
             mode: ProfilingMode::ProfileAll,
+            truncated: false,
         })
     }
 

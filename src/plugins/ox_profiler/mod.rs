@@ -307,7 +307,7 @@ fn build_run_meta(
         event_count,
         error_count,
         leaked_count,
-        truncated: false,
+        truncated: tree.truncated,
         oxphp_version: env!("CARGO_PKG_VERSION").into(),
         formats: vec![],
     }
@@ -786,5 +786,51 @@ mod tests {
             msg.contains("ture"),
             "error should echo the value, got: {msg}"
         );
+    }
+
+    /// The stored run metadata must report truncation from the tree the
+    /// worker finalized. Only the PHP worker thread can read the bridge
+    /// flag that says the span cap fired, so `SpanTree::truncated` is the
+    /// single path by which that fact reaches `index.json`, `/stats` and
+    /// `oxphp_profiler_truncated_total`; a `build_run_meta` that does not
+    /// copy it leaves all three reporting "not truncated" for a run that
+    /// was.
+    #[test]
+    fn run_meta_reports_the_trees_truncation() {
+        use crate::profiling::{ProfilingMode, SpanTree};
+        use std::sync::Arc;
+
+        let addr: std::net::SocketAddr = "127.0.0.1:8080".parse().unwrap();
+
+        for truncated in [false, true] {
+            let tree = Arc::new(SpanTree {
+                finished: vec![],
+                trace_id: "aaaaaaaaaaaaaaaabbbbbbbbbbbbbbbb".into(),
+                root_span_id: "2222222222222222".into(),
+                mode: ProfilingMode::ProfileAll,
+                truncated,
+            });
+            let view = PluginCompleteView::new(
+                "req-1",
+                "GET",
+                "/test",
+                200,
+                std::time::Duration::from_millis(10),
+                addr,
+                0,
+                0,
+                &[],
+                &[],
+                Some(&tree),
+                None,
+                None,
+            );
+
+            let meta = build_run_meta(&view, &tree, "req-1");
+            assert_eq!(
+                meta.truncated, truncated,
+                "run meta must mirror the tree's truncated flag"
+            );
+        }
     }
 }
