@@ -221,6 +221,7 @@ extern "C" {
     pub fn oxphp_bridge_get_profiling_mode() -> u8;
     pub fn oxphp_bridge_snapshot_open_stack(dst: *mut u32, max_depth: u8) -> u8;
     pub fn oxphp_bridge_profiler_rshutdown_flush();
+    pub fn oxphp_bridge_profiler_was_truncated() -> u8;
     pub fn oxphp_bridge_set_profiling_paused(paused: u8);
     pub fn oxphp_bridge_is_profiling_paused() -> u8;
     pub fn oxphp_bridge_get_memory_usage_bytes() -> i64;

@@ -94,6 +94,7 @@ fn make_fixture_tree() -> SpanTree {
         trace_id: "trace-fixture".into(),
         root_span_id: "root-fixture".into(),
         mode: ProfilingMode::ProfileAll,
+        truncated: false,
     }
 }
 
@@ -263,6 +264,7 @@ fn pprof_empty_tree_yields_valid_profile() {
         trace_id: "empty".into(),
         root_span_id: "root".into(),
         mode: ProfilingMode::ProfileAll,
+        truncated: false,
     };
     let gz = export_pprof(&tree);
     let mut decoder = flate2::read::GzDecoder::new(&gz[..]);

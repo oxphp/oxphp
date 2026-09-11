@@ -4657,6 +4657,21 @@ static __thread struct {
     uint8_t  paused;            /* set/cleared by oxphp_bridge_set_profiling_paused */
     uint8_t  open_depth;
     uint8_t  open_stack_overflow;
+    /* Set once the per-request span cap is reached and no further
+     * spans are recorded. Distinct from open_stack_overflow, which
+     * also fires when the 32-entry open-stack mirror runs out — on
+     * any call chain deeper than 32 *recorded* frames, which ordinary
+     * code reaches. That case costs the heap hook its attribution
+     * path and leaves every frame past the mirror unclosed: the BEGIN
+     * was emitted, the matching END is not (oxphp_profiler_end finds
+     * an outer fn_id on top and bails), so Rust force-closes those
+     * spans at finalize and marks them `leaked`. Their duration is
+     * not usable either — the force-close stamps the end from the
+     * wall clock while the observer stamped the start from
+     * CLOCK_MONOTONIC — but the span is there. What the mirror does
+     * not do is lose a span, which is what the cap does — hence two
+     * flags. Rust reports this one as the run's `truncated` flag. */
+    uint8_t  spans_truncated;
     uint16_t buf_len;
     uint16_t name_arena_used;
 
@@ -4753,6 +4768,7 @@ void oxphp_bridge_set_profiling_mode(uint8_t mode) {
         g_prof.name_arena_used = 0;
         g_prof.open_depth = 0;
         g_prof.open_stack_overflow = 0;
+        g_prof.spans_truncated = 0;
         g_prof.next_seq = 0;
         g_prof.paused = 0;          /* Fresh request starts unpaused */
         /* force_profile_fn_count intentionally preserved: mirrors g_filter_cache, not per-request */
@@ -4776,6 +4792,10 @@ uint8_t oxphp_bridge_snapshot_open_stack(uint32_t *dst, uint8_t max_depth) {
 
 void oxphp_bridge_profiler_rshutdown_flush(void) {
     oxphp_prof_flush_buffer();
+}
+
+uint8_t oxphp_bridge_profiler_was_truncated(void) {
+    return g_prof.spans_truncated;
 }
 
 /* ── Profiler paused flag ───────────────────────────── */
@@ -5228,7 +5248,8 @@ static void oxphp_profiler_begin(zend_execute_data *execute_data) {
      * outer frame. zend_function* is never NULL, so 0 is a safe
      * sentinel value. */
     if (UNEXPECTED(g_prof.next_seq >= g_prof_max_spans_cap)) {
-        g_prof.open_stack_overflow = 1;  /* signal truncation to Rust */
+        g_prof.spans_truncated = 1;      /* signal truncation to Rust */
+        g_prof.open_stack_overflow = 1;  /* sentinel frames carry no seq */
         if (g_prof.open_depth < OXPHP_PROF_OPEN_STACK_MAX) {
             g_prof.open_stack[g_prof.open_depth] = 0;
             g_prof.open_fn_stack[g_prof.open_depth] = 0;

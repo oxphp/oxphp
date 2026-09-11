@@ -172,6 +172,7 @@ fn run_format_cache_wins_over_disk() {
         trace_id: "t".into(),
         root_span_id: "r".into(),
         mode: ProfilingMode::ProfileAll,
+        truncated: false,
     });
     storage.cache.put("abc".into(), Arc::clone(&tree));
     let router = build_router(storage, None);

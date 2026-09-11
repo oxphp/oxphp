@@ -1824,14 +1824,31 @@ uint8_t oxphp_bridge_get_profiling_mode(void);
  * allocations to the current span path.
  *
  * Writes up to `max_depth` u32 seq tags into `dst`, root → current.
- * Returns the actual depth, OR 255 if the real depth overflows the
- * 32-entry mirror (caller should set its truncated flag). */
+ * Returns the actual depth, OR 255 if the mirror holds no usable
+ * path — either the real depth overflowed its 32 entries, or the
+ * span cap left sentinel frames on it that carry no seq. The caller
+ * has no attribution path for the allocation in that case; it is not
+ * the run-level truncation flag, which
+ * oxphp_bridge_profiler_was_truncated reports. */
 uint8_t oxphp_bridge_snapshot_open_stack(uint32_t *dst, uint8_t max_depth);
 
 /* Drain any partial ring-buffer contents into Rust. Called from
  * Rust at RSHUTDOWN, before PROFILING_CONTEXT::finalize. Idempotent
  * (a second call when the buffer is empty is a no-op). */
 void oxphp_bridge_profiler_rshutdown_flush(void);
+
+/* Read the per-thread "span cap was reached" flag: 1 once a request
+ * hit the cap set by oxphp_bridge_set_profiler_max_spans and stopped
+ * recording spans, 0 otherwise. Cleared by set_profiling_mode(OFF),
+ * which both executors call after finalizing a profiled request —
+ * except on the traditional executor's early-send path
+ * (finish_request()/streaming), which returns before that trio and
+ * leaves this flag standing along with the rest of the per-request
+ * profiler state, the seq counter included. Rust reads it in
+ * ProfilingContext::finalize — on the PHP worker thread, which is the
+ * only one that can see this thread-local state — and carries it out
+ * on the SpanTree. */
+uint8_t oxphp_bridge_profiler_was_truncated(void);
 
 /* Set the per-thread "paused" flag for the profiler observer.
  * When 1, the begin callback early-returns
@@ -1975,9 +1992,10 @@ uint32_t oxphp_bridge_get_filter_spec_id_cached(uintptr_t fn_id);
 void oxphp_bridge_clear_filter_cache(void);
 
 /* Set the per-request span cap. Process-wide, set once at plugin
- * init from ProfilerConfig.max_spans. 0 means "unlimited". Reached
- * caps sets open_stack_overflow so Rust can flag the resulting
- * SpanTree as truncated. */
+ * init from ProfilerConfig.max_spans. 0 means "unlimited". A request
+ * that reaches the cap stops recording spans and raises the flag
+ * oxphp_bridge_profiler_was_truncated reports, which Rust carries
+ * out on the SpanTree as `truncated`. */
 void oxphp_bridge_set_profiler_max_spans(uint32_t cap);
 
 /* ─── Shareable interface ───────────────────

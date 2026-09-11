@@ -163,6 +163,7 @@ mod tests {
     fn tree_of(finished: Vec<FinishedSpan>) -> SpanTree {
         SpanTree {
             mode: ProfilingMode::ProfileAll,
+            truncated: false,
             trace_id: Arc::<str>::from(""),
             root_span_id: Arc::<str>::from(""),
             finished,
