@@ -2,6 +2,15 @@ use crate::config::AccessLogLevel;
 use crate::events::RequestComplete;
 use crate::events::{EventHandler, Priority, Propagation};
 
+/// Tracing target every access log entry is emitted under.
+///
+/// The log filter carries a directive naming this target, so that a quiet
+/// `LOG_LEVEL` cannot silently switch the access log off; both sides read the
+/// name from here rather than spelling it twice. Directives match a target by
+/// prefix, so renaming this to something another target starts with would widen
+/// what that directive frees.
+pub const TARGET: &str = "access_log";
+
 /// Emits a structured access log entry via `tracing::info!`.
 pub struct AccessLogHandler {
     level: AccessLogLevel,
@@ -33,7 +42,7 @@ impl EventHandler<RequestComplete> for AccessLogHandler {
 
         if let (Some(tid), Some(sid)) = (trace_id, span_id) {
             tracing::info!(
-                target: "access_log",
+                target: TARGET,
                 request_id = %event.request_id,
                 trace_id = tid,
                 span_id = sid,
@@ -46,7 +55,7 @@ impl EventHandler<RequestComplete> for AccessLogHandler {
             );
         } else {
             tracing::info!(
-                target: "access_log",
+                target: TARGET,
                 request_id = %event.request_id,
                 method = %event.method,
                 path = %event.path,

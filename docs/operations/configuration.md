@@ -222,6 +222,8 @@ A coding is offered when `COMPRESSION_ENCODINGS` lists it **and** its level is n
 
 > **Note:** `ACCESS_LOG` accepts `all` or `error`. Leave it unset to disable access logging entirely.
 
+> **Note:** The two are independent. `LOG_LEVEL` sets the verbosity of the server's own diagnostics; it does not filter the access log, so `LOG_LEVEL=warn` with `ACCESS_LOG=error` reports warnings and errors *and* logs every 4xx/5xx request. Silencing the access log on its own takes a `RUST_LOG` directive naming its target — `RUST_LOG=warn,access_log=off`, with `warn` standing in for whatever `LOG_LEVEL` you were running: `RUST_LOG`, when set and parsable, replaces `LOG_LEVEL` rather than layering on it. See [Access logging](../features/access-logging.md#fine-grained-filtering).
+
 ## Observability
 
 | Variable | Default | Description |

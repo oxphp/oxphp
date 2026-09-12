@@ -46,6 +46,21 @@ impl fmt::Display for AccessLogLevel {
     }
 }
 
+/// Parse an `ACCESS_LOG` value. `None` means the value is one this server does
+/// not recognise.
+///
+/// Whether to say so out loud is left to the caller: the logger reads this
+/// variable as well, before a subscriber exists, so a warning raised there
+/// would go nowhere. `Config::from_env` reports it, once.
+pub fn parse_access_log(raw: Option<&str>) -> Option<AccessLogLevel> {
+    match raw {
+        Some("all") => Some(AccessLogLevel::All),
+        Some("error") => Some(AccessLogLevel::Error),
+        None | Some("") => Some(AccessLogLevel::Off),
+        Some(_) => None,
+    }
+}
+
 /// Top-level application configuration.
 #[derive(Debug)]
 pub struct Config {
@@ -613,13 +628,12 @@ impl Config {
         let tls_min_version = TlsMinVersion::from_env()?;
         let error_pages_dir = std::env::var("ERROR_PAGES_DIR").ok();
         let compression = compression_from_env()?;
-        let access_log = match std::env::var("ACCESS_LOG").as_deref() {
-            Ok("all") => AccessLogLevel::All,
-            Ok("error") => AccessLogLevel::Error,
-            Ok("") | Err(_) => AccessLogLevel::Off,
-            Ok(other) => {
+        let access_log_raw = std::env::var("ACCESS_LOG").ok();
+        let access_log = match parse_access_log(access_log_raw.as_deref()) {
+            Some(level) => level,
+            None => {
                 tracing::warn!(
-                    value = %other,
+                    value = %access_log_raw.as_deref().unwrap_or_default(),
                     "unknown ACCESS_LOG value, expected \"all\", \"error\", or empty — defaulting to off"
                 );
                 AccessLogLevel::Off
@@ -1017,6 +1031,19 @@ fn check_file(label: &str, path: &Path, errors: &mut Vec<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn access_log_values_parse_to_their_levels() {
+        assert_eq!(parse_access_log(Some("all")), Some(AccessLogLevel::All));
+        assert_eq!(parse_access_log(Some("error")), Some(AccessLogLevel::Error));
+        // Unset and empty are the same "off": an unsubstituted `ACCESS_LOG=${…}`
+        // is a missing setting, not a broken one.
+        assert_eq!(parse_access_log(None), Some(AccessLogLevel::Off));
+        assert_eq!(parse_access_log(Some("")), Some(AccessLogLevel::Off));
+        // Not a level this server knows — the caller reports it and falls back.
+        assert_eq!(parse_access_log(Some("ALL")), None);
+        assert_eq!(parse_access_log(Some("true")), None);
+    }
 
     /// What the level variables parse to when none of them are set.
     fn shipped_levels() -> Levels {

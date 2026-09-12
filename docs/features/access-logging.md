@@ -12,8 +12,9 @@ OxPHP emits structured JSON access logs for every HTTP request, written to stdou
 1. When `ACCESS_LOG` is set, OxPHP writes one JSON line to stdout after each completed request.
 2. Log writes are buffered in a background writer thread and never block the request pipeline.
 3. `ACCESS_LOG=all` logs every request. `ACCESS_LOG=error` logs only responses with status 400 or higher.
-4. Each log line includes a `request_id` field that correlates access log entries with your application logs.
-5. When W3C Trace Context propagation is enabled, log entries also include `trace_id` and `span_id` fields.
+4. `ACCESS_LOG` alone decides whether those lines are written — `LOG_LEVEL` does not get a second vote. A server told to keep its diagnostics down to `warn` still writes the access log it was asked for. The one exception is a filter directive that names the `access_log` target explicitly; see [Fine-Grained Filtering](#fine-grained-filtering).
+5. Each log line includes a `request_id` field that correlates access log entries with your application logs.
+6. When W3C Trace Context propagation is enabled, log entries also include `trace_id` and `span_id` fields.
 
 ## Configuration
 
@@ -78,12 +79,23 @@ When W3C Trace Context is active, `trace_id` and `span_id` are included alongsid
 
 ## Fine-Grained Filtering
 
-OxPHP uses the internal `access_log` logging target for access log entries. Use the `RUST_LOG` variable to filter access logs independently from other log output:
+OxPHP emits access log entries under the internal `access_log` logging target, and adds a directive for that target to its own log filter whenever `ACCESS_LOG` asks for an access log. That is what keeps the two settings independent — quietening the server with `LOG_LEVEL=warn` leaves the access log running:
 
 ```bash
-# Suppress general info messages, keep access logs
-RUST_LOG=warn,access_log=info
+# Quiet diagnostics, access log intact — nothing else needed
+LOG_LEVEL=warn
+ACCESS_LOG=all
 ```
+
+A `RUST_LOG` directive that names the target in full has the last word on it, including against the directive OxPHP adds. A bare level does not, the same way `LOG_LEVEL` does not — `RUST_LOG=off` quietens the server's own diagnostics and leaves the access log running — and neither does a shortened name such as `access=off`, which is the less specific of the two directives and loses. Use it to silence the access log and nothing else. Note that `RUST_LOG`, when set and parsable, *replaces* `LOG_LEVEL` rather than adding to it, so spell your level into it:
+
+```bash
+# Access log off, warnings and errors still reported
+ACCESS_LOG=all
+RUST_LOG=warn,access_log=off   # `warn` here is what LOG_LEVEL would have been
+```
+
+That combination is contradictory — the access log is switched on and then filtered away — so the server reports it once at startup, naming both values. Prefer unsetting `ACCESS_LOG`.
 
 > **Note:** The `access_log` target is used for `RUST_LOG` filtering but is not included in the JSON output. To identify access log entries in downstream systems, use the `"message": "request completed"` field and the characteristic field set (`method`, `path`, `status`, `duration_us`).
 
@@ -98,6 +110,22 @@ Access logging is disabled when `ACCESS_LOG` is unset or empty.
 ```bash
 ACCESS_LOG=all
 ```
+
+If it is already set, the remaining possibility is a `RUST_LOG` that names the `access_log` target and switches it off; an operator's own directive wins over the one OxPHP adds. The server says so at startup:
+
+```json
+{"timestamp":"…","level":"WARN","fields":{"message":"ACCESS_LOG is set but the log filter drops the access_log target — no access log entries will be written","access_log":"all","filter":"warn,access_log=off"}}
+```
+
+The `filter` field shows the directives in force, which here are exactly the ones you set: the directive OxPHP adds for the target is dropped again wherever your own overrides it, since it would then admit nothing while still keeping the process-wide level maximum raised. Remove the `access_log=…` you wrote from `RUST_LOG` and the entries come back.
+
+If the filter is quiet enough to drop `WARN` as well, the same report is written to stderr as a plain line rather than JSON, so that this combination can never be silent:
+
+```
+WARN ACCESS_LOG is set but the log filter drops the access_log target — no access log entries will be written (access_log=all, filter=error,access_log=off)
+```
+
+A plain `LOG_LEVEL` (`trace`, `debug`, `info`, `warn`, `error`) never causes any of this: a bare level applies to every target at once, and the directive naming this one is the more specific of the two.
 
 ### Access logs show `error` mode but successful requests are missing
 
