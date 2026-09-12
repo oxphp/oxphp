@@ -139,28 +139,6 @@ fn log_startup(
     }
 }
 
-/// 529 body shared by every path that refuses for overload — the fail-fast
-/// shed, the expired wait budget, and the worker-side pickup check — so they
-/// cannot drift apart.
-pub(crate) fn overloaded_response() -> ScriptResponse {
-    ScriptResponse {
-        status: 529,
-        headers: vec![
-            (
-                HeaderName::from_static("content-type"),
-                HeaderValue::from_static("text/plain; charset=utf-8"),
-            ),
-            (
-                HeaderName::from_static("retry-after"),
-                HeaderValue::from_static("3"),
-            ),
-        ],
-        body: Bytes::from_static(b"Site is overloaded"),
-        refused: true,
-        ..Default::default()
-    }
-}
-
 /// Hand a request that already holds a queue-slot permit to the workers.
 ///
 /// Holding a permit means a slot was free, so `Full` here is a broken
@@ -217,7 +195,7 @@ fn shed_response(reason: ShedReason) -> ScriptResponse {
         ShedReason::QueueFull
         | ShedReason::WaitTimeout
         | ShedReason::WaitingFull
-        | ShedReason::WaitingBytes => overloaded_response(),
+        | ShedReason::WaitingBytes => ScriptResponse::overloaded(),
     }
 }
 
@@ -353,8 +331,11 @@ impl ScriptExecutor for SapiExecutor {
         // for a slot here, and for a worker once in the queue. Taking the
         // budget fresh at each stage would let a request spend it twice, which
         // is how a wait budget of a second turns into a queue wait of half a
-        // minute on a pool whose handlers are slow. Costs the admitted path one
-        // clock read, and nothing at all in fail-fast mode.
+        // minute on a pool whose handlers are slow. Costs the admitted path
+        // this clock read plus the timer the waiting side then arms against
+        // the deadline, and nothing at all in fail-fast mode. Measured on a
+        // pool serving an empty handler, the pair is indistinguishable from
+        // zero: −0.27 %, 95 % CI [−1.19 %, +0.64 %].
         let deadline = self
             .admission
             .budget()
@@ -373,7 +354,10 @@ impl ScriptExecutor for SapiExecutor {
                     permit,
                     deadline,
                 ) {
-                    Ok(()) => ExecuteResult::Deferred(response_rx),
+                    Ok(()) => ExecuteResult::Deferred(crate::executor::Queued {
+                        rx: response_rx,
+                        deadline,
+                    }),
                     Err(resp) => ExecuteResult::Rejected(resp),
                 }
             }
@@ -428,6 +412,11 @@ impl ScriptExecutor for SapiExecutor {
             // here, they come back however this future ends — admitted,
             // refused, or dropped along with a client that left.
             let _charge = charge;
+            // Paired with the reading below: the gate is the other place a
+            // budget can run out, and a wait that ends here has the same
+            // question asked of it — did the pool begin anything at all while
+            // it waited.
+            let starts_on_arrival = crate::metrics::pool_starts();
             match admission.admit(parked, deadline).await {
                 Admitted::Slot(permit) => {
                     // A client that leaves during the wait needs nothing from
@@ -446,11 +435,24 @@ impl ScriptExecutor for SapiExecutor {
                     if request.cancel_state.get() != crate::bridge::cancel::CancelReason::None {
                         return Err(ScriptResponse::client_closed());
                     }
-                    send_admitted(&tx, &metrics, request, response_tx, permit, Some(deadline))
-                        .map(|()| response_rx)
+                    send_admitted(&tx, &metrics, request, response_tx, permit, Some(deadline)).map(
+                        |()| crate::executor::Queued {
+                            rx: response_rx,
+                            deadline: Some(deadline),
+                        },
+                    )
                 }
                 Admitted::Shed(reason) => {
                     metrics.request_admission_refused(reason);
+                    // A budget spent at the gate with no work starting behind
+                    // it. This is the shape an application calling back into
+                    // itself takes when the queue is short enough that its
+                    // inner request never gets into it.
+                    if reason == ShedReason::WaitTimeout
+                        && crate::metrics::pool_starts() == starts_on_arrival
+                    {
+                        metrics.admission_wait_wasted();
+                    }
                     Err(shed_response(reason))
                 }
             }
@@ -686,6 +688,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn admission_wait_counts_a_shed_nothing_could_have_saved() {
+        use crate::executor::ExecuteResult;
+
+        // The same state as the shed test, read for what it records rather
+        // than what it answers. There are no workers here, so nothing began a
+        // request while the second one waited — which is the whole of what
+        // the wasted counter claims, and this pool satisfies it by having no
+        // way to start anything at all.
+        let executor = test_executor(1, 150);
+        assert!(
+            matches!(executor.execute(make_request()), ExecuteResult::Deferred(_)),
+            "first request takes the only slot"
+        );
+
+        match executor.execute(make_request()) {
+            ExecuteResult::Admitting(fut) => match fut.await {
+                Err(resp) => assert_overloaded(&resp),
+                Ok(_) => panic!("no slot ever freed — must shed"),
+            },
+            _ => panic!("expected Admitting once the queue is full"),
+        }
+
+        // Both counters, from the one path that moves them together. The
+        // refusal without the wasted wait would be an ordinary overload; the
+        // wasted wait without the refusal would be a subset that is not one.
+        let out = executor.metrics.to_prometheus();
+        assert!(
+            out.contains("oxphp_admission_refused_total{reason=\"wait_timeout\"} 1"),
+            "a budget spent at the gate is a wait_timeout refusal: {out}"
+        );
+        assert!(
+            out.contains("oxphp_admission_wait_wasted_total 1"),
+            "and one no pickup could have saved, so also a wasted wait: {out}"
+        );
+
+        // The other arm — the pool did begin something, so do not count it —
+        // is not reachable here: the tick only moves from `take_from_queue`,
+        // which is compiled under the `php` feature, so a host build has no
+        // way to advance it. It is pinned on the waiting side instead, by
+        // `await_queued_does_not_call_a_lost_race_a_wasted_wait`.
+
+        forget_executor(executor);
+    }
+
+    #[tokio::test]
     async fn test_admission_wait_admits_when_a_slot_frees() {
         use crate::executor::ExecuteResult;
 
@@ -700,8 +747,9 @@ mod tests {
             _ => panic!("expected Admitting once the queue is full"),
         };
 
-        // Stand in for a worker picking the queued request up: drain it and
-        // release its permit, exactly as the worker loop does.
+        // Stand in for a worker picking the queued request up, as far as
+        // admission is concerned: drain it and release its permit, which is
+        // the half of a pickup that frees the slot.
         let queued = executor.request_rx.recv().expect("queued request");
         drop(queued.permit);
 

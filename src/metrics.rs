@@ -5,6 +5,50 @@ use std::time::{Duration, Instant};
 
 use http::Method;
 
+/// Requests the pool has begun executing, process-wide.
+///
+/// A tick, not a statistic: the only question asked of it is whether it moved
+/// between two readings. That is what separates a wait that lost a race for a
+/// worker — the pool was serving others — from a wait that never had one,
+/// where the pool started nothing at all for the whole budget.
+///
+/// Counted where execution starts rather than where an entry leaves the
+/// channel, and the difference is the whole point. A worker that reaches a
+/// request already answered on its deadline drops it and takes the next: the
+/// channel moves, no work begins, and counting that as movement would say the
+/// pool was serving somebody. Under a self-call that is exactly what a freed
+/// worker does — it clears the corpses of requests the dispatch side refused —
+/// so a tick counting entries goes quiet precisely in the state it exists to
+/// name.
+///
+/// **Deliberately not exported.** Read as a rate it would say a pool is making
+/// progress when it may be doing nothing of the sort: a worker can start a
+/// request, fail it instantly and start the next, and the number would climb
+/// the whole time. Progress is reported from completed work instead, and
+/// publishing this alongside it would invite exactly the wrong reading.
+///
+/// Process-global because there is one pool per process, and because every
+/// start is bumped from `WorkerIncomingRequest::take_from_queue`, which holds
+/// no `Metrics` of its own: the traditional loop has one by argument, worker
+/// mode through a thread-local that may be unset, and the request carries
+/// neither.
+static POOL_STARTS: AtomicU64 = AtomicU64::new(0);
+
+/// One request a worker is about to begin executing.
+///
+/// Gated with the pool itself: without PHP there are no workers and nothing
+/// ever runs, so a build that could call this is a build where the reading
+/// below would be meaningless.
+#[cfg(feature = "php")]
+pub(crate) fn pool_start() {
+    POOL_STARTS.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Reading of [`POOL_STARTS`], for comparison against a later one.
+pub(crate) fn pool_starts() -> u64 {
+    POOL_STARTS.load(Ordering::Relaxed)
+}
+
 // ── Worker Mode Metrics ──────────────────────────────────────
 
 /// Per-worker stats shared between the worker thread and the metrics collector.
@@ -210,6 +254,7 @@ pub struct Metrics {
     /// One slot per [`ShedReason`], indexed by its position in
     /// `ShedReason::ALL` — the same array the labels are rendered from.
     admission_refusals: [AtomicU64; crate::executor::admission::ShedReason::ALL.len()],
+    admission_wait_wasted: AtomicU64,
     requests_by_method: [AtomicU64; 10],
     responses_by_status_class: [AtomicU64; 5],
     total_response_time_us: AtomicU64,
@@ -361,6 +406,7 @@ impl Metrics {
             pending_requests: AtomicUsize::new(0),
             dropped_requests: AtomicU64::new(0),
             admission_refusals: std::array::from_fn(|_| AtomicU64::new(0)),
+            admission_wait_wasted: AtomicU64::new(0),
             requests_by_method: std::array::from_fn(|_| AtomicU64::new(0)),
             responses_by_status_class: std::array::from_fn(|_| AtomicU64::new(0)),
             total_response_time_us: AtomicU64::new(0),
@@ -564,6 +610,22 @@ impl Metrics {
     /// counter called "overloaded" would make every restart read as a spike.
     pub fn request_admission_refused(&self, reason: crate::executor::admission::ShedReason) {
         self.admission_refusals[reason.index()].fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A wait that ran out its budget without the pool beginning a single
+    /// request in the meantime.
+    ///
+    /// A subset of `request_admission_refused(WaitTimeout)`, separating the
+    /// wait that lost a race from the wait that never had one. The commonest
+    /// way to have none is an application that calls back into this same
+    /// server over HTTP: the inner request needs a worker the outer request is
+    /// holding while it waits for the inner one, so the wait cannot succeed
+    /// however long it is given. Nothing distinguishes such a request from any
+    /// other on arrival, so this is measured rather than predicted — and it
+    /// measures what it says, not the pattern: a pool whose handlers all run
+    /// longer than the budget also frees nothing while a request waits.
+    pub fn admission_wait_wasted(&self) {
+        self.admission_wait_wasted.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn set_workers_current(&self, n: usize) {
@@ -854,13 +916,24 @@ impl Metrics {
             );
         }
 
+        let _ = writeln!(
+            out,
+            "# HELP oxphp_admission_wait_wasted_total Requests that waited out QUEUE_WAIT_TIMEOUT_MS while the pool began no request at all. Measured as work started, not as entries leaving the queue: a worker clearing requests the deadline already answered moves the queue without serving anybody. A subset of oxphp_admission_refused_total{{reason=\"wait_timeout\"}}: those waits lost a race for a worker, these never had one to lose. Sustained non-zero means waiting is buying nothing — shorten QUEUE_WAIT_TIMEOUT_MS. Setting it to 0 drops the wait for a queue slot but not the wait inside the queue, so it needs a QUEUE_CAPACITY small enough to be full on a pool that picks nothing up. The classic cause is an application calling back into this same server over HTTP, where the inner request waits for a worker the outer one is holding; a pool whose handlers all outlast the budget produces it too."
+        );
+        let _ = writeln!(out, "# TYPE oxphp_admission_wait_wasted_total counter");
+        let _ = writeln!(
+            out,
+            "oxphp_admission_wait_wasted_total {}",
+            self.admission_wait_wasted.load(Ordering::Relaxed)
+        );
+
         // Read off the live queue rather than counted here, and absent
         // entirely for an executor that has no queue — zeros would read as an
         // idle queue rather than as none.
         if let Some(queue) = self.queue_snapshot() {
             let _ = writeln!(
                 out,
-                "# HELP oxphp_queue_depth Requests sitting in the worker queue right now: admitted, not yet picked up by a worker. Read against oxphp_queue_capacity and oxphp_admission_slots_available."
+                "# HELP oxphp_queue_depth Requests sitting in the worker queue right now: admitted, not yet picked up by a worker. An entry stays until a worker reaches it, so this counts requests already answered on their deadline alongside ones still waiting. Read against oxphp_queue_capacity and oxphp_admission_slots_available."
             );
             let _ = writeln!(out, "# TYPE oxphp_queue_depth gauge");
             let _ = writeln!(out, "oxphp_queue_depth {}", queue.depth);
@@ -1666,6 +1739,34 @@ mod tests {
         assert!(out.contains("oxphp_admission_refused_total{reason=\"waiting_full\"} 1"));
         assert!(out.contains("oxphp_admission_refused_total{reason=\"pool_unavailable\"} 1"));
         assert!(out.contains("oxphp_admission_refused_total{reason=\"queue_full\"} 0"));
+    }
+
+    #[test]
+    fn wait_wasted_renders_from_zero_alongside_the_series_it_subsets() {
+        // Published from zero so a dashboard can tell "no wasted waits" from
+        // "this build does not report them" — an absent series reads as the
+        // latter, and this is the number an operator is asked to act on.
+        let m = Metrics::new();
+        assert!(m
+            .to_prometheus()
+            .contains("oxphp_admission_wait_wasted_total 0"));
+
+        // Rendering only: both counters are driven by hand here, so this says
+        // the two series come out side by side and independently, not that
+        // one is a subset of the other. That every wasted wait is also a
+        // refusal is a property of the two call sites, and it is pinned where
+        // they run: `await_queued_refuses_a_request_no_worker_ever_takes` for
+        // the waiting side, and the overload script's self-call scenario for
+        // the gate — whose own unit test,
+        // `admission_wait_counts_a_shed_nothing_could_have_saved`, sits in a
+        // module that only compiles with a PHP library present and so runs
+        // nowhere automatically.
+        m.request_admission_refused(crate::executor::admission::ShedReason::WaitTimeout);
+        m.request_admission_refused(crate::executor::admission::ShedReason::WaitTimeout);
+        m.admission_wait_wasted();
+        let out = m.to_prometheus();
+        assert!(out.contains("oxphp_admission_refused_total{reason=\"wait_timeout\"} 2"));
+        assert!(out.contains("oxphp_admission_wait_wasted_total 1"));
     }
 
     #[test]

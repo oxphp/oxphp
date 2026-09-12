@@ -108,7 +108,7 @@ mod tests {
         let result = executor.execute(make_request());
         let response = match result {
             ExecuteResult::Immediate(resp) => resp,
-            ExecuteResult::Deferred(rx) => rx.blocking_recv().unwrap(),
+            ExecuteResult::Deferred(queued) => queued.rx.blocking_recv().unwrap(),
             // The stub has no queue, so it never waits and never refuses.
             ExecuteResult::Admitting(_) => panic!("StubExecutor should not gate on admission"),
             ExecuteResult::Rejected(_) => panic!("StubExecutor should not reject"),

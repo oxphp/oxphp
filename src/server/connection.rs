@@ -417,6 +417,70 @@ struct PhpExecData {
     php_exec_us: Option<u64>,
 }
 
+/// Wait for the pool's answer, and no longer than the request is allowed to
+/// wait for one.
+///
+/// `QUEUE_WAIT_TIMEOUT_MS` is one deadline covering both waits a request can
+/// face — for a queue slot, then inside the queue for a worker. The pool
+/// enforces the second half when it takes the request off the channel, which
+/// answers it only as early as the next pickup and not at all when no pickup
+/// is coming: an application calling back into this same server occupies a
+/// worker while it waits for one, so where every worker is held that way the
+/// queue cannot move until a request that cannot finish does. The clock on
+/// this side is the one that keeps running.
+///
+/// What the deadline gates is whether a worker has the request, never how long
+/// the request has taken: a worker that claimed it first keeps it, whatever it
+/// then spends on it. A budget that bounded running handlers would refuse a
+/// request a worker started on well inside its deadline, purely for taking
+/// longer than the *wait* was allowed to be.
+async fn await_queued(
+    queued: crate::executor::Queued,
+    cancel_state: &CancellationState,
+    metrics: &crate::metrics::Metrics,
+    starts_on_arrival: u64,
+    rejected: &mut bool,
+) -> Result<crate::types::ScriptResponse, ()> {
+    let crate::executor::Queued { mut rx, deadline } = queued;
+    // Fail-fast mode has no wait to bound, so it arms no timer.
+    let Some(deadline) = deadline else {
+        return rx.await.map_err(|_| ());
+    };
+
+    tokio::select! {
+        // Poll the answer first. Nothing rests on it for the race it looks
+        // like it settles: a worker holding this request has already taken the
+        // claim below, so a timer firing next to a finished response loses
+        // that claim and comes back to this same channel. It saves a response
+        // that beat the deadline from taking the long way round through a
+        // refusal it cannot win. The order does decide one thing — a sender
+        // dropped without any claim, as a pool being torn down does, reads
+        // here as the worker-error `500` and on the other arm as the
+        // deadline's `529` — and for a pool that is gone neither is wrong.
+        biased;
+        resp = &mut rx => return resp.map_err(|_| ()),
+        _ = tokio::time::sleep_until(tokio::time::Instant::from_std(deadline)) => {}
+    }
+
+    // Losing the claim means a worker already has the request — running it, or
+    // refusing it on this same deadline, having reached it a moment sooner.
+    // Either way the answer comes back through the channel, so keep waiting
+    // for it rather than adding a second one.
+    if !cancel_state.claim_from_queue() {
+        return rx.await.map_err(|_| ());
+    }
+
+    *rejected = true;
+    metrics.request_admission_refused(crate::executor::admission::ShedReason::WaitTimeout);
+    // Whether this wait ever stood a chance. Unchanged means the pool began
+    // no request at all for the whole budget, so this one was not outrun by
+    // others — there was no work being started to be outrun by.
+    if crate::metrics::pool_starts() == starts_on_arrival {
+        metrics.admission_wait_wasted();
+    }
+    Ok(crate::types::ScriptResponse::overloaded())
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_request(
     parts: http::request::Parts,
@@ -600,7 +664,24 @@ async fn dispatch_request(
                 profiling_run_id: profiling_run_id.clone(),
             };
 
+            // The request itself is about to be handed to the executor, and
+            // the queue deadline has to be answerable from this side after
+            // that: the pool reads it at pickup, and the case this covers is
+            // the one where no pickup happens.
+            let deadline_cancel = script_request.cancel_state.clone();
+
             let queue_start = Instant::now();
+            // Paired with the reading taken if this request is ever refused on
+            // its deadline: the two together say whether the pool began any
+            // work at all while it waited.
+            //
+            // Taken on arrival rather than on entry to the queue, because the
+            // budget it is paired with is stamped on arrival too. A request
+            // that spends most of that budget waiting for a slot is queued
+            // behind a line that is moving, and a reading taken at the end of
+            // that wait would report it as a wait nobody could have served.
+            // The gate takes its own reading for the wait that ends there.
+            let starts_on_arrival = crate::metrics::pool_starts();
             // Guard, not a matching decrement: it discounts the request from
             // `pending_requests` however this scope ends, including the client
             // vanishing mid-await and taking the whole future with it.
@@ -621,9 +702,27 @@ async fn dispatch_request(
                     rejected = true;
                     Ok(resp)
                 }
-                ExecuteResult::Deferred(rx) => rx.await.map_err(|_| ()),
+                ExecuteResult::Deferred(queued) => {
+                    await_queued(
+                        queued,
+                        &deadline_cancel,
+                        &server.metrics,
+                        starts_on_arrival,
+                        &mut rejected,
+                    )
+                    .await
+                }
                 ExecuteResult::Admitting(admission) => match admission.await {
-                    Ok(rx) => rx.await.map_err(|_| ()),
+                    Ok(queued) => {
+                        await_queued(
+                            queued,
+                            &deadline_cancel,
+                            &server.metrics,
+                            starts_on_arrival,
+                            &mut rejected,
+                        )
+                        .await
+                    }
                     Err(resp) => {
                         rejected = true;
                         Ok(resp)
@@ -652,10 +751,14 @@ async fn dispatch_request(
                     // the histogram — a span claiming a second of queue wait for
                     // a request that never entered the queue is the same lie,
                     // told where it is harder to cross-check.
-                    // `resp.refused` covers the refusals a worker decides —
-                    // a request reached past its queue deadline comes back
+                    // Two flags because the refusals arrive two ways.
+                    // `resp.refused` covers the ones a worker decides: a
+                    // request reached past its queue deadline comes back
                     // through the ordinary response channel, so the flag on
-                    // the executor side never sees it.
+                    // the executor side never sees it. `rejected` covers the
+                    // one this side decides, where the deadline passes before
+                    // any worker takes the request and no response is ever
+                    // sent through that channel at all.
                     let queue_wait_us = (!rejected && !resp.refused).then_some(queue_wait_us);
                     if let Some(us) = queue_wait_us {
                         server.metrics.record_queue_wait(us);
@@ -756,6 +859,199 @@ mod tests {
 
     use crate::events::EventHandler;
     use crate::handlers::request_id::RequestIdGenerator;
+
+    /// Builds the pieces `await_queued` needs, with `deadline` measured from
+    /// now. The pickup reading is taken here rather than passed in, so a test
+    /// that wants it to have moved says so explicitly.
+    fn queued_for(
+        deadline: Option<std::time::Duration>,
+    ) -> (
+        tokio::sync::oneshot::Sender<crate::types::ScriptResponse>,
+        crate::executor::Queued,
+        crate::bridge::cancel::CancellationState,
+        crate::metrics::Metrics,
+    ) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let queued = crate::executor::Queued {
+            rx,
+            deadline: deadline.map(|d| std::time::Instant::now() + d),
+        };
+        (
+            tx,
+            queued,
+            crate::bridge::cancel::CancellationState::new(),
+            crate::metrics::Metrics::new(),
+        )
+    }
+
+    /// A worker's answer, distinguishable from the 529 the deadline produces.
+    fn ok_response() -> crate::types::ScriptResponse {
+        crate::types::ScriptResponse::default()
+    }
+
+    /// Fail-fast mode arms no timer, so a worker that takes longer than any
+    /// budget would have allowed is still waited for. The delay here outlives
+    /// the budget the neighbouring tests refuse on by three times over.
+    #[tokio::test(flavor = "current_thread")]
+    async fn await_queued_without_a_deadline_waits_for_the_worker() {
+        let (tx, queued, cancel, metrics) = queued_for(None);
+        let mut rejected = false;
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            let _ = tx.send(ok_response());
+        });
+
+        let resp = await_queued(
+            queued,
+            &cancel,
+            &metrics,
+            crate::metrics::pool_starts(),
+            &mut rejected,
+        )
+        .await
+        .expect("the worker answered");
+
+        handle.await.unwrap();
+        assert_eq!(resp.status, 200);
+        assert!(!rejected);
+        assert!(metrics
+            .to_prometheus()
+            .contains("oxphp_admission_refused_total{reason=\"wait_timeout\"} 0"));
+    }
+
+    /// A response already on the channel wins over a deadline that has also
+    /// come due: `biased` polls it first, and answering work that is done beats
+    /// refusing it.
+    ///
+    /// Repeated, because a `select!` without `biased` chooses between ready
+    /// arms at random and one run of it is a coin toss — the property is that
+    /// the answer wins *every* time, and only a run of them can say so.
+    #[tokio::test(flavor = "current_thread")]
+    async fn await_queued_prefers_a_finished_response_to_an_expired_deadline() {
+        for attempt in 0..32 {
+            // Already in the past when the select runs, so both arms are ready
+            // and nothing but the polling order decides between them.
+            let (tx, queued, cancel, metrics) = queued_for(None);
+            let queued = crate::executor::Queued {
+                deadline: Some(std::time::Instant::now() - std::time::Duration::from_secs(1)),
+                ..queued
+            };
+            let mut rejected = false;
+            tx.send(ok_response()).unwrap();
+
+            let resp = await_queued(
+                queued,
+                &cancel,
+                &metrics,
+                crate::metrics::pool_starts(),
+                &mut rejected,
+            )
+            .await
+            .expect("the finished response came back");
+
+            assert_eq!(
+                resp.status, 200,
+                "attempt {attempt} refused a response that was already in hand"
+            );
+            assert!(!rejected);
+            // The claim is untouched: this side never had to take it, so a
+            // worker arriving afterwards is still free to.
+            assert!(cancel.claim_from_queue());
+        }
+    }
+
+    /// The case the fix exists for: nobody picks the request up, so the
+    /// deadline is the only thing that can answer it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn await_queued_refuses_a_request_no_worker_ever_takes() {
+        let (tx, queued, cancel, metrics) = queued_for(Some(std::time::Duration::from_millis(50)));
+        let mut rejected = false;
+        // Bounds the failure rather than the success: a build that arms no
+        // timer would otherwise wait on this channel forever, and a test that
+        // hangs reports nothing. Dropping the sender well after the deadline
+        // turns that into a failed `expect` without touching the path being
+        // measured, which has answered and returned long before.
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            drop(tx);
+        });
+
+        let resp = await_queued(
+            queued,
+            &cancel,
+            &metrics,
+            crate::metrics::pool_starts(),
+            &mut rejected,
+        )
+        .await
+        .expect("the deadline answered");
+
+        assert_eq!(resp.status, 529);
+        assert!(rejected);
+        let out = metrics.to_prometheus();
+        assert!(out.contains("oxphp_admission_refused_total{reason=\"wait_timeout\"} 1"));
+        // Nothing came off the queue while it waited, so the wait never stood a
+        // chance — which is the distinction this counter carries.
+        assert!(out.contains("oxphp_admission_wait_wasted_total 1"));
+    }
+
+    /// Same refusal, but the pool was moving: the request lost a race for a
+    /// worker rather than never having one. Only the subset counter separates
+    /// the two, so it has to stay still here.
+    #[tokio::test(flavor = "current_thread")]
+    async fn await_queued_does_not_call_a_lost_race_a_wasted_wait() {
+        let (tx, queued, cancel, metrics) = queued_for(Some(std::time::Duration::from_millis(50)));
+        let mut rejected = false;
+        let moved = crate::metrics::pool_starts().wrapping_sub(1);
+        // As above: bounds a build that arms no timer, so it fails instead of
+        // hanging. Well past the deadline this one answers on.
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            drop(tx);
+        });
+
+        let resp = await_queued(queued, &cancel, &metrics, moved, &mut rejected)
+            .await
+            .expect("the deadline answered");
+
+        assert_eq!(resp.status, 529);
+        let out = metrics.to_prometheus();
+        assert!(out.contains("oxphp_admission_refused_total{reason=\"wait_timeout\"} 1"));
+        assert!(out.contains("oxphp_admission_wait_wasted_total 0"));
+    }
+
+    /// A worker that claimed the request a moment before the timer fired owns
+    /// it: this side answers nothing and counts nothing, or one refusal would
+    /// be served twice and counted twice.
+    #[tokio::test(flavor = "current_thread")]
+    async fn await_queued_leaves_a_claimed_request_to_the_worker() {
+        let (tx, queued, cancel, metrics) = queued_for(Some(std::time::Duration::from_millis(50)));
+        let mut rejected = false;
+        assert!(
+            cancel.claim_from_queue(),
+            "the worker takes the claim first"
+        );
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            let _ = tx.send(ok_response());
+        });
+
+        let resp = await_queued(
+            queued,
+            &cancel,
+            &metrics,
+            crate::metrics::pool_starts(),
+            &mut rejected,
+        )
+        .await
+        .expect("the worker answered");
+
+        assert_eq!(resp.status, 200);
+        assert!(!rejected);
+        let out = metrics.to_prometheus();
+        assert!(out.contains("oxphp_admission_refused_total{reason=\"wait_timeout\"} 0"));
+        assert!(out.contains("oxphp_admission_wait_wasted_total 0"));
+    }
 
     #[test]
     fn test_method_expects_body_standard() {
