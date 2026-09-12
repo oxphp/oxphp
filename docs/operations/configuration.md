@@ -355,7 +355,7 @@ Sampling profiler that emits xhprof / speedscope traces. See [Profiling](../feat
 | `PROFILER_INTERNAL` | `false` | Boolean. When truthy, requests to the internal server (`/health`, `/metrics`, plugin endpoints) are also eligible for sampling |
 | `PROFILER_AUTH_TOKEN` | *(unset)* | Optional bearer token. When set, the `oxphp_profiler_*` PHP functions require requests carrying this token to enable on-demand profiling |
 | `PROFILER_MAX_SPANS` | `50000` | Per-request cap on profile spans. Profiles exceeding the cap are truncated |
-| `PROFILER_MAX_DEPTH` | `256` | Maximum call-stack depth captured per sample. Hard-capped at `65535` |
+| `PROFILER_MAX_DEPTH` | `0` (no cap) | Maximum nesting depth of recorded calls; a deeper call and, except under self-recursion past 32 frames, everything it calls are absent from the profile — their time is not, and reads as exclusive time of the call at the limit. Dropped calls still count against `PROFILER_MAX_SPANS`. Clamped to `32`, the depth the engine observer tracks; a larger value is reported as clamped at startup |
 | `PROFILER_OUTPUT_DIR` | `/tmp/oxphp-profiles` | Directory for on-disk profile files |
 | `PROFILER_OUTPUT_FORMATS` | `xhprof,speedscope` | Comma-separated list of output formats to write to disk |
 | `PROFILER_DISK_MAX_PER_SEC` | `10` | Rate limit on profile files written to disk per second |

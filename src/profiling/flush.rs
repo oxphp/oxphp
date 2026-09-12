@@ -22,6 +22,20 @@ use std::sync::Arc;
 pub const SPAN_EVENT_KIND_BEGIN: u8 = 1;
 pub const SPAN_EVENT_KIND_END: u8 = 2;
 
+/// Size of the observer's open-frame mirror. Must match
+/// `OXPHP_PROF_OPEN_STACK_MAX` in `ext/bridge/oxphp_bridge.c`.
+///
+/// It is the number of open frames the observer can still pair a
+/// return with: a BEGIN emitted while the mirror is full gets no slot,
+/// so no END carrying its seq is ever emitted and the span stays open
+/// for the rest of the request. (A return from such a frame is not
+/// always silent — where a function recurses into itself the observer
+/// attributes it to a shallower frame of the same function — but it
+/// never closes the frame that made it.) Anything on the Rust side
+/// that has to reason about how many frames are reliably paired is
+/// bounded by this number.
+pub const OBSERVER_OPEN_FRAMES_MAX: u16 = 32;
+
 /// Profiling-mode raw byte values. Mirror `OXPHP_PROFILING_MODE_*`
 /// in `ext/bridge/oxphp_bridge.h` and the discriminants of
 /// `crate::profiling::ProfilingMode`.
