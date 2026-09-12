@@ -14204,6 +14204,16 @@ An unset variable or empty assignment (`FOO=`) falls back to the documented defa
 | `MAX_CONNECTIONS` | `10000` | Maximum concurrent TCP connections. Also the ceiling for the default `QUEUE_MAX_WAITING` (half of it), so a malformed value is a startup error rather than a silent fallback. Lowering it does not move the `QUEUE_CAPACITY` default, which is sized from the worker count alone — keep it above `PHP_WORKERS` + `QUEUE_CAPACITY` + `QUEUE_MAX_WAITING`, see below |
 | `TOKIO_WORKERS` | CPU / 2 (min 1) | Async I/O threads. `1` = single-threaded, `N > 1` = fixed thread count, unset = auto (CPU / 2, min 1) |
 
+### Sizing the async runtime
+
+`TOKIO_WORKERS` defaults to half the available cores, and the half it leaves is not idle — it belongs to the PHP worker pool. Those threads are not the runtime's, and the two sets compete for the same cores, so the runtime cannot be widened without taking cycles from the application.
+
+Raising it to the full core count is a loss wherever the pool is already sized near that count. Measured on a 4-core machine with a 4-worker pool, serving compressed responses: going from 2 runtime threads to 4 cost 13% of the rate on a 1.6 KB JSON body and 26% on a 5 KB one, and burned more CPU doing it. The threads were oversubscribed, and the scheduler paid for it.
+
+It is worth raising where the balance genuinely differs: a pool small relative to the machine, or work that is I/O-bound rather than PHP-bound — proxied upstreams, static files, streaming responses — where the runtime does the work and the pool mostly waits. Whenever you change it, watch the pool as well as the rate: `oxphp_busy_workers` against `oxphp_workers_current` tells you which side the cores went to. A rate that rises while the pool gets busier is a real gain; a rate that rises while the pool empties usually means the work moved, not that more of it got done.
+
+Both this and `PHP_WORKERS` default to half the machine, so their sum lands on the core count. Change one and the sum moves — which is what makes either one worth measuring rather than guessing.
+
 ## PHP Workers
 
 | Variable | Default | Description |
