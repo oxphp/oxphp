@@ -4780,6 +4780,82 @@ uint8_t oxphp_bridge_get_profiling_mode(void) {
     return g_prof.mode;
 }
 
+_Static_assert(OXPHP_PROF_OPEN_STACK_MAX == 32,
+               "oxphp_prof_parked_t mirrors open_stack/open_fn_stack at 32 entries");
+
+void oxphp_bridge_profiler_park(oxphp_prof_parked_t *dst) {
+    if (dst == NULL) return;
+
+    /* Drain first. The events still in the ring buffer were recorded by the
+     * request being parked, and the span stack they belong in is parked by
+     * the caller right after this returns — so anything left here would be
+     * applied to whichever request's stack is installed when the buffer next
+     * flushes, arriving as that request's own calls and, because the parked
+     * request's frames are still open on the stack this builds, as the
+     * ancestors of everything it goes on to record. */
+    oxphp_prof_flush_buffer();
+
+    dst->mode                = g_prof.mode;
+    dst->paused              = g_prof.paused;
+    dst->open_depth          = g_prof.open_depth;
+    dst->open_stack_overflow = g_prof.open_stack_overflow;
+    dst->spans_truncated     = g_prof.spans_truncated;
+    dst->was_active          = oxphp_prof_was_active;
+    dst->next_seq            = g_prof.next_seq;
+    memcpy(dst->open_stack, g_prof.open_stack, sizeof(g_prof.open_stack));
+    memcpy(dst->open_fn_stack, g_prof.open_fn_stack, sizeof(g_prof.open_fn_stack));
+
+    /* What stays behind is what a thread serving nobody looks like — the same
+     * fields the OFF branch of set_profiling_mode clears, for the same reason.
+     * Mode included: a request admitted into this window that was never asked
+     * for must not find the observer recording the whole of it on its behalf.
+     * Whole of it, not all of it — OFF is the mode gate and not the only one,
+     * and a function the filter cache marks force_profile keeps being recorded
+     * here exactly as it is between two ordinary requests.
+     *
+     * force_profile_fn_count, capture_mem and capture_cpu are deliberately not
+     * touched. The first mirrors g_filter_cache and the other two are copies of
+     * process-wide defaults; none of the three describes a request. */
+    g_prof.mode                = OXPHP_PROFILING_MODE_OFF;
+    g_prof.paused              = 0;
+    g_prof.open_depth          = 0;
+    g_prof.open_stack_overflow = 0;
+    g_prof.spans_truncated     = 0;
+    g_prof.next_seq            = 0;
+    g_prof.buf_len             = 0;
+    g_prof.name_arena_used     = 0;
+    oxphp_prof_was_active      = 0;
+}
+
+void oxphp_bridge_profiler_unpark(const oxphp_prof_parked_t *src) {
+    if (src == NULL) return;
+
+    /* The ring buffer is not restored, because park did not take it — it
+     * drained it. What it is instead is emptied: nothing standing here can
+     * belong to the request being resumed (its own events left at park), and
+     * the next flush runs with that request's span stack installed, so a
+     * leftover would arrive there as one of its calls.
+     *
+     * There is a producer for such a leftover. Mode OFF silences the observer
+     * only while force_profile_fn_count is zero: a function the filter cache
+     * marks force_profile is recorded on this thread whatever the mode says
+     * (see the gate in oxphp_profiler_begin), and that cache is thread-wide and
+     * outlives every request. A call to one inside the park window therefore
+     * leaves events here, and they belong to whatever was running then. */
+    g_prof.buf_len             = 0;
+    g_prof.name_arena_used     = 0;
+
+    g_prof.mode                = src->mode;
+    g_prof.paused              = src->paused;
+    g_prof.open_depth          = src->open_depth;
+    g_prof.open_stack_overflow = src->open_stack_overflow;
+    g_prof.spans_truncated     = src->spans_truncated;
+    g_prof.next_seq            = src->next_seq;
+    memcpy(g_prof.open_stack, src->open_stack, sizeof(g_prof.open_stack));
+    memcpy(g_prof.open_fn_stack, src->open_fn_stack, sizeof(g_prof.open_fn_stack));
+    oxphp_prof_was_active      = src->was_active;
+}
+
 uint8_t oxphp_bridge_snapshot_open_stack(uint32_t *dst, uint8_t max_depth) {
     if (g_prof.open_stack_overflow) return 255;
     uint8_t n = g_prof.open_depth;

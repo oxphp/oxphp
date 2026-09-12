@@ -1,0 +1,17 @@
+# profile: profilerfiber
+# description: two profiled requests multiplexed on one worker thread must not share a profile
+
+# Each probe is triggered through the query string, issues one inner request
+# against itself and parks on a hooked sleep() while that request is served. The
+# inner request is the neighbour whose profiler state used to overwrite the
+# parked one's.
+profilerfiber/test_spans_stay_with_their_request >> ?__oxprof=test-token
+profilerfiber/test_apm_neighbour_leaves_profile_alone >> ?__oxprof=test-token
+
+# Last of the probes, because it is the one that reaches PROFILER_MAX_SPANS:
+# ordered here so that nothing it leaves on the thread can be mistaken for a
+# later probe's own truncation.
+profilerfiber/test_cap_stays_with_its_request >> ?__oxprof=test-token
+
+# Reads back what the probes above wrote. Untriggered, so it adds no run.
+profilerfiber/test_runs_are_separate

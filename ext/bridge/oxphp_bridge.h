@@ -1860,6 +1860,42 @@ void oxphp_bridge_set_profiling_paused(uint8_t paused);
 /* Read the per-thread paused flag. */
 uint8_t oxphp_bridge_is_profiling_paused(void);
 
+/* One request's share of the observer state, moved off the thread while
+ * that request is parked. The buffers are deliberately absent: park drains
+ * the ring buffer into the request's own span stack before it travels, so
+ * only the counters and the open-frame mirror have to be carried, and the
+ * struct stays a few hundred bytes rather than the 24 KiB the buffers add.
+ *
+ * The mirror widths track OXPHP_PROF_OPEN_STACK_MAX in oxphp_bridge.c; a
+ * static assert there pins them together. */
+typedef struct {
+    uint8_t   mode;
+    uint8_t   paused;
+    uint8_t   open_depth;
+    uint8_t   open_stack_overflow;
+    uint8_t   spans_truncated;
+    uint8_t   was_active;
+    uint64_t  next_seq;
+    uint32_t  open_stack[32];
+    uintptr_t open_fn_stack[32];
+} oxphp_prof_parked_t;
+
+/* Move this thread's observer state into `dst` and leave the thread in the
+ * state a request that has not started profiling finds: mode OFF, counters
+ * zero, mirror empty. Drains the ring buffer first — the events in it were
+ * recorded by the request being parked and belong in its span stack, which
+ * the caller parks immediately afterwards.
+ *
+ * Called when a request fiber suspends. Without it the whole of the state
+ * below is one slot per worker thread, and a worker that admits a second
+ * request while this one is parked hands that request the first one's span
+ * counter, truncation flag and open-frame mirror. */
+void oxphp_bridge_profiler_park(oxphp_prof_parked_t *dst);
+
+/* Put a parked request's observer state back on the thread, undoing
+ * oxphp_bridge_profiler_park. Called when the fiber resumes. */
+void oxphp_bridge_profiler_unpark(const oxphp_prof_parked_t *src);
+
 /* Read zend_memory_usage(0) — bytes currently allocated on this
  * thread's Zend heap. Per-thread under ZTS, so it describes one
  * worker rather than the process. Two callers: MemoryThresholdDecorator

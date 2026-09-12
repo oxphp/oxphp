@@ -42,6 +42,28 @@ thread_local! {
     static DECORATOR_SPAN_IDS: RefCell<Vec<u32>> = const { RefCell::new(Vec::new()) };
 }
 
+/// Take this request's open `#[Trace]` span ids off the thread, leaving it
+/// empty.
+///
+/// The ids index into `PROFILING_CONTEXT`, which travels with a suspended
+/// fiber — so this stack has to travel with it too. Left behind, it would hold
+/// the ids of two requests at once in one LIFO, and the `on_end` of a request
+/// admitted into the suspension window would pop an id minted in the parked
+/// request's context and apply it to its own. Overlap is the rule rather than
+/// the exception: both contexts number their spans from 1, and `pop` closes
+/// whichever span wears the number it is given — so an outer frame gets
+/// stamped with an inner frame's end time, or, where nothing wears it, the
+/// call closes nothing and its own span is left to leak.
+pub fn take_decorator_span_ids() -> Vec<u32> {
+    DECORATOR_SPAN_IDS.with(|ids| std::mem::take(&mut *ids.borrow_mut()))
+}
+
+/// Give a fiber its `#[Trace]` span ids back (counterpart of
+/// [`take_decorator_span_ids`]).
+pub fn restore_decorator_span_ids(ids: Vec<u32>) {
+    DECORATOR_SPAN_IDS.with(|cell| *cell.borrow_mut() = ids);
+}
+
 /// Built-in decorator for the `#[OxPHP\Apm\Trace]` PHP attribute.
 ///
 /// When a PHP developer annotates a function or method with this attribute,
@@ -623,6 +645,21 @@ mod tests {
     use crate::plugin::handler::{PluginInternalHandler, PluginMetricsCollector};
     use crate::plugin::php::PluginNativeFunctionDef;
     use std::collections::HashMap;
+
+    #[test]
+    fn taking_the_trace_span_ids_hands_the_thread_over_empty() {
+        DECORATOR_SPAN_IDS.with(|ids| ids.borrow_mut().clear());
+        DECORATOR_SPAN_IDS.with(|ids| ids.borrow_mut().extend([3, 4]));
+
+        let parked = take_decorator_span_ids();
+        assert_eq!(parked, vec![3, 4]);
+        // A request admitted into the suspension window finds nothing to pop,
+        // so its `on_end` cannot close a span it did not open.
+        DECORATOR_SPAN_IDS.with(|ids| assert!(ids.borrow().is_empty()));
+
+        restore_decorator_span_ids(parked);
+        DECORATOR_SPAN_IDS.with(|ids| assert_eq!(*ids.borrow(), vec![3, 4]));
+    }
 
     /// Initialise the plugin with `vars` applied to the environment for the
     /// duration of `init`, under the crate-wide env lock. Plugin init is the

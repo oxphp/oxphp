@@ -2228,6 +2228,13 @@ void oxphp_fiber_save_php_state(oxphp_request_fiber *fiber) {
     fiber->php_state.shutdown_functions = BG(user_shutdown_function_names);
     BG(user_shutdown_function_names) = NULL;
 
+    /* Step 1d: and the profiler observer's share of the request, by the same
+     * move as the three above. Ahead of step 2 rather than after it, because
+     * parking it drains the observer's ring buffer, and the span stack those
+     * events belong in is the one step 2 takes away — drained afterwards they
+     * would land in whichever request's stack is installed by then. */
+    oxphp_bridge_profiler_park(&fiber->php_state.prof);
+
     /* Step 2: Save Rust TLS (RESPONSE, EARLY_TX, REQUEST_DATA, deadline) */
     oxphp_bridge_fiber_save_ctx(fiber->fiber_id);
 
@@ -2338,6 +2345,13 @@ void oxphp_fiber_save_php_state(oxphp_request_fiber *fiber) {
 void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber) {
     /* Restore Rust TLS first (so ub_write goes to the right buffer) */
     oxphp_bridge_fiber_restore_ctx(fiber->fiber_id);
+
+    /* Then the observer state that was taken just before it, in the order that
+     * undoes the save: the span stack the restore above put back is the one the
+     * counters and the open-frame mirror below are matched to, so nothing may
+     * be recorded between the two. Nothing is — no PHP runs until this function
+     * returns and the fiber is entered. */
+    oxphp_bridge_profiler_unpark(&fiber->php_state.prof);
 
     /* And point the SAPI at this request's cookie string, the way a new
      * request's init does (see oxphp_fiber_init_request_state). The engine
