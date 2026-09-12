@@ -270,6 +270,30 @@ impl ProfilingContext {
         }
     }
 
+    /// An empty context with nothing reserved, to stand on the worker thread
+    /// while a suspended request's own context is parked elsewhere.
+    ///
+    /// Deliberately not [`ProfilingContext::new`]. That one reserves room for
+    /// 256 finished spans — around 48 KiB — which is right for the single
+    /// context a thread used to have and wrong for this one: worker mode parks
+    /// at every await and every hooked read, so the reservation would be made
+    /// and thrown away on each of them, and each parked fiber would hold one of
+    /// its own besides. What the request that lands here actually records is
+    /// what it grows.
+    fn parked_placeholder() -> Self {
+        Self {
+            mode: ProfilingMode::Off,
+            spans: Vec::new(),
+            finished: Vec::new(),
+            next_id: 1,
+            trace_id: Arc::from(""),
+            root_span_id: Arc::from(""),
+            seq_to_local: smallvec::SmallVec::new(),
+            max_depth: 0,
+            observer_open: 0,
+        }
+    }
+
     /// Reset the stack for a new request, clearing all spans and setting
     /// the profiling mode + trace context.
     pub fn reset(&mut self, mode: ProfilingMode, trace_id: String, root_span_id: String) {
@@ -685,6 +709,56 @@ impl ProfilingContext {
     pub fn root_span_id(&self) -> &str {
         &self.root_span_id
     }
+
+    /// True when this context holds nothing a request would miss: no mode
+    /// was set for it and neither the open stack nor the finished buffer
+    /// has anything in it.
+    fn is_idle(&self) -> bool {
+        self.mode == ProfilingMode::Off && self.spans.is_empty() && self.finished.is_empty()
+    }
+}
+
+/// Move this thread's profiling context off the thread, leaving an empty one
+/// behind. Returns `None` when there was nothing to move: no mode set and
+/// nothing recorded.
+///
+/// That case does not arise in a build that can run PHP. The `php` feature
+/// pulls in `plugin-apm`, and with APM compiled every request gets
+/// `ProfilingMode::ApmOnly` as its floor — plugins only raise it — so a
+/// request's context is never left at `Off` and every suspension parks. The
+/// `None` arm is what a thread that has never served a request looks like,
+/// and it is why the placeholder left behind reserves nothing: see
+/// [`ProfilingContext::parked_placeholder`].
+///
+/// Paired with [`restore_profiling_context`] by the fiber TLS slot: the context
+/// is one per worker thread, and a worker multiplexing requests resets it for
+/// each one it admits, so a request parked across another's start would come
+/// back to that request's span stack — with its own spans already cleared out
+/// of it and its finished ones about to be carried off by whoever finalizes
+/// first.
+pub fn take_profiling_context() -> Option<ProfilingContext> {
+    PROFILING_CONTEXT.with(|cell| {
+        let mut ctx = cell.borrow_mut();
+        if ctx.is_idle() {
+            return None;
+        }
+        Some(std::mem::replace(
+            &mut *ctx,
+            ProfilingContext::parked_placeholder(),
+        ))
+    })
+}
+
+/// Put a parked request's profiling context back on the thread. A `None` —
+/// which [`take_profiling_context`] does not produce in a build that can run
+/// PHP — leaves the thread's context alone rather than installing an empty one,
+/// so a fiber parked with nothing resumes onto whatever stands there.
+pub fn restore_profiling_context(ctx: Option<ProfilingContext>) {
+    if let Some(ctx) = ctx {
+        PROFILING_CONTEXT.with(|cell| {
+            *cell.borrow_mut() = ctx;
+        });
+    }
 }
 
 /// Return the current time as Unix epoch nanoseconds.
@@ -754,7 +828,11 @@ fn generate_span_id() -> Arc<str> {
 }
 
 thread_local! {
-    /// Per-worker-thread profiling context.
+    /// Per-worker-thread profiling context. One slot, and in worker mode a
+    /// thread carries several requests at once — so what stands here is the
+    /// context of the request currently running, not of every request the
+    /// thread holds. A request that suspends takes its own away with it; see
+    /// [`take_profiling_context`].
     pub static PROFILING_CONTEXT: RefCell<ProfilingContext> = RefCell::new(ProfilingContext::new());
 
     /// Per-thread splitmix64 state for span-ID generation, seeded once
@@ -1662,5 +1740,136 @@ mod tests {
         assert_eq!(s.mem_enter, 1000);
         assert_eq!(s.mem_exit, 1200);
         assert_eq!(s.mem_peak, 2500);
+    }
+
+    // ── Parking the context for a fiber ────────────────────────────
+
+    #[test]
+    fn take_profiling_context_moves_the_request_off_the_thread() {
+        PROFILING_CONTEXT.with(|cell| {
+            let mut ctx = cell.borrow_mut();
+            ctx.reset(ProfilingMode::ProfileAll, "trace-o".into(), "root-o".into());
+            let done = ctx.push("done".into(), vec![]);
+            ctx.pop(done).unwrap();
+            ctx.push("still-open".into(), vec![]);
+        });
+
+        let parked = take_profiling_context().expect("a profiling request parks");
+
+        // What travels: the open stack, the finished pool and the mode.
+        assert_eq!(parked.mode, ProfilingMode::ProfileAll);
+        assert_eq!(parked.open_count(), 1);
+        assert_eq!(parked.finished_count(), 1);
+        assert_eq!(parked.trace_id(), "trace-o");
+        assert_eq!(parked.root_span_id(), "root-o");
+
+        // What the next request finds: a thread serving nobody.
+        PROFILING_CONTEXT.with(|cell| {
+            let ctx = cell.borrow();
+            assert_eq!(ctx.mode, ProfilingMode::Off);
+            assert_eq!(ctx.open_count(), 0);
+            assert_eq!(ctx.finished_count(), 0);
+        });
+
+        restore_profiling_context(Some(parked));
+
+        PROFILING_CONTEXT.with(|cell| {
+            let ctx = cell.borrow();
+            assert_eq!(ctx.mode, ProfilingMode::ProfileAll);
+            assert_eq!(ctx.open_count(), 1);
+            assert_eq!(ctx.finished_count(), 1);
+            assert_eq!(ctx.trace_id(), "trace-o");
+        });
+    }
+
+    #[test]
+    fn take_profiling_context_leaves_nothing_reserved_behind() {
+        // A worker parks at every await and every hooked read. What stands in
+        // for the parked context must not carry ProfilingContext::new's 256-span
+        // reservation, or every suspension pays ~48 KiB it throws away on the
+        // matching resume, and every parked fiber holds one of its own.
+        PROFILING_CONTEXT.with(|cell| {
+            let mut ctx = cell.borrow_mut();
+            ctx.reset(ProfilingMode::ApmOnly, "t".into(), "r".into());
+            let id = ctx.push("s".into(), vec![]);
+            ctx.pop(id).unwrap();
+        });
+
+        take_profiling_context().expect("a request with spans parks");
+
+        PROFILING_CONTEXT.with(|cell| {
+            let ctx = cell.borrow();
+            assert_eq!(ctx.finished.capacity(), 0, "no finished-span reservation");
+            assert_eq!(ctx.spans.capacity(), 0, "no open-span reservation");
+        });
+    }
+
+    #[test]
+    fn take_profiling_context_skips_a_thread_with_nothing_to_park() {
+        assert!(
+            take_profiling_context().is_none(),
+            "an unprofiled request parks nothing"
+        );
+    }
+
+    #[test]
+    fn take_profiling_context_parks_an_off_context_that_still_holds_spans() {
+        // Mode alone does not decide: a request whose profiling was switched
+        // off still owns whatever it recorded before that.
+        PROFILING_CONTEXT.with(|cell| {
+            let mut ctx = cell.borrow_mut();
+            ctx.reset(ProfilingMode::ApmOnly, "t".into(), "r".into());
+            let id = ctx.push("recorded".into(), vec![]);
+            ctx.pop(id).unwrap();
+            ctx.mode = ProfilingMode::Off;
+        });
+
+        let parked = take_profiling_context().expect("finished spans park even when mode is Off");
+        assert_eq!(parked.finished_count(), 1);
+    }
+
+    #[test]
+    fn take_profiling_context_parks_an_off_context_that_still_has_frames_open() {
+        PROFILING_CONTEXT.with(|cell| {
+            let mut ctx = cell.borrow_mut();
+            ctx.reset(ProfilingMode::ApmOnly, "t".into(), "r".into());
+            ctx.push("open".into(), vec![]);
+            ctx.mode = ProfilingMode::Off;
+        });
+
+        let parked = take_profiling_context().expect("open frames park even when mode is Off");
+        assert_eq!(parked.open_count(), 1);
+    }
+
+    #[test]
+    fn take_profiling_context_parks_a_profiling_request_that_has_recorded_nothing_yet() {
+        // Emptiness alone does not decide either: the mode is what the resumed
+        // request goes on recording under, and a request that parks before its
+        // first span would come back recording nothing.
+        PROFILING_CONTEXT.with(|cell| {
+            let mut ctx = cell.borrow_mut();
+            ctx.reset(ProfilingMode::ProfileAll, "t".into(), "r".into());
+        });
+
+        let parked = take_profiling_context().expect("a mode parks with or without spans");
+        assert_eq!(parked.mode, ProfilingMode::ProfileAll);
+    }
+
+    #[test]
+    fn restore_profiling_context_leaves_the_thread_alone_for_an_unprofiled_request() {
+        PROFILING_CONTEXT.with(|cell| {
+            let mut ctx = cell.borrow_mut();
+            ctx.reset(ProfilingMode::ProfileAll, "mine".into(), "root".into());
+            ctx.push("mine".into(), vec![]);
+        });
+
+        restore_profiling_context(None);
+
+        PROFILING_CONTEXT.with(|cell| {
+            let ctx = cell.borrow();
+            assert_eq!(ctx.mode, ProfilingMode::ProfileAll);
+            assert_eq!(ctx.trace_id(), "mine");
+            assert_eq!(ctx.open_count(), 1);
+        });
     }
 }

@@ -5,6 +5,7 @@
 #include "php.h"
 #include "main/php_output.h" /* php_output_handler: a suspended request parks its own */
 #include "zend_fibers.h"
+#include "bridge/oxphp_bridge.h" /* oxphp_prof_parked_t: a suspended request parks its profile */
 
 #include <poll.h>
 
@@ -220,6 +221,20 @@ typedef struct {
     int last_error_lineno;
     zend_string *last_error_message;
     zend_string *last_error_file;
+
+    /* This request's share of the profiler observer: the mode it is recording
+     * under, its span counter, its truncation flag and the mirror of the frames
+     * it has open. One slot per worker thread like everything else here, and
+     * rewritten by every request that starts profiling — so a request that
+     * suspends would otherwise resume with whichever mode its neighbour's
+     * teardown left (recording nothing for the rest of itself), hand that
+     * neighbour its own collected spans, and read the neighbour's truncation
+     * flag into the run it writes to disk.
+     *
+     * Plain bytes, no ownership: the events themselves are drained into this
+     * request's span stack on the Rust side before the park, and that stack
+     * travels with the Rust TLS. See oxphp_bridge_profiler_park. */
+    oxphp_prof_parked_t prof;
 
     /* The shutdown functions this request has registered. The registry they sit
      * in is thread-wide, and the end of a request runs everything standing in it

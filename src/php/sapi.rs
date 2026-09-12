@@ -1167,6 +1167,23 @@ pub(crate) fn take_request_data() -> RequestData {
     REQUEST_DATA.with(|rd| std::mem::replace(&mut *rd.borrow_mut(), RequestData::new()))
 }
 
+/// Take the "this request started with profiling on" flag off the thread,
+/// leaving it clear.
+///
+/// One slot per worker thread, written by every request the scheduler admits
+/// and read by each request's own teardown — so a request parked across a
+/// neighbour's start answers its own `do_finalize` question with the
+/// neighbour's mode.
+pub(crate) fn take_profiling_was_active() -> bool {
+    PROFILING_WAS_ACTIVE.with(|f| f.replace(false))
+}
+
+/// Give a fiber its profiling-active flag back (counterpart of
+/// `take_profiling_was_active`).
+pub(crate) fn restore_profiling_was_active(value: bool) {
+    PROFILING_WAS_ACTIVE.with(|f| f.set(value));
+}
+
 /// Give a fiber its SAPI data back (counterpart of `take_request_data`).
 ///
 /// Re-points `SG(request_info)` at this request's strings, which is not

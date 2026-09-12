@@ -84,6 +84,25 @@ thread_local! {
     static SLOW_STARTS: RefCell<Vec<Instant>> = const { RefCell::new(Vec::new()) };
 }
 
+/// Take this request's open `#[SlowThreshold]` start marks off the thread,
+/// leaving it empty.
+///
+/// The marks are a LIFO paired with the call nesting, and `on_end` stamps the
+/// event on whatever `PROFILING_CONTEXT` currently holds — a context that
+/// travels with a suspended fiber. Left behind, a request admitted into the
+/// suspension window would pop this request's `Instant` instead of its own and
+/// measure the suspension with it: a call reported as slow on the strength of
+/// a clock somebody else started.
+pub fn take_slow_starts() -> Vec<Instant> {
+    SLOW_STARTS.with(|stack| std::mem::take(&mut *stack.borrow_mut()))
+}
+
+/// Give a fiber its `#[SlowThreshold]` start marks back (counterpart of
+/// [`take_slow_starts`]).
+pub fn restore_slow_starts(starts: Vec<Instant>) {
+    SLOW_STARTS.with(|cell| *cell.borrow_mut() = starts);
+}
+
 pub struct SlowThresholdDecorator {
     /// Threshold in milliseconds. The registered instance holds the
     /// global default; `configure` overrides it per attribute from
@@ -142,6 +161,20 @@ impl Decorator for SlowThresholdDecorator {
 
 thread_local! {
     static MEM_STARTS: RefCell<Vec<i64>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Take this request's open `#[MemoryThreshold]` start marks off the thread,
+/// leaving it empty (same reasoning as [`take_slow_starts`]; here the mark a
+/// neighbour would pop is a byte count, and the growth it reports is whatever
+/// this thread allocated while this request was away).
+pub fn take_mem_starts() -> Vec<i64> {
+    MEM_STARTS.with(|stack| std::mem::take(&mut *stack.borrow_mut()))
+}
+
+/// Give a fiber its `#[MemoryThreshold]` start marks back (counterpart of
+/// [`take_mem_starts`]).
+pub fn restore_mem_starts(starts: Vec<i64>) {
+    MEM_STARTS.with(|cell| *cell.borrow_mut() = starts);
 }
 
 pub struct MemoryThresholdDecorator {
@@ -285,6 +318,29 @@ impl Decorator for TestMarkDecorator {
 mod tests {
     use super::*;
     use crate::decorator::AttrArg;
+
+    #[test]
+    fn taking_the_threshold_marks_hands_the_thread_over_empty() {
+        SLOW_STARTS.with(|s| s.borrow_mut().clear());
+        MEM_STARTS.with(|s| s.borrow_mut().clear());
+
+        SLOW_STARTS.with(|s| s.borrow_mut().push(Instant::now()));
+        MEM_STARTS.with(|s| s.borrow_mut().push(4096));
+
+        let slow = take_slow_starts();
+        let mem = take_mem_starts();
+        assert_eq!(slow.len(), 1);
+        assert_eq!(mem, vec![4096]);
+        // What a request admitted into the suspension window finds: nothing to
+        // pop, so its own `on_end` cannot measure this request's stay.
+        SLOW_STARTS.with(|s| assert!(s.borrow().is_empty()));
+        MEM_STARTS.with(|s| assert!(s.borrow().is_empty()));
+
+        restore_slow_starts(slow);
+        restore_mem_starts(mem);
+        SLOW_STARTS.with(|s| assert_eq!(s.borrow().len(), 1));
+        MEM_STARTS.with(|s| assert_eq!(*s.borrow(), vec![4096]));
+    }
 
     fn dummy_ctx(target: &str) -> DecoratorCallContext {
         DecoratorCallContext {

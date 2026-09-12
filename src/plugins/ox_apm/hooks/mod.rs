@@ -59,6 +59,23 @@ pub fn pop_frame() -> Option<HookFrame> {
     HOOK_FRAMES.with(|frames| frames.borrow_mut().pop())
 }
 
+/// Take this request's open hook frames off the thread, leaving it empty.
+///
+/// Each frame carries a `span_local_id` into `PROFILING_CONTEXT`, which travels
+/// with a suspended fiber — so the frames have to travel with it too. Left
+/// behind, the stack would hold two requests' frames in one LIFO, and the
+/// `after_callback` of a request admitted into the suspension window would
+/// close its own DB span against an id the parked request minted — see
+/// `take_decorator_span_ids` for why the two numberings collide.
+pub fn take_hook_frames() -> Vec<HookFrame> {
+    HOOK_FRAMES.with(|frames| std::mem::take(&mut *frames.borrow_mut()))
+}
+
+/// Give a fiber its hook frames back (counterpart of [`take_hook_frames`]).
+pub fn restore_hook_frames(frames: Vec<HookFrame>) {
+    HOOK_FRAMES.with(|cell| *cell.borrow_mut() = frames);
+}
+
 // ---------------------------------------------------------------------------
 // Database instrumentation (pure logic — unit-tested without PHP)
 // ---------------------------------------------------------------------------
@@ -571,6 +588,25 @@ mod tests {
             start: Instant::now(),
             slow_eligible: false,
         }
+    }
+
+    #[test]
+    fn taking_the_frames_hands_the_thread_to_the_next_request_empty() {
+        HOOK_FRAMES.with(|frames| frames.borrow_mut().clear());
+
+        push_frame(test_frame(7));
+        push_frame(test_frame(9));
+
+        let parked = take_hook_frames();
+        assert_eq!(parked.len(), 2);
+        assert!(
+            pop_frame().is_none(),
+            "a request admitted while this one is parked starts on an empty stack"
+        );
+
+        restore_hook_frames(parked);
+        assert_eq!(pop_frame().map(|f| f.span_local_id), Some(9));
+        assert_eq!(pop_frame().map(|f| f.span_local_id), Some(7));
     }
 
     #[test]
