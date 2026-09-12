@@ -13,8 +13,10 @@
 //! - **One deadline covers both waits.** A request waits twice — here for a
 //!   slot, then in the channel for a worker — and the deadline is absolute, so
 //!   the budget bounds their sum rather than the first alone. The second wait
-//!   is enforced at pickup, where the request is refused instead of executed;
-//!   this module only hands out the deadline.
+//!   is enforced from both ends — by the worker that reaches the request past
+//!   the deadline, and by the side waiting for its answer, which is the only
+//!   one left when no worker reaches it at all; this module only hands out the
+//!   deadline.
 //! - **The waiting set is capped.** A waiter holds its connection, so an
 //!   uncapped set lets a sustained overload consume every connection permit
 //!   until the accept loop stalls — answering overload by not answering.

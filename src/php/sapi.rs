@@ -54,17 +54,59 @@ pub struct WorkerIncomingRequest {
     pub deadline: Option<Instant>,
 }
 
+/// What a worker must do with a request it has just taken off the channel.
+#[derive(Debug, Eq, PartialEq)]
+pub enum Pickup {
+    /// Run it.
+    Run,
+    /// Its queue budget ran out before this worker reached it: answer it, and
+    /// count the refusal.
+    Expired,
+    /// The waiting side reached the same deadline first and has already
+    /// answered it. Drop it, silently: answering again writes to a channel
+    /// nobody is reading, counting again reports one refusal as two, and
+    /// running it spends a worker on a client that is gone.
+    Abandoned,
+}
+
 impl WorkerIncomingRequest {
-    /// Whether this request sat in the queue past its budget.
+    /// Take this request out of the queue, and say what may be done with it.
     ///
-    /// Checked at pickup, where refusing costs nothing and executing costs a
+    /// Refusing an expired request costs nothing and executing one costs a
     /// worker: with a queue `worker_count × 128` deep, a pool serving 200 ms
     /// handlers takes some 25 seconds to reach the tail, and every request in
-    /// it is answered later than any budget the operator set. Without this the
-    /// budget would bound only the wait for a queue slot — the smaller of the
-    /// two waits, and the one that is short precisely when the other is long.
-    pub fn queue_budget_expired(&self) -> bool {
-        self.deadline.is_some_and(|at| Instant::now() > at)
+    /// it is answered later than any budget the operator set.
+    ///
+    /// Claiming the request and reading its deadline are one call because they
+    /// must not drift apart. The waiting side enforces the same deadline, and
+    /// the two sides can reach one request in the same instant; the claim is
+    /// what decides between them, so a pickup that read the deadline without
+    /// claiming could run work whose client was already answered. The pool
+    /// tick is bumped here for the same reason: every request a worker begins
+    /// passes through this method, and none of them can pass through it
+    /// unnoticed.
+    ///
+    /// The tick moves on `Run` alone. The other two outcomes are a worker
+    /// finding a request that is already answered, or answering one itself —
+    /// the channel moves and nothing runs, and a wait that overlapped it was
+    /// no closer to a worker for it.
+    #[must_use = "a request taken off the queue must not be executed unless this says it may be"]
+    pub fn take_from_queue(&self) -> Pickup {
+        // Fail-fast mode arms no timer on the waiting side, so there is nobody
+        // to race and nothing to claim.
+        let Some(at) = self.deadline else {
+            crate::metrics::pool_start();
+            return Pickup::Run;
+        };
+        if !self.script.cancel_state.claim_from_queue() {
+            return Pickup::Abandoned;
+        }
+        if Instant::now() > at {
+            Pickup::Expired
+        } else {
+            crate::metrics::pool_start();
+            Pickup::Run
+        }
     }
 }
 
@@ -2829,12 +2871,15 @@ fn worker_recv_blocking() -> Option<WorkerIncomingRequest> {
 unsafe extern "C" fn worker_wait_callback() -> std::os::raw::c_int {
     loop {
         match worker_recv_blocking() {
-            Some(req) if req.queue_budget_expired() => continue_after_refusal(req),
-            Some(req) => {
-                // Direct call — no PENDING_REQUEST round-trip on the blocking path
-                setup_request_tls(req);
-                return 0; // success
-            }
+            Some(req) => match req.take_from_queue() {
+                Pickup::Run => {
+                    // Direct call — no PENDING_REQUEST round-trip on the blocking path
+                    setup_request_tls(req);
+                    return 0; // success
+                }
+                Pickup::Expired => continue_after_refusal(req),
+                Pickup::Abandoned => {}
+            },
             None => return -1, // channel closed or retired = shutdown
         }
     }
@@ -2850,6 +2895,10 @@ unsafe extern "C" fn worker_wait_callback() -> std::os::raw::c_int {
 /// fiber bails on the cancel cell; an expired one carries no such flag, so it
 /// must never be handed over at all.
 fn continue_after_refusal(req: WorkerIncomingRequest) {
+    // Only ever reached by a worker that won the request's claim in
+    // `take_from_queue`, so the response channel and the refusal count are
+    // this worker's alone — the waiting side, having lost, is waiting on the
+    // very message sent below.
     SERVER_METRICS.with(|slot| {
         if let Some(ref m) = *slot.borrow() {
             m.request_admission_refused(crate::executor::admission::ShedReason::WaitTimeout);
@@ -2857,7 +2906,7 @@ fn continue_after_refusal(req: WorkerIncomingRequest) {
     });
     let _ = req
         .response_tx
-        .send(crate::executor::sapi::overloaded_response());
+        .send(crate::types::ScriptResponse::overloaded());
 }
 
 /// Worker send response callback — called from C bridge after each handler invocation.
@@ -3125,13 +3174,16 @@ fn try_recv_inner() -> TryRecvResult {
             // it must not be staged for the scheduler.
             Some(rx) => loop {
                 match rx.try_recv() {
-                    Ok(req) if req.queue_budget_expired() => continue_after_refusal(req),
-                    Ok(req) => {
-                        PENDING_REQUEST.with(|p| {
-                            *p.borrow_mut() = Some(req);
-                        });
-                        return TryRecvResult::Ready;
-                    }
+                    Ok(req) => match req.take_from_queue() {
+                        Pickup::Run => {
+                            PENDING_REQUEST.with(|p| {
+                                *p.borrow_mut() = Some(req);
+                            });
+                            return TryRecvResult::Ready;
+                        }
+                        Pickup::Expired => continue_after_refusal(req),
+                        Pickup::Abandoned => {}
+                    },
                     Err(crossbeam_channel::TryRecvError::Empty) => return TryRecvResult::Empty,
                     Err(crossbeam_channel::TryRecvError::Disconnected) => {
                         return TryRecvResult::Disconnected

@@ -11,6 +11,7 @@ use bytes::Bytes;
 use crossbeam_channel::RecvTimeoutError;
 
 use crate::executor::idle_clock::LastActive;
+use crate::php::sapi::Pickup;
 use crate::php::{bindings, sapi};
 use crate::types::{ScriptRequest, ScriptResponse};
 
@@ -58,10 +59,14 @@ pub(super) fn spawn_worker(
 /// request already answered later than the operator asked for, ahead of
 /// arrivals that can still make their deadline.
 fn refuse_expired(wr: WorkerRequest, metrics: &crate::metrics::Metrics) {
+    // Only ever reached by a worker that won the request's claim in
+    // `take_from_queue`, so the response channel and the refusal count are
+    // this worker's alone — the waiting side, having lost, is waiting on the
+    // very message sent below.
     metrics.request_admission_refused(crate::executor::admission::ShedReason::WaitTimeout);
     let _ = wr
         .response_tx
-        .send(crate::executor::sapi::overloaded_response());
+        .send(crate::types::ScriptResponse::overloaded());
 }
 
 fn worker_thread(
@@ -111,9 +116,15 @@ fn worker_thread(
         WorkerLoopMode::Static => {
             // Blocking recv — zero CPU while idle, exits when channel closes.
             while let Ok(wr) = request_rx.recv() {
-                if wr.queue_budget_expired() {
-                    refuse_expired(wr, &metrics);
-                    continue;
+                match wr.take_from_queue() {
+                    Pickup::Run => {}
+                    Pickup::Expired => {
+                        refuse_expired(wr, &metrics);
+                        continue;
+                    }
+                    // Already answered by the waiting side; dropping it here
+                    // is what finally frees its queue slot.
+                    Pickup::Abandoned => continue,
                 }
                 // The request has left the queue; release its slot now rather
                 // than at the end of the iteration, so the queue depth the
@@ -160,9 +171,14 @@ fn worker_thread(
                 match request_rx.recv_timeout(super::WORKER_RETIRE_POLL) {
                     Ok(wr) => {
                         last_active.touch();
-                        if wr.queue_budget_expired() {
-                            refuse_expired(wr, &metrics);
-                            continue;
+                        match wr.take_from_queue() {
+                            Pickup::Run => {}
+                            Pickup::Expired => {
+                                refuse_expired(wr, &metrics);
+                                continue;
+                            }
+                            // See the static-mode branch.
+                            Pickup::Abandoned => continue,
                         }
                         // Slot freed at pickup — see the static-mode branch.
                         drop(wr.permit);

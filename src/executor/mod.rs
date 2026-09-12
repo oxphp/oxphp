@@ -17,6 +17,18 @@ use crate::types::{ScriptRequest, ScriptResponse};
 /// Response channel for a request a worker has accepted.
 type DeferredResponse = tokio::sync::oneshot::Receiver<ScriptResponse>;
 
+/// A request that is in the queue, and the moment it stops being worth
+/// starting — `None` in fail-fast mode, where there is no wait to bound.
+///
+/// The deadline travels with the channel because the pool cannot enforce it on
+/// its own: it is read at pickup, and a request nobody picks up is never read
+/// at all. The waiting side holds the only clock that keeps running in that
+/// case.
+pub struct Queued {
+    pub rx: DeferredResponse,
+    pub deadline: Option<std::time::Instant>,
+}
+
 /// Result of executor dispatch. Stub returns `Immediate` (no channel overhead),
 /// SAPI returns `Deferred` (worker thread sends response via oneshot).
 pub enum ExecuteResult {
@@ -30,8 +42,11 @@ pub enum ExecuteResult {
     /// mean nothing here, and folding these into latency or queue-wait
     /// statistics reports a refusal as if it were work done.
     Rejected(ScriptResponse),
-    /// Response will arrive via oneshot channel from a worker thread.
-    Deferred(DeferredResponse),
+    /// The request is in the queue. The answer usually arrives through the
+    /// oneshot channel from a worker thread — but see [`Queued`]: when the
+    /// deadline passes with nobody having taken the request, the waiting side
+    /// answers it itself and no worker is involved.
+    Deferred(Queued),
     /// The queue was full and the request is waiting for a slot. Resolves to
     /// `Ok` once admitted (equivalent to `Deferred` from there on), or to
     /// `Err` with a synthesized response once the request is refused — the
@@ -39,9 +54,7 @@ pub enum ExecuteResult {
     /// contended path needs a future — the admitted path stays synchronous
     /// and allocation-free.
     Admitting(
-        std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<DeferredResponse, ScriptResponse>> + Send>,
-        >,
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<Queued, ScriptResponse>> + Send>>,
     ),
 }
 

@@ -216,6 +216,31 @@ impl ScriptResponse {
             ..Default::default()
         }
     }
+
+    /// 529 body shared by every path that refuses for overload — the fail-fast
+    /// shed, a wait budget that ran out at the gate or in the queue, and the
+    /// worker-side pickup check — so they cannot drift apart.
+    ///
+    /// Lives here rather than beside the pool because the dispatch task
+    /// answers with it too, and that task is compiled whether or not PHP is.
+    pub fn overloaded() -> Self {
+        Self {
+            status: 529,
+            headers: vec![
+                (
+                    HeaderName::from_static("content-type"),
+                    HeaderValue::from_static("text/plain; charset=utf-8"),
+                ),
+                (
+                    HeaderName::from_static("retry-after"),
+                    HeaderValue::from_static("3"),
+                ),
+            ],
+            body: Bytes::from_static(b"Site is overloaded"),
+            refused: true,
+            ..Default::default()
+        }
+    }
 }
 
 #[cfg(test)]

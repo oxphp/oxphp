@@ -8,9 +8,11 @@
 # therefore live in a standalone script that backgrounds curls, like
 # tests/graceful_drain.sh.
 #
-# Every scenario runs with PHP_WORKERS=1 and QUEUE_CAPACITY=1, so the pool
-# holds exactly one request in a worker and one in the queue; anything beyond
-# that has to wait for admission.
+# Every scenario runs with PHP_WORKERS=1, and all but M2 with QUEUE_CAPACITY=1,
+# so the pool holds exactly one request in a worker and one in the queue and
+# anything beyond that has to wait for admission. M2 is the exception on
+# purpose: the behaviour it is about only exists where a queue slot is free,
+# which at the default capacity is almost always.
 #
 #   A: a burst that fits the pool's capacity is served in full. With
 #      fail-fast shedding the same burst produced 529s while the pool was
@@ -26,9 +28,9 @@
 #   F: a waiter whose client has gone gives its place in that set back instead
 #      of holding it to the end of the budget.
 #   G: the budget covers the wait inside the queue too. A request admitted with
-#      time left over but reached long after it ran out is refused at pickup
-#      rather than executed, so QUEUE_WAIT_TIMEOUT_MS bounds the whole wait and
-#      not just its admission half.
+#      time left over is refused when that time runs out rather than whenever a
+#      worker next becomes free, so QUEUE_WAIT_TIMEOUT_MS bounds the whole wait
+#      and not just its admission half.
 #   H: a queue sized to hold every connection the server may accept is reported
 #      at startup and by `config --check`, instead of being found under load.
 #   I: F over HTTP/1.1 — a client that closes mid-wait is seen on that protocol
@@ -45,6 +47,19 @@
 #      suppresses — a stall beginning right after a reported one is still
 #      reported, once the window closes, rather than staying silent for as
 #      long as it lasts.
+#   M: an application that calls back into this same server over HTTP. The
+#      inner call can only be served once the outer one frees its worker, and
+#      the outer one is waiting for the inner one, so the wait cannot succeed.
+#      Two shapes, because which one a deployment gets is decided by
+#      QUEUE_CAPACITY: with no free slot the inner call waits at the gate and
+#      is refused on its deadline (M1, the budget spent for nothing), and with
+#      a slot free it is admitted to the queue instead and waits there (M2,
+#      where the budget has to be enforced by something other than a pickup
+#      that is never coming). M3 is the control the deadline must not catch: a
+#      request a worker did pick up in time runs past the budget and is served.
+#   N: the negative control for M. The same refusal, on a pool that is working
+#      its way through the queue the whole time a request waits: the wait fails
+#      but it failed a race, and the wasted-wait series must stay still for it.
 #
 # Handler durations are picked for discrimination, not realism: each scenario
 # needs the pool to be busy for a stretch that its own budget cannot outlast
@@ -146,6 +161,16 @@ pending() {
 		| awk '/^oxphp_pending_requests /{print $2; found=1} END{if (!found) print -1}'
 }
 
+# A failed scrape prints -1 rather than an empty string: an arithmetic test
+# against "" is a syntax error, and one against 0 would quietly pass every
+# check whose healthy value is "nothing yet". The name is matched as a whole
+# field rather than as a substring, so the `# HELP` line carrying the same name
+# does not turn the answer into two lines.
+gauge() {
+	docker exec "$SRV" wget -qO- http://127.0.0.1:9090/metrics 2>/dev/null \
+		| awk -v k="$1" '$1 == k {print $2; found=1} END{if (!found) print -1}'
+}
+
 say "== queue admission control ($IMAGE) =="
 
 # ── A: a burst inside the pool's capacity is served, not shed ────────
@@ -174,6 +199,17 @@ else
 	bad "A: oxphp_admission_refused_total moved on a burst that was fully served"
 fi
 
+# The negative control for the wasted-wait series. Waits happened here — the
+# last of the six queued behind five pickups — and every one of them ended in
+# a worker. A counter that moved on those would be counting waiting, not
+# waiting for nothing, and would read as a fault on every healthy burst.
+A_WASTED="$(gauge 'oxphp_admission_wait_wasted_total')"
+if [ "$A_WASTED" = "0" ]; then
+	ok "A: oxphp_admission_wait_wasted_total stayed 0 — waits that succeed are not wasted"
+else
+	bad "A: oxphp_admission_wait_wasted_total reads ${A_WASTED} (-1 = the series is not exported at all) — on this burst every wait ended in a worker and none of them was wasted"
+fi
+
 # ── B: genuine overload still sheds, by deadline ─────────────────────
 # 3 s handlers against one worker: long enough that the budget expires first
 # (so the shed is attributable to the deadline and not to the pool draining),
@@ -184,6 +220,14 @@ for i in 1 2 3; do
 		"http://localhost:${PORT}/pause.php?ms=3000" >/dev/null 2>&1 &
 done
 sleep 0.5
+
+# Read the saturation gauges *now*, while the pool is actually saturated: one
+# request in the worker, one in the queue behind it, one parked at the gate.
+# Half a second in, none of the three has reached its 1 s budget yet. Later is
+# too late — the two that are waiting are answered on that budget, so a scrape
+# taken after the shed below finds only the executing request and reads the
+# absence of a queue as a gauge that does not count it.
+METRICS_B_SAT="$(docker exec "$SRV" wget -qO- http://127.0.0.1:9090/metrics 2>/dev/null)"
 
 # This one has nowhere to go and must be shed once its budget runs out.
 read -r B_CODE B_TIME <<<"$(curl -s -o /dev/null -D "$TMP/hdr" \
@@ -220,13 +264,13 @@ else
 	bad "B: oxphp_admission_refused_total{reason=\"wait_timeout\"} did not move despite a shed"
 fi
 
-# The pool is still saturated right now: one request in the worker, one in the
-# queue behind it. A single worker can be busy at most once — a gauge that
-# counts the queue too reads 2 here, exceeds oxphp_workers_current, and drives
-# oxphp_workers_idle to a saturating zero that means nothing.
-B_BUSY="$(printf '%s' "$METRICS_B" | awk '/^oxphp_busy_workers /{print $2}')"
-B_IDLE="$(printf '%s' "$METRICS_B" | awk '/^oxphp_workers_idle /{print $2}')"
-B_PENDING="$(printf '%s' "$METRICS_B" | awk '/^oxphp_pending_requests /{print $2}')"
+# From the saturation scrape taken above, not this one. A single worker can be
+# busy at most once — a gauge that counts the queue too reads 2 there, exceeds
+# oxphp_workers_current, and drives oxphp_workers_idle to a saturating zero
+# that means nothing.
+B_BUSY="$(printf '%s' "$METRICS_B_SAT" | awk '/^oxphp_busy_workers /{print $2}')"
+B_IDLE="$(printf '%s' "$METRICS_B_SAT" | awk '/^oxphp_workers_idle /{print $2}')"
+B_PENDING="$(printf '%s' "$METRICS_B_SAT" | awk '/^oxphp_pending_requests /{print $2}')"
 if [ "$B_BUSY" = "1" ] && [ "$B_IDLE" = "0" ]; then
 	ok "B: busy_workers counts the worker, not the queue behind it (busy=$B_BUSY, idle=$B_IDLE)"
 else
@@ -426,13 +470,16 @@ fi
 # ── G: the budget covers the wait inside the queue as well ───────────
 # Capacity 1, one worker, a 1 s budget and a 3 s handler. The second request is
 # admitted immediately — there is a free queue slot the moment the first is
-# picked up — so admission never refuses it. It is then reached three seconds
-# later, two seconds past a budget the operator set to one.
+# picked up — so admission never refuses it. Its budget then runs out while it
+# sits in the queue, two full seconds before the worker is free to look at it.
 #
-# The timing is the whole check: a 529 at ~1 s is the admission gate, which
-# this scenario deliberately does not exercise. A 529 at ~3 s can only come
-# from the pickup check, and a 200 at ~3.1 s means the worker ran a request
-# whose deadline had passed.
+# What distinguishes this from the admission gate is the queue, not the clock.
+# Both refusals now land at about the budget, so the check that this scenario
+# is about the *second* wait is that the request was admitted: a queued request
+# and no slot left to admit another. Reading it from the timing instead —
+# "later than the gate could have answered" — is what the old version did, and
+# it only worked while the queue wait was the one thing the budget failed to
+# bound.
 if start_container 1000; then
 	ok "G: container up (1 s budget)"
 else
@@ -441,10 +488,23 @@ fi
 
 curl -s -o /dev/null --max-time 40 "http://localhost:${PORT}/pause.php?ms=3000" &
 sleep 0.2
-read -r G_CODE G_TIME <<<"$(curl -s -o /dev/null -D "$TMP/ghdr" \
-	-w '%{http_code} %{time_total}' --max-time 40 \
-	"http://localhost:${PORT}/pause.php?ms=100")"
+curl -s -o /dev/null -D "$TMP/ghdr" -w '%{http_code} %{time_total}' --max-time 40 \
+	"http://localhost:${PORT}/pause.php?ms=100" > "$TMP/g.res" &
+G_PID=$!
+# While it waits: taken off admission and sitting in the channel. Read before
+# anything that waits on the request itself, or the window has closed.
+sleep 0.4
+G_DEPTH="$(gauge 'oxphp_queue_depth')"
+G_SLOTS="$(gauge 'oxphp_admission_slots_available')"
+wait "$G_PID"
+read -r G_CODE G_TIME < "$TMP/g.res"
 wait
+
+if [ "${G_DEPTH:--1}" -ge 1 ] && [ "${G_SLOTS:--1}" = "0" ]; then
+	ok "G: the request was admitted and waiting in the queue (depth ${G_DEPTH}, no slot left)"
+else
+	bad "G: queue depth ${G_DEPTH:-?} with ${G_SLOTS:-?} slots free — the request never reached the queue, so the checks below are about the gate"
+fi
 
 if [ "$G_CODE" = "529" ]; then
 	ok "G: a request queued past its budget is refused, not executed"
@@ -452,10 +512,10 @@ else
 	bad "G: expected 529, got $G_CODE — the budget bounds admission only, and the queue wait is unbounded"
 fi
 
-if awk -v t="$G_TIME" 'BEGIN { exit !(t > 2.5) }'; then
-	ok "G: refused at pickup (${G_TIME}s), so admission had let it through"
+if awk -v t="$G_TIME" 'BEGIN { exit !(t > 0.8 && t < 2.5) }'; then
+	ok "G: refused on its budget (${G_TIME}s), not when the worker got round to it"
 else
-	bad "G: answered in ${G_TIME}s — that is the admission gate, not the queue"
+	bad "G: answered in ${G_TIME}s against a 1 s budget — past 2.5 s it is waiting for the pickup rather than for the deadline"
 fi
 
 if grep -qi '^retry-after: 3' "$TMP/ghdr"; then
@@ -732,10 +792,12 @@ else
 	bad "J: the 1 KiB body answered $J_SMALL_CODE after ${J_SMALL_TIME}s — carrying a body at all is what lost the wait, not its size"
 fi
 
-if printf '%s' "$METRICS_J" | grep -qE '^oxphp_admission_refused_total\{reason="wait_timeout"\} [2-9]'; then
+J_WAITED_OUT="$(printf '%s' "$METRICS_J" \
+	| awk '/^oxphp_admission_refused_total\{reason="wait_timeout"\} /{print $2}')"
+if [ "${J_WAITED_OUT:-0}" -ge 2 ]; then
 	ok "J: the two that waited were refused by the budget, not by the byte cap"
 else
-	bad "J: expected two wait_timeout refusals alongside the byte-budget one"
+	bad "J: oxphp_admission_refused_total{reason=\"wait_timeout\"} reads ${J_WAITED_OUT:-absent} — expected at least the two that waited, alongside the byte-budget one"
 fi
 
 # The charge outlives the wait, or it bounds nothing. Neither body is refusable
@@ -973,6 +1035,269 @@ fi
 
 # The handlers outlive the checks by design; drop the container rather than
 # waiting out twelve seconds of sleeps that have nothing left to prove.
+docker rm -f "$SRV" >/dev/null 2>&1
+wait
+
+# ── M: an application that calls back into this same server ──────────
+# selfcall.php holds the only worker while it fetches /pause.php from this same
+# instance, and reports what that inner call came back as. The distinction the
+# fixture carries — a 529 versus a stream timeout — is the whole scenario: both
+# make the outer request slow, and only one of them is the queue answering.
+start_selfcall_container() {
+	# start_selfcall_container <queue_wait_timeout_ms> [queue_capacity]
+	# Capacity 0 is the product's own "auto" — worker_count × 128, the default an
+	# ordinary deployment runs with. M2 is about that default, so it asks for it
+	# by name rather than by leaving the variable out.
+	docker rm -f "$SRV" >/dev/null 2>&1
+	docker run -d --name "$SRV" \
+		-e DOCUMENT_ROOT=/var/www/html \
+		-e PHP_WORKERS=1 \
+		-e QUEUE_CAPACITY="${2:-0}" \
+		-e QUEUE_WAIT_TIMEOUT_MS="$1" \
+		-e INTERNAL_ADDR=0.0.0.0:9090 \
+		-e LOG_LEVEL=error \
+		-p "${PORT}":80 \
+		-v "$FIX:/var/www/html:ro" \
+		"$IMAGE" >/dev/null || return 1
+	for _ in $(seq 1 30); do
+		curl -fsS "http://localhost:${PORT}/pause.php?ms=0" >/dev/null 2>&1 && return 0
+		sleep 1
+	done
+	return 1
+}
+
+# selfcall.php reports `inner=<code|timeout> waited=<ms>`; read both out of the
+# body rather than timing the outer request, whose own duration also carries
+# the delay it was asked for and the pool's scheduling.
+inner_of()  { sed -n 's/.*inner=\([^ ]*\).*/\1/p' "$1"; }
+waited_of() { sed -n 's/.*waited=\([0-9]*\)ms.*/\1/p' "$1"; }
+
+# ── M1: no free slot — the inner call waits at the gate ──────────────
+# QUEUE_CAPACITY=1, with a filler request parked in that one slot before the
+# self-caller reaches out: the inner call finds the gate shut and can only
+# wait. Nothing can open it, because opening it means the worker taking the
+# filler, and the worker is inside the outer request. Measured against the same
+# run with the budget off, which is the comparison the behaviour is about.
+if start_selfcall_container 1000 1; then
+	ok "M1: container up (1 worker, queue capacity 1, budget 1000 ms)"
+else
+	bad "M1: container failed to start"; docker logs "$SRV" 2>&1 | tail -5 >&2; exit 1
+fi
+
+# selfcall first, so it is the one holding the worker; the filler second, so it
+# takes the queue slot rather than the worker; and the inner call last, a full
+# second after the filler, so which wait is under test is decided here and not
+# by whichever request the scheduler happened to run first.
+selfcall_with_filler() {
+	# selfcall_with_filler <out-file>
+	curl -s -o "$1" --max-time 90 \
+		"http://localhost:${PORT}/selfcall.php?d=1500&t=20" &
+	local outer=$!
+	sleep 0.4
+	curl -s -o /dev/null --max-time 90 "http://localhost:${PORT}/pause.php?ms=5000" &
+	# Read the gate where the inner call meets it, not before. The outer
+	# handler holds the worker for 1.5 s before calling back, so a reading
+	# taken while it is still sleeping describes a moment nothing in this
+	# scenario was measured at — and the filler could still have lost its race
+	# by the time the reading was supposed to mean something. Two seconds in,
+	# the inner call has been parked for about half its budget and has about
+	# half of it left.
+	sleep 1.6
+	M_SLOTS="$(gauge 'oxphp_admission_slots_available')"
+	wait "$outer"
+}
+
+selfcall_with_filler "$TMP/m1.budget"
+M1_INNER="$(inner_of "$TMP/m1.budget")"
+M1_WAITED="$(waited_of "$TMP/m1.budget")"
+M1_WASTED="$(gauge 'oxphp_admission_wait_wasted_total')"
+M1_REFUSED="$(gauge 'oxphp_admission_refused_total{reason="wait_timeout"}')"
+
+# Without this the scenario cannot claim to be about the gate at all: a run
+# where the filler lost its race leaves a free slot, the inner call is admitted
+# to the queue, and M1 silently becomes M2.
+if [ "${M_SLOTS:--1}" = "0" ]; then
+	ok "M1: the gate was shut when the inner call reached it (slots_available 0)"
+else
+	bad "M1: slots_available was ${M_SLOTS:-?} — the inner call did not meet a full queue, the checks below are about something else"
+fi
+if [ "$M1_INNER" = "529" ]; then
+	ok "M1: the inner call is refused by the gate (529), not left to time out"
+else
+	bad "M1: inner call came back '$M1_INNER' — the gate never answered it"
+fi
+if [ "${M1_WAITED:-0}" -ge 800 ]; then
+	ok "M1: and it spent the budget doing so (${M1_WAITED} ms of a 1000 ms budget)"
+else
+	bad "M1: inner call waited only ${M1_WAITED:-?} ms — the gate did not park it"
+fi
+
+# The whole point of the series: this wait could not have succeeded, and
+# nothing in the response says so. A 529 here is indistinguishable from the
+# 529 a genuinely overloaded pool returns, and an operator reading only that
+# cannot tell "add workers" from "stop calling yourself".
+if [ "${M1_WASTED:--1}" -ge 1 ]; then
+	ok "M1: counted as a wait that bought nothing (oxphp_admission_wait_wasted_total ${M1_WASTED})"
+else
+	bad "M1: oxphp_admission_wait_wasted_total is ${M1_WASTED:-?} — the one wait that provably could not succeed was not recorded as such"
+fi
+
+# The series is documented as a subset of the refusals, and this is the only
+# place that claim is exercised by a running server: the gate is the other
+# site that increments it, and it does so on the line after the refusal. A
+# build where the two came apart would still pass every check above.
+if [ "${M1_REFUSED:--1}" -ge "${M1_WASTED:-0}" ] && [ "${M1_REFUSED:--1}" -ge 1 ]; then
+	ok "M1: and it stayed a subset — ${M1_WASTED} wasted of ${M1_REFUSED} refused on the budget"
+else
+	bad "M1: oxphp_admission_wait_wasted_total ${M1_WASTED:-?} against reason=\"wait_timeout\" ${M1_REFUSED:-absent} — the wasted count is not a subset of the refusals it claims to narrow"
+fi
+
+# Same shape with the budget off: the refusal is the same, its cost is not.
+# This difference is what the wait budget trades away on this pattern.
+if start_selfcall_container 0 1; then
+	ok "M1: control container up (same, QUEUE_WAIT_TIMEOUT_MS=0)"
+else
+	bad "M1: control container failed to start"
+fi
+selfcall_with_filler "$TMP/m1.failfast"
+M1_FF_INNER="$(inner_of "$TMP/m1.failfast")"
+M1_FF_WAITED="$(waited_of "$TMP/m1.failfast")"
+if [ "$M1_FF_INNER" = "529" ] && [ "${M1_FF_WAITED:-9999}" -lt 200 ]; then
+	ok "M1: fail-fast answers the same 529 in ${M1_FF_WAITED} ms — the budget costs $((M1_WAITED - M1_FF_WAITED)) ms of worker occupancy per self-call"
+else
+	bad "M1: control gave inner='$M1_FF_INNER' after ${M1_FF_WAITED:-?} ms — the comparison proves nothing"
+fi
+docker rm -f "$SRV" >/dev/null 2>&1
+wait
+
+# ── M2: a slot is free — the inner call waits in the queue ───────────
+# The default QUEUE_CAPACITY is worker_count × 128, so on an ordinary
+# deployment the inner call never meets the gate at all: it is admitted to the
+# queue in front of a pool whose only worker is the outer request. No worker
+# will ever pick it up, so a deadline read only at pickup would never be read
+# at all — which is what this scenario exists to catch.
+if start_selfcall_container 1000; then
+	ok "M2: container up (1 worker, default queue capacity, budget 1000 ms)"
+else
+	bad "M2: container failed to start"; docker logs "$SRV" 2>&1 | tail -5 >&2; exit 1
+fi
+
+M2_BEFORE="$(gauge 'oxphp_admission_refused_total{reason="wait_timeout"}')"
+# The inner call asks for a handler that records having run. Removed rather
+# than created: the file has to be written by the PHP process, which is not the
+# user this exec runs as.
+docker exec "$SRV" rm -f /tmp/oxphp-inner-ran >/dev/null 2>&1
+curl -s -o "$TMP/m2" --max-time 90 "http://localhost:${PORT}/selfcall.php?t=20&i=mark.php"
+M2_INNER="$(inner_of "$TMP/m2")"
+M2_WAITED="$(waited_of "$TMP/m2")"
+# The refused request is still in the queue when the outer one ends, and the
+# freed worker reaches it a moment later. Scraping the instant curl returns
+# would read the counter before that second event, which is the one the check
+# below exists to catch — so let it happen first.
+sleep 1
+M2_AFTER="$(gauge 'oxphp_admission_refused_total{reason="wait_timeout"}')"
+
+if [ "$M2_INNER" = "529" ]; then
+	ok "M2: a queued request nobody picks up is still answered by its deadline (529)"
+else
+	bad "M2: inner call came back '$M2_INNER' after ${M2_WAITED:-?} ms — QUEUE_WAIT_TIMEOUT_MS bounded nothing"
+fi
+if [ "${M2_WAITED:-0}" -ge 800 ] && [ "${M2_WAITED:-99999}" -le 3000 ]; then
+	ok "M2: and answered on the budget, not whenever (${M2_WAITED} ms of 1000 ms)"
+else
+	bad "M2: inner call waited ${M2_WAITED:-?} ms against a 1000 ms budget"
+fi
+# The response alone cannot say who refused it — 529 is also something the
+# application could return. The counter is what ties it to admission control.
+#
+# Exactly one, not merely more than none. The request stays in the queue after
+# its deadline is answered, and the worker that eventually reaches it finds an
+# expired request too: one refusal reported as two would make the series
+# overcount precisely on the pattern it is meant to measure.
+if [ "${M2_BEFORE:--1}" -ge 0 ] && [ "${M2_AFTER:--1}" -eq $((M2_BEFORE + 1)) ]; then
+	ok "M2: counted once under reason=\"wait_timeout\" ($M2_BEFORE → $M2_AFTER)"
+else
+	bad "M2: oxphp_admission_refused_total{reason=\"wait_timeout\"} went ${M2_BEFORE:-?} → ${M2_AFTER:-?}, expected exactly one more"
+fi
+
+M2_WASTED="$(gauge 'oxphp_admission_wait_wasted_total')"
+if [ "${M2_WASTED:--1}" -ge 1 ]; then
+	ok "M2: and recorded as a wait that bought nothing (oxphp_admission_wait_wasted_total ${M2_WASTED})"
+else
+	bad "M2: oxphp_admission_wait_wasted_total is ${M2_WASTED:-?} — a wait nobody could have ended was counted as an ordinary refusal"
+fi
+
+# The refused request is not merely unanswered-twice: it must never run. Its
+# client was answered a second ago, so a worker that reaches it and executes it
+# anyway spends a worker on nobody — and runs whatever the handler does to the
+# world for a request the server has already refused. The response of such a
+# run goes to a dropped channel and leaves no trace, which is why this asks the
+# handler instead.
+M2_RAN="$(docker exec "$SRV" sh -c 'cat /tmp/oxphp-inner-ran 2>/dev/null | wc -c' 2>/dev/null | tr -d ' \r')"
+if [ "${M2_RAN:-x}" = "0" ]; then
+	ok "M2: and never ran — the worker that reached it afterwards dropped it"
+else
+	bad "M2: the inner handler left ${M2_RAN:-?} mark(s) — a request already answered with 529 was executed anyway"
+fi
+# Vacuous otherwise: a mark that never appears proves nothing until the same
+# path is shown to leave one when the request is actually served.
+curl -s -o /dev/null --max-time 30 "http://localhost:${PORT}/mark.php"
+M2_CONTROL="$(docker exec "$SRV" sh -c 'cat /tmp/oxphp-inner-ran 2>/dev/null | wc -c' 2>/dev/null | tr -d ' \r')"
+if [ "${M2_CONTROL:-x}" = "1" ]; then
+	ok "M2: control — the same handler served directly does leave one"
+else
+	bad "M2: control left ${M2_CONTROL:-?} mark(s) instead of 1 — the check above was testing nothing"
+fi
+
+# ── M3: the control the deadline must not catch ──────────────────────
+# The budget bounds time spent *not executing*. A request a worker picked up
+# inside it runs for as long as it runs — 4 s against a 1 s budget here — and a
+# deadline enforced by the clock rather than by whether anyone took the request
+# would answer 529 to a perfectly healthy handler three seconds in.
+M3_CODE="$(curl -s -o /dev/null -w '%{http_code}' --max-time 60 \
+	"http://localhost:${PORT}/pause.php?ms=4000")"
+if [ "$M3_CODE" = "200" ]; then
+	ok "M3: a request picked up in time runs past the budget and is served (200)"
+else
+	bad "M3: a 4 s handler under a 1 s budget answered $M3_CODE — the deadline is catching running requests"
+fi
+docker rm -f "$SRV" >/dev/null 2>&1
+wait
+
+# ── N: a wait that failed a race, not a wait that never had one ──────
+# A is one half of the wasted-wait claim: the counter does not move when every
+# wait ends in a worker. This is the harder half — waits that *fail*, on a pool
+# that was picking requests up the whole time they waited. Forty 50 ms requests
+# against one worker take about two seconds to get through, so everything past
+# the first twenty or so runs out its budget; the pool took a request off the
+# queue every 50 ms while they did. A counter that cannot tell that from a pool
+# that took nothing would read "waiting is buying nothing" on the commonest
+# overload there is, which is exactly the reading it exists to make possible.
+if start_container 1000; then
+	ok "N: container up (1 s budget, 50 ms handlers)"
+else
+	bad "N: container failed to start"; docker logs "$SRV" 2>&1 | tail -5 >&2; exit 1
+fi
+
+fire 40 50 n
+N_SERVED="$(count n 200)"
+N_SHED="$(count n 529)"
+# Read before the container goes, and after `fire` has waited for every one of
+# them: the refusals are what this is about and the last of them lands a second
+# after the burst.
+N_WASTED="$(gauge 'oxphp_admission_wait_wasted_total')"
+
+if [ "$N_SERVED" -ge 1 ] && [ "$N_SHED" -ge 1 ]; then
+	ok "N: a pool working through its queue still sheds what it cannot reach in time (${N_SERVED} × 200, ${N_SHED} × 529)"
+else
+	bad "N: got ${N_SERVED} × 200 and ${N_SHED} × 529 — this scenario needs both, or the check below is about a pool that was never busy"
+fi
+
+if [ "$N_WASTED" = "0" ]; then
+	ok "N: oxphp_admission_wait_wasted_total stayed 0 — these waits lost a race for a worker rather than never having one"
+else
+	bad "N: oxphp_admission_wait_wasted_total reads ${N_WASTED} (-1 = the series is not exported at all) on a pool that picked up a request every 50 ms — it cannot tell a lost race from no race at all"
+fi
 docker rm -f "$SRV" >/dev/null 2>&1
 wait
 

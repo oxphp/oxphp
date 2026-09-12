@@ -481,11 +481,15 @@ pub(crate) fn resolve_queue_env(
 /// worker, sitting in the queue, or parked in admission — when that is enough
 /// to take every connection the server is allowed to have.
 ///
-/// All three hold a connection, and therefore a `MAX_CONNECTIONS` permit, until
-/// their request is answered. They are three separate populations because a
-/// queue slot is released the moment a worker picks the request up, before the
-/// script runs: a running request occupies neither buffer and still holds its
-/// connection. `QUEUE_MAX_WAITING`'s own `MAX_CONNECTIONS / 2` ceiling covers
+/// All three can hold a connection, and therefore a `MAX_CONNECTIONS` permit,
+/// while their request goes unanswered. They are three separate populations
+/// because a queue slot is released only when a worker picks the request up,
+/// which is after the script would have started and independent of when the
+/// client was answered: a running request occupies neither buffer and still
+/// holds its connection, while a request refused on its queue deadline has
+/// given its connection back and still occupies a slot. The sum is therefore
+/// an upper bound on the connections the PHP path can pin at once, not an
+/// equality. `QUEUE_MAX_WAITING`'s own `MAX_CONNECTIONS / 2` ceiling covers
 /// one of the three.
 ///
 /// Past that sum the accept loop is the thing that stops: it takes a permit
