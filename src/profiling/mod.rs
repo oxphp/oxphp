@@ -13,8 +13,37 @@ pub use flush::{
 };
 
 use std::cell::{Cell, RefCell};
+use std::sync::atomic::{AtomicU16, Ordering};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
+
+/// Process-wide cap on the nesting depth of observer-recorded calls
+/// (`PROFILER_MAX_DEPTH`). `0` means "no cap".
+///
+/// Written once by `ProfilerPlugin::init` at startup and snapshotted by
+/// [`ProfilingContext::reset`] into each request's context, so the hot
+/// path reads a plain field rather than an atomic.
+///
+/// Never larger than [`flush::OBSERVER_OPEN_FRAMES_MAX`] — the setter
+/// below clamps it, and the reason is not cosmetic. The observer mirrors
+/// only its first 32 open frames and can pair a return with nothing
+/// else: a call made while that mirror is full still emits a BEGIN,
+/// but its END never arrives. Every path that skips the BEGIN skips
+/// the mirror push with it, so the count kept below stays in step
+/// with the observer's own; refusing to record past 32 is what keeps
+/// every span this side opens one the observer can still close.
+static MAX_SPAN_DEPTH: AtomicU16 = AtomicU16::new(0);
+
+/// Install the process-wide call-depth cap. `0` disables it. Values
+/// above [`flush::OBSERVER_OPEN_FRAMES_MAX`] are clamped to it.
+pub fn set_max_span_depth(cap: u16) {
+    MAX_SPAN_DEPTH.store(cap.min(flush::OBSERVER_OPEN_FRAMES_MAX), Ordering::Relaxed);
+}
+
+/// Read the process-wide call-depth cap. `0` means "no cap".
+pub fn max_span_depth() -> u16 {
+    MAX_SPAN_DEPTH.load(Ordering::Relaxed)
+}
 
 /// Activation mode for a request's profiling context.
 ///
@@ -201,6 +230,19 @@ pub struct ProfilingContext {
     /// spans case (deeper recursion just heap-allocates and keeps
     /// working).
     seq_to_local: smallvec::SmallVec<[(u64, SpanLocalId); 32]>,
+    /// Snapshot of [`max_span_depth`] taken at [`reset`](Self::reset).
+    /// `0` = no cap. Read on every observer BEGIN, so it is a field
+    /// rather than an atomic load per event.
+    max_depth: u16,
+    /// How many observer-recorded calls are open right now — the
+    /// nesting depth `max_depth` is compared against.
+    ///
+    /// Counted separately from `spans.len()` because that stack also
+    /// holds decorator spans (`push`, `push_with_metrics` from APM),
+    /// which sit at their own depth and must neither consume the
+    /// budget nor release it. This counter moves in step with the
+    /// observer's own open-frame count instead.
+    observer_open: u16,
 }
 
 impl Default for ProfilingContext {
@@ -223,6 +265,8 @@ impl ProfilingContext {
             trace_id: Arc::from(""),
             root_span_id: Arc::from(""),
             seq_to_local: smallvec::SmallVec::new(),
+            max_depth: 0,
+            observer_open: 0,
         }
     }
 
@@ -236,6 +280,8 @@ impl ProfilingContext {
         self.next_id = 1;
         self.trace_id = Arc::from(trace_id);
         self.root_span_id = Arc::from(root_span_id);
+        self.max_depth = max_span_depth();
+        self.observer_open = 0;
     }
 
     /// Push a new child span onto the stack with full metric capture.
@@ -393,6 +439,13 @@ impl ProfilingContext {
     pub fn force_close_all(&mut self) -> usize {
         let count = self.spans.len();
         let now = now_ns();
+        // Nothing is open once this returns, so the observer-frame
+        // accounting is settled too. Clearing it here rather than
+        // leaving it to `reset` keeps the depth cap from carrying a
+        // finished request's open frames into whatever runs next on
+        // this thread, on any path where `reset` does not run first.
+        self.observer_open = 0;
+        self.seq_to_local.clear();
         for pending in self.spans.drain(..) {
             self.finished.push(FinishedSpan {
                 local_id: pending.local_id,
@@ -449,8 +502,8 @@ impl ProfilingContext {
     /// `seq → local_id` mapping; END events look up the matching span
     /// by `seq` and `pop` it.
     ///
-    /// END events without a matching BEGIN are silently dropped (a
-    /// metric counts these). BEGIN events without a matching
+    /// END events without a matching BEGIN are silently dropped —
+    /// nothing counts them. BEGIN events without a matching
     /// END remain open and are force-closed by `finalize` with
     /// `leaked = true`.
     ///
@@ -465,6 +518,25 @@ impl ProfilingContext {
         for ev in events {
             match ev.kind {
                 flush::SPAN_EVENT_KIND_BEGIN => {
+                    // PROFILER_MAX_DEPTH. A call nested deeper than
+                    // the cap is not recorded, and — except where a
+                    // function recurses into itself past the
+                    // observer's 32-frame mirror, where a return is
+                    // attributed to a shallower frame of the same
+                    // function and frees a level early — neither is
+                    // anything it calls; the parent's exclusive time
+                    // absorbs the subtree. Checked before `read_name` so a
+                    // dropped frame costs nothing here beyond the
+                    // compare. No seq goes into `seq_to_local`, so the
+                    // matching END — if the observer emits one at all —
+                    // falls through the unmatched-END path below and
+                    // leaves the counter where it is. The call has
+                    // already been charged against `PROFILER_MAX_SPANS`
+                    // by then: that budget is spent where the observer
+                    // emits the event, which is upstream of here.
+                    if self.max_depth != 0 && self.observer_open >= self.max_depth {
+                        continue;
+                    }
                     let name = flush::read_name(ev);
                     // Propagate ts_ns / cpu_ns / mem / mem_peak from the
                     // C-side BEGIN event so exporters (collapsed,
@@ -480,8 +552,25 @@ impl ProfilingContext {
                         ev.mem_peak,
                     );
                     self.seq_to_local.push((ev.seq, local_id));
+                    // Saturating for the same reason as the decrement
+                    // below, from the other end: with no cap in force
+                    // nothing bounds this counter, and a frame past
+                    // the observer's mirror never gets the END that
+                    // would bring it back down. A request that opens
+                    // more than `u16::MAX` such frames — reachable
+                    // only with the span cap lifted — would otherwise
+                    // overflow here, which in a debug build is a panic
+                    // unwinding out of an `extern "C"` flush.
+                    self.observer_open = self.observer_open.saturating_add(1);
                     // Bounded safety net — should never fire under
-                    // normal use (32-deep open-span recursion).
+                    // normal use (32-deep open-span recursion). It can
+                    // only be reached with no cap in force: under a cap
+                    // at most `max_depth` entries are open at once, and
+                    // each of those has a return the observer can still
+                    // pair. That matters because a drained entry turns
+                    // its END into an unmatched one, which would leave
+                    // `observer_open` counting a call that has already
+                    // returned.
                     if self.seq_to_local.len() > 4096 {
                         self.seq_to_local.drain(..2048);
                     }
@@ -517,6 +606,11 @@ impl ProfilingContext {
                     }
                     if let Some(pos) = self.seq_to_local.iter().rposition(|&(s, _)| s == ev.seq) {
                         let (_, local_id) = self.seq_to_local.swap_remove(pos);
+                        // Each seq is recorded once and matched once,
+                        // so this mirrors the increment above; saturate
+                        // rather than trust that across a drain of the
+                        // seq map (see the bound below).
+                        self.observer_open = self.observer_open.saturating_sub(1);
                         // Propagate ts_ns / cpu_end / mem / mem_peak
                         // from END event; pop_with_metrics computes
                         // the cpu delta and stores everything. Using
@@ -1029,6 +1123,10 @@ mod tests {
 
     #[test]
     fn apply_events_well_formed_lifo() {
+        // Pins the process-wide cap while this context resets:
+        // a neighbour running under a cap would otherwise be
+        // snapshotted here and drop spans this test expects.
+        let _cap = DepthCap::set(0);
         let mut ctx = ProfilingContext::new();
         ctx.reset(ProfilingMode::ProfileAll, "trace".into(), "root".into());
 
@@ -1064,6 +1162,10 @@ mod tests {
 
     #[test]
     fn apply_events_unmatched_end_dropped() {
+        // Pins the process-wide cap while this context resets:
+        // a neighbour running under a cap would otherwise be
+        // snapshotted here and drop spans this test expects.
+        let _cap = DepthCap::set(0);
         let mut ctx = ProfilingContext::new();
         ctx.reset(ProfilingMode::ProfileAll, "trace".into(), "root".into());
         let events = [
@@ -1080,6 +1182,10 @@ mod tests {
 
     #[test]
     fn apply_events_unmatched_end_zero_seq_dropped() {
+        // Pins the process-wide cap while this context resets:
+        // a neighbour running under a cap would otherwise be
+        // snapshotted here and drop spans this test expects.
+        let _cap = DepthCap::set(0);
         // C side emits seq=0 when its open_stack is empty.
         let mut ctx = ProfilingContext::new();
         ctx.reset(ProfilingMode::ProfileAll, "trace".into(), "root".into());
@@ -1097,6 +1203,10 @@ mod tests {
 
     #[test]
     fn apply_events_unmatched_begin_leaked() {
+        // Pins the process-wide cap while this context resets:
+        // a neighbour running under a cap would otherwise be
+        // snapshotted here and drop spans this test expects.
+        let _cap = DepthCap::set(0);
         let mut ctx = ProfilingContext::new();
         ctx.reset(ProfilingMode::ProfileAll, "trace".into(), "root".into());
         let events = [ev(flush::SPAN_EVENT_KIND_BEGIN, 1, b"leaks")];
@@ -1106,8 +1216,283 @@ mod tests {
         assert!(tree.finished[0].leaked);
     }
 
+    // ── PROFILER_MAX_DEPTH ─────────────────────
+
+    /// RAII handle for the process-wide span-depth cap.
+    ///
+    /// `ProfilerPlugin::init` is the other writer of that static, and
+    /// its tests run under the crate-wide env lock; taking the same
+    /// lock here is what keeps the two sets from interleaving. The cap
+    /// is restored to "no cap" on drop, including on a failed assert.
+    struct DepthCap {
+        _guard: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl DepthCap {
+        fn set(cap: u16) -> Self {
+            let guard = crate::config::test_env::ENV_LOCK
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            set_max_span_depth(cap);
+            Self { _guard: guard }
+        }
+    }
+
+    impl Drop for DepthCap {
+        fn drop(&mut self) {
+            set_max_span_depth(0);
+        }
+    }
+
+    #[test]
+    fn apply_events_stops_recording_below_max_depth() {
+        let _cap = DepthCap::set(2);
+        let mut ctx = ProfilingContext::new();
+        ctx.reset(ProfilingMode::ProfileAll, "trace".into(), "root".into());
+
+        // d1 → d2 → d3, well-formed LIFO. Only the first two levels
+        // fit under the cap.
+        let events = [
+            ev(flush::SPAN_EVENT_KIND_BEGIN, 1, b"d1"),
+            ev(flush::SPAN_EVENT_KIND_BEGIN, 2, b"d2"),
+            ev(flush::SPAN_EVENT_KIND_BEGIN, 3, b"d3"),
+            ev(flush::SPAN_EVENT_KIND_END, 3, b""),
+            ev(flush::SPAN_EVENT_KIND_END, 2, b""),
+            ev(flush::SPAN_EVENT_KIND_END, 1, b""),
+        ];
+        ctx.apply_events(&events);
+
+        // The dropped BEGIN must not unbalance the stack: its END is
+        // unmatched and goes down the drop path, leaving d1 and d2 to
+        // close on their own events.
+        assert_eq!(ctx.open_count(), 0);
+        let tree = ctx.finalize();
+        let names: Vec<&str> = tree.finished.iter().map(|s| s.name.as_ref()).collect();
+        assert_eq!(names, vec!["d2", "d1"]);
+        assert!(
+            tree.finished.iter().all(|s| !s.leaked),
+            "spans under the cap close normally, none force-closed"
+        );
+    }
+
+    #[test]
+    fn max_depth_zero_records_every_frame() {
+        let _cap = DepthCap::set(0);
+        let mut ctx = ProfilingContext::new();
+        ctx.reset(ProfilingMode::ProfileAll, "trace".into(), "root".into());
+
+        let events = [
+            ev(flush::SPAN_EVENT_KIND_BEGIN, 1, b"d1"),
+            ev(flush::SPAN_EVENT_KIND_BEGIN, 2, b"d2"),
+            ev(flush::SPAN_EVENT_KIND_BEGIN, 3, b"d3"),
+            ev(flush::SPAN_EVENT_KIND_END, 3, b""),
+            ev(flush::SPAN_EVENT_KIND_END, 2, b""),
+            ev(flush::SPAN_EVENT_KIND_END, 1, b""),
+        ];
+        ctx.apply_events(&events);
+
+        let tree = ctx.finalize();
+        let names: Vec<&str> = tree.finished.iter().map(|s| s.name.as_ref()).collect();
+        assert_eq!(names, vec!["d3", "d2", "d1"]);
+    }
+
+    #[test]
+    fn max_depth_ignores_decorator_spans() {
+        // The cap bounds how deep the observer records, and a span a
+        // decorator opened is not an observer frame: it neither eats a
+        // level nor returns one. An APM trace wrapping the request
+        // would otherwise shrink the profile by its own nesting.
+        let _cap = DepthCap::set(2);
+        let mut ctx = ProfilingContext::new();
+        ctx.reset(ProfilingMode::ProfileAll, "trace".into(), "root".into());
+        let manual = ctx.push(Arc::from("manual"), vec![]);
+
+        let events = [
+            ev(flush::SPAN_EVENT_KIND_BEGIN, 1, b"d1"),
+            ev(flush::SPAN_EVENT_KIND_BEGIN, 2, b"d2"),
+            ev(flush::SPAN_EVENT_KIND_BEGIN, 3, b"d3"),
+            ev(flush::SPAN_EVENT_KIND_END, 3, b""),
+            ev(flush::SPAN_EVENT_KIND_END, 2, b""),
+            ev(flush::SPAN_EVENT_KIND_END, 1, b""),
+        ];
+        ctx.apply_events(&events);
+
+        assert_eq!(ctx.open_count(), 1, "only the manual span stays open");
+        ctx.pop(manual).expect("manual span pops");
+        let tree = ctx.finalize();
+        let names: Vec<&str> = tree.finished.iter().map(|s| s.name.as_ref()).collect();
+        assert_eq!(names, vec!["d2", "d1", "manual"]);
+    }
+
+    #[test]
+    fn unmatched_end_does_not_release_depth_budget() {
+        // An END whose BEGIN was never recorded belongs to a call the
+        // cap dropped. Crediting it would let the next sibling in at a
+        // level the cap had already closed off.
+        let _cap = DepthCap::set(1);
+        let mut ctx = ProfilingContext::new();
+        ctx.reset(ProfilingMode::ProfileAll, "trace".into(), "root".into());
+
+        ctx.apply_events(&[
+            ev(flush::SPAN_EVENT_KIND_BEGIN, 1, b"outer"),
+            ev(flush::SPAN_EVENT_KIND_END, 99, b""),
+            ev(flush::SPAN_EVENT_KIND_BEGIN, 2, b"inner"),
+            ev(flush::SPAN_EVENT_KIND_END, 2, b""),
+            ev(flush::SPAN_EVENT_KIND_END, 1, b""),
+        ]);
+
+        assert_eq!(ctx.observer_open, 0);
+        let tree = ctx.finalize();
+        let names: Vec<&str> = tree.finished.iter().map(|s| s.name.as_ref()).collect();
+        assert_eq!(names, vec!["outer"]);
+    }
+
+    #[test]
+    fn max_depth_survives_a_chain_deeper_than_the_observer_mirror() {
+        // The observer mirrors only its first
+        // `OBSERVER_OPEN_FRAMES_MAX` open frames; a call made while
+        // that mirror is full still emits a BEGIN, but never an END.
+        // Those unclosable frames must stay out of the tree: if they
+        // were recorded, the
+        // first deep chain would exhaust the budget and everything the
+        // request did afterwards would go unrecorded at any depth.
+        // Ask for a cap far above the mirror — the shape an operator
+        // reaches for against runaway recursion. What is installed is
+        // the mirror's limit.
+        let limit = flush::OBSERVER_OPEN_FRAMES_MAX;
+        let _cap = DepthCap::set(256);
+        assert_eq!(max_span_depth(), limit);
+        let mut ctx = ProfilingContext::new();
+        ctx.reset(ProfilingMode::ProfileAll, "trace".into(), "root".into());
+
+        // One chain 8 frames deeper than the mirror, as the observer
+        // emits it for a plain chain of unfiltered calls: a BEGIN for
+        // each, an END only for the frames that got a mirror slot,
+        // innermost-first.
+        let chain = |first_seq: u64| {
+            let depth = u64::from(limit) + 8;
+            let mut events: Vec<OxSpanEvent> = (0..depth)
+                .map(|i| ev(flush::SPAN_EVENT_KIND_BEGIN, first_seq + i, b"f"))
+                .collect();
+            events.extend(
+                (0..u64::from(limit))
+                    .rev()
+                    .map(|i| ev(flush::SPAN_EVENT_KIND_END, first_seq + i, b"")),
+            );
+            events
+        };
+
+        // Two such chains, one after the other, inside one request.
+        ctx.apply_events(&chain(1));
+        assert_eq!(
+            ctx.observer_open, 0,
+            "the chain returned; nothing it opened is still counted"
+        );
+        assert_eq!(
+            ctx.seq_to_local.len(),
+            usize::from(ctx.observer_open),
+            "the seq map and the counter are written and cleared together"
+        );
+        ctx.apply_events(&chain(1_000));
+
+        let tree = ctx.finalize();
+        assert_eq!(
+            tree.finished.len(),
+            2 * usize::from(limit),
+            "both chains recorded to the full depth the observer can pair"
+        );
+        assert!(
+            tree.finished.iter().all(|s| !s.leaked),
+            "no unclosable frame reached the tree"
+        );
+    }
+
+    #[test]
+    fn uncapped_open_frames_saturate_rather_than_overflow() {
+        // With no cap in force nothing bounds `observer_open`, and a
+        // frame the observer could not mirror never sends the END
+        // that would bring it back down. The span cap normally stops
+        // the observer long before that matters, but it can be lifted
+        // — `PROFILER_MAX_SPANS=0` maps to `UINT32_MAX` inside the
+        // bridge — and then one request can open more frames than a
+        // `u16` holds. Overflowing here panics in a debug build, and
+        // the panic unwinds out of the `extern "C"` flush that called
+        // us, which has no `catch_unwind` above it: the process goes,
+        // not the profile.
+        let _cap = DepthCap::set(0);
+        let mut ctx = ProfilingContext::new();
+        ctx.reset(ProfilingMode::ProfileAll, "trace".into(), "root".into());
+
+        let events: Vec<OxSpanEvent> = (1..=u64::from(u16::MAX) + 16)
+            .map(|seq| ev(flush::SPAN_EVENT_KIND_BEGIN, seq, b"f"))
+            .collect();
+        ctx.apply_events(&events);
+
+        assert_eq!(
+            ctx.observer_open,
+            u16::MAX,
+            "the counter stops at its ceiling instead of wrapping"
+        );
+    }
+
+    #[test]
+    fn finalize_settles_the_depth_budget_without_a_reset() {
+        // `reset` is the ordinary place the per-request counter goes
+        // back to zero, but a build is free not to reach it: without
+        // the APM plugin nothing forces a profiling mode at RINIT, so
+        // the reset is skipped and a request started from the PHP SDK
+        // inherits whatever the last one left. Closing out a request
+        // has to settle the budget by itself, or the next one on this
+        // thread begins with the previous one's unclosable frames
+        // already counted against the cap.
+        let limit = flush::OBSERVER_OPEN_FRAMES_MAX;
+        let _cap = DepthCap::set(limit);
+        let mut ctx = ProfilingContext::new();
+        ctx.reset(ProfilingMode::ProfileAll, "trace".into(), "root".into());
+
+        // A chain that never returns: every recorded frame stays open.
+        let events: Vec<OxSpanEvent> = (0..u64::from(limit))
+            .map(|i| ev(flush::SPAN_EVENT_KIND_BEGIN, i + 1, b"f"))
+            .collect();
+        ctx.apply_events(&events);
+        assert_eq!(ctx.observer_open, limit, "the whole budget is taken");
+
+        let tree = ctx.finalize();
+        assert!(tree.finished.iter().all(|s| s.leaked));
+        assert_eq!(ctx.observer_open, 0, "closing out the request frees it");
+        assert!(ctx.seq_to_local.is_empty());
+
+        // Deliberately no `reset` here.
+        ctx.apply_events(&[
+            ev(flush::SPAN_EVENT_KIND_BEGIN, 1_000, b"after"),
+            ev(flush::SPAN_EVENT_KIND_END, 1_000, b""),
+        ]);
+        let tree = ctx.finalize();
+        let names: Vec<&str> = tree.finished.iter().map(|s| s.name.as_ref()).collect();
+        assert_eq!(names, vec!["after"], "recording resumes without a reset");
+    }
+
+    #[test]
+    fn set_max_span_depth_clamps_to_the_observer_mirror() {
+        let _cap = DepthCap::set(u16::MAX);
+        assert_eq!(max_span_depth(), flush::OBSERVER_OPEN_FRAMES_MAX);
+    }
+
+    #[test]
+    fn reset_snapshots_the_process_max_depth() {
+        let _cap = DepthCap::set(5);
+        let mut ctx = ProfilingContext::new();
+        assert_eq!(ctx.max_depth, 0, "a fresh context carries no cap");
+        ctx.reset(ProfilingMode::ProfileAll, "trace".into(), "root".into());
+        assert_eq!(ctx.max_depth, 5);
+    }
+
     #[test]
     fn apply_events_unknown_kind_ignored() {
+        // Pins the process-wide cap while this context resets:
+        // a neighbour running under a cap would otherwise be
+        // snapshotted here and drop spans this test expects.
+        let _cap = DepthCap::set(0);
         let mut ctx = ProfilingContext::new();
         ctx.reset(ProfilingMode::ProfileAll, "trace".into(), "root".into());
         let events = [ev(255, 1, b"junk")];
@@ -1233,6 +1618,10 @@ mod tests {
 
     #[test]
     fn apply_events_carries_metrics_from_observer_events() {
+        // Pins the process-wide cap while this context resets:
+        // a neighbour running under a cap would otherwise be
+        // snapshotted here and drop spans this test expects.
+        let _cap = DepthCap::set(0);
         let mut ctx = ProfilingContext::new();
         ctx.reset(ProfilingMode::ProfileAll, "t".into(), "r".into());
 

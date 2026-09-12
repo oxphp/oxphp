@@ -60,7 +60,7 @@ impl Default for ProfilerConfig {
             sample_rate: 0.0,
             internal: false,
             max_spans: 50_000,
-            max_depth: 256,
+            max_depth: 0,
             output_dir: PathBuf::from("/tmp/oxphp-profiles"),
             output_formats: vec!["xhprof".into(), "speedscope".into()],
             disk_max_per_sec: 10,
@@ -104,8 +104,26 @@ impl ProfilerConfig {
         )
         .map_err(|e| PluginError::Config(e.to_string()))?;
         let max_spans = parse_u32(ctx.config("MAX_SPANS").as_deref(), 50_000);
-        let max_depth =
-            parse_u32(ctx.config("MAX_DEPTH").as_deref(), 256).min(u16::MAX as u32) as u16;
+        // 0 = no cap. The ceiling is the observer's open-frame limit,
+        // not an arbitrary number: the engine hook fires on deeper
+        // frames too, but the observer can no longer pair a return
+        // with them, so a cap above it would admit calls whose spans
+        // never close.
+        let max_depth_requested = parse_u32(ctx.config("MAX_DEPTH").as_deref(), 0);
+        let max_depth_limit = u32::from(crate::profiling::flush::OBSERVER_OPEN_FRAMES_MAX);
+        let max_depth = max_depth_requested.min(max_depth_limit) as u16;
+        // Only worth saying when the cap will actually be installed:
+        // with the plugin off the aggregator is never told about it,
+        // and a warning naming an effective depth of 32 would describe
+        // a limit that is not in force.
+        if enabled && max_depth_requested > max_depth_limit {
+            tracing::warn!(
+                plugin = "profiler",
+                requested = max_depth_requested,
+                effective = max_depth,
+                "PROFILER_MAX_DEPTH is above the depth the observer can track; clamped"
+            );
+        }
 
         let output_dir = ctx
             .config("OUTPUT_DIR")
@@ -460,7 +478,7 @@ mod tests {
         assert_eq!(cfg.sample_rate, 0.0);
         assert!(cfg.auth_token.is_none());
         assert_eq!(cfg.max_spans, 50_000);
-        assert_eq!(cfg.max_depth, 256);
+        assert_eq!(cfg.max_depth, 0);
         assert_eq!(cfg.output_formats, vec!["xhprof", "speedscope"]);
         assert_eq!(cfg.retention_count, 100);
     }

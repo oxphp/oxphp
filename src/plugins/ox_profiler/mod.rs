@@ -404,6 +404,14 @@ impl Plugin for ProfilerPlugin {
             crate::php::bindings::oxphp_bridge_set_profiler_max_spans(self.config.max_spans);
         }
 
+        // Apply the span-depth cap to the Rust aggregator. Unlike
+        // max_spans it is not a bound on the observer's work: the
+        // engine hook still fires for deeper frames and the events
+        // still reach `apply_events`, which drops them before they
+        // enter the tree. Set here rather than per request so the
+        // aggregator reads a value that never changes under it.
+        crate::profiling::set_max_span_depth(self.config.max_depth);
+
         ctx.on_request(ProfilerRequestHandler {
             config: self.config.clone(),
         });
@@ -721,6 +729,85 @@ mod tests {
             .chain(overrides.iter().map(|(k, v)| (*k, Some(*v))))
             .collect();
         crate::config::test_env::with_env(&vars, f)
+    }
+
+    /// `PROFILER_MAX_DEPTH` has to reach the span aggregator, not just
+    /// the config page and the startup log. Without this the cap could
+    /// be parsed, reported and never installed — which is exactly the
+    /// state this test was written against — and every test of the cap
+    /// itself would still be green, because they set the static
+    /// directly.
+    #[test]
+    fn init_installs_max_depth_on_the_aggregator() {
+        with_env(
+            &[("PROFILER_ENABLED", "true"), ("PROFILER_MAX_DEPTH", "7")],
+            || {
+                crate::profiling::set_max_span_depth(0);
+                let mut plugin = ProfilerPlugin::new();
+                let _config = init_profiler_plugin(&mut plugin);
+                let installed = crate::profiling::max_span_depth();
+                crate::profiling::set_max_span_depth(0);
+                assert_eq!(installed, 7);
+            },
+        );
+    }
+
+    /// Unset means unbounded. The knob was inert for its whole life,
+    /// so a deployment that never set it must keep the profiles it
+    /// has always had.
+    #[test]
+    fn init_defaults_to_no_cap() {
+        with_env(&[("PROFILER_ENABLED", "true")], || {
+            crate::profiling::set_max_span_depth(9);
+            let mut plugin = ProfilerPlugin::new();
+            let _ = init_profiler_plugin(&mut plugin);
+            let installed = crate::profiling::max_span_depth();
+            crate::profiling::set_max_span_depth(0);
+            assert_eq!(installed, 0);
+            assert_eq!(plugin.config.max_depth, 0);
+        });
+    }
+
+    /// A cap the observer cannot honour must not be installed as
+    /// written: past its open-frame mirror the observer stops pairing
+    /// returns, so anything recorded there would never close.
+    #[test]
+    fn init_clamps_max_depth_to_what_the_observer_can_track() {
+        with_env(
+            &[("PROFILER_ENABLED", "true"), ("PROFILER_MAX_DEPTH", "1000")],
+            || {
+                crate::profiling::set_max_span_depth(0);
+                let mut plugin = ProfilerPlugin::new();
+                let _ = init_profiler_plugin(&mut plugin);
+                let installed = crate::profiling::max_span_depth();
+                crate::profiling::set_max_span_depth(0);
+                let limit = crate::profiling::flush::OBSERVER_OPEN_FRAMES_MAX;
+                assert_eq!(installed, limit);
+                assert_eq!(
+                    plugin.config.max_depth, limit,
+                    "the config view and the startup log report the cap in force, \
+                     not the one that was asked for"
+                );
+            },
+        );
+    }
+
+    /// A disabled profiler never records a span, so it must not leave a
+    /// cap behind for whatever else shares the aggregator.
+    #[test]
+    fn init_leaves_max_depth_alone_when_disabled() {
+        with_env(&[("PROFILER_ENABLED", "false")], || {
+            // Pre-set to something the disabled plugin would have to
+            // overwrite to fail this: starting from 0 the assertion
+            // would hold whether init left the value alone or wrote
+            // its own 0 over it.
+            crate::profiling::set_max_span_depth(9);
+            let mut plugin = ProfilerPlugin::new();
+            let _config = init_profiler_plugin(&mut plugin);
+            let installed = crate::profiling::max_span_depth();
+            crate::profiling::set_max_span_depth(0);
+            assert_eq!(installed, 9);
+        });
     }
 
     #[test]
