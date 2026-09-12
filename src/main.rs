@@ -203,6 +203,15 @@ fn main() -> Result<(), types::BoxError> {
     let cpu = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
+    // Half the machine, because the other half belongs to the PHP worker pool:
+    // its threads are not the runtime's, and the two sets compete for the same
+    // cores. Widening the runtime to the full core count is a loss, not a gain,
+    // wherever the pool is already sized near it — measured on a 4-core box
+    // serving compressed responses with a 4-worker pool, going from 2 runtime
+    // threads to 4 cost 13% on a 1.6 KB JSON body and 26% on a 5 KB one, while
+    // burning more CPU for the lower rate. Raise it only where the pool is
+    // small relative to the machine, or where the work is I/O-bound rather
+    // than PHP-bound, and measure the pool when you do.
     let tokio_workers: usize = std::env::var("TOKIO_WORKERS")
         .ok()
         .and_then(|v| v.parse().ok())
