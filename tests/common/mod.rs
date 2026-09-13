@@ -46,15 +46,39 @@ pub async fn start_test_server_with_compression(
     h2: &H2Config,
     entry_file: Option<&str>,
     metrics: Arc<Metrics>,
+    dispatcher: EventDispatcher,
+    compression: oxphp::server::compression::Levels,
+) -> (SocketAddr, Arc<Server>) {
+    let executor: Arc<dyn oxphp::executor::ScriptExecutor> =
+        Arc::new(oxphp::executor::stub::StubExecutor::new());
+    start_test_server_with_executor(
+        document_root,
+        h2,
+        entry_file,
+        metrics,
+        dispatcher,
+        compression,
+        executor,
+    )
+    .await
+}
+
+/// Same again, with the executor supplied — for suites about what the dispatch
+/// side does while a request is still unanswered. The stub answers inline, so
+/// nothing built on it can hold a request open long enough for a client to
+/// leave during it.
+pub async fn start_test_server_with_executor(
+    document_root: &Path,
+    h2: &H2Config,
+    entry_file: Option<&str>,
+    metrics: Arc<Metrics>,
     mut dispatcher: EventDispatcher,
     compression: oxphp::server::compression::Levels,
+    executor: Arc<dyn oxphp::executor::ScriptExecutor>,
 ) -> (SocketAddr, Arc<Server>) {
     let config = ServerConfig::new("127.0.0.1:0".to_string(), document_root.to_path_buf());
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-
-    let executor: Arc<dyn oxphp::executor::ScriptExecutor> =
-        Arc::new(oxphp::executor::stub::StubExecutor::new());
 
     dispatcher.freeze();
 

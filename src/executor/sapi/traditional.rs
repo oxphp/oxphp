@@ -69,6 +69,21 @@ fn refuse_expired(wr: WorkerRequest, metrics: &crate::metrics::Metrics) {
         .send(crate::types::ScriptResponse::overloaded());
 }
 
+/// Answer a request whose client left while it waited, without running it.
+///
+/// No refusal is counted, by contrast with `refuse_expired`: there is nobody
+/// left to receive one. `expired` says whether the queue budget had also run
+/// out, which is the only thing separating the two answers — see
+/// `Pickup::Cancelled`.
+fn answer_departed_client(wr: WorkerRequest, expired: bool) {
+    let answer = if expired {
+        crate::types::ScriptResponse::client_closed_unpicked()
+    } else {
+        crate::types::ScriptResponse::client_closed()
+    };
+    let _ = wr.response_tx.send(answer);
+}
+
 fn worker_thread(
     worker_id: usize,
     request_rx: crossbeam_channel::Receiver<WorkerRequest>,
@@ -122,8 +137,11 @@ fn worker_thread(
                         refuse_expired(wr, &metrics);
                         continue;
                     }
-                    Pickup::Cancelled => {
-                        let _ = wr.response_tx.send(ScriptResponse::client_closed());
+                    // Answered, and not counted: the refusal is owed to a
+                    // client who is not there to read it. See
+                    // `Pickup::Cancelled` for what `expired` decides.
+                    Pickup::Cancelled { expired } => {
+                        answer_departed_client(wr, expired);
                         continue;
                     }
                     // Already answered by the waiting side; dropping it here
@@ -181,11 +199,11 @@ fn worker_thread(
                                 refuse_expired(wr, &metrics);
                                 continue;
                             }
-                            Pickup::Cancelled => {
-                                let _ = wr.response_tx.send(ScriptResponse::client_closed());
+                            // See the static-mode branch.
+                            Pickup::Cancelled { expired } => {
+                                answer_departed_client(wr, expired);
                                 continue;
                             }
-                            // See the static-mode branch.
                             Pickup::Abandoned => continue,
                         }
                         // Slot freed at pickup — see the static-mode branch.

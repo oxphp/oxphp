@@ -160,18 +160,24 @@ pub struct ScriptResponse {
     pub profile_tree: Option<std::sync::Arc<crate::profiling::SpanTree>>,
     /// Cancellation reason observed at response-send time, mirrored from
     /// the per-request `CancellationState`. 0 = no cancellation.
-    /// Used by the dispatch side to bump
-    /// `oxphp_request_cancelled_total{reason}`.
-    pub cancel_reason: u8,
-    /// Set when this response is an admission refusal rather than a script's
-    /// output — the request never reached PHP.
     ///
-    /// Mirrored to the dispatch side like `cancel_reason`, because a refusal
+    /// It shapes the response — a drain reply gets a `Retry-After` — and
+    /// nothing else. `oxphp_request_cancelled_total{reason}` is counted from
+    /// the cancellation state directly, by the abort guard, since the
+    /// commonest cancellation of all produces no response for this field to
+    /// travel on.
+    pub cancel_reason: u8,
+    /// Set when this response is the queue's own answer rather than a
+    /// script's output — the request waited out its budget with no worker
+    /// reaching it, and never got to PHP.
+    ///
+    /// Mirrored to the dispatch side like `cancel_reason`, because an answer
     /// decided on a worker thread (a request reached past its queue deadline)
     /// is otherwise indistinguishable from a 529 the application returned. It
-    /// keeps refusals out of `oxphp_queue_wait_us`: their wait is by definition
-    /// the one that ran out, so recording it would leave the histogram
-    /// measuring failures alongside the queueing it is named for.
+    /// keeps those out of `oxphp_queue_wait_us`: the wait behind them is by
+    /// definition the one that ended in no pickup, so recording it would
+    /// leave the histogram measuring failures alongside the queueing it is
+    /// named for.
     pub refused: bool,
 }
 
@@ -214,6 +220,26 @@ impl ScriptResponse {
             status: 499,
             cancel_reason: crate::bridge::cancel::CancelReason::ClientAbort as u8,
             ..Default::default()
+        }
+    }
+
+    /// The same 499, for a queued request whose budget ran out before any
+    /// worker reached it.
+    ///
+    /// `refused` because of the one thing that flag gates: the wait behind
+    /// this answer ended with nothing picked up, so it is not a pickup
+    /// latency and does not belong in `oxphp_queue_wait_us` — exactly as it
+    /// would not had the same wait ended in a 529. What separates the two is
+    /// the refusal *count*, which this answer stays out of: there was nobody
+    /// left to refuse.
+    ///
+    /// Distinct from `client_closed()` because that one is also sent to a
+    /// departed client whose request a worker *had* picked up, and that wait
+    /// is a pickup latency like any other.
+    pub fn client_closed_unpicked() -> Self {
+        Self {
+            refused: true,
+            ..Self::client_closed()
         }
     }
 

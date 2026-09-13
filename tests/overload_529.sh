@@ -8,10 +8,11 @@
 # therefore live in a standalone script that backgrounds curls, like
 # tests/graceful_drain.sh.
 #
-# Every scenario runs with PHP_WORKERS=1, and all but M2 with QUEUE_CAPACITY=1,
+# Every scenario runs with PHP_WORKERS=1. Most also run with QUEUE_CAPACITY=1,
 # so the pool holds exactly one request in a worker and one in the queue and
-# anything beyond that has to wait for admission. M2 is the exception on
-# purpose: the behaviour it is about only exists where a queue slot is free,
+# anything beyond that has to wait for admission; the ones needing room for
+# more say so where they start their container. M2 is the deliberate
+# exception: the behaviour it is about only exists where a queue slot is free,
 # which at the default capacity is almost always.
 #
 #   A: a burst that fits the pool's capacity is served in full. With
@@ -60,6 +61,16 @@
 #   N: the negative control for M. The same refusal, on a pool that is working
 #      its way through the queue the whole time a request waits: the wait fails
 #      but it failed a race, and the wasted-wait series must stay still for it.
+#   O: a client that leaves while its request is still queued is counted as a
+#      cancellation, and as nothing else — no overload refusal is charged to
+#      it and no ERROR line is written for it.
+#   P: the same for a client that leaves while its request is running: the
+#      fatal this server raises to unwind the handler is not the application
+#      failing, and is not logged as one — while a handler that raises a fatal
+#      of its own carrying that same wording, on a request nobody cancelled,
+#      still is.
+#   Q: O and P through the worker-mode receive loop, which takes requests off
+#      the queue from a different place and unwinds through the scheduler.
 #
 # Handler durations are picked for discrimination, not realism: each scenario
 # needs the pool to be busy for a stretch that its own budget cannot outlast
@@ -115,17 +126,17 @@ cleanup() {
 trap cleanup EXIT
 
 start_container() {
-	# start_container <queue_wait_timeout_ms> [queue_max_waiting] [queue_max_waiting_bytes]
+	# start_container <queue_wait_timeout_ms> [queue_max_waiting] [queue_max_waiting_bytes] [queue_capacity] [log_level]
 	docker rm -f "$SRV" >/dev/null 2>&1
 	docker run -d --name "$SRV" \
 		-e DOCUMENT_ROOT=/var/www/html \
 		-e PHP_WORKERS=1 \
-		-e QUEUE_CAPACITY=1 \
+		-e QUEUE_CAPACITY="${4:-1}" \
 		-e QUEUE_WAIT_TIMEOUT_MS="$1" \
 		-e QUEUE_MAX_WAITING="${2:-0}" \
 		-e QUEUE_MAX_WAITING_BYTES="${3:-0}" \
 		-e INTERNAL_ADDR=0.0.0.0:9090 \
-		-e LOG_LEVEL=error \
+		-e LOG_LEVEL="${5:-error}" \
 		-p "${PORT}":80 \
 		-v "$FIX:/var/www/html:ro" \
 		"$IMAGE" >/dev/null || return 1
@@ -134,6 +145,53 @@ start_container() {
 		sleep 1
 	done
 	return 1
+}
+
+# The same pool, reached through the worker-mode receive loop instead of the
+# traditional one. Same knobs; the URI carries no script name because every
+# request goes to the entry file.
+start_worker_container() {
+	# start_worker_container <queue_wait_timeout_ms> [queue_capacity] [log_level]
+	docker rm -f "$SRV" >/dev/null 2>&1
+	docker run -d --name "$SRV" \
+		-e DOCUMENT_ROOT=/var/www/html \
+		-e ENTRY_FILE=/var/www/html/worker_entry.php \
+		-e WORKER_MODE_ENABLED=true \
+		-e PHP_WORKERS=1 \
+		-e QUEUE_CAPACITY="${2:-1}" \
+		-e QUEUE_WAIT_TIMEOUT_MS="$1" \
+		-e INTERNAL_ADDR=0.0.0.0:9090 \
+		-e LOG_LEVEL="${3:-error}" \
+		-p "${PORT}":80 \
+		-v "$FIX:/var/www/html:ro" \
+		"$IMAGE" >/dev/null || return 1
+	for _ in $(seq 1 30); do
+		curl -fsS "http://localhost:${PORT}/?ms=0" >/dev/null 2>&1 && return 0
+		sleep 1
+	done
+	return 1
+}
+
+# ERROR-level lines the server has written since it started. A client that
+# stops waiting is the commonest thing a public listener sees, and the
+# container runs at LOG_LEVEL=error, so on these scenarios this is either zero
+# or the whole complaint.
+#
+# JSON is the only shape this can take: the one subscriber the server installs
+# calls .json() unconditionally and no setting changes it, so a bare-word level
+# is not a second format to also match but one that never appears.
+error_lines() {
+	docker logs "$SRV" 2>&1 | grep -c '"level":"ERROR"' | tr -d ' \r'
+}
+
+# Log lines reporting the fatal this server raises to unwind a handler whose
+# client left, at whatever level they were written. Counted separately from
+# error_lines because the fatal reaches the log by two routes with two levels —
+# the structured error callback and PHP's own error log through the SAPI hook —
+# and a container quiet enough to hide one of them would make a check about it
+# pass by filtering rather than by the change under test.
+cancel_lines() {
+	docker logs "$SRV" 2>&1 | grep -c 'Request cancelled (client_abort)' | tr -d ' \r'
 }
 
 # fire <count> <ms> <tag> — <count> concurrent requests, each holding a worker
@@ -1297,6 +1355,285 @@ if [ "$N_WASTED" = "0" ]; then
 	ok "N: oxphp_admission_wait_wasted_total stayed 0 — these waits lost a race for a worker rather than never having one"
 else
 	bad "N: oxphp_admission_wait_wasted_total reads ${N_WASTED} (-1 = the series is not exported at all) on a pool that picked up a request every 50 ms — it cannot tell a lost race from no race at all"
+fi
+docker rm -f "$SRV" >/dev/null 2>&1
+wait
+
+# ── O: a client that leaves is counted, and counted as itself ────────
+# The whole point of oxphp_request_cancelled_total{reason="client_abort"} is
+# to tell a client giving up apart from the server failing, and the commonest
+# shape of the first — a client that walks away from a request still waiting
+# for a worker — used to move nothing at all. Its only trace was an ERROR line
+# saying "Connection error", so an ordinary client timeout read as a fault of
+# the server's and the cancellation read as nothing.
+#
+# What the worker finds when it finally reaches those requests is the other
+# half: their budget has run out, and refusing them counted a wait_timeout
+# apiece. That series is read as the case for shortening QUEUE_WAIT_TIMEOUT_MS
+# — an argument about the pool, which a client's own patience has no business
+# making, and which nobody received in any case.
+#
+# Capacity 4 so all three impatient clients sit in the queue proper rather than
+# parking at the gate: it is the queue pickup that used to charge them.
+if start_container 1500 0 0 4; then
+	ok "O: container up (1.5 s budget, queue capacity 4)"
+else
+	bad "O: container failed to start"; docker logs "$SRV" 2>&1 | tail -5 >&2; exit 1
+fi
+
+# t=0: the blocker takes the only worker for 3 s. t=0.3: three clients queue
+# behind it, each giving up at t=1.1 — before their 1.5 s budget runs out at
+# t=1.8, and long before the worker is free at t=3. Both margins are load-
+# bearing: leave after the budget and the waiting side refuses them as an
+# overload, which is the thing under test.
+curl -s -o /dev/null --max-time 60 "http://localhost:${PORT}/pause.php?ms=3000" &
+sleep 0.3
+for i in 1 2 3; do
+	curl -s -o /dev/null --max-time 0.8 \
+		"http://localhost:${PORT}/pause.php?ms=100" >/dev/null 2>&1 &
+done
+
+# Negative control. Without it every count below is satisfied by a run where
+# the three never reached the queue — refused at the gate, or never sent — and
+# zero would mean nothing.
+#
+# Read at t=0.7, a clear 0.4 s before the earliest departure — the margin F
+# and I leave for the same measurement, and it is the scrape that needs it:
+# `pending` goes through `docker exec`, which on Docker Desktop is worth
+# hundreds of milliseconds, and one arriving late finds the three already
+# gone and fails a build that did everything right.
+sleep 0.4
+O_PENDING="$(pending)"
+if [ "$O_PENDING" -eq 4 ]; then
+	ok "O: all three impatient requests really were queued behind the blocker"
+else
+	bad "O: expected 4 in flight, got ${O_PENDING} — the rest of O proves nothing"
+fi
+
+# t≈4.0: the blocker is done, the worker has been through all three, and
+# whatever each pickup decided has already been counted.
+sleep 3.3
+O_ABORTS="$(gauge 'oxphp_request_cancelled_total{reason="client_abort"}')"
+O_WAIT_TIMEOUT="$(gauge 'oxphp_admission_refused_total{reason="wait_timeout"}')"
+O_WASTED="$(gauge 'oxphp_admission_wait_wasted_total')"
+O_ERRORS="$(error_lines)"
+wait
+
+if [ "$O_ABORTS" = "3" ]; then
+	ok "O: three departed clients counted as three cancellations"
+else
+	bad "O: oxphp_request_cancelled_total{reason=\"client_abort\"} reads ${O_ABORTS} (-1 = not exported), expected 3 — the commonest client cancellation there is moves the counter by nothing"
+fi
+
+if [ "$O_WAIT_TIMEOUT" = "0" ]; then
+	ok "O: no overload refusal was charged to a client that had gone"
+else
+	bad "O: oxphp_admission_refused_total{reason=\"wait_timeout\"} reads ${O_WAIT_TIMEOUT}, expected 0 — refusals nobody received are being counted as refusals the pool handed out"
+fi
+
+if [ "$O_WASTED" = "0" ]; then
+	ok "O: oxphp_admission_wait_wasted_total stayed 0"
+else
+	bad "O: oxphp_admission_wait_wasted_total reads ${O_WASTED} — a departed client moved the series that argues for a shorter budget"
+fi
+
+if [ "$O_ERRORS" = "0" ]; then
+	ok "O: no ERROR line for a client that simply stopped waiting"
+else
+	bad "O: ${O_ERRORS} ERROR line(s) for clients that stopped waiting — an ordinary client timeout reads as a server fault"
+fi
+docker rm -f "$SRV" >/dev/null 2>&1
+wait
+
+# ── P: an interrupted handler is a cancellation, not an error ────────
+# The other end of the same story: a client that leaves while its script is
+# actually running. The engine unwinds the handler with a fatal of this
+# server's own making, and a fatal is logged at ERROR — so a cancellation the
+# server itself initiated was reported as an application failure, twice, from
+# the PHP error handler and from the SAPI log hook.
+#
+# spin.php rather than pause.php: a cancellation is delivered at an opcode
+# boundary and usleep() has none, so a request aborted mid-sleep is not
+# interrupted at all and this scenario would be about nothing.
+#
+# LOG_LEVEL=warn, not the error the other scenarios run at: the fatal reaches
+# the log twice, once through the structured error callback and once through
+# PHP's own error log, and the second of those was a WARN. At LOG_LEVEL=error
+# it is filtered out before it is written, and a check counting it would pass
+# on a build that never changed it.
+if start_container 1000 0 0 1 warn; then
+	ok "P: container up"
+else
+	bad "P: container failed to start"; docker logs "$SRV" 2>&1 | tail -5 >&2; exit 1
+fi
+
+curl -s -o /dev/null --max-time 1.0 "http://localhost:${PORT}/spin.php?ms=4000" \
+	>/dev/null 2>&1 &
+P_PID=$!
+
+# Negative control: the request is in a worker and running, not queued, not
+# refused. Read at t=0.5, half a second before its client leaves at t=1.0 —
+# the scrape goes through `docker exec`, which is worth hundreds of
+# milliseconds here, and one arriving after the departure reads 0 and fails a
+# correct build.
+sleep 0.5
+P_PENDING="$(pending)"
+if [ "$P_PENDING" -eq 1 ]; then
+	ok "P: the request was running in a worker when its client left"
+else
+	bad "P: expected 1 in flight, got ${P_PENDING} — the rest of P proves nothing"
+fi
+
+wait "$P_PID"; P_RC=$?
+if [ "$P_RC" -eq 28 ]; then
+	ok "P: the client left mid-handler, unanswered (curl 28)"
+else
+	bad "P: curl exited $P_RC, not 28 — it was answered rather than abandoned mid-handler"
+fi
+
+# The interrupt lands at the loop's next opcode, well inside a second.
+sleep 1
+P_ABORTS="$(gauge 'oxphp_request_cancelled_total{reason="client_abort"}')"
+P_ERRORS="$(error_lines)"
+P_CANCEL_LINES="$(cancel_lines)"
+
+if [ "$P_ABORTS" = "1" ]; then
+	ok "P: the interrupted request counted as one client abort"
+else
+	bad "P: oxphp_request_cancelled_total{reason=\"client_abort\"} reads ${P_ABORTS}, expected 1"
+fi
+
+if [ "$P_ERRORS" = "0" ]; then
+	ok "P: an interrupted handler wrote no ERROR line"
+else
+	bad "P: ${P_ERRORS} ERROR line(s) from a cancellation this server raised itself — a client hanging up reads as an application fatal"
+fi
+
+if [ "$P_CANCEL_LINES" = "0" ]; then
+	ok "P: neither route the fatal takes reported it above debug"
+else
+	bad "P: ${P_CANCEL_LINES} line(s) naming the cancellation at warn or above — one of the two routes the fatal takes to the log still reports it"
+fi
+
+# And the worker is still usable: quietening the log must not have been done by
+# swallowing something the engine needed.
+P_AFTER="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 \
+	"http://localhost:${PORT}/pause.php?ms=10")"
+if [ "$P_AFTER" = "200" ]; then
+	ok "P: the worker served the next request normally (200)"
+else
+	bad "P: the next request got $P_AFTER — the interrupted one took the worker with it"
+fi
+
+# The other half of the same rule: the text alone must not be enough to
+# quieten a fatal. forge_cancel_fatal.php raises E_USER_ERROR carrying the
+# exact wording the server uses for a cancelled request, on a request nobody
+# cancelled — and it has to be reported as loudly as any other fatal, by both
+# routes, or any handler could hide its failures by naming them after ours.
+P_ERR_BEFORE="$(error_lines)"
+P_CANCEL_BEFORE="$(cancel_lines)"
+curl -s -o /dev/null --max-time 30 "http://localhost:${PORT}/forge_cancel_fatal.php" \
+	>/dev/null 2>&1
+sleep 0.5
+P_ERR_FORGED=$(( $(error_lines) - P_ERR_BEFORE ))
+P_CANCEL_FORGED=$(( $(cancel_lines) - P_CANCEL_BEFORE ))
+
+if [ "$P_ERR_FORGED" -ge 1 ]; then
+	ok "P: a fatal wearing the cancellation's wording, on a request nobody cancelled, is still an ERROR"
+else
+	bad "P: a script hid its own fatal by naming it after the server's cancellation — no ERROR line appeared"
+fi
+
+if [ "$P_CANCEL_FORGED" -ge 2 ]; then
+	ok "P: both routes reported the forged fatal at warn or above"
+else
+	bad "P: only ${P_CANCEL_FORGED} of the two log routes reported the forged fatal above debug"
+fi
+docker rm -f "$SRV" >/dev/null 2>&1
+wait
+
+# ── Q: O and P again, through the worker-mode receive loop ───────────
+# Worker mode takes requests off the same channel from a different place and
+# unwinds an interrupted handler through the fiber scheduler instead of
+# straight out of the worker thread. Both halves of the accounting live on
+# those paths, so neither is covered by the traditional runs above.
+#
+# LOG_LEVEL=warn for the same reason as P: one of the two routes the fatal
+# takes to the log was a WARN, and a quieter container would hide it.
+if start_worker_container 1500 4 warn; then
+	ok "Q: worker-mode container up (1.5 s budget, queue capacity 4)"
+else
+	bad "Q: worker-mode container failed to start"; docker logs "$SRV" 2>&1 | tail -5 >&2; exit 1
+fi
+
+# Timed as in O, and for the same two reasons: the three leave before their
+# budget runs out, and the control is read a clear 0.4 s before the first of
+# them does.
+curl -s -o /dev/null --max-time 60 "http://localhost:${PORT}/?ms=3000" &
+sleep 0.3
+for i in 1 2 3; do
+	curl -s -o /dev/null --max-time 0.8 \
+		"http://localhost:${PORT}/?ms=100" >/dev/null 2>&1 &
+done
+
+sleep 0.4
+Q_PENDING="$(pending)"
+if [ "$Q_PENDING" -eq 4 ]; then
+	ok "Q: all three impatient requests really were queued behind the blocker"
+else
+	bad "Q: expected 4 in flight, got ${Q_PENDING} — the rest of Q proves nothing"
+fi
+
+sleep 3.3
+Q_ABORTS="$(gauge 'oxphp_request_cancelled_total{reason="client_abort"}')"
+Q_WAIT_TIMEOUT="$(gauge 'oxphp_admission_refused_total{reason="wait_timeout"}')"
+wait
+
+if [ "$Q_ABORTS" = "3" ]; then
+	ok "Q: three departed clients counted as three cancellations in worker mode"
+else
+	bad "Q: oxphp_request_cancelled_total{reason=\"client_abort\"} reads ${Q_ABORTS}, expected 3"
+fi
+
+if [ "$Q_WAIT_TIMEOUT" = "0" ]; then
+	ok "Q: worker-mode pickup charged no overload refusal to a client that had gone"
+else
+	bad "Q: oxphp_admission_refused_total{reason=\"wait_timeout\"} reads ${Q_WAIT_TIMEOUT}, expected 0 — the worker-mode pickup still bills departed clients"
+fi
+
+# P's half, on the same container: a handler interrupted mid-run.
+curl -s -o /dev/null --max-time 0.5 "http://localhost:${PORT}/?spin=1&ms=4000" \
+	>/dev/null 2>&1 &
+Q_PID=$!
+wait "$Q_PID"; Q_RC=$?
+sleep 1
+Q_ERRORS="$(error_lines)"
+Q_CANCEL_LINES="$(cancel_lines)"
+
+if [ "$Q_RC" -eq 28 ]; then
+	ok "Q: the client left mid-handler, unanswered (curl 28)"
+else
+	bad "Q: curl exited $Q_RC, not 28 — it was answered rather than abandoned mid-handler"
+fi
+
+if [ "$Q_ERRORS" = "0" ]; then
+	ok "Q: worker mode wrote no ERROR line for clients that stopped waiting"
+else
+	bad "Q: ${Q_ERRORS} ERROR line(s) in worker mode for clients that stopped waiting"
+fi
+
+if [ "$Q_CANCEL_LINES" = "0" ]; then
+	ok "Q: neither route the fatal takes reported it above debug in worker mode"
+else
+	bad "Q: ${Q_CANCEL_LINES} line(s) naming the cancellation at warn or above in worker mode"
+fi
+
+Q_AFTER="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 \
+	"http://localhost:${PORT}/?ms=10")"
+if [ "$Q_AFTER" = "200" ]; then
+	ok "Q: the worker served the next request normally (200)"
+else
+	bad "Q: the next request got $Q_AFTER — the interrupted one took the worker with it"
 fi
 docker rm -f "$SRV" >/dev/null 2>&1
 wait

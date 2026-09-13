@@ -66,7 +66,24 @@ pub enum Pickup {
     /// not run it. The handler's output has nowhere to go, and running it
     /// anyway spends the worker on nobody while the requests queued behind it
     /// wait.
-    Cancelled,
+    ///
+    /// Neither form counts a refusal, including the one whose budget also ran
+    /// out: a refusal nobody receives is not one the pool handed out, and
+    /// `oxphp_admission_refused_total{reason="wait_timeout"}` is read as the
+    /// case for shortening `QUEUE_WAIT_TIMEOUT_MS` — an argument about the
+    /// pool, which a client's own patience has no business making. The
+    /// cancellation itself is counted where it happened, by the dispatch
+    /// side's abort guard, which is what filled the cell read here — a
+    /// best-effort read, nothing ordering it against that write, and a stale
+    /// `None` simply leaves the request whatever it would have had.
+    ///
+    /// `expired` is what the two forms do not share, and it decides one
+    /// thing: `oxphp_queue_wait_us`. A request this worker reached inside its
+    /// budget has a pickup latency worth recording; one reached after the
+    /// budget ran out has the budget itself, which is not a pickup latency
+    /// and stays out of the histogram exactly as `Expired` does — hence
+    /// `client_closed_unpicked()` there and a plain `client_closed()` here.
+    Cancelled { expired: bool },
     /// The waiting side reached the same deadline first and has already
     /// answered it. Drop it, silently: answering again writes to a channel
     /// nobody is reading, counting again reports one refusal as two, and
@@ -96,8 +113,13 @@ impl WorkerIncomingRequest {
     /// channel moves and nothing runs, and a wait that overlapped it was no
     /// closer to a worker for it.
     ///
-    /// The cancel cell is read after the deadline, so a request that is both
-    /// expired and left by its client is refused as expired.
+    /// The cancel cell is read on both sides of the deadline, and decides
+    /// something different on each. Inside the budget any reason at all drops
+    /// the request, because whoever wrote it wanted the work stopped. Past the
+    /// budget only a client's own departure changes the answer, from the `529`
+    /// this request has earned to a `499` nobody will read: every other reason
+    /// is written by the worker holding a request, and this one has not
+    /// reached one.
     #[must_use = "a request taken off the queue must not be executed unless this says it may be"]
     pub fn take_from_queue(&self) -> Pickup {
         // Fail-fast mode arms no timer on the waiting side, so there is nobody
@@ -107,11 +129,21 @@ impl WorkerIncomingRequest {
                 return Pickup::Abandoned;
             }
             if Instant::now() > at {
-                return Pickup::Expired;
+                // `ClientAbort` specifically — it is the absent client that
+                // makes the refusal pointless. Every other reason is written
+                // by the worker holding the request, and this one is still in
+                // the queue.
+                return if self.script.cancel_state.get()
+                    == crate::bridge::cancel::CancelReason::ClientAbort
+                {
+                    Pickup::Cancelled { expired: true }
+                } else {
+                    Pickup::Expired
+                };
             }
         }
         if self.script.cancel_state.get() != crate::bridge::cancel::CancelReason::None {
-            return Pickup::Cancelled;
+            return Pickup::Cancelled { expired: false };
         }
         crate::metrics::pool_start();
         Pickup::Run
@@ -1792,6 +1824,43 @@ unsafe extern "C" fn oxphp_send_headers(_sapi_headers: *mut sapi_headers_struct)
 
 // ─── Logging ────────────────────────────────────────────────
 
+/// The fatal this server raises to unwind a request whose client hung up.
+///
+/// Raised as `Request cancelled (<reason>)` by the interrupt handler this
+/// server installs on the engine, so the wording is ours, and this is the
+/// whole of it for the one reason that matters here.
+const CLIENT_ABORT_FATAL: &str = "Request cancelled (client_abort)";
+
+/// Whether `msg` is that fatal, on a request that really was aborted.
+///
+/// A client hanging up is not a failure of the application's, and a request
+/// interrupted that way said it was on both of the routes a fatal can take
+/// out of the engine: this server's own error callback, and — where
+/// `log_errors` is on and no `error_log` file has been named — the engine's
+/// error log, which then arrives through the SAPI's log hook. Both drop to
+/// DEBUG, and nothing else about the fatal changes: the status handling, the
+/// async fatal capture, the entry in this request's collected errors and the
+/// delegation to Zend's own callback all still run.
+///
+/// The cancel cell is read as well as the text because the text alone can be
+/// forged: `trigger_error()` reaches the same callback, and a script must not
+/// be able to hide its own fatals by naming them after ours. Nothing a
+/// handler can write reaches that cell: it is set by a cancellation actually
+/// delivered to the request and by nothing else.
+///
+/// Sound outside a request as well as inside one, which matters because both
+/// callers are reachable at startup, between requests and after teardown: the
+/// bridge answers `None` for a null cell rather than dereferencing it, and
+/// both teardowns null the pointer before the `Arc` behind it can go — worker
+/// mode in `worker_request_teardown`, traditional mode in
+/// `RequestDataGuard::drop`, which runs while the worker loop still holds the
+/// request. So the quietening simply never applies out there.
+unsafe fn is_client_abort_fatal(msg: &str) -> bool {
+    msg.contains(CLIENT_ABORT_FATAL)
+        && bindings::oxphp_bridge_get_cancel_reason()
+            == crate::bridge::cancel::CancelReason::ClientAbort as u8
+}
+
 unsafe extern "C" fn oxphp_log_message(message: *const c_char, syslog_type: c_int) {
     if message.is_null() {
         return;
@@ -1806,7 +1875,12 @@ unsafe extern "C" fn oxphp_log_message(message: *const c_char, syslog_type: c_in
         set_fatal_error_status_if_default();
     }
 
-    tracing::warn!(php_message = %msg.to_string_lossy(), "PHP log");
+    let text = msg.to_string_lossy();
+    if is_client_abort_fatal(&text) {
+        tracing::debug!(php_message = %text, "PHP log");
+    } else {
+        tracing::warn!(php_message = %text, "PHP log");
+    }
 }
 
 // ─── Structured Error Logging via zend_error_cb ─────────────
@@ -1909,6 +1983,16 @@ unsafe extern "C" fn oxphp_error_cb(
     }
 
     match level {
+        // See `is_client_abort_fatal`: our own unwind for a client that hung
+        // up, which is not the application erroring.
+        "error" if is_client_abort_fatal(&msg) => {
+            tracing::debug!(
+                php_error_type = type_name,
+                php_file = %file,
+                php_line = error_lineno,
+                "PHP: {msg}"
+            );
+        }
         "error" => {
             tracing::error!(
                 php_error_type = type_name,
@@ -2903,9 +2987,7 @@ unsafe extern "C" fn worker_wait_callback() -> std::os::raw::c_int {
                     return 0; // success
                 }
                 Pickup::Expired => continue_after_refusal(req),
-                Pickup::Cancelled => {
-                    let _ = req.response_tx.send(ScriptResponse::client_closed());
-                }
+                Pickup::Cancelled { expired } => answer_departed_client(req, expired),
                 Pickup::Abandoned => {}
             },
             None => return -1, // channel closed or retired = shutdown
@@ -2939,6 +3021,24 @@ fn continue_after_refusal(req: WorkerIncomingRequest) {
     let _ = req
         .response_tx
         .send(crate::types::ScriptResponse::overloaded());
+}
+
+/// Answer a request the same way, when the client it was owed to has gone.
+///
+/// Here rather than in the 499 fast path inside `setup_request_tls` for the
+/// reason above: this request's budget has run out, so it is not going to the
+/// handler in any case, and handing it over would mean a fiber running for a
+/// response channel already closed.
+///
+/// Counts no refusal, and keeps its wait out of the pickup-latency
+/// histogram — see `Pickup::Cancelled`.
+fn answer_departed_client(req: WorkerIncomingRequest, expired: bool) {
+    let answer = if expired {
+        crate::types::ScriptResponse::client_closed_unpicked()
+    } else {
+        crate::types::ScriptResponse::client_closed()
+    };
+    let _ = req.response_tx.send(answer);
 }
 
 /// Worker send response callback — called from C bridge after each handler invocation.
@@ -3214,9 +3314,7 @@ fn try_recv_inner() -> TryRecvResult {
                             return TryRecvResult::Ready;
                         }
                         Pickup::Expired => continue_after_refusal(req),
-                        Pickup::Cancelled => {
-                            let _ = req.response_tx.send(ScriptResponse::client_closed());
-                        }
+                        Pickup::Cancelled { expired } => answer_departed_client(req, expired),
                         Pickup::Abandoned => {}
                     },
                     Err(crossbeam_channel::TryRecvError::Empty) => return TryRecvResult::Empty,
@@ -5914,7 +6012,7 @@ mod tests {
             let before = crate::metrics::pool_starts();
             assert_eq!(
                 req.take_from_queue(),
-                Pickup::Cancelled,
+                Pickup::Cancelled { expired: false },
                 "deadline {deadline:?}"
             );
             assert_eq!(
@@ -5925,13 +6023,31 @@ mod tests {
         }
     }
 
+    /// An expired request whose client left is answered as closed, not as an
+    /// overload — the refusal has nobody to reach, and the series counting it
+    /// is read as a statement about the pool.
     #[test]
-    fn pickup_refuses_an_expired_request_as_expired_even_once_its_client_left() {
+    fn pickup_answers_an_expired_request_whose_client_left_as_closed() {
         let _tick = pickup_tick();
         let req = queued_request(a_second_ago());
         req.script
             .cancel_state
             .set(crate::bridge::cancel::CancelReason::ClientAbort);
+        let before = crate::metrics::pool_starts();
+        assert_eq!(req.take_from_queue(), Pickup::Cancelled { expired: true });
+        assert_eq!(crate::metrics::pool_starts(), before);
+    }
+
+    /// The conjunct on the other side of the deadline: every reason but the
+    /// client's own is written by the worker holding a request, and this one
+    /// has not reached a worker, so an expired request still refuses.
+    #[test]
+    fn pickup_refuses_an_expired_request_the_drain_cancelled() {
+        let _tick = pickup_tick();
+        let req = queued_request(a_second_ago());
+        req.script
+            .cancel_state
+            .set(crate::bridge::cancel::CancelReason::Shutdown);
         let before = crate::metrics::pool_starts();
         assert_eq!(req.take_from_queue(), Pickup::Expired);
         assert_eq!(crate::metrics::pool_starts(), before);

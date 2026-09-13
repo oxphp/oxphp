@@ -13,8 +13,9 @@ observability/test_request_age_metric
 # reading — a serving pool has admission slots free.
 observability/test_queue_gauges
 
-# Cancellation counters are wired through the dispatch side (see
-# `Metrics::observe_cancelled` and `ScriptResponse::cancel_reason`).
+# Cancellation counters are wired through the abort guard the dispatch
+# side puts around every request (see `Metrics::observe_cancelled`), which
+# reads the reason out of the per-request cancellation state.
 # An end-to-end test would assert
 # `oxphp_request_cancelled_total{reason="timeout"}` increments after a
 # `set_time_limit(1) + sleep(3)` request. That assertion is intentionally

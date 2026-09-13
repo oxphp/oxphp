@@ -443,6 +443,45 @@ impl ScriptExecutor for SapiExecutor {
                     )
                 }
                 Admitted::Shed(reason) => {
+                    // The queue deadline's reasoning, for the other budget:
+                    // a refusal nobody is waiting for is not one the pool
+                    // handed out, and this series is read as the case for
+                    // shortening `QUEUE_WAIT_TIMEOUT_MS` — an argument about
+                    // the pool, which a client's own patience has no business
+                    // making.
+                    //
+                    // Reachable in spite of the note above about hyper
+                    // dropping the future, and by one route rather than any:
+                    // the signal the connection raises once `serve_connection`
+                    // has returned drops the abort guard and then goes on
+                    // awaiting the dispatch on purpose, so this wait runs to
+                    // its deadline with the cell already filled. What survives
+                    // to hear that signal is an HTTP/2 stream, whose handler
+                    // runs as a task of its own rather than inside the
+                    // connection. That is the whole of the route: one stream
+                    // going away takes its own wait with it on either
+                    // protocol, and only the end of the connection under a
+                    // request that is still queued gets this far.
+                    //
+                    // `client_closed()` and not the `_unpicked` variant its
+                    // sibling in the queue uses: the flag that one carries
+                    // keeps a wait out of `oxphp_queue_wait_us`, and every
+                    // answer this gate returns as `Err` is already held out
+                    // of it by `rejected` on the dispatch side. Nothing here
+                    // was ever in the queue to have a pickup latency.
+                    //
+                    // `WaitTimeout` and `ClientAbort` and nothing wider: the
+                    // other shed reasons are the pool's own state at the
+                    // moment of arrival — a full waiting set is full whoever
+                    // was asking — and the other cancel reasons are a
+                    // worker's, which a request that never reached one cannot
+                    // have been given.
+                    if reason == ShedReason::WaitTimeout
+                        && request.cancel_state.get()
+                            == crate::bridge::cancel::CancelReason::ClientAbort
+                    {
+                        return Err(ScriptResponse::client_closed());
+                    }
                     metrics.request_admission_refused(reason);
                     // A budget spent at the gate with no work starting behind
                     // it. This is the shape an application calling back into
@@ -728,6 +767,73 @@ mod tests {
         // which is compiled under the `php` feature, so a host build has no
         // way to advance it. It is pinned on the waiting side instead, by
         // `await_queued_does_not_call_a_lost_race_a_wasted_wait`.
+
+        forget_executor(executor);
+    }
+
+    #[tokio::test]
+    async fn admission_wait_charges_nothing_to_a_client_that_has_gone() {
+        use crate::bridge::cancel::CancelReason;
+        use crate::executor::ExecuteResult;
+
+        // The shed above, on a request whose client left while it waited.
+        // Nothing about the pool is different — the budget ran out the same
+        // way — but there is nobody the refusal can be handed to, and both
+        // series this arm moves are read as statements about the pool.
+        //
+        // One route reaches it in production: hyper drops the request future
+        // when the client goes, which takes this wait with it, except at the
+        // end of an HTTP/2 connection under a still-queued stream, where the
+        // handler outlives the connection and the dispatch is deliberately
+        // kept awaited so a worker's answer can still arrive.
+        let executor = test_executor(1, 150);
+        assert!(
+            matches!(executor.execute(make_request()), ExecuteResult::Deferred(_)),
+            "first request takes the only slot"
+        );
+
+        let gone = make_request();
+        gone.cancel_state.set(CancelReason::ClientAbort);
+        match executor.execute(gone) {
+            ExecuteResult::Admitting(fut) => match fut.await {
+                Err(resp) => {
+                    assert_eq!(resp.status, 499, "a departed client is not an overload");
+                    assert_eq!(resp.cancel_reason, CancelReason::ClientAbort as u8);
+                }
+                Ok(_) => panic!("no slot ever freed — must shed"),
+            },
+            _ => panic!("expected Admitting once the queue is full"),
+        }
+
+        let out = executor.metrics.to_prometheus();
+        assert!(
+            out.contains("oxphp_admission_refused_total{reason=\"wait_timeout\"} 0"),
+            "a refusal nobody received is not one the pool handed out: {out}"
+        );
+        assert!(
+            out.contains("oxphp_admission_wait_wasted_total 0"),
+            "and it is out of the subset for the same reason: {out}"
+        );
+
+        // The conjunct, not just the branch: every other cancel reason is a
+        // worker's own, and a request shed at the gate never reached one, so
+        // widening this check to "cancelled at all" would answer a drain's
+        // own shed with a 499 and drop a refusal the pool really did hand
+        // out.
+        let draining = make_request();
+        draining.cancel_state.set(CancelReason::Shutdown);
+        match executor.execute(draining) {
+            ExecuteResult::Admitting(fut) => match fut.await {
+                Err(resp) => assert_overloaded(&resp),
+                Ok(_) => panic!("no slot ever freed — must shed"),
+            },
+            _ => panic!("expected Admitting once the queue is full"),
+        }
+        let out = executor.metrics.to_prometheus();
+        assert!(
+            out.contains("oxphp_admission_refused_total{reason=\"wait_timeout\"} 1"),
+            "a cancellation a worker wrote leaves the refusal where it was: {out}"
+        );
 
         forget_executor(executor);
     }

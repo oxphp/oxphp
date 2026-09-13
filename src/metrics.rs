@@ -472,9 +472,20 @@ impl Metrics {
     }
 
     /// Increment the counter that matches `reason` (1=client_abort,
-    /// 2=timeout, 3=shutdown). Other values are ignored — reason 4
-    /// (stuck) is reserved and reason 5 (user) is intentionally not
-    /// emitted today.
+    /// 2=timeout, 3=shutdown). Other values are ignored — 0 is the
+    /// uncancelled case every request passes through, reason 4 (stuck) is
+    /// reserved and reason 5 (user) is intentionally not emitted today.
+    ///
+    /// Called from one place, the request's abort guard in
+    /// `server::connection`. Every request that reaches dispatch constructs
+    /// one and drops it exactly once, whatever ends up answering it — the
+    /// guard wraps the whole of `dispatch_request`, so a static file or a
+    /// 404 is inside it as much as a handler is. What falls outside is
+    /// either edge of that scope: a response decided before dispatch (a
+    /// plugin answering at `RequestReceived`, the rate limiter's `429`)
+    /// never reaches the guard, and a cancellation raised after the scope
+    /// ends is read by nothing — which for a streamed or early-sent response
+    /// is before the body is finished.
     pub fn observe_cancelled(&self, reason: u8) {
         match reason {
             1 => {
