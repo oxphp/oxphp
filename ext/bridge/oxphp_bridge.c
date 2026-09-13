@@ -1873,6 +1873,27 @@ bool oxphp_bridge_get_superglobals_enabled(void) {
     return g_superglobals_enabled;
 }
 
+/* ─── Runtime Hooks Reporting ─── */
+/* Same global-not-__thread reasoning as the flag above: written once from the
+ * extension's MINIT, on the startup thread, before any worker thread is
+ * spawned, and never mutated after. The capacity is public, so the publisher
+ * can prove its value fits before calling; for any other caller a longer value
+ * is truncated rather than refused, because a report is not worth failing a
+ * startup over. */
+static char g_runtime_hooks[OXPHP_BRIDGE_RUNTIME_HOOKS_MAX] = "";
+
+void oxphp_bridge_set_runtime_hooks(const char *csv) {
+    if (csv == NULL) {
+        g_runtime_hooks[0] = '\0';
+        return;
+    }
+    snprintf(g_runtime_hooks, sizeof(g_runtime_hooks), "%s", csv);
+}
+
+const char *oxphp_bridge_get_runtime_hooks(void) {
+    return g_runtime_hooks;
+}
+
 /* ─── HTTP Request Data Accessors ─── */
 static oxphp_req_str_fn_t     g_req_method_fn = NULL;
 static oxphp_req_str_fn_t     g_req_path_fn = NULL;

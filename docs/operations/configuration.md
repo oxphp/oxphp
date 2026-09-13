@@ -286,6 +286,27 @@ A malformed value in any of these three variables (e.g. `ASYNC_WORKERS=8x`) is a
 | `sleep` | Native `sleep()` and `usleep()` suspend the current fiber exactly like `oxphp_sleep()`/`oxphp_usleep()` |
 | `streams` | Two waits suspend the current fiber instead of pinning the worker thread: a blocking **read** on a `tcp://` socket stream, and **`stream_select()`**. The read covers clients that block on one socket — `fsockopen()`, `stream_socket_client()`, HTTP stream wrappers, mysqlnd (PDO_MySQL, mysqli), phpredis; `stream_select()` covers loops that wait on several at once. No code changes either way. Clients that wait some other way are unaffected (see below) |
 
+**Checking that the setting was picked up.** The server reports the categories it installed, as a parsed set, in two places. On the internal server:
+
+```console
+$ curl -s localhost:9090/config | jq .runtime_hooks
+[
+  "sleep",
+  "streams"
+]
+```
+
+and from PHP, for a deployment whose internal server is not reachable or not enabled:
+
+```php
+<?php
+echo json_encode(oxphp_server_info()['runtime_hooks']);   // ["sleep","streams"]
+```
+
+Both read the same value, and both report the set rather than the string: `RUNTIME_HOOKS=all`, `RUNTIME_HOOKS=1` and `RUNTIME_HOOKS=sleep, streams` are one state and all three come back as `["sleep","streams"]`. An empty list means no hook is installed — which is the answer for the variable unset, for `RUNTIME_HOOKS=0`, for a value naming *only* categories this build does not know, and for a misspelled variable name, since all four enable nothing. A value mixing the two is not that case: `RUNTIME_HOOKS=sleep,bogus` reads as `["sleep"]`, because the unrecognised name enables nothing while the recognised one still does. So a non-empty list is not by itself evidence that every name in the value was understood: each unrecognised name gets its own line in the server log at startup, and that line is the only place they are named. This is worth checking after any change to the setting: an unrecognised environment variable is not an error anywhere, so the difference between "enabled" and "misspelled" is otherwise only visible as latency.
+
+**Installed is not the same as in effect.** What that list reports is which builtins had their handlers replaced, which happens at startup and does not depend on the routing mode. Outside a fiber the replacements delegate to the handlers they replaced, so a traditional-mode server and a `php` CLI process both report `["sleep","streams"]` while behaving natively throughout. Read the list as "this process is set up for the hooks", and the routing mode as whether anything can use them. Within `streams` it is narrower still: the socket-read part can fail to install on its own, on a platform where the stream ops table cannot be made writable, while `stream_select()` and the database entry points stay hooked. The category is reported either way, and the only signal for that partial failure is a line in the server log saying socket reads stay blocking. That line follows PHP's error logging: with `error_log` unset, which is the default, it reaches the server's own log as a `warn`, and `LOG_LEVEL=error` hides it. The field says `streams` either way. The same is true of the unrecognised-category line above.
+
 Hooks take effect inside worker-mode request fibers and async task fibers. Outside a fiber (traditional/framework/SPA request context, CLI) the original native behavior is preserved, including argument validation errors. With the `sleep` hooks enabled, third-party code calling `sleep()` stops pinning the worker thread — no code changes required. Cancelling an async task during a hooked sleep unwinds it with `OxPHP\Async\AsyncException`, and a hooked `sleep()` always returns `0` (the signal-interruption return value of the native builtin does not arise).
 
 What the `streams` hook makes cooperative is a blocking read on a PHP socket stream and a wait inside `stream_select()`. Before counting on it, check that your client waits one of those two ways — several common ones do not, and for them nothing changes:
@@ -475,6 +496,7 @@ curl -s http://localhost:9090/config | jq .
   "trace_context": true,
   "superglobals_enabled": true,
   "trusted_proxies": false,
+  "runtime_hooks": [],
   "plugins": {
     "otel": {
       "enabled": true,

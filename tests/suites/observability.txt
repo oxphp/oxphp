@@ -23,3 +23,10 @@ observability/test_queue_gauges
 # default error, so the unified bailout never observes the reason. When
 # that path lands the counter wiring will start incrementing without
 # code changes.
+
+# The negative half of the runtime-hooks reporting: this profile sets no
+# RUNTIME_HOOKS, which is also what a misspelled variable name leaves behind.
+# An absent key would read identically on a server with the hooks on, so the
+# key has to be there and empty. hooks/test_runtime_hooks_published is the
+# other half.
+observability/test_runtime_hooks_empty

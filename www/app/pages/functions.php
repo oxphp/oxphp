@@ -33,14 +33,15 @@ $tmp = "/tmp/worker_{$wid}_buffer.dat";',
         'name'    => 'oxphp_server_info',
         'sig'     => 'oxphp_server_info(): array',
         'params'  => [],
-        'return'  => 'array — Associative array with keys: <code>version</code>, <code>worker_id</code>, <code>request_time</code>, <code>worker_mode</code>.',
-        'desc'    => 'Returns server metadata for the current request. The <code>request_time</code> is a Unix timestamp with microsecond precision, set before <code>php_request_startup()</code> for accurate timing.',
+        'return'  => 'array — Associative array with keys: <code>version</code>, <code>worker_id</code>, <code>request_time</code>, <code>worker_mode</code>, <code>runtime_hooks</code>.',
+        'desc'    => 'Returns server metadata for the current request. The <code>request_time</code> is a Unix timestamp with microsecond precision, set before <code>php_request_startup()</code> for accurate timing. <code>runtime_hooks</code> lists the hook categories this process installed at startup — empty when <code>RUNTIME_HOOKS</code> enabled none, and a report that the handlers were replaced rather than that they suspend anything, since outside a fiber they delegate to the builtins they replaced.',
         'example' => '$info = oxphp_server_info();
 // [
-//     "version"      => "0.1.0",
-//     "worker_id"    => 3,
-//     "request_time" => 1740000000.123456,
-//     "worker_mode"  => true
+//     "version"       => "0.1.0",
+//     "worker_id"     => 3,
+//     "request_time"  => 1740000000.123456,
+//     "worker_mode"   => true,
+//     "runtime_hooks" => ["sleep", "streams"]
 // ]
 
 header("X-Worker: " . $info["worker_id"]);',

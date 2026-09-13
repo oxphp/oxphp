@@ -162,6 +162,7 @@ curl -s http://localhost:9090/config | jq .
   "trace_context": false,
   "superglobals_enabled": true,
   "trusted_proxies": false,
+  "runtime_hooks": [],
   "plugins": {}
 }
 ```

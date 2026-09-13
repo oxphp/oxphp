@@ -91,11 +91,16 @@ function oxphp_worker_id(): int {}
  * The request_time is a Unix timestamp with microsecond precision,
  * set before php_request_startup() for accurate timing.
  *
- * @return array{version: string, worker_id: int, request_time: float, worker_mode: bool}
+ * The runtime_hooks list names the hook categories this process installed at
+ * startup ("sleep", "streams"), empty when RUNTIME_HOOKS enabled none. It says
+ * the handlers were replaced, not that they suspend anything: outside a fiber
+ * they delegate to the builtins they replaced.
+ *
+ * @return array{version: string, worker_id: int, request_time: float, worker_mode: bool, runtime_hooks: list<string>}
  *
  * @example
  * $info = oxphp_server_info();
- * // ["version" => "0.1.0", "worker_id" => 3, "request_time" => 1740000000.123, "worker_mode" => false]
+ * // ["version" => "0.1.0", "worker_id" => 3, "request_time" => 1740000000.123, "worker_mode" => false, "runtime_hooks" => []]
  */
 function oxphp_server_info(): array {}
 

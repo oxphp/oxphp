@@ -999,6 +999,32 @@ void oxphp_bridge_set_superglobals_enabled(bool enabled);
 /** Check if superglobals are enabled. */
 bool oxphp_bridge_get_superglobals_enabled(void);
 
+/* ─── Runtime Hooks Reporting ─────────────────────────────── */
+
+/** Capacity of the published string, terminator included. Public so the one
+ *  caller that builds the value — the extension's MINIT, whose content is a
+ *  fixed vocabulary known at compile time — can static-assert against the real
+ *  number instead of guessing, and so growing that vocabulary past this bound
+ *  fails a build rather than a field. */
+#define OXPHP_BRIDGE_RUNTIME_HOOKS_MAX 64
+
+/** Publish the runtime-hook categories this process installed, as a
+ *  comma-separated list of category names in a canonical order
+ *  ("sleep,streams"). Called once from the PHP extension's MINIT, on the
+ *  startup thread, before any worker thread exists; the value is a property of
+ *  the process rather than of a request, so it is a plain global and not
+ *  __thread. Values longer than the buffer are truncated.
+ *
+ *  What is published is what was installed, not what was asked for: a category
+ *  name the build does not know enables nothing and appears nowhere here. */
+void oxphp_bridge_set_runtime_hooks(const char *csv);
+
+/** The categories published above — "" when no hook is installed, which is
+ *  also what a host that never started PHP reads. Never NULL. The pointer is
+ *  to storage that is written once before threads are spawned and not mutated
+ *  afterwards, so readers on any thread need no synchronisation. */
+const char *oxphp_bridge_get_runtime_hooks(void);
+
 /* ─── HTTP Request Data Accessors (Rust callback pattern) ─── */
 
 /** Rust callback types for lazy request data access.

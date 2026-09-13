@@ -292,6 +292,15 @@ fn build_config_json(config: &Config, plugin_manager: &PluginManager) -> serde_j
     let mut body = config.to_json();
     if let Some(obj) = body.as_object_mut() {
         obj.insert("plugins".to_string(), plugin_manager.config_json());
+        // Not from `Config`: `RUNTIME_HOOKS` is read by the PHP extension, which
+        // publishes the categories it installed. Reported as the parsed set
+        // rather than the raw value so a reader does not have to implement that
+        // grammar to find out what is on — `RUNTIME_HOOKS=all` and
+        // `RUNTIME_HOOKS=sleep,streams` are one state and read as one here.
+        obj.insert(
+            "runtime_hooks".to_string(),
+            serde_json::json!(crate::bridge::runtime_hooks()),
+        );
         obj.remove("internal_addr");
         obj.remove("error_pages_dir");
     }
@@ -548,5 +557,28 @@ mod tests {
             serde_json::json!(true),
             "the threads are alive — the wedge is a separate field, not this one"
         );
+    }
+
+    #[test]
+    fn config_reports_the_runtime_hooks_the_process_installed() {
+        // Without this key, a process that installed the hooks and one whose
+        // operator misspelled the variable serve byte-identical `/config`
+        // bodies. The key must therefore be present whatever the answer is —
+        // an absent key reads as "this build cannot tell you", which is the
+        // state being fixed. On a host without PHP nothing installs hooks, so
+        // the honest answer here is the empty set, and it must be an array
+        // rather than a string: a caller reading it must not have to
+        // re-implement the `RUNTIME_HOOKS` grammar to know what is on.
+        let config = Config::test_minimal();
+        let pm = PluginManager::new();
+
+        let body = build_config_json(&config, &pm);
+        let obj = body.as_object().expect("config json is an object");
+
+        assert!(
+            obj.contains_key("runtime_hooks"),
+            "runtime_hooks must be reported whether or not any hook is installed"
+        );
+        assert_eq!(body["runtime_hooks"], serde_json::json!([]));
     }
 }

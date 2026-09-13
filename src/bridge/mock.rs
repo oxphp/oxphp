@@ -1200,6 +1200,12 @@ pub unsafe extern "C" fn oxphp_bridge_get_worker_id() -> std::os::raw::c_int {
 #[allow(clippy::missing_safety_doc)]
 pub unsafe extern "C" fn oxphp_bridge_set_tick_ptr(_ptr: *const std::sync::atomic::AtomicU64) {}
 
+/// Mirrors `ffi::oxphp_bridge_get_runtime_hooks`. A host build has no PHP and
+/// therefore installs no hooks, so the honest answer is the empty list.
+pub unsafe fn oxphp_bridge_get_runtime_hooks() -> *const c_char {
+    c"".as_ptr()
+}
+
 #[cfg(test)]
 mod worker_class_mock_tests {
     use super::*;
