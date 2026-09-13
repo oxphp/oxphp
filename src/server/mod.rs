@@ -26,6 +26,65 @@ use crate::metrics::Metrics;
 use crate::server::response::static_file::FileCache;
 use crate::server::routing::RouteConfig;
 
+/// What ended a connection, to the extent that decides how loudly to say so.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ConnectionEnd {
+    /// The peer went away mid-message: a cancelled fetch, a closed tab, a
+    /// client that stopped waiting. Nothing here is the server's doing, and
+    /// on a public listener it is the commonest thing that happens.
+    ClientGone,
+    /// A deadline of ours fired — the peer was too slow, or sent nothing.
+    Timeout,
+    /// Anything else, including everything unrecognised.
+    Fault,
+}
+
+/// Classifies the error a connection ended with.
+///
+/// By type, walking the `source()` chain, because the text is not a place to
+/// look: hyper writes "connection closed before message completed" for the
+/// ordinary case of a client hanging up, which says nothing an operator can
+/// match on and reads like a failure. The chain is walked rather than just
+/// its head because the error arrives boxed through `hyper_util`'s connection
+/// future and an I/O cause sits one link down.
+///
+/// Unrecognised errors are `Fault`: a new shape of failure should be loud
+/// until someone has looked at it.
+///
+/// Bounded rather than walked to the end. Nothing in this dependency set
+/// builds a chain that cycles, but `source()` is a trait method and a chain
+/// that returned to itself would spin this connection's task at full tilt,
+/// holding one of `MAX_CONNECTIONS`, and never log the line it was called to
+/// choose. Sixteen links is far past anything real, so the bound costs the
+/// honest cases nothing and the dishonest one a `Fault`.
+pub fn classify_connection_end(err: &(dyn std::error::Error + 'static)) -> ConnectionEnd {
+    let mut cause = Some(err);
+    for _ in 0..16 {
+        let Some(e) = cause else { break };
+        if let Some(h) = e.downcast_ref::<hyper::Error>() {
+            if h.is_timeout() {
+                return ConnectionEnd::Timeout;
+            }
+            // hyper's own name for "the peer stopped sending mid-message".
+            if h.is_incomplete_message() {
+                return ConnectionEnd::ClientGone;
+            }
+        }
+        if let Some(io) = e.downcast_ref::<std::io::Error>() {
+            use std::io::ErrorKind::*;
+            match io.kind() {
+                TimedOut => return ConnectionEnd::Timeout,
+                ConnectionReset | ConnectionAborted | BrokenPipe | NotConnected | UnexpectedEof => {
+                    return ConnectionEnd::ClientGone
+                }
+                _ => {}
+            }
+        }
+        cause = e.source();
+    }
+    ConnectionEnd::Fault
+}
+
 /// RAII guard that calls `Metrics::connection_closed()` on drop.
 struct ConnectionGuard(Arc<Metrics>);
 
@@ -244,11 +303,10 @@ impl Server {
         // cancellation on the worker side.
         let _ = closed_tx.send(true);
 
-        if let Err(e) = result {
-            return Err(format!("connection error: {e}").into());
-        }
-
-        Ok(())
+        // Returned as it came, not restated into a string: the caller decides
+        // how loudly to log it, and the only thing that can tell a client
+        // hanging up from a fault of ours is the error's type.
+        result
     }
 
     /// Serve one connection, winding it down gracefully when the drain latch

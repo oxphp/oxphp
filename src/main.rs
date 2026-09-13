@@ -667,19 +667,27 @@ async fn async_main(
         tokio::spawn(async move {
             let _permit = permit; // held until task completes
             if let Err(e) = server_clone.handle_connection(stream, remote_addr).await {
-                let msg = e.to_string();
-                if msg.contains("timeout") {
-                    tracing::warn!(
+                use oxphp::server::ConnectionEnd;
+                match oxphp::server::classify_connection_end(e.as_ref()) {
+                    // A client that stops waiting is normal traffic, not an
+                    // incident, and on a public listener it is the commonest
+                    // thing that happens: left at ERROR it buries the
+                    // failures worth reading.
+                    ConnectionEnd::ClientGone => tracing::debug!(
+                        remote_addr = %remote_addr,
+                        error = %e,
+                        "Client closed the connection"
+                    ),
+                    ConnectionEnd::Timeout => tracing::warn!(
                         remote_addr = %remote_addr,
                         error = %e,
                         "Connection timeout"
-                    );
-                } else {
-                    tracing::error!(
+                    ),
+                    ConnectionEnd::Fault => tracing::error!(
                         remote_addr = %remote_addr,
                         error = %e,
                         "Connection error"
-                    );
+                    ),
                 }
             }
         });

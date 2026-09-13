@@ -11,6 +11,7 @@ use hyper::body::Incoming;
 use crate::bridge::cancel::{CancelReason, CancellationState};
 use crate::events::{RequestComplete, RequestReceived, ResponseBuilding};
 use crate::executor::ExecuteResult;
+use crate::metrics::Metrics;
 use crate::php::worker_registry::cancel_request;
 use crate::server::compression;
 use crate::server::response::static_file;
@@ -75,27 +76,71 @@ fn parse_content_length(bytes: &[u8]) -> Option<usize> {
 /// Drop-guard that fires `cancel_request(state, ClientAbort)` if the
 /// dispatch future is dropped before completing. Disarmed via
 /// `disarm()` once the future has returned a result.
-struct ClientAbortGuard {
+///
+/// It is also where `oxphp_request_cancelled_total` is incremented, once per
+/// guard and for whatever reason the cell ends up holding. The guard is the
+/// one thing a cancelled request cannot get past: `disarm()` takes `self`, so
+/// `Drop` runs on the path where the dispatch returned normally too, and the
+/// reason it reads there is whatever the worker stored. And where a client
+/// abort takes the request future out from under the dispatch, the dispatch
+/// never returns at all — so counting anywhere downstream of it misses
+/// exactly the case the counter exists for.
+///
+/// What bounds it is the dispatch scope, not the response. A response sent
+/// early — a stream, or `oxphp_finish_request()` — leaves that scope while
+/// the handler is still running, so a cancellation raised afterwards (the
+/// stream's own `blocking_send` failure, say) is read by nothing: not here,
+/// the guard having already gone, and nowhere else either. That gap is older
+/// than this guard — the site that used to count read the same zero off the
+/// early-sent response — and is tracked on its own.
+struct ClientAbortGuard<'a> {
     state: std::sync::Arc<CancellationState>,
+    metrics: &'a Metrics,
+    /// The reason carried by the answer this request got, where it got one.
+    answered: Option<u8>,
 }
 
-impl ClientAbortGuard {
-    fn new(state: std::sync::Arc<CancellationState>) -> Self {
-        Self { state }
-    }
-
-    /// `mark_done()` IS the disarm — `Drop` below early-returns on the flag.
-    fn disarm(self) {
-        self.state.mark_done();
-    }
-}
-
-impl Drop for ClientAbortGuard {
-    fn drop(&mut self) {
-        if self.state.is_done() {
-            return;
+impl<'a> ClientAbortGuard<'a> {
+    fn new(state: std::sync::Arc<CancellationState>, metrics: &'a Metrics) -> Self {
+        Self {
+            state,
+            metrics,
+            answered: None,
         }
-        cancel_request(&self.state, CancelReason::ClientAbort);
+    }
+
+    /// `mark_done()` IS the disarm — `Drop` below stops cancelling on the
+    /// flag. It still counts: a request the worker cancelled itself
+    /// (`Timeout`, `Shutdown`) comes back through here.
+    ///
+    /// What it counts is `answered` — the reason on the response that came
+    /// back — and not the cell as it reads at this moment. The two differ
+    /// for a window the worker opens on every request: it publishes its
+    /// response and only then unregisters, so a drain sweep arriving between
+    /// the two writes into the cell of a request that has already been
+    /// answered `200`, and reading the cell here would file that request
+    /// under `shutdown`. The response is also simply the better authority —
+    /// it is what the client got, and what the status beside it was chosen
+    /// from.
+    ///
+    /// `None` means no response at all reached this scope: a static file or
+    /// a `404`, which never had a cell to fill, or a worker whose channel
+    /// was dropped out from under the request, where the cell is the only
+    /// account of what happened. Those fall through to it.
+    fn disarm(mut self, answered: Option<u8>) {
+        self.state.mark_done();
+        self.answered = answered;
+    }
+}
+
+impl Drop for ClientAbortGuard<'_> {
+    fn drop(&mut self) {
+        if !self.state.is_done() {
+            cancel_request(&self.state, CancelReason::ClientAbort);
+        }
+        // `None` is the ordinary case and `observe_cancelled` ignores it.
+        let reason = self.answered.unwrap_or_else(|| self.state.get() as u8);
+        self.metrics.observe_cancelled(reason);
     }
 }
 
@@ -224,7 +269,7 @@ pub async fn handle_request(
         // is dropped before completing (hyper saw the client go away). Disarmed
         // on the success path. Declared after `dispatch` so on a future-drop
         // its Drop runs after the dispatch local has already gone.
-        let guard = ClientAbortGuard::new(cancel_state);
+        let guard = ClientAbortGuard::new(cancel_state, &server.metrics);
 
         // If the connection ends first (HTTP/2 stream RST, HTTP/1.1 close
         // between requests, or any other serve_connection completion), drop
@@ -235,7 +280,7 @@ pub async fn handle_request(
         tokio::select! {
             biased;
             r = &mut dispatch => {
-                guard.disarm();
+                guard.disarm(r.as_ref().ok().and_then(|(_, _, exec)| exec.cancel_reason));
                 r
             }
             _ = closed_rx.changed() => {
@@ -415,6 +460,9 @@ struct PhpExecData {
     profile_tree: Option<std::sync::Arc<crate::profiling::SpanTree>>,
     queue_wait_us: Option<u64>,
     php_exec_us: Option<u64>,
+    /// The cancel reason on the response the pool returned, for the abort
+    /// guard to count. `None` on the paths that return no such response.
+    cancel_reason: Option<u8>,
 }
 
 /// Wait for the pool's answer, and no longer than the request is allowed to
@@ -468,6 +516,27 @@ async fn await_queued(
     // for it rather than adding a second one.
     if !cancel_state.claim_from_queue() {
         return rx.await.map_err(|_| ());
+    }
+
+    // Both things are true of this request — its client left and its budget
+    // ran out — and only one of them describes what happened. A refusal
+    // nobody is waiting for is not one the pool handed out, and
+    // `oxphp_admission_refused_total{reason="wait_timeout"}` is read as the
+    // case for shortening `QUEUE_WAIT_TIMEOUT_MS`: an argument about the
+    // pool, which a client's own patience has no business making. The
+    // cancellation is already counted where it happened, in the abort guard
+    // that filled this cell.
+    //
+    // `ClientAbort` and not merely "cancelled": it is the absent client that
+    // makes the refusal pointless, and `client_closed()` is the only answer
+    // this reasoning licenses. Every other reason is a worker's own, and a
+    // request still in the queue has no worker to have written one.
+    if cancel_state.get() == CancelReason::ClientAbort {
+        // Still set, because what this flag gates is the queue-wait histogram
+        // and not the refusal count: no worker picked this request up, so its
+        // wait is not a pickup latency whatever the reason it ended.
+        *rejected = true;
+        return Ok(crate::types::ScriptResponse::client_closed());
     }
 
     *rejected = true;
@@ -751,7 +820,7 @@ async fn dispatch_request(
                     // the histogram — a span claiming a second of queue wait for
                     // a request that never entered the queue is the same lie,
                     // told where it is harder to cross-check.
-                    // Two flags because the refusals arrive two ways.
+                    // Two flags because those answers arrive two ways.
                     // `resp.refused` covers the ones a worker decides: a
                     // request reached past its queue deadline comes back
                     // through the ordinary response channel, so the flag on
@@ -759,6 +828,13 @@ async fn dispatch_request(
                     // one this side decides, where the deadline passes before
                     // any worker takes the request and no response is ever
                     // sent through that channel at all.
+                    //
+                    // Neither flag means "refused" exactly — a deadline that
+                    // passed on a request whose client had already gone is
+                    // answered `499` and counted as a cancellation, not as a
+                    // refusal. What both mean is the thing this line is
+                    // deciding: no worker picked the request up, so there is
+                    // no pickup latency to record.
                     let queue_wait_us = (!rejected && !resp.refused).then_some(queue_wait_us);
                     if let Some(us) = queue_wait_us {
                         server.metrics.record_queue_wait(us);
@@ -787,13 +863,6 @@ async fn dispatch_request(
                 }
             };
 
-            // Bump the per-reason cancellation counter once per request,
-            // observed from the worker-side reason mirrored on the
-            // ScriptResponse. 0 = no cancellation → no-op.
-            server
-                .metrics
-                .observe_cancelled(script_response.cancel_reason);
-
             // Graceful-drain replies (Shutdown → 503) advertise a short
             // retry window so clients can hit a recovered/replacement
             // instance. Userland-set Retry-After wins.
@@ -813,6 +882,7 @@ async fn dispatch_request(
             let exec_data = PhpExecData {
                 php_errors: std::mem::take(&mut script_response.errors),
                 profile_tree: script_response.profile_tree.take(),
+                cancel_reason: Some(script_response.cancel_reason),
                 ..exec_data
             };
 
@@ -1020,6 +1090,57 @@ mod tests {
         assert!(out.contains("oxphp_admission_wait_wasted_total 0"));
     }
 
+    /// The budget ran out on a request whose client had already gone. Both
+    /// are true of it, and only one of them is worth reporting: the refusal
+    /// reaches nobody, while `oxphp_admission_refused_total{reason=
+    /// "wait_timeout"}` is documented as the reason to shorten
+    /// `QUEUE_WAIT_TIMEOUT_MS` — a remedy for the pool, aimed here at how long
+    /// clients were prepared to wait. The cancellation is counted where it
+    /// happened (the abort guard), so this side must leave both refusal series
+    /// alone and answer 499.
+    #[tokio::test(flavor = "current_thread")]
+    async fn await_queued_does_not_charge_a_departed_client_with_an_overload_refusal() {
+        let (tx, queued, cancel, metrics) = queued_for(Some(std::time::Duration::from_millis(50)));
+        let mut rejected = false;
+        // What the abort guard leaves behind when hyper drops the request
+        // future: the cell is set long before this deadline comes due.
+        assert!(cancel.set(CancelReason::ClientAbort));
+        // As in the neighbouring refusal tests: bounds a build that arms no
+        // timer so it fails rather than hangs.
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            drop(tx);
+        });
+
+        let resp = await_queued(
+            queued,
+            &cancel,
+            &metrics,
+            crate::metrics::pool_starts(),
+            &mut rejected,
+        )
+        .await
+        .expect("the deadline answered");
+
+        assert_eq!(
+            resp.status, 499,
+            "a request answered after its client left is a client abort, not an overload refusal"
+        );
+        assert!(
+            rejected,
+            "no worker picked this request up, so its wait is a budget that ran out and not a pickup latency — it belongs out of oxphp_queue_wait_us"
+        );
+        let out = metrics.to_prometheus();
+        assert!(
+            out.contains("oxphp_admission_refused_total{reason=\"wait_timeout\"} 0"),
+            "a refusal nobody receives was counted as one the pool handed out"
+        );
+        assert!(
+            out.contains("oxphp_admission_wait_wasted_total 0"),
+            "the departed client moved the counter that argues for a shorter budget"
+        );
+    }
+
     /// A worker that claimed the request a moment before the timer fired owns
     /// it: this side answers nothing and counts nothing, or one refusal would
     /// be served twice and counted twice.
@@ -1051,6 +1172,52 @@ mod tests {
         let out = metrics.to_prometheus();
         assert!(out.contains("oxphp_admission_refused_total{reason=\"wait_timeout\"} 0"));
         assert!(out.contains("oxphp_admission_wait_wasted_total 0"));
+    }
+
+    /// The same claim, on a request whose client has also gone. Both things
+    /// the 499 branch reads are true here, and it must still not fire: the
+    /// worker owns the request and an answer is already on its way, so a
+    /// second one written from this side would be a response the caller never
+    /// asked for and a wait excluded from `oxphp_queue_wait_us` that a worker
+    /// did pick up. Which is why that branch sits after the claim and not
+    /// before it.
+    #[tokio::test(flavor = "current_thread")]
+    async fn await_queued_leaves_a_claimed_departed_request_to_the_worker() {
+        let (tx, queued, cancel, metrics) = queued_for(Some(std::time::Duration::from_millis(50)));
+        let mut rejected = false;
+        assert!(cancel.set(CancelReason::ClientAbort));
+        assert!(
+            cancel.claim_from_queue(),
+            "the worker takes the claim first"
+        );
+        // What the worker answers is not the point — that it is the worker's
+        // answer which comes back is. A 200 is the one thing this side would
+        // never write for itself.
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+            let _ = tx.send(ok_response());
+        });
+
+        let resp = await_queued(
+            queued,
+            &cancel,
+            &metrics,
+            crate::metrics::pool_starts(),
+            &mut rejected,
+        )
+        .await
+        .expect("the worker answered");
+
+        assert_eq!(
+            resp.status, 200,
+            "this side answered a request a worker had already claimed"
+        );
+        assert!(
+            !rejected,
+            "a worker did pick this request up, so its wait is a pickup latency and belongs in oxphp_queue_wait_us"
+        );
+        let out = metrics.to_prometheus();
+        assert!(out.contains("oxphp_admission_refused_total{reason=\"wait_timeout\"} 0"));
     }
 
     #[test]
@@ -1128,10 +1295,11 @@ mod tests {
     #[test]
     fn test_disarm_releases_cancel_state() {
         let state = std::sync::Arc::new(CancellationState::new());
-        let guard = ClientAbortGuard::new(std::sync::Arc::clone(&state));
+        let metrics = Metrics::new();
+        let guard = ClientAbortGuard::new(std::sync::Arc::clone(&state), &metrics);
         assert_eq!(std::sync::Arc::strong_count(&state), 2);
 
-        guard.disarm();
+        guard.disarm(Some(CancelReason::None as u8));
 
         assert_eq!(
             std::sync::Arc::strong_count(&state),
@@ -1144,6 +1312,13 @@ mod tests {
             CancelReason::None,
             "disarm must not report a cancellation"
         );
+        assert_eq!(
+            metrics
+                .request_cancelled_client_abort
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "a request that finished normally was counted as cancelled"
+        );
     }
 
     /// The counterpart: dropping without disarming must still fire the abort,
@@ -1153,10 +1328,100 @@ mod tests {
     #[test]
     fn test_drop_without_disarm_cancels() {
         let state = std::sync::Arc::new(CancellationState::new());
-        drop(ClientAbortGuard::new(std::sync::Arc::clone(&state)));
+        let metrics = Metrics::new();
+        drop(ClientAbortGuard::new(
+            std::sync::Arc::clone(&state),
+            &metrics,
+        ));
 
         assert_eq!(state.get(), CancelReason::ClientAbort);
         assert_eq!(std::sync::Arc::strong_count(&state), 1);
+        assert_eq!(
+            metrics
+                .request_cancelled_client_abort
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "the guard cancelled the request without counting it"
+        );
+    }
+
+    /// A worker that cancels a request itself — its own timeout, a drain —
+    /// takes the disarmed path, because the dispatch future does return. The
+    /// guard is still the counting site, so it has to report the reason the
+    /// worker stored rather than the one it would have written itself.
+    #[test]
+    fn test_disarm_counts_the_reason_the_worker_set() {
+        let state = std::sync::Arc::new(CancellationState::new());
+        let metrics = Metrics::new();
+        let guard = ClientAbortGuard::new(std::sync::Arc::clone(&state), &metrics);
+        // The cell and the response agree, which is the ordinary case: the
+        // worker read this cell to build that response.
+        assert!(state.set(CancelReason::Timeout));
+
+        guard.disarm(Some(CancelReason::Timeout as u8));
+
+        assert_eq!(
+            metrics
+                .request_cancelled_timeout
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "a worker-side timeout stopped being counted"
+        );
+        assert_eq!(
+            metrics
+                .request_cancelled_client_abort
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "the guard overwrote the worker's reason with its own"
+        );
+    }
+
+    /// The two disagree in exactly one window, and the response wins it.
+    ///
+    /// A worker publishes its response and only then unregisters, so a drain
+    /// sweep landing between the two reaches a request that has already been
+    /// answered and fills its cell. Counting the cell at that point files a
+    /// request the client received `200` for under `reason="shutdown"` — a
+    /// false reading in the one counter this whole path exists to make
+    /// worth trusting. The window is narrow; the counter is not sampled.
+    #[test]
+    fn a_cancellation_arriving_after_the_answer_is_not_counted() {
+        let state = std::sync::Arc::new(CancellationState::new());
+        let metrics = Metrics::new();
+        let guard = ClientAbortGuard::new(std::sync::Arc::clone(&state), &metrics);
+
+        // The drain, reaching a request whose 200 is already on its way out.
+        assert!(state.set(CancelReason::Shutdown));
+        guard.disarm(Some(CancelReason::None as u8));
+
+        assert_eq!(
+            metrics
+                .request_cancelled_shutdown
+                .load(std::sync::atomic::Ordering::Relaxed),
+            0,
+            "a request answered 200 was counted as cancelled by the drain"
+        );
+    }
+
+    /// And the fallback still reads the cell, for the answers that never
+    /// arrive: a worker channel dropped out from under a request leaves the
+    /// cell as the only account of what happened to it.
+    #[test]
+    fn an_unanswered_request_is_still_counted_from_the_cell() {
+        let state = std::sync::Arc::new(CancellationState::new());
+        let metrics = Metrics::new();
+        let guard = ClientAbortGuard::new(std::sync::Arc::clone(&state), &metrics);
+
+        assert!(state.set(CancelReason::Shutdown));
+        guard.disarm(None);
+
+        assert_eq!(
+            metrics
+                .request_cancelled_shutdown
+                .load(std::sync::atomic::Ordering::Relaxed),
+            1,
+            "a request the drain cancelled and nobody answered went uncounted"
+        );
     }
 
     #[test]
