@@ -9,16 +9,14 @@ require_once __DIR__ . '/breaker_probe.php';
 // worker serving.
 //
 // The abort earlier in this suite reaches PHP through the interrupt handler,
-// which marks the request as one the server ended. These do not. One asked to
-// outlive its client, so the handler records the disconnect and returns without
-// unwinding; the ones that were still queued when their client left got no
-// interrupt raised against them in the first place. Either way what ends the
-// request is the cancellation check on the SAPI's write path, and it ends it
-// with a bare bailout. That is the same event as the abort above — a client that
-// went away — so it has to read the same way to the breaker. Counting it means a
-// proxy with a short read timeout, or a flood of clients giving up at once,
-// rotates the pool three requests at a time and re-runs the whole application
-// bootstrap each time.
+// which marks the request as one the server ended. These do not. They asked to
+// outlive their clients, so the handler records the disconnect and returns
+// without unwinding, and what ends the request is the cancellation check on the
+// SAPI's write path, which ends it with a bare bailout. That is the same event
+// as the abort above — a client that went away — so it has to read the same way
+// to the breaker. Counting it means a proxy with a short read timeout, or a
+// flood of clients giving up at once, rotates the pool three requests at a time
+// and re-runs the whole application bootstrap each time.
 //
 // The recycles asserted here are the trips from earlier in the suite; they must
 // not have moved.

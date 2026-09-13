@@ -14,12 +14,6 @@ declare(strict_types=1);
 // three times retires a worker, which is precisely what a cancellation must not
 // do.
 //
-// Three of these back to back also reach that write the other way. The worker
-// keeps running a request its client has left, so the next one waits in the
-// queue while it finishes — and a request cancelled before any worker owns it
-// gets no interrupt raised against it at all. It is dispatched anyway and dies
-// at the same write, having never been told its client was gone.
-//
 // The markers are what make this test mean anything. Nobody is left to read the
 // response, so the suite line can only assert that curl gave up — which it does
 // whether or not the server ever noticed, and would go on doing if cancellation
@@ -27,9 +21,7 @@ declare(strict_types=1);
 // probe reads is about the last request that got here and not about the first:
 //
 //  - the shutdown marker says this request reached the end of its request, and
-//    carries connection_status() for diagnosis. Do not assert a value on it:
-//    the queued arm above legitimately reports PHP_CONNECTION_NORMAL, because
-//    nothing on that path ever sets the bit;
+//    carries connection_status() for diagnosis only;
 //  - the past-echo marker must be ABSENT. It is written after the echo, so it is
 //    reached only if that write did not unwind the request — and a run where it
 //    exists is a run that never entered the path under test;
@@ -38,9 +30,8 @@ declare(strict_types=1);
 //    request whose interrupt handler unwound it on the client's departure —
 //    which is what this setting is asking it not to do — stops at the first
 //    opcode after the sleep and never writes it. Only the probe that follows a
-//    single abort may assert it: a request cancelled while it waited in the
-//    queue never had an interrupt raised against it, so it writes the marker
-//    whether or not the setting is honoured at all.
+//    single abort asserts it, for the reason given beside that line in the
+//    suite.
 //
 // Files rather than statics: the retires this suite performs replace the
 // worker, and worker-scope state does not survive that. /tmp is inside the

@@ -122,6 +122,10 @@ fn worker_thread(
                         refuse_expired(wr, &metrics);
                         continue;
                     }
+                    Pickup::Cancelled => {
+                        let _ = wr.response_tx.send(ScriptResponse::client_closed());
+                        continue;
+                    }
                     // Already answered by the waiting side; dropping it here
                     // is what finally frees its queue slot.
                     Pickup::Abandoned => continue,
@@ -175,6 +179,10 @@ fn worker_thread(
                             Pickup::Run => {}
                             Pickup::Expired => {
                                 refuse_expired(wr, &metrics);
+                                continue;
+                            }
+                            Pickup::Cancelled => {
+                                let _ = wr.response_tx.send(ScriptResponse::client_closed());
                                 continue;
                             }
                             // See the static-mode branch.
@@ -322,8 +330,9 @@ fn execute_request(
 ) -> Option<ScriptResponse> {
     let start = Instant::now();
 
-    // Fast-path: client disconnected while we were in the queue.
-    // Drop guard already wrote the reason; ship 499 and skip PHP.
+    // Fast-path: client disconnected after `take_from_queue` read the cancel
+    // cell; a request whose client left before that is answered there. Drop
+    // guard already wrote the reason; ship 499 and skip PHP.
     if request.cancel_state.get() != crate::bridge::cancel::CancelReason::None {
         let _ = response_tx.send(crate::types::ScriptResponse::client_closed());
         return None;

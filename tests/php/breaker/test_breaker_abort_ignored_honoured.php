@@ -8,13 +8,9 @@ require_once __DIR__ . '/breaker_probe.php';
 // ignore_user_abort(true) is honoured, and the write is what ends the request.
 //
 // The three aborts earlier in this suite establish that none of this counts
-// against the worker. What they cannot establish is which of the two arms the
-// last of them took: markers are cleared per request, and the last of three
-// back-to-back aborts is one that was cancelled while it waited in the queue —
-// a request no interrupt was ever raised against, and therefore one that runs
-// to its own end no matter what the interrupt handler would have done with it.
-// Everything those three observe stays exactly the same if the handler stops
-// honouring the setting and unwinds on the client's departure instead.
+// against the worker. Whether each of them was already running when its client
+// left rests on the timing of the suite lines, though, and their probe does not
+// read the marker that would say the interrupt was declined.
 //
 // So: a single abort, against a worker that is free to take it. It is dispatched
 // straight away, the disconnect raises an interrupt against a running request,

@@ -62,6 +62,11 @@ pub enum Pickup {
     /// Its queue budget ran out before this worker reached it: answer it, and
     /// count the refusal.
     Expired,
+    /// Its client left while it waited: answer it as a closed request, and do
+    /// not run it. The handler's output has nowhere to go, and running it
+    /// anyway spends the worker on nobody while the requests queued behind it
+    /// wait.
+    Cancelled,
     /// The waiting side reached the same deadline first and has already
     /// answered it. Drop it, silently: answering again writes to a channel
     /// nobody is reading, counting again reports one refusal as two, and
@@ -86,27 +91,30 @@ impl WorkerIncomingRequest {
     /// passes through this method, and none of them can pass through it
     /// unnoticed.
     ///
-    /// The tick moves on `Run` alone. The other two outcomes are a worker
-    /// finding a request that is already answered, or answering one itself —
-    /// the channel moves and nothing runs, and a wait that overlapped it was
-    /// no closer to a worker for it.
+    /// The tick moves on `Run` alone. The other outcomes are a worker finding
+    /// a request that is already answered, or answering one itself — the
+    /// channel moves and nothing runs, and a wait that overlapped it was no
+    /// closer to a worker for it.
+    ///
+    /// The cancel cell is read after the deadline, so a request that is both
+    /// expired and left by its client is refused as expired.
     #[must_use = "a request taken off the queue must not be executed unless this says it may be"]
     pub fn take_from_queue(&self) -> Pickup {
         // Fail-fast mode arms no timer on the waiting side, so there is nobody
         // to race and nothing to claim.
-        let Some(at) = self.deadline else {
-            crate::metrics::pool_start();
-            return Pickup::Run;
-        };
-        if !self.script.cancel_state.claim_from_queue() {
-            return Pickup::Abandoned;
+        if let Some(at) = self.deadline {
+            if !self.script.cancel_state.claim_from_queue() {
+                return Pickup::Abandoned;
+            }
+            if Instant::now() > at {
+                return Pickup::Expired;
+            }
         }
-        if Instant::now() > at {
-            Pickup::Expired
-        } else {
-            crate::metrics::pool_start();
-            Pickup::Run
+        if self.script.cancel_state.get() != crate::bridge::cancel::CancelReason::None {
+            return Pickup::Cancelled;
         }
+        crate::metrics::pool_start();
+        Pickup::Run
     }
 }
 
@@ -2895,6 +2903,9 @@ unsafe extern "C" fn worker_wait_callback() -> std::os::raw::c_int {
                     return 0; // success
                 }
                 Pickup::Expired => continue_after_refusal(req),
+                Pickup::Cancelled => {
+                    let _ = req.response_tx.send(ScriptResponse::client_closed());
+                }
                 Pickup::Abandoned => {}
             },
             None => return -1, // channel closed or retired = shutdown
@@ -2904,13 +2915,17 @@ unsafe extern "C" fn worker_wait_callback() -> std::os::raw::c_int {
 
 /// Answer a request whose queue budget ran out before this worker reached it.
 ///
-/// Deliberately *before* `setup_request_tls`, unlike the 499 fast path inside
-/// it: past that point the C serve loop creates a fiber and runs the PHP
-/// handler either way, and a handler run for a request already answered here
-/// has no response channel to write to — for a streaming handler, no client to
-/// end it either. The 499 case survives that because a cancelled request's
-/// fiber bails on the cancel cell; an expired one carries no such flag, so it
-/// must never be handed over at all.
+/// Deliberately *before* `setup_request_tls`, like the answer to a request
+/// whose client left while it was queued: past that point the C serve loop
+/// creates a fiber and runs the PHP handler either way, and a handler run for
+/// a request already answered here has no response channel to write to — for
+/// a streaming handler, no client to end it either. The 499 fast path inside
+/// `setup_request_tls` is left only for a client that leaves in the instant
+/// after the pickup, and survives that because a cancelled request's handler
+/// is ended by the cancellation: by the interrupt `cancel_request` raises, if
+/// the handler reaches an interrupt check while it is still raised, and
+/// otherwise at its first write, where the output path reads the cancel cell.
+/// An expired one carries no such flag, so it must never be handed over at all.
 fn continue_after_refusal(req: WorkerIncomingRequest) {
     // Only ever reached by a worker that won the request's claim in
     // `take_from_queue`, so the response channel and the refusal count are
@@ -3186,9 +3201,9 @@ fn try_recv_inner() -> TryRecvResult {
         let rx = slot.borrow();
         match rx.as_ref() {
             None => TryRecvResult::Disconnected,
-            // Loops so an expired request is answered and the next one
-            // examined in the same poll — see `continue_after_refusal` for why
-            // it must not be staged for the scheduler.
+            // Loops so an expired or cancelled request is answered and the
+            // next one examined in the same poll — see `continue_after_refusal`
+            // for why it must not be staged for the scheduler.
             Some(rx) => loop {
                 match rx.try_recv() {
                     Ok(req) => match req.take_from_queue() {
@@ -3199,6 +3214,9 @@ fn try_recv_inner() -> TryRecvResult {
                             return TryRecvResult::Ready;
                         }
                         Pickup::Expired => continue_after_refusal(req),
+                        Pickup::Cancelled => {
+                            let _ = req.response_tx.send(ScriptResponse::client_closed());
+                        }
                         Pickup::Abandoned => {}
                     },
                     Err(crossbeam_channel::TryRecvError::Empty) => return TryRecvResult::Empty,
@@ -3322,9 +3340,18 @@ fn setup_request_tls(req: WorkerIncomingRequest) {
         &req.script.cancel_state,
     );
 
-    // Fast-path: client disconnected while we were in the queue.
-    // Ship 499 directly via the still-owned response_tx and bail
-    // before any further setup (no PHP, no early_tx stash).
+    // Fast-path: client disconnected after `take_from_queue` read the cancel
+    // cell; a request whose client left before that never reaches here. Ship
+    // 499 directly via the still-owned response_tx and bail before any further
+    // setup (no early_tx stash). The C serve loop still creates a fiber and
+    // enters the handler. If the client left after `begin_request` above,
+    // `cancel_request` found this worker and raised an interrupt, and the
+    // handler unwinds at the first interrupt check it reaches while that is
+    // still raised. Otherwise the handler runs until its first write, where the
+    // output path reads the cancel cell and bails: the client left before
+    // `begin_request`, so there was no worker to interrupt; the handler
+    // suspended before any check and another fiber on this worker took the
+    // interrupt; or it had called `ignore_user_abort()` by its check.
     if req.script.cancel_state.get() != crate::bridge::cancel::CancelReason::None {
         let _ = req.response_tx.send(ScriptResponse::client_closed());
         return;
@@ -5801,5 +5828,127 @@ mod tests {
         );
 
         clear_request_data();
+    }
+
+    /// `take_from_queue` moves a process-wide tick, so every test that reads it
+    /// takes this lock rather than count another test's pickups as its own.
+    static PICKUP_TICK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn pickup_tick() -> std::sync::MutexGuard<'static, ()> {
+        PICKUP_TICK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    fn queued_request(deadline: Option<Instant>) -> WorkerIncomingRequest {
+        let (response_tx, _) = oneshot::channel();
+        WorkerIncomingRequest {
+            script: ScriptRequest {
+                request_id: "test-pickup".to_string(),
+                script_path: std::path::PathBuf::from("/var/www/html/index.php"),
+                method: http::Method::GET,
+                uri: http::Uri::from_static("/"),
+                query_string: String::new(),
+                headers: http::HeaderMap::new(),
+                body: Bytes::new(),
+                remote_addr: "127.0.0.1:0".parse().unwrap(),
+                document_root: Arc::new(std::path::PathBuf::from("/var/www/html")),
+                cancel_state: Arc::new(crate::bridge::cancel::CancellationState::new()),
+                trace_id: String::new(),
+                span_id: String::new(),
+                parent_span_id: String::new(),
+                is_tls: false,
+                version: http::Version::HTTP_11,
+                path_info: None,
+                forwarded_proto: None,
+                forwarded_host: None,
+                forwarded_port: None,
+                denied_meta: None,
+                profiling_mode: crate::profiling::ProfilingMode::Off,
+                profiling_run_id: None,
+            },
+            response_tx,
+            permit: Arc::new(tokio::sync::Semaphore::new(1))
+                .try_acquire_owned()
+                .unwrap(),
+            deadline,
+        }
+    }
+
+    fn in_a_minute() -> Option<Instant> {
+        Some(Instant::now() + std::time::Duration::from_secs(60))
+    }
+
+    fn a_second_ago() -> Option<Instant> {
+        Some(
+            Instant::now()
+                .checked_sub(std::time::Duration::from_secs(1))
+                .unwrap(),
+        )
+    }
+
+    #[test]
+    fn pickup_runs_a_waiting_request_and_counts_it_as_begun() {
+        let _tick = pickup_tick();
+        for deadline in [in_a_minute(), None] {
+            let before = crate::metrics::pool_starts();
+            assert_eq!(queued_request(deadline).take_from_queue(), Pickup::Run);
+            assert_eq!(
+                crate::metrics::pool_starts(),
+                before + 1,
+                "deadline {deadline:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pickup_drops_a_request_whose_client_left_without_beginning_it() {
+        // Fail-fast mode included: with no deadline there is nothing to claim,
+        // and the pickup used to run whatever it was handed.
+        let _tick = pickup_tick();
+        for deadline in [in_a_minute(), None] {
+            let req = queued_request(deadline);
+            req.script
+                .cancel_state
+                .set(crate::bridge::cancel::CancelReason::ClientAbort);
+            let before = crate::metrics::pool_starts();
+            assert_eq!(
+                req.take_from_queue(),
+                Pickup::Cancelled,
+                "deadline {deadline:?}"
+            );
+            assert_eq!(
+                crate::metrics::pool_starts(),
+                before,
+                "deadline {deadline:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn pickup_refuses_an_expired_request_as_expired_even_once_its_client_left() {
+        let _tick = pickup_tick();
+        let req = queued_request(a_second_ago());
+        req.script
+            .cancel_state
+            .set(crate::bridge::cancel::CancelReason::ClientAbort);
+        let before = crate::metrics::pool_starts();
+        assert_eq!(req.take_from_queue(), Pickup::Expired);
+        assert_eq!(crate::metrics::pool_starts(), before);
+    }
+
+    #[test]
+    fn pickup_leaves_a_request_the_waiting_side_claimed_alone_even_once_its_client_left() {
+        // The waiting side answered it on its own deadline; the worker must not
+        // answer it a second time, as closed or otherwise.
+        let _tick = pickup_tick();
+        let req = queued_request(in_a_minute());
+        assert!(req.script.cancel_state.claim_from_queue());
+        req.script
+            .cancel_state
+            .set(crate::bridge::cancel::CancelReason::ClientAbort);
+        let before = crate::metrics::pool_starts();
+        assert_eq!(req.take_from_queue(), Pickup::Abandoned);
+        assert_eq!(crate::metrics::pool_starts(), before);
     }
 }
