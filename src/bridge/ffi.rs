@@ -828,6 +828,13 @@ extern "C" {
 
     // Tick counter pointer; see common.rs binding for full docs.
     pub fn oxphp_bridge_set_tick_ptr(ptr: *const std::sync::atomic::AtomicU64);
+
+    /// The runtime-hook categories the PHP extension installed at module
+    /// startup, comma-separated; `""` when none. Written once on the startup
+    /// thread before any worker exists and never mutated, so the returned
+    /// pointer stays valid and race-free for the life of the process. See
+    /// [`super::runtime_hooks`] for the wrapper callers should use.
+    pub fn oxphp_bridge_get_runtime_hooks() -> *const c_char;
 }
 
 pub const OXPHP_SHARED_INVOKE_OK: c_int = 0;

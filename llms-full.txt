@@ -891,7 +891,7 @@ echo "<p>Version: {$info['version']}</p>\n";
 echo "<p>Time: " . date('c') . "</p>\n";
 ```
 
-`oxphp_request_id()` returns the unique ID assigned to each request. `oxphp_server_info()` returns details about the running server including `version`, `worker_id`, `request_time`, and `worker_mode`.
+`oxphp_request_id()` returns the unique ID assigned to each request. `oxphp_server_info()` returns details about the running server including `version`, `worker_id`, `request_time`, `worker_mode`, and `runtime_hooks`.
 
 ### 5. Build and Start
 
@@ -4632,7 +4632,7 @@ These functions do **not** suspend the fiber:
 | `oxphp_stream_flush()` | Sends a chunk to the client immediately and returns. Use with `oxphp_sleep()` in SSE loops |
 | `oxphp_finish_request()` | Sends the complete response and continues PHP execution. Does not yield |
 
-> **Note:** PHP's built-in `sleep()` and `usleep()` block the entire worker thread by default. Either use `oxphp_sleep()` / `oxphp_usleep()`, or set `RUNTIME_HOOKS=sleep` to make the native builtins suspend the fiber automatically — useful when third-party code calls `sleep()` directly. See [Configuration](../operations/configuration.md).
+> **Note:** PHP's built-in `sleep()` and `usleep()` block the entire worker thread by default. Either use `oxphp_sleep()` / `oxphp_usleep()`, or set `RUNTIME_HOOKS=sleep` to make the native builtins suspend the fiber automatically — useful when third-party code calls `sleep()` directly. To confirm the server picked the setting up, read `runtime_hooks` from `oxphp_server_info()` or from the internal server's `/config`; an unrecognised environment variable is not an error anywhere. See [Configuration](../operations/configuration.md#runtime-hooks).
 
 ## PHP Examples
 
@@ -4711,7 +4711,7 @@ Fiber multiplexing is **cooperative, not preemptive**. A fiber that calls a bloc
 - DNS resolution (`gethostbyname()`)
 - Any synchronous network or disk I/O
 
-Socket **reads** and **`stream_select()`** are the exception once `RUNTIME_HOOKS=streams` is enabled: both suspend the fiber instead of the thread, which covers clients that block on a PHP stream read (mysqlnd, phpredis, the HTTP stream wrappers) as well as loops waiting on several sockets at once. Writes, `socket_select()`, ext/curl, connecting and DNS resolution still block. See [Configuration](../operations/configuration.md#runtime-hooks).
+Socket **reads** and **`stream_select()`** are the exception once `RUNTIME_HOOKS=streams` is enabled: both suspend the fiber instead of the thread, which covers clients that block on a PHP stream read (mysqlnd, phpredis, the HTTP stream wrappers) as well as loops waiting on several sockets at once. Writes, `socket_select()`, ext/curl, connecting and DNS resolution still block. Whether the categories were installed at all is reported as `runtime_hooks` by `oxphp_server_info()` and by `/config`. See [Configuration](../operations/configuration.md#runtime-hooks).
 
 ### How to Avoid Blocking
 
@@ -4973,9 +4973,12 @@ curl -s http://localhost:9090/config | jq .
   "trace_context": false,
   "superglobals_enabled": true,
   "trusted_proxies": false,
+  "runtime_hooks": ["sleep", "streams"],
   "plugins": {}
 }
 ```
+
+`runtime_hooks` lists the runtime-hook categories the process installed at startup, as a parsed set rather than the raw `RUNTIME_HOOKS` value, so `all`, `1` and `sleep, streams` all read as `["sleep","streams"]` and a scraper needs no copy of that grammar. An empty list means no hook is installed, which is also the answer for a misspelled variable name. It reports what was installed, not what is in effect: outside a fiber the hooks delegate to the builtins they replaced, so a traditional-mode server reports the categories it set up while behaving natively. See [Runtime Hooks](../operations/configuration.md#runtime-hooks).
 
 TLS certificate and key file paths are never emitted (only the `tls_enabled` boolean is exposed), and `internal_addr` and `error_pages_dir` are scrubbed from the served response — deployment topology and filesystem paths that aid an attacker and are not needed by scrapers.
 
@@ -12677,6 +12680,7 @@ Returns an associative array with server and request metadata.
 | `worker_id` | `int` | Same value as `oxphp_worker_id()` |
 | `request_time` | `float` | Unix timestamp with microsecond precision when the request started |
 | `worker_mode` | `bool` | Whether the current process runs in worker mode |
+| `runtime_hooks` | `array` | The runtime-hook categories this process installed at startup, as a list of category names (`["sleep", "streams"]`). Empty when `RUNTIME_HOOKS` enabled nothing — see [Runtime Hooks](../operations/configuration.md#runtime-hooks) |
 
 **Example:**
 
@@ -12684,10 +12688,11 @@ Returns an associative array with server and request metadata.
 <?php
 $info = oxphp_server_info();
 // [
-//     "version"      => "0.11.0",
-//     "worker_id"    => 3,
-//     "request_time" => 1738800000.123456,
-//     "worker_mode"  => true,
+//     "version"       => "0.11.0",
+//     "worker_id"     => 3,
+//     "request_time"  => 1738800000.123456,
+//     "worker_mode"   => true,
+//     "runtime_hooks" => ["sleep", "streams"],
 // ]
 
 $elapsed = microtime(true) - $info['request_time'];
@@ -14489,6 +14494,27 @@ A malformed value in any of these three variables (e.g. `ASYNC_WORKERS=8x`) is a
 | `sleep` | Native `sleep()` and `usleep()` suspend the current fiber exactly like `oxphp_sleep()`/`oxphp_usleep()` |
 | `streams` | Two waits suspend the current fiber instead of pinning the worker thread: a blocking **read** on a `tcp://` socket stream, and **`stream_select()`**. The read covers clients that block on one socket — `fsockopen()`, `stream_socket_client()`, HTTP stream wrappers, mysqlnd (PDO_MySQL, mysqli), phpredis; `stream_select()` covers loops that wait on several at once. No code changes either way. Clients that wait some other way are unaffected (see below) |
 
+**Checking that the setting was picked up.** The server reports the categories it installed, as a parsed set, in two places. On the internal server:
+
+```console
+$ curl -s localhost:9090/config | jq .runtime_hooks
+[
+  "sleep",
+  "streams"
+]
+```
+
+and from PHP, for a deployment whose internal server is not reachable or not enabled:
+
+```php
+<?php
+echo json_encode(oxphp_server_info()['runtime_hooks']);   // ["sleep","streams"]
+```
+
+Both read the same value, and both report the set rather than the string: `RUNTIME_HOOKS=all`, `RUNTIME_HOOKS=1` and `RUNTIME_HOOKS=sleep, streams` are one state and all three come back as `["sleep","streams"]`. An empty list means no hook is installed — which is the answer for the variable unset, for `RUNTIME_HOOKS=0`, for a value naming *only* categories this build does not know, and for a misspelled variable name, since all four enable nothing. A value mixing the two is not that case: `RUNTIME_HOOKS=sleep,bogus` reads as `["sleep"]`, because the unrecognised name enables nothing while the recognised one still does. So a non-empty list is not by itself evidence that every name in the value was understood: each unrecognised name gets its own line in the server log at startup, and that line is the only place they are named. This is worth checking after any change to the setting: an unrecognised environment variable is not an error anywhere, so the difference between "enabled" and "misspelled" is otherwise only visible as latency.
+
+**Installed is not the same as in effect.** What that list reports is which builtins had their handlers replaced, which happens at startup and does not depend on the routing mode. Outside a fiber the replacements delegate to the handlers they replaced, so a traditional-mode server and a `php` CLI process both report `["sleep","streams"]` while behaving natively throughout. Read the list as "this process is set up for the hooks", and the routing mode as whether anything can use them. Within `streams` it is narrower still: the socket-read part can fail to install on its own, on a platform where the stream ops table cannot be made writable, while `stream_select()` and the database entry points stay hooked. The category is reported either way, and the only signal for that partial failure is a line in the server log saying socket reads stay blocking. That line follows PHP's error logging: with `error_log` unset, which is the default, it reaches the server's own log as a `warn`, and `LOG_LEVEL=error` hides it. The field says `streams` either way. The same is true of the unrecognised-category line above.
+
 Hooks take effect inside worker-mode request fibers and async task fibers. Outside a fiber (traditional/framework/SPA request context, CLI) the original native behavior is preserved, including argument validation errors. With the `sleep` hooks enabled, third-party code calling `sleep()` stops pinning the worker thread — no code changes required. Cancelling an async task during a hooked sleep unwinds it with `OxPHP\Async\AsyncException`, and a hooked `sleep()` always returns `0` (the signal-interruption return value of the native builtin does not arise).
 
 What the `streams` hook makes cooperative is a blocking read on a PHP socket stream and a wait inside `stream_select()`. Before counting on it, check that your client waits one of those two ways — several common ones do not, and for them nothing changes:
@@ -14678,6 +14704,7 @@ curl -s http://localhost:9090/config | jq .
   "trace_context": true,
   "superglobals_enabled": true,
   "trusted_proxies": false,
+  "runtime_hooks": [],
   "plugins": {
     "otel": {
       "enabled": true,
@@ -15008,6 +15035,7 @@ curl -s http://localhost:9090/config | jq .
   "trace_context": false,
   "superglobals_enabled": true,
   "trusted_proxies": false,
+  "runtime_hooks": [],
   "plugins": {}
 }
 ```

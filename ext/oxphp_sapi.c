@@ -1138,6 +1138,26 @@ PHP_FUNCTION(oxphp_worker_id)
 }
 /* }}} */
 
+/* The runtime-hook categories this process installed, as a PHP list. Split from
+ * the string the bridge publishes rather than worked out again here, so this
+ * function and the /config endpoint — the other reader of that string — cannot
+ * disagree about what is on. Empty where nothing was installed. */
+static void oxphp_runtime_hooks_to_array(zval *out)
+{
+    array_init(out);
+
+    const char *csv = oxphp_bridge_get_runtime_hooks();
+    while (csv != NULL && *csv != '\0') {
+        const char *comma = strchr(csv, ',');
+        size_t len = comma ? (size_t) (comma - csv) : strlen(csv);
+        if (len > 0) {
+            add_next_index_stringl(out, csv, len);
+        }
+        if (comma == NULL) break;
+        csv = comma + 1;
+    }
+}
+
 /* {{{ oxphp_server_info(): array
  * Returns an array with server and request metadata. */
 PHP_FUNCTION(oxphp_server_info)
@@ -1149,6 +1169,10 @@ PHP_FUNCTION(oxphp_server_info)
     add_assoc_long(return_value, "worker_id", oxphp_bridge_get_worker_id());
     add_assoc_double(return_value, "request_time", oxphp_bridge_get_request_time());
     add_assoc_bool(return_value, "worker_mode", oxphp_bridge_is_worker_mode());
+
+    zval runtime_hooks;
+    oxphp_runtime_hooks_to_array(&runtime_hooks);
+    add_assoc_zval(return_value, "runtime_hooks", &runtime_hooks);
 }
 /* }}} */
 
@@ -4275,8 +4299,32 @@ static void oxphp_filter_guard_restore(void)
     oxphp_orig_filter_input_array = NULL;
 }
 
+/* Publishing the set is what makes an enabled RUNTIME_HOOKS confirmable at all:
+ * a misspelled variable name, RUNTIME_HOOKS=0 and a correctly enabled build
+ * otherwise serve byte-identical responses and log nothing. The flags are
+ * raised inside the branches that do the swapping rather than recomputed from
+ * oxphp_hook_categories[], so a category cannot be reported without the branch
+ * that installs it having run. What each flag records is that branch and not
+ * the individual swaps within it: oxphp_hook_swap() returns whether it found
+ * its target and these calls ignore that, because sleep, usleep and
+ * stream_select are ext/standard functions registered long before any shared
+ * extension's MINIT, and a miss would mean the engine came up without its own
+ * builtins.
+ *
+ * "Installed" is the claim, and it is narrower than "in effect". Outside a
+ * fiber every hook delegates to the handler it replaced, so a traditional-mode
+ * or CLI process reports the same set as a worker-mode one while behaving
+ * natively throughout. Within the streams category it is narrower still: the
+ * socket-read part can be dropped on its own (the php_log_err below is the only
+ * signal for that, and with PHP's error_log unset it reaches the server's log as
+ * a warn, which LOG_LEVEL=error hides, and stderr under the CLI SAPIs) while
+ * stream_select() and the database entry points stay hooked, and the category is
+ * reported either way. */
 static void oxphp_runtime_hooks_install(void)
 {
+    bool sleep_installed = false;
+    bool streams_installed = false;
+
     oxphp_hooks_report_unknown_categories();
 
     if (oxphp_hooks_category_enabled("sleep")) {
@@ -4284,6 +4332,7 @@ static void oxphp_runtime_hooks_install(void)
                         oxphp_hooked_sleep, &oxphp_orig_sleep);
         oxphp_hook_swap("usleep", sizeof("usleep") - 1,
                         oxphp_hooked_usleep, &oxphp_orig_usleep);
+        sleep_installed = true;
     }
     if (oxphp_hooks_category_enabled("streams")) {
         if (!oxphp_hook_socket_ops()) {
@@ -4300,9 +4349,42 @@ static void oxphp_runtime_hooks_install(void)
          * the connection belongs to one fiber, and for the database clients that
          * has to be established above the stream — see the claim section. */
         oxphp_hook_db_entries();
+        streams_installed = true;
     }
+
+    /* Category order here is the order oxphp_hook_categories[] declares, so the
+     * published value is a canonical set: "all", "1" and "streams, sleep" are
+     * one state and come out as one string.
+     *
+     * The buffer is the longest value this can produce, spelled out, and the
+     * asserts are what keep it that way. Truncation here would not degrade
+     * gracefully: a set cut to ["sleep","streams","datab"] is exactly the
+     * cannot-trust-the-field state this reporting exists to end, and unlike the
+     * setter's general contract the content here is known at compile time. The
+     * vocabulary does grow between releases — that is why the grammar forgives
+     * names it does not recognise — so that growth has to break a build rather
+     * than a field. */
+    char installed[sizeof("sleep,streams")];
+    _Static_assert(sizeof(oxphp_hook_categories) / sizeof(oxphp_hook_categories[0]) == 2,
+                   "a hook category was added: give it a flag and a branch above, "
+                   "and add its name to the size literal of installed[]");
+    _Static_assert(sizeof(installed) <= OXPHP_BRIDGE_RUNTIME_HOOKS_MAX,
+                   "installed[] outgrew the bridge's published slot, which would "
+                   "move the silent truncation there instead of removing it");
+    snprintf(installed, sizeof(installed), "%s%s%s",
+             sleep_installed ? "sleep" : "",
+             (sleep_installed && streams_installed) ? "," : "",
+             streams_installed ? "streams" : "");
+    oxphp_bridge_set_runtime_hooks(installed);
 }
 
+/* The published set is deliberately left standing. Nothing can read it after
+ * this point — MSHUTDOWN runs once the worker threads are joined and once the
+ * server has dropped the Tokio runtime that serves /config — and leaving the
+ * bridge's slot written exactly once, before any thread existed, is what makes
+ * every read of it race-free without synchronisation. Clearing it here would
+ * trade that for a second write whose safety rests on a teardown order set in
+ * another file. */
 static void oxphp_runtime_hooks_restore(void)
 {
     oxphp_hook_restore("sleep", sizeof("sleep") - 1, oxphp_orig_sleep);

@@ -86,7 +86,7 @@ echo "<p>Version: {$info['version']}</p>\n";
 echo "<p>Time: " . date('c') . "</p>\n";
 ```
 
-`oxphp_request_id()` returns the unique ID assigned to each request. `oxphp_server_info()` returns details about the running server including `version`, `worker_id`, `request_time`, and `worker_mode`.
+`oxphp_request_id()` returns the unique ID assigned to each request. `oxphp_server_info()` returns details about the running server including `version`, `worker_id`, `request_time`, `worker_mode`, and `runtime_hooks`.
 
 ### 5. Build and Start
 

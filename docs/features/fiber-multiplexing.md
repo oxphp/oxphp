@@ -53,7 +53,7 @@ These functions do **not** suspend the fiber:
 | `oxphp_stream_flush()` | Sends a chunk to the client immediately and returns. Use with `oxphp_sleep()` in SSE loops |
 | `oxphp_finish_request()` | Sends the complete response and continues PHP execution. Does not yield |
 
-> **Note:** PHP's built-in `sleep()` and `usleep()` block the entire worker thread by default. Either use `oxphp_sleep()` / `oxphp_usleep()`, or set `RUNTIME_HOOKS=sleep` to make the native builtins suspend the fiber automatically — useful when third-party code calls `sleep()` directly. See [Configuration](../operations/configuration.md).
+> **Note:** PHP's built-in `sleep()` and `usleep()` block the entire worker thread by default. Either use `oxphp_sleep()` / `oxphp_usleep()`, or set `RUNTIME_HOOKS=sleep` to make the native builtins suspend the fiber automatically — useful when third-party code calls `sleep()` directly. To confirm the server picked the setting up, read `runtime_hooks` from `oxphp_server_info()` or from the internal server's `/config`; an unrecognised environment variable is not an error anywhere. See [Configuration](../operations/configuration.md#runtime-hooks).
 
 ## PHP Examples
 
@@ -132,7 +132,7 @@ Fiber multiplexing is **cooperative, not preemptive**. A fiber that calls a bloc
 - DNS resolution (`gethostbyname()`)
 - Any synchronous network or disk I/O
 
-Socket **reads** and **`stream_select()`** are the exception once `RUNTIME_HOOKS=streams` is enabled: both suspend the fiber instead of the thread, which covers clients that block on a PHP stream read (mysqlnd, phpredis, the HTTP stream wrappers) as well as loops waiting on several sockets at once. Writes, `socket_select()`, ext/curl, connecting and DNS resolution still block. See [Configuration](../operations/configuration.md#runtime-hooks).
+Socket **reads** and **`stream_select()`** are the exception once `RUNTIME_HOOKS=streams` is enabled: both suspend the fiber instead of the thread, which covers clients that block on a PHP stream read (mysqlnd, phpredis, the HTTP stream wrappers) as well as loops waiting on several sockets at once. Writes, `socket_select()`, ext/curl, connecting and DNS resolution still block. Whether the categories were installed at all is reported as `runtime_hooks` by `oxphp_server_info()` and by `/config`. See [Configuration](../operations/configuration.md#runtime-hooks).
 
 ### How to Avoid Blocking
 
