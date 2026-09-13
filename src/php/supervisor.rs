@@ -1045,7 +1045,7 @@ mod tests {
     fn a_worker_churning_through_aborted_requests_is_not_a_stall() {
         // Under a storm of client aborts the client is gone before any
         // completion can be recorded against a connection, while the workers'
-        // own count still sees every one of those requests end. Judged by
+        // own count still sees every request they began end. Judged by
         // completions alone a pool handling thousands of requests a second
         // would read as stalled — and it would read that way in exactly the
         // traffic that precedes the real fault, which is where the two have to

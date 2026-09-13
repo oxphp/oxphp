@@ -127,15 +127,22 @@ breaker/test_breaker_shutdown_throw_does_not_clear
 
 # And the same client hanging up, reached the other way. ignore_user_abort()
 # makes the interrupt handler record the disconnect and return instead of
-# unwinding; and the worker keeps running a request whose client has left, so the
-# next one waits in the queue and is cancelled before any worker owns it, which
-# raises no interrupt at all. Either way what ends these requests is the
-# cancellation check on the SAPI's write path — a bailout with nothing said about
-# it. It is the same event as the abort above and has to read the same way: three
-# of them must leave the worker serving.
-breaker/test_breaker_abort_ignored | GET | --max-time 1 | 0 |
-breaker/test_breaker_abort_ignored | GET | --max-time 1 | 0 |
-breaker/test_breaker_abort_ignored | GET | --max-time 1 | 0 |
+# unwinding, so what ends these requests is the cancellation check on the SAPI's
+# write path — a bailout with nothing said about it. It is the same event as the
+# abort above and has to read the same way: three of them must leave the worker
+# serving.
+#
+# The timing is what keeps all three running. Each handler sleeps two seconds
+# before its first write, and each client gives up after one and a half: it is
+# gone at least half a second before that write, and the next line, queued
+# behind the request before it, is reached by the worker at least half a second
+# before its own client goes. A client that leaves while its request is still
+# queued has that request dropped without being run — the last block of this
+# suite — so a shorter wait here would leave these blocks counting two requests,
+# not three.
+breaker/test_breaker_abort_ignored | GET | --max-time 1.5 | 0 |
+breaker/test_breaker_abort_ignored | GET | --max-time 1.5 | 0 |
+breaker/test_breaker_abort_ignored | GET | --max-time 1.5 | 0 |
 breaker/test_breaker_abort_ignored_neutral
 
 # And the boundary of that case. A fatal raised on a request whose client has
@@ -146,18 +153,17 @@ breaker/test_breaker_abort_ignored_neutral
 # reading it as a cancellation would keep a worker that fatals on every request
 # in the pool for as long as clients kept hanging up. No status expected, for
 # the same reason as the aborts above: the client is gone before the response.
-breaker/test_breaker_abort_ignored_fatal | GET | --max-time 1 | 0 |
-breaker/test_breaker_abort_ignored_fatal | GET | --max-time 1 | 0 |
-breaker/test_breaker_abort_ignored_fatal | GET | --max-time 1 | 0 |
+breaker/test_breaker_abort_ignored_fatal | GET | --max-time 1.5 | 0 |
+breaker/test_breaker_abort_ignored_fatal | GET | --max-time 1.5 | 0 |
+breaker/test_breaker_abort_ignored_fatal | GET | --max-time 1.5 | 0 |
 breaker/test_breaker_abort_ignored_fatal_counts
 
-# One abort on its own, against a worker free to take it — the only shape in
-# which the interrupt handler is reached with a running request and asked to
-# leave it alone. The three above cannot show that it does: the last of them was
-# cancelled in the queue, and a request no interrupt was raised against runs to
-# its own end regardless. This one's probe reads a marker on the far side of the
-# sleep, which only a request whose interrupt handler honoured the setting ever
-# writes.
+# One abort on its own, against a worker free to take it, so the interrupt
+# handler is reached with a running request and asked to leave it alone. This
+# one's probe reads a marker on the far side of the sleep, which only a request
+# whose interrupt handler honoured the setting ever writes. It stands apart from
+# the three above because it rests on nothing but its own request: that each of
+# those is still waited for when the worker reaches it is a matter of timing.
 breaker/test_breaker_abort_ignored | GET | --max-time 1 | 0 |
 breaker/test_breaker_abort_ignored_honoured
 
@@ -180,7 +186,21 @@ breaker/test_breaker_abort_buffered_clears
 # two the request is filed as is the whole question, and it has to be the fatal:
 # the client stopping its wait says nothing about the engine state the next
 # request on this worker would inherit. Three of them retire it.
-breaker/test_breaker_abort_then_shutdown_fatal | GET | --max-time 1 | 0 |
-breaker/test_breaker_abort_then_shutdown_fatal | GET | --max-time 1 | 0 |
-breaker/test_breaker_abort_then_shutdown_fatal | GET | --max-time 1 | 0 |
+breaker/test_breaker_abort_then_shutdown_fatal | GET | --max-time 1.5 | 0 |
+breaker/test_breaker_abort_then_shutdown_fatal | GET | --max-time 1.5 | 0 |
+breaker/test_breaker_abort_then_shutdown_fatal | GET | --max-time 1.5 | 0 |
 breaker/test_breaker_abort_then_shutdown_fatal_counts
+
+# Requests whose clients leave while they are still waiting in the queue. Nobody
+# is left to read what they would produce, so the worker that reaches them
+# answers each as closed and takes the next one: it neither runs them nor counts
+# them as served. Each of the two ways a worker takes a request from the queue
+# has a test here. The first stages three such requests and returns, leaving the
+# worker to reach them on its blocking branch; the probe after it reads what the
+# worker did with them. The second stages three more and parks, so the event
+# loop's tick reaches them while it sleeps. The staging confirms from /metrics
+# that all three were queued and that the server saw all three clients leave
+# before any worker took them.
+breaker/test_breaker_queued_cancel_stage
+breaker/test_breaker_queued_cancel_skipped
+breaker/test_breaker_queued_cancel_tick

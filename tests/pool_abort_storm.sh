@@ -14,7 +14,7 @@
 #   1. a plain request is still answered, and answered quickly;
 #   2. the queue is back to empty in the lull after the storm;
 #   3. every worker's request-fiber count is back to zero;
-#   4. the workers have handled everything the server took in.
+#   4. no worker is still inside a request.
 #
 # All four decide the round, none of them is decoration: a pool with one worker
 # of four wedged still answers, so a round that reads seconds where it read
@@ -89,12 +89,10 @@ snap() {
         /^oxphp_workers_idle /                  {i=$2}
         /^oxphp_busy_workers /                  {b=$2}
         /^oxphp_worker_recycles_total /         {r=$2}
-        /^oxphp_requests_total /                {rt=$2}
-        /^oxphp_worker_requests_handled_total / {wh=$2}
         /^oxphp_worker_request_fibers_active\{/ {f = f $2 ","; if ($2+0 > 0) leaked=1}
         END {
-            if (d == "" || rt == "" || wh == "" || f == "") { printf "NOMETRICS"; exit }
-            printf "depth=%s idle=%s busy=%s recycles=%s lag=%d fibers=[%s] %s", d,i,b,r,(rt-wh),f,(leaked?"LEAKED":"")
+            if (d == "" || b == "" || f == "") { printf "NOMETRICS"; exit }
+            printf "depth=%s idle=%s busy=%s recycles=%s fibers=[%s] %s", d,i,b,r,f,(leaked?"LEAKED":"")
         }'
 }
 
@@ -126,9 +124,9 @@ for r in $(seq 1 "$ROUNDS"); do
             ;;
         *)
             depth="$(printf '%s' "$s" | sed -n 's/.*depth=\([0-9]*\) .*/\1/p')"
-            lag="$(printf '%s' "$s" | sed -n 's/.*lag=\(-*[0-9]*\) .*/\1/p')"
+            busy="$(printf '%s' "$s" | sed -n 's/.*busy=\([0-9]*\) .*/\1/p')"
             [ "$depth" = "0" ] || note "the queue still holds $depth"
-            [ "$lag" = "0" ] || note "the workers are $lag behind what the server took in"
+            [ "$busy" = "0" ] || note "$busy workers are still inside a request"
             case "$s" in *LEAKED*) note "a worker still carries a request fiber" ;; esac
             ;;
     esac
