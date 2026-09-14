@@ -3784,20 +3784,19 @@ static bool oxphp_db_class_guarded(const char *cls)
 
 /* Report client classes that turned up after the hooks went in.
  *
- * Asked at the first request rather than at startup, because a class that is
- * absent when module startup runs is indistinguishable there from an extension
- * that is not installed: extensions start in the order their ini files are read,
- * and one whose file sorts after ours (or names its extension in a file of its
- * own) has not registered its classes yet when we look. By the first request every
- * module has started, so a class that is present now and unguarded was loaded too
- * late — worth a line, because an unguarded entry point looks exactly like a
- * guarded one until data crosses between requests.
+ * Asked once every module has started rather than from our own module startup,
+ * because a class that is absent when our MINIT runs is indistinguishable there
+ * from an extension that is not installed: modules start in the order they were loaded
+ * (compiled-in ones first, then as the ini files name them), and a dependency one
+ * module declares on another can move the first of them behind ours without either
+ * naming us. So a client extension whose file sorts after ours, or that such a
+ * dependency pushed behind us, has not registered its classes yet when we look. Once
+ * all of them have started, a class that is present and unguarded was loaded too
+ * late — worth a line, because an unguarded entry point looks exactly like a guarded
+ * one until data crosses between requests.
  *
- * Diagnostic only; the hook is not installed from here. Internal class entries are
- * shared between worker threads — each thread copies the global function table,
- * but classes are copied by pointer with a refcount — so rewriting a method table
- * from inside a request would race every other worker for a structure that only
- * module startup can touch alone. */
+ * Diagnostic only: it names what module startup could not guard and installs
+ * nothing. */
 static void oxphp_db_report_late_classes(void)
 {
     for (size_t i = 0; i < sizeof(oxphp_db_guarded_classes) / sizeof(*oxphp_db_guarded_classes);
@@ -3816,6 +3815,26 @@ static void oxphp_db_report_late_classes(void)
                  cls, cls);
         php_log_err(msg);
     }
+}
+
+/* PHP calls zend_post_startup_cb once per process, from php_module_startup() after
+ * every module and zend_extension has started — before the first request and, in
+ * this server, before any PHP worker thread exists. Chained the way OPcache chains
+ * it: whatever held the slot before us runs first. */
+static zend_result (*oxphp_orig_post_startup_cb)(void) = NULL;
+
+static zend_result oxphp_hooks_post_startup(void)
+{
+    if (oxphp_orig_post_startup_cb) {
+        zend_result (*cb)(void) = oxphp_orig_post_startup_cb;
+
+        oxphp_orig_post_startup_cb = NULL;
+        if (cb() != SUCCESS) {
+            return FAILURE;
+        }
+    }
+    oxphp_db_report_late_classes();
+    return SUCCESS;
 }
 
 /* ─── Hooked stream_select() (category "streams") ────────────
@@ -4349,6 +4368,10 @@ static void oxphp_runtime_hooks_install(void)
          * the connection belongs to one fiber, and for the database clients that
          * has to be established above the stream — see the claim section. */
         oxphp_hook_db_entries();
+        /* Only here: the report compares against the snapshot oxphp_hook_db_entries()
+         * just took, and means nothing without it. */
+        oxphp_orig_post_startup_cb = zend_post_startup_cb;
+        zend_post_startup_cb = oxphp_hooks_post_startup;
         streams_installed = true;
     }
 
@@ -7571,14 +7594,6 @@ PHP_RINIT_FUNCTION(oxphp_sapi)
      * arm64). RSHUTDOWN still runs zend_hash_clean() to dtor cached instances
      * while they are valid; this only forces a fresh table next request. */
     decorator_instance_cache_initialized = 0;
-
-    /* Once per process, at the first request: module startup is too early to tell a
-     * client extension that has not started yet from one that is not installed. */
-    static atomic_flag late_classes_checked = ATOMIC_FLAG_INIT;
-    if (oxphp_hooks_category_enabled("streams")
-        && !atomic_flag_test_and_set(&late_classes_checked)) {
-        oxphp_db_report_late_classes();
-    }
 
     return SUCCESS;
 }
