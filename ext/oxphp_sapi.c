@@ -6760,6 +6760,9 @@ static void oxphp_zend_interrupt_handler(zend_execute_data *execute_data)
  * left to read what it produced. The loop is the only place that knows which of
  * the two this is, so it decides; see cancel_bailout_pending. */
 static void oxphp_mark_cancelled_bailout(oxphp_cancel_reason_t reason) {
+    /* Whatever the verdict below: the frames are left behind either way. */
+    oxphp_fiber_record_cancel_bailout_frame();
+
     if (oxphp_current_fiber != NULL
         && reason != OXPHP_CANCEL_STUCK
         && !oxphp_current_fiber->fatal_reported) {

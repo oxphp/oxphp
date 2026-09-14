@@ -234,7 +234,7 @@ $kernel->shutdown();
 
 ## Best Practices
 
-- **Set `WORKER_MAX_MEMORY_MIB`** (e.g. `128`) so a leaking worker recycles automatically instead of consuming the host. Combine with `Worker::scheduleExit()` for application-driven recycling on top.
+- **Set `WORKER_MAX_MEMORY_MIB`** (e.g. `128`) so a leaking worker recycles automatically instead of consuming the host. Combine with `Worker::scheduleExit()` for application-driven recycling on top. A worker can grow even when the application leaks nothing: when a fatal error or a cancellation abandons a request inside an internal function, what that function had allocated for itself is not given back. A request cancelled in the middle of `usort()` keeps the whole array being sorted alive, for the life of the worker.
 - **Avoid storing per-request state in static properties or globals.** Since these persist across requests, leftover state from one request can leak into another.
 - **Validate the soft reset early.** Add `Worker::current()->scheduleExit()` to your handler under a development flag and exercise the application end-to-end — this catches state-leak bugs before you commit to long-lived workers.
 - **Handle database idle timeouts.** If your database driver disconnects after an idle period, catch the exception and reconnect, or use a connection pool that handles reconnection automatically.

@@ -145,6 +145,15 @@ breaker/test_breaker_abort_ignored | GET | --max-time 1.5 | 0 |
 breaker/test_breaker_abort_ignored | GET | --max-time 1.5 | 0 |
 breaker/test_breaker_abort_ignored_neutral
 
+# The same three hang-ups, on a handler holding an object whose destructor
+# throws. The write ends each request, and the cleanup that gives back what the
+# handler held runs that destructor: the engine reports its throw as an uncaught
+# exception, and that report must not turn a cancellation into a failure.
+breaker/test_breaker_abort_ignored_dtor_throw | GET | --max-time 1.5 | 0 |
+breaker/test_breaker_abort_ignored_dtor_throw | GET | --max-time 1.5 | 0 |
+breaker/test_breaker_abort_ignored_dtor_throw | GET | --max-time 1.5 | 0 |
+breaker/test_breaker_abort_ignored_dtor_throw_neutral
+
 # And the boundary of that case. A fatal raised on a request whose client has
 # already gone reaches the same cancellation check, because the message it
 # displays on its way out is a write like any other — and it gets there before
