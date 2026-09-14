@@ -542,6 +542,11 @@ uint64_t oxphp_fiber_current_id(void);
  * its callable. Called once from the extension MINIT. */
 void oxphp_fiber_minit(void);
 
+/* Record where the running request is, for the cleanup after a bailout that no
+ * error preceded. Called immediately before the write path's cancellation
+ * bailout. */
+void oxphp_fiber_record_cancel_bailout_frame(void);
+
 /* Fill `fci`/`fcc` with a zero-argument call to that function. The fcc carries
  * the handler directly, so no name lookup happens and the function stays out of
  * the global function table — userland can neither see nor call it. */
