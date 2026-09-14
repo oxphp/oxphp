@@ -69,7 +69,10 @@ services:
       # 0 or unset = auto (PHP_WORKERS * 128).
       # - QUEUE_CAPACITY=0
 
-      # How long a request may wait for a PHP worker before it gets a 529.
+      # The longest a request may wait for a PHP worker before it gets a 529.
+      # A ceiling, not a fixed wait: while the pool is picking up requests
+      # whose clients have already left, the server shortens the wait below
+      # this and publishes what is in force as oxphp_admission_wait_budget_us.
       # One deadline covering both waits: for a queue slot, and in the queue
       # for a worker. A request a worker reaches after its deadline is refused
       # rather than executed.

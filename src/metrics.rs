@@ -49,6 +49,55 @@ pub(crate) fn pool_starts() -> u64 {
     POOL_STARTS.load(Ordering::Relaxed)
 }
 
+/// Requests a worker answered whose client had already gone.
+///
+/// The pair to [`POOL_STARTS`], though not over the same population: a start
+/// is counted only for a request that goes on to run, while this also counts
+/// one answered at the pickup, without running, because its client left while
+/// it sat in the queue. Their ratio over a window says whether the waiting in
+/// front of the pool is outliving the clients doing it, which is what the
+/// admission budget tunes itself against.
+///
+/// Deliberately not a measure of wasted CPU. A request whose client left while
+/// it was queued is answered 499 at the pickup without starting PHP, on either
+/// pool model, while one whose client left during its handler has cost a whole
+/// handler — the two cost the pool very different amounts and say the same
+/// thing about the wait, so both are counted. Excluding the cheap one was
+/// measured: on a per-request pool it halves useful throughput under an
+/// overload of impatient clients, because the budget then never shortens.
+///
+/// Refusals are not counted. A request answered 529 on its deadline was never
+/// run, is already reported as `oxphp_admission_refused_total`, and counting it
+/// here would feed the controller its own output.
+///
+/// Not counted for a request whose response left before its handler finished —
+/// a stream whose headers went out, or an early `oxphp_finish_request()`
+/// answer. The client already has that response, and closing it afterwards
+/// ends the response rather than giving up on the wait: an SSE session ending
+/// is the everyday case. A stream's own flush writes the same `ClientAbort`
+/// when it finds the connection gone, so these are excluded by where the count
+/// is taken rather than by reason, and a client that left before such a
+/// handler handed its response over goes uncounted with them.
+///
+/// Process-global for the same reason as [`POOL_STARTS`]: worker mode observes
+/// it at the pickup and in its response callback, where a `Metrics` is
+/// reachable only through a thread-local that may be unset.
+static ABANDONED_WORK: AtomicU64 = AtomicU64::new(0);
+
+/// One request a worker answered for a client that had gone.
+///
+/// Gated with the pool itself, like [`pool_start`]: without PHP there are no
+/// workers and nothing is ever taken off the queue.
+#[cfg(feature = "php")]
+pub(crate) fn abandoned_work() {
+    ABANDONED_WORK.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Reading of [`ABANDONED_WORK`], for comparison against a later one.
+pub(crate) fn abandoned_work_total() -> u64 {
+    ABANDONED_WORK.load(Ordering::Relaxed)
+}
+
 // ── Worker Mode Metrics ──────────────────────────────────────
 
 /// Per-worker stats shared between the worker thread and the metrics collector.
@@ -229,6 +278,24 @@ pub struct QueueSnapshot {
     pub capacity: usize,
     /// Admission permits nobody holds.
     pub slots_available: usize,
+    /// How long a request arriving now would be given to wait, in
+    /// microseconds. `QUEUE_WAIT_TIMEOUT_MS` is the ceiling, not the value:
+    /// the server shortens this on its own when the work it admits turns out
+    /// to be work nobody is still waiting for. `0` in fail-fast mode, where
+    /// there is no wait to shorten.
+    ///
+    /// Microseconds, like every other duration this file publishes, and not
+    /// the milliseconds the knob is written in: the floor is a sixty-fourth of
+    /// the ceiling, which at the default is 15.6 ms, and the reading an
+    /// operator wants from this series is whether the controller is sitting on
+    /// that floor.
+    pub wait_budget_us: u64,
+    /// `QUEUE_WAIT_TIMEOUT_MS`, in microseconds — the ceiling the value above
+    /// is read against. Published for the same reason [`QueueSnapshot::capacity`]
+    /// is: "the budget is below its ceiling" is the whole diagnosis, and an
+    /// alert cannot make it against a number that lives only in `/config`.
+    /// `0` in fail-fast mode.
+    pub wait_budget_ceiling_us: u64,
 }
 
 /// Reads [`QueueSnapshot`] off the live executor. Installed once by the
@@ -929,7 +996,7 @@ impl Metrics {
 
         let _ = writeln!(
             out,
-            "# HELP oxphp_admission_wait_wasted_total Requests that waited out QUEUE_WAIT_TIMEOUT_MS while the pool began no request at all. Measured as work started, not as entries leaving the queue: a worker clearing requests the deadline already answered moves the queue without serving anybody. A subset of oxphp_admission_refused_total{{reason=\"wait_timeout\"}}: those waits lost a race for a worker, these never had one to lose. Sustained non-zero means waiting is buying nothing — shorten QUEUE_WAIT_TIMEOUT_MS. Setting it to 0 drops the wait for a queue slot but not the wait inside the queue, so it needs a QUEUE_CAPACITY small enough to be full on a pool that picks nothing up. The classic cause is an application calling back into this same server over HTTP, where the inner request waits for a worker the outer one is holding; a pool whose handlers all outlast the budget produces it too."
+            "# HELP oxphp_admission_wait_wasted_total Requests that waited out their whole wait budget while the pool began no request at all. Measured as work started, not as entries leaving the queue: a worker clearing requests the deadline already answered moves the queue without serving anybody. A subset of oxphp_admission_refused_total{{reason=\"wait_timeout\"}}: those waits lost a race for a worker, these never had one to lose. Read only while oxphp_admission_wait_budget_us is at its ceiling: over a window the server has already shortened, \"the pool began nothing\" is a statement about the window rather than about the pool — a healthy pool of four workers on quarter-second handlers starts one request every 62ms and would land outside most of them. A wedged pool holds the budget at its ceiling on its own, so this stays armed where it is needed; the exception is a pool that wedges while an overload already had the budget down, where oxphp_queue_depth not falling with oxphp_busy_workers at 0 is what names it instead. Sustained non-zero therefore means waiting is buying nothing at full length — shorten QUEUE_WAIT_TIMEOUT_MS; the server does not shorten it for this on its own, because the adjustment is driven by what the pool starts, and a wedged pool starts nothing. Setting it to 0 drops the wait for a queue slot but not the wait inside the queue, so it needs a QUEUE_CAPACITY small enough to be full on a pool that picks nothing up. The classic cause is an application calling back into this same server over HTTP, where the inner request waits for a worker the outer one is holding; a pool whose handlers all outlast the budget produces it too."
         );
         let _ = writeln!(out, "# TYPE oxphp_admission_wait_wasted_total counter");
         let _ = writeln!(
@@ -937,6 +1004,13 @@ impl Metrics {
             "oxphp_admission_wait_wasted_total {}",
             self.admission_wait_wasted.load(Ordering::Relaxed)
         );
+
+        let _ = writeln!(
+            out,
+            "# HELP oxphp_abandoned_work_total Requests a worker answered whose client had already gone. Counted whether or not the handler ran: a request whose client left while it was queued is answered 499 at the pickup before PHP starts and costs almost nothing, one whose client left during its handler costs a full one — the two differ in price and say the same thing about the wait in front of the pool, which is what this measures. Not counted once the response has gone out before the handler finished — a stream whose headers were sent, or an oxphp_finish_request() answer — so an SSE client ending its session is not abandoned work. Rising with oxphp_admission_wait_budget_us below its ceiling is the server reacting; rising with the budget at its ceiling means the clients are leaving during their handler rather than during their wait, and the wait is not what to shorten. Requests refused on their deadline are not counted — they never ran and are reported as oxphp_admission_refused_total instead."
+        );
+        let _ = writeln!(out, "# TYPE oxphp_abandoned_work_total counter");
+        let _ = writeln!(out, "oxphp_abandoned_work_total {}", abandoned_work_total());
 
         // Read off the live queue rather than counted here, and absent
         // entirely for an executor that has no queue — zeros would read as an
@@ -965,6 +1039,28 @@ impl Metrics {
                 out,
                 "oxphp_admission_slots_available {}",
                 queue.slots_available
+            );
+
+            let _ = writeln!(
+                out,
+                "# HELP oxphp_admission_wait_budget_us How long a request arriving now may wait for a worker. QUEUE_WAIT_TIMEOUT_MS is the ceiling, published alongside as oxphp_admission_wait_budget_ceiling_us: the server shortens this while the work it admits is completing for clients who have already left, and lengthens it again once the queue drains. Below the ceiling means the pool is being offered more than it can serve to clients less patient than the ceiling; at the floor, a sixty-fourth of the ceiling or 10ms, it has shortened as far as it will go. 0 in fail-fast mode."
+            );
+            let _ = writeln!(out, "# TYPE oxphp_admission_wait_budget_us gauge");
+            let _ = writeln!(
+                out,
+                "oxphp_admission_wait_budget_us {}",
+                queue.wait_budget_us
+            );
+
+            let _ = writeln!(
+                out,
+                "# HELP oxphp_admission_wait_budget_ceiling_us QUEUE_WAIT_TIMEOUT_MS, the longest oxphp_admission_wait_budget_us is ever allowed to be. Constant for the life of the process, and published so that the reading that matters — how far under its ceiling the budget has been driven — can be made from this endpoint alone rather than against a number hardcoded into the alert. 0 in fail-fast mode."
+            );
+            let _ = writeln!(out, "# TYPE oxphp_admission_wait_budget_ceiling_us gauge");
+            let _ = writeln!(
+                out,
+                "oxphp_admission_wait_budget_ceiling_us {}",
+                queue.wait_budget_ceiling_us
             );
         }
 
@@ -1794,6 +1890,8 @@ mod tests {
             depth: 512,
             capacity: 512,
             slots_available: 0,
+            wait_budget_us: 1_000_000,
+            wait_budget_ceiling_us: 1_000_000,
         }));
         let out = stuck_queue.to_prometheus();
         assert!(out.contains("oxphp_queue_depth 512"), "{out}");
@@ -1805,10 +1903,71 @@ mod tests {
             depth: 0,
             capacity: 512,
             slots_available: 0,
+            wait_budget_us: 1_000_000,
+            wait_budget_ceiling_us: 1_000_000,
         }));
         let out = lost_permits.to_prometheus();
         assert!(out.contains("oxphp_queue_depth 0"), "{out}");
         assert!(out.contains("oxphp_admission_slots_available 0"), "{out}");
+    }
+
+    #[test]
+    fn the_wait_budget_pair_renders_with_the_queue_and_reports_fail_fast_as_zero() {
+        // The gauge alone cannot be read: "below its ceiling" is the entire
+        // diagnosis and the ceiling lives nowhere else on this endpoint, so
+        // the two are one reading and are asserted as one.
+        let shortened = Metrics::new();
+        shortened.set_queue_probe(Box::new(|| QueueSnapshot {
+            depth: 12,
+            capacity: 512,
+            slots_available: 0,
+            wait_budget_us: 15_625,
+            wait_budget_ceiling_us: 1_000_000,
+        }));
+        let out = shortened.to_prometheus();
+        assert!(
+            out.contains("oxphp_admission_wait_budget_us 15625"),
+            "{out}"
+        );
+        assert!(
+            out.contains("oxphp_admission_wait_budget_ceiling_us 1000000"),
+            "{out}"
+        );
+
+        // Fail-fast has no wait to shorten and says so with a zero on both,
+        // which is the contract three doc comments state and nothing else
+        // exercises. A floor of 15.625 ms also has to survive the trip: in
+        // milliseconds it would publish as 15, and "is the controller sitting
+        // on its floor" is precisely the question this series is asked.
+        let fail_fast = Metrics::new();
+        fail_fast.set_queue_probe(Box::new(|| QueueSnapshot {
+            depth: 0,
+            capacity: 512,
+            slots_available: 512,
+            wait_budget_us: 0,
+            wait_budget_ceiling_us: 0,
+        }));
+        let out = fail_fast.to_prometheus();
+        assert!(out.contains("oxphp_admission_wait_budget_us 0"), "{out}");
+        assert!(
+            out.contains("oxphp_admission_wait_budget_ceiling_us 0"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn abandoned_work_renders_without_a_queue_probe() {
+        // The controller's only input, and an operator series in its own
+        // right. Unlike the queue gauges it is process-global and rendered
+        // unconditionally, so an executor with no queue still reports it —
+        // the value is whatever the rest of this process has counted, which is
+        // why only its presence is asserted.
+        let out = Metrics::new().to_prometheus();
+        assert!(
+            out.contains("# TYPE oxphp_abandoned_work_total counter"),
+            "{out}"
+        );
+        assert!(out.contains("\noxphp_abandoned_work_total "), "{out}");
     }
 
     #[test]
@@ -1827,6 +1986,8 @@ mod tests {
             depth: 0,
             capacity: 512,
             slots_available: 512,
+            wait_budget_us: 1_000_000,
+            wait_budget_ceiling_us: 1_000_000,
         }));
         assert!(!queue_only.to_prometheus().contains("oxphp_pool_stalled"));
 
@@ -1835,6 +1996,8 @@ mod tests {
             depth: 7,
             capacity: 512,
             slots_available: 505,
+            wait_budget_us: 1_000_000,
+            wait_budget_ceiling_us: 1_000_000,
         }));
         watched.set_worker_metrics(Arc::new(WorkerMetrics::new(4)));
         let out = watched.to_prometheus();
@@ -1856,10 +2019,18 @@ mod tests {
         // The stub executor has no queue at all. Rendering zeros for one would
         // read as an idle queue rather than as no queue, the same way the
         // per-worker section stays absent outside worker mode.
+        //
+        // Asserted against the declaration and the sample rather than against
+        // the name anywhere in the output: a series is exported when those two
+        // lines are present, and HELP text on the counters that are always
+        // rendered names other series freely — the wasted-wait counter tells
+        // an operator to read this one.
         let m = Metrics::new();
         let out = m.to_prometheus();
-        assert!(!out.contains("oxphp_queue_depth"), "{out}");
-        assert!(!out.contains("oxphp_admission_slots_available"), "{out}");
+        for series in ["oxphp_queue_depth", "oxphp_admission_slots_available"] {
+            assert!(!out.contains(&format!("# TYPE {series} ")), "{out}");
+            assert!(!out.contains(&format!("\n{series} ")), "{out}");
+        }
     }
 
     #[test]

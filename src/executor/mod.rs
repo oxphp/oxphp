@@ -27,6 +27,12 @@ type DeferredResponse = tokio::sync::oneshot::Receiver<ScriptResponse>;
 pub struct Queued {
     pub rx: DeferredResponse,
     pub deadline: Option<std::time::Instant>,
+    /// Whether `deadline` was stamped from the configured wait budget rather
+    /// than a shortened one. Carried from arrival because the waiting side
+    /// asks, when the deadline answers a request no worker took, whether the
+    /// pool started anything at all while it waited — a question only a
+    /// full-length window can put to the pool.
+    pub wait_at_ceiling: bool,
 }
 
 /// Result of executor dispatch. Stub returns `Immediate` (no channel overhead),

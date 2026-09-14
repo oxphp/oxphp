@@ -44,7 +44,14 @@ impl ScriptExecutor for HoldingExecutor {
         self.held.lock().unwrap().push(tx);
         // No deadline: fail-fast mode's shape, so nothing on the waiting side
         // can answer this request and the only way it ends is the client.
-        ExecuteResult::Deferred(Queued { rx, deadline: None })
+        ExecuteResult::Deferred(Queued {
+            rx,
+            deadline: None,
+            // No deadline, so nothing reads it: the flag says whether a wait
+            // that ran out ran out over the configured budget, and this one
+            // has no budget to run out of.
+            wait_at_ceiling: false,
+        })
     }
 
     fn shutdown(&self) {}
@@ -65,7 +72,14 @@ impl ScriptExecutor for AnsweringExecutor {
             sleep(Duration::from_millis(20)).await;
             let _ = tx.send(answer());
         });
-        ExecuteResult::Deferred(Queued { rx, deadline: None })
+        ExecuteResult::Deferred(Queued {
+            rx,
+            deadline: None,
+            // No deadline, so nothing reads it: the flag says whether a wait
+            // that ran out ran out over the configured budget, and this one
+            // has no budget to run out of.
+            wait_at_ceiling: false,
+        })
     }
 
     fn shutdown(&self) {}

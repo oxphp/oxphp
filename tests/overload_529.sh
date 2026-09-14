@@ -71,6 +71,25 @@
 #      still is.
 #   Q: O and P through the worker-mode receive loop, which takes requests off
 #      the queue from a different place and unwinds through the scheduler.
+#   R: clients less patient than the budget. Under sustained overload a FIFO
+#      queue hands every worker the oldest surviving request, so a fixed budget
+#      makes each served request wait it out in full and the client is gone
+#      before the handler returns — the pool runs flat out and delivers nothing.
+#      The budget has to shorten itself until the work it admits is work
+#      somebody is still waiting for, and lengthen again once the queue drains.
+#   S: the same load on the per-request pool, which answers a request whose
+#      client left while it was queued before starting PHP at all. That costs
+#      the pool almost nothing and says the same thing about the wait, so it
+#      counts the same — the pool has to come out of the collapse here too.
+#   T: the negative control for the shortening itself. Once the budget is
+#      below the gap between two pickups, a wait that ends on it ends between
+#      them, and the wasted-wait series — which means "the pool began nothing
+#      at all while this request waited" — would follow the budget down and
+#      report a pool that is serving as one that picks up nothing.
+#   U: a client closing a stream it already has is not abandoned work. The
+#      flush that finds an SSE connection gone writes the same client-abort
+#      reason as a departure mid-handler, and counting it would let every
+#      ordinary end of a session shorten the budget, on either pool model.
 #
 # Handler durations are picked for discrimination, not realism: each scenario
 # needs the pool to be busy for a stretch that its own budget cannot outlast
@@ -268,6 +287,29 @@ else
 	bad "A: oxphp_admission_wait_wasted_total reads ${A_WASTED} (-1 = the series is not exported at all) — on this burst every wait ended in a worker and none of them was wasted"
 fi
 
+# The negative control for scenario R. The budget shortens itself when the work
+# the pool starts turns out to belong to clients who have left; here every one
+# of the six was delivered, so it must not have moved. Without this, R is
+# satisfied by a server that simply always waits less than it was told to.
+A_BUDGET="$(gauge 'oxphp_admission_wait_budget_us')"
+A_CEILING="$(gauge 'oxphp_admission_wait_budget_ceiling_us')"
+if [ "$A_BUDGET" = "1000000" ] && [ "$A_CEILING" = "1000000" ]; then
+	ok "A: oxphp_admission_wait_budget_us still reads the configured 1000 ms"
+else
+	bad "A: oxphp_admission_wait_budget_us reads ${A_BUDGET} against a ceiling of ${A_CEILING} (-1 = the series is not exported at all) — the budget moved on a burst the pool served in full"
+fi
+
+# And the controller's only input, on the same burst. Every one of the six was
+# delivered to a client that was still there, so the signal the budget moves on
+# has to be silent — otherwise the gauge above is standing still for some
+# reason other than the absence of evidence.
+A_ABANDONED="$(gauge 'oxphp_abandoned_work_total')"
+if [ "$A_ABANDONED" = "0" ]; then
+	ok "A: oxphp_abandoned_work_total stayed 0 — nothing was served to a client that had gone"
+else
+	bad "A: oxphp_abandoned_work_total reads ${A_ABANDONED} (-1 = the series is not exported at all) — a burst the pool served in full cannot contain work nobody was waiting for"
+fi
+
 # ── B: genuine overload still sheds, by deadline ─────────────────────
 # 3 s handlers against one worker: long enough that the budget expires first
 # (so the shed is attributable to the deadline and not to the pool draining),
@@ -400,6 +442,19 @@ if [ "$FAST_SHED" -eq "$SHED_D" ]; then
 	ok "D: every fail-fast shed returned in under a second"
 else
 	bad "D: only $FAST_SHED of $SHED_D sheds were immediate — the budget is still being applied"
+fi
+
+# Fail-fast has no wait, so it has no budget to publish and no ceiling to
+# publish it against. Both series say so with a zero rather than by being
+# absent — an absent series and a server that forgot to wire the probe look the
+# same to an alert, and a non-zero here would mean a mode with no wait is
+# advertising one.
+D_BUDGET="$(gauge 'oxphp_admission_wait_budget_us')"
+D_CEILING="$(gauge 'oxphp_admission_wait_budget_ceiling_us')"
+if [ "$D_BUDGET" = "0" ] && [ "$D_CEILING" = "0" ]; then
+	ok "D: the wait-budget pair reads 0 in fail-fast mode"
+else
+	bad "D: oxphp_admission_wait_budget_us reads ${D_BUDGET} against a ceiling of ${D_CEILING} with QUEUE_WAIT_TIMEOUT_MS=0 (-1 = the series is not exported at all)"
 fi
 
 if docker exec "$SRV" wget -qO- http://127.0.0.1:9090/metrics 2>/dev/null \
@@ -1637,6 +1692,573 @@ else
 fi
 docker rm -f "$SRV" >/dev/null 2>&1
 wait
+
+# ── R: clients less patient than the budget ──────────────────────────
+# The pool serves 10 requests a second (one worker, 100 ms handler) and is
+# offered roughly 30. A FIFO queue hands a worker the oldest request that still
+# has a client, and under a fixed 1000 ms budget that request has waited out the
+# client's own 400 ms: the handler runs, the client is already gone, and the
+# next 100 ms of the worker goes the same way. Every knob here is the pool's
+# except the patience, which is the client's and which the server never learns —
+# so the budget has to find its own way under it.
+#
+# Capacity 64 rather than the 1 the other scenarios use, and that is the point:
+# the collapse lives where the queue is *not* full. A full queue refuses on the
+# spot and the refusal reaches the client in milliseconds; a queue with room
+# admits everything and lets it age instead.
+#
+# Worker mode here and the per-request pool in S, one scenario per model.
+# Neither runs a handler for a request whose client left while it was queued —
+# both answer it at the pickup, at memory speed — but the pickup is a different
+# piece of code in each, and it is where the evidence the budget moves on is
+# counted. What the budget decides is what happens to the requests behind
+# those: whether the pool keeps handing workers requests whose clients are
+# about to leave, or refuses them early enough that the ones it does start are
+# still wanted. Measured on this image at 74 of 240 served in worker mode and
+# 79 per-request, with the surplus refused rather than left hanging.
+start_collapse_container() {
+	docker rm -f "$SRV" >/dev/null 2>&1
+	docker run -d --name "$SRV" \
+		-e DOCUMENT_ROOT=/var/www/html \
+		-e WORKER_MODE_ENABLED=true \
+		-e ENTRY_FILE=/var/www/html/wpause.php \
+		-e PHP_WORKERS=1 \
+		-e QUEUE_CAPACITY=64 \
+		-e QUEUE_WAIT_TIMEOUT_MS=1000 \
+		-e INTERNAL_ADDR=0.0.0.0:9090 \
+		-e LOG_LEVEL=error \
+		-p "${PORT}":80 \
+		-v "$FIX:/var/www/html:ro" \
+		"$IMAGE" >/dev/null || return 1
+	for _ in $(seq 1 30); do
+		curl -fsS "http://localhost:${PORT}/work?ms=0" >/dev/null 2>&1 && return 0
+		sleep 1
+	done
+	return 1
+}
+
+R_WAVES=40
+R_PER_WAVE=6
+R_PATIENCE=0.4
+
+if start_collapse_container; then
+	ok "R: container up (worker mode, 1 worker, 100 ms handler, capacity 64, budget 1000 ms)"
+else
+	bad "R: container failed to start"; docker logs "$SRV" 2>&1 | tail -5 >&2; exit 1
+fi
+
+# Sampled while the load runs, not after it. The budget this scenario is about
+# is a live quantity that recovers once the queue drains, so a single reading
+# taken when the last curl has returned describes the recovery and not the
+# overload. Written under its own prefix: `codes r` globs `$TMP/r.*`, and a
+# file of gauge readings in there would be counted as HTTP results.
+: > "$TMP/rbudget"
+rm -f "$TMP/rstop"
+(
+	while [ ! -f "$TMP/rstop" ]; do
+		gauge 'oxphp_admission_wait_budget_us' >> "$TMP/rbudget"
+		sleep 0.5
+	done
+) &
+R_SAMPLER=$!
+
+# Open-loop: the waves keep arriving whether or not the pool is keeping up,
+# which is what a queue in front of a saturated pool actually faces. A closed
+# loop cannot produce this at all — its clients are the ones waiting, so the
+# offered rate falls to the served rate and the queue never builds.
+#
+# In its own subshell so that the `wait` at the end has only the curls to wait
+# for: a bare `wait` waits for every background job of the shell it runs in,
+# and the sampler above is one of those — it stops on a file this loop has not
+# written yet, so waiting for it here would never return.
+(
+	for w in $(seq 1 "$R_WAVES"); do
+		for c in $(seq 1 "$R_PER_WAVE"); do
+			curl -s -o /dev/null -w '%{http_code}\n' --max-time "$R_PATIENCE" \
+				"http://localhost:${PORT}/work?ms=100" \
+				> "$TMP/r.${w}_${c}" 2>&1 &
+		done
+		sleep 0.2
+	done
+	wait
+)
+
+touch "$TMP/rstop"
+wait "$R_SAMPLER" 2>/dev/null
+
+R_ATTEMPTS=$((R_WAVES * R_PER_WAVE))
+R_SERVED="$(count r 200)"
+R_SHED="$(count r 529)"
+# curl prints 000 when it gives up without a response: the request is still
+# somewhere in the server, and nothing will ever be delivered for it. This is
+# the population the collapse consists of.
+R_HUNG="$(count r 000)"
+# Lowest reading the budget reached while the load was on. -1 readings are
+# failed scrapes, not a budget of -1, and would win a minimum outright.
+R_MIN_BUDGET="$(grep -v '^-1$' "$TMP/rbudget" | sort -n | head -1)"
+
+# The premise, read from the run itself rather than assumed: a pool offered
+# more than twice what it can serve must have turned most of it away somehow.
+# Without this the checks below would pass on a run that was never overloaded —
+# 240 requests a fast enough pool served in full would satisfy "at least 25 were
+# served" without exercising anything.
+if [ "$((R_SERVED + R_SHED + R_HUNG))" -eq "$R_ATTEMPTS" ] \
+	&& [ "$((R_SHED + R_HUNG))" -ge 120 ]; then
+	ok "R: the pool was genuinely over-offered (${R_SERVED} × 200, ${R_SHED} × 529, ${R_HUNG} unanswered of ${R_ATTEMPTS})"
+else
+	bad "R: ${R_SERVED} × 200, ${R_SHED} × 529, ${R_HUNG} unanswered of ${R_ATTEMPTS} — this scenario needs a pool that could not keep up, or the checks below are about nothing"
+fi
+
+# The half that says the work is granted. A pool serving 10 requests a second
+# has some 80 to give across this run. The bar is the one S uses, and for the
+# same reason: both models answer a queue-abandoned request at the pickup, so
+# the side with the budget pinned at its ceiling sits where S measures it,
+# around 43 of 240, against 74 here once the budget moves. 55 leaves the narrow
+# margin on the side that would produce a false pass, which is why this reading
+# does not carry the scenario alone — see S for what a red here with the
+# refusal count and the gauge both green means.
+if [ "$R_SERVED" -ge 55 ]; then
+	ok "R: the pool kept serving clients less patient than its budget (${R_SERVED} × 200)"
+else
+	bad "R: only ${R_SERVED} × 200 out of ${R_ATTEMPTS} — the pool was busy the whole run and delivered almost none of it"
+fi
+
+# And the half that says it is bounded. Serving some while leaving the rest to
+# hang is not the behaviour being asked for: what cannot be served has to be
+# refused to a client who is still there to read the refusal, which is what
+# distinguishes a 529 from a connection that goes quiet.
+if [ "$R_SHED" -ge 40 ]; then
+	ok "R: and refused the surplus to clients still waiting (${R_SHED} × 529)"
+else
+	bad "R: only ${R_SHED} × 529 against ${R_HUNG} unanswered — the surplus was left hanging rather than turned away"
+fi
+
+# The mechanism, not the symptom: the counts above could in principle come from
+# a pool that got faster. This is the only reading that says the budget itself
+# moved, and it has to be taken from the load, which is why it is sampled.
+if [ "${R_MIN_BUDGET:--1}" -ge 0 ] && [ "${R_MIN_BUDGET:-99999999}" -le 500000 ]; then
+	ok "R: the wait budget shortened itself under the load (${R_MIN_BUDGET} µs of 1000000 µs)"
+else
+	bad "R: oxphp_admission_wait_budget_us never went below ${R_MIN_BUDGET:-?} µs (-1 = the series is not exported at all) — the budget stayed as configured while the pool served nobody"
+fi
+
+# The way out. A budget that shortens and stays short has traded this failure
+# for the one the wait exists to prevent: the next burst inside the pool's
+# capacity would be shed instead of absorbed. The queue is empty within a
+# second of the last client leaving, and recovery is what must follow from that
+# and not from a restart.
+R_RECOVERED=""
+for _ in $(seq 1 20); do
+	if [ "$(gauge 'oxphp_admission_wait_budget_us')" = "1000000" ]; then
+		R_RECOVERED=1
+		break
+	fi
+	sleep 0.5
+done
+if [ -n "$R_RECOVERED" ]; then
+	ok "R: and went back to the configured budget once the queue drained"
+else
+	bad "R: oxphp_admission_wait_budget_us stayed at $(gauge 'oxphp_admission_wait_budget_us') µs on an idle pool — the shortening has no way out"
+fi
+
+# The input the whole loop runs on. Everything above reads the budget, which is
+# the controller's output; without this the scenario is satisfied by a budget
+# that moves for some reason of its own.
+#
+# The bar is low on purpose, and not because the number is: the better this
+# works the smaller it gets, since a shortened budget is precisely what stops
+# requests reaching a worker for a client who has gone. On the unfixed build
+# the same run produces it in the hundreds. What is being asserted is that the
+# evidence exists and is not a stray one-off.
+R_ABANDONED="$(gauge 'oxphp_abandoned_work_total')"
+if [ "${R_ABANDONED:--1}" -ge 10 ]; then
+	ok "R: and counted the work it was reacting to (${R_ABANDONED} × abandoned)"
+else
+	bad "R: oxphp_abandoned_work_total reads ${R_ABANDONED} (-1 = the series is not exported at all) — the budget moved without the evidence that is supposed to move it"
+fi
+
+# And the series this load must NOT move. A wasted wait means the pool began
+# nothing at all while somebody waited out the whole budget — a wedged pool.
+# This pool is the opposite: it starts a request every 100 ms throughout, and
+# its budget bottoms out at 125 ms, so every wait that ends on the deadline spans
+# a pickup and the reading is false on its own terms. That is what this check
+# says here, and it is all it says: the case where the budget falls under the
+# pickup spacing and the reading needs the configured window to hold it down is
+# scenario T. A handful from the first second is the most this can legitimately
+# be.
+R_WASTED="$(gauge 'oxphp_admission_wait_wasted_total')"
+if [ "${R_WASTED:--1}" -ge 0 ] && [ "${R_WASTED:-99999}" -le 5 ]; then
+	ok "R: and left oxphp_admission_wait_wasted_total alone (${R_WASTED}) — a shedding pool is not a wedged one"
+else
+	bad "R: oxphp_admission_wait_wasted_total reads ${R_WASTED} against ${R_SHED} refusals — the wasted-wait reading is following the budget down and calling a working pool wedged"
+fi
+docker rm -f "$SRV" >/dev/null 2>&1
+wait
+
+# ── S: the same collapse, on the per-request pool ───────────
+#
+# R covers worker mode. This pool model reaches the same request through a
+# worker loop of its own, and answers it 499 there without starting PHP, so it
+# costs almost nothing — and it is tempting to conclude that a request that
+# cost nothing is not evidence of anything and should not move the budget.
+# Measured, that reading costs this pool half of what it can deliver: the cheap
+# 499s are most of what it picks up under this load, and leaving them out keeps
+# the budget at its ceiling, above the patience in front of it, so the pool
+# keeps admitting requests whose clients are gone before a worker frees up. The
+# clients that are still there get no answer at all rather than a 529 they
+# could act on.
+#
+# What the counter measures is therefore the wait, not the work: a client that
+# left while queued says the waiting outlived it, whatever that request went on
+# to cost. This scenario asserts the consequence on the second of the two pool
+# models, whose pickup is the second of the two places the evidence is counted
+# — it serves, it refuses the surplus to clients still there, and the budget
+# comes down and goes back up.
+start_percall_container() {
+	docker rm -f "$SRV" >/dev/null 2>&1
+	docker run -d --name "$SRV" \
+		-e DOCUMENT_ROOT=/var/www/html \
+		-e PHP_WORKERS=1 \
+		-e QUEUE_CAPACITY=64 \
+		-e QUEUE_WAIT_TIMEOUT_MS=1000 \
+		-e INTERNAL_ADDR=0.0.0.0:9090 \
+		-e LOG_LEVEL=error \
+		-p "${PORT}":80 \
+		-v "$FIX:/var/www/html:ro" \
+		"$IMAGE" >/dev/null || return 1
+	for _ in $(seq 1 30); do
+		curl -fsS "http://localhost:${PORT}/pause.php?ms=0" >/dev/null 2>&1 && return 0
+		sleep 1
+	done
+	return 1
+}
+
+if start_percall_container; then
+	ok "S: container up (per-request, 1 worker, 100 ms handler, capacity 64, budget 1000 ms)"
+else
+	bad "S: container failed to start"; docker logs "$SRV" 2>&1 | tail -5 >&2; exit 1
+fi
+
+: > "$TMP/sbudget"
+rm -f "$TMP/sstop"
+(
+	while [ ! -f "$TMP/sstop" ]; do
+		gauge 'oxphp_admission_wait_budget_us' >> "$TMP/sbudget"
+		sleep 0.5
+	done
+) &
+S_SAMPLER=$!
+
+# Same shape as R — see there for why the load loop has a subshell of its own.
+(
+	for w in $(seq 1 "$R_WAVES"); do
+		for c in $(seq 1 "$R_PER_WAVE"); do
+			curl -s -o /dev/null -w '%{http_code}\n' --max-time "$R_PATIENCE" \
+				"http://localhost:${PORT}/pause.php?ms=100" \
+				> "$TMP/s.${w}_${c}" 2>&1 &
+		done
+		sleep 0.2
+	done
+	wait
+)
+
+touch "$TMP/sstop"
+wait "$S_SAMPLER" 2>/dev/null
+
+S_SERVED="$(count s 200)"
+S_SHED="$(count s 529)"
+S_HUNG="$(count s 000)"
+# Lowest reading the budget reached while the load was on — see R.
+S_MIN_BUDGET="$(grep -v '^-1$' "$TMP/sbudget" | sort -n | head -1)"
+
+# The premise, as in R: this says nothing unless the pool was over-offered.
+if [ "$((S_SERVED + S_SHED + S_HUNG))" -eq "$R_ATTEMPTS" ] \
+	&& [ "$((S_SHED + S_HUNG))" -ge 120 ]; then
+	ok "S: the pool was genuinely over-offered (${S_SERVED} × 200, ${S_SHED} × 529, ${S_HUNG} unanswered of ${R_ATTEMPTS})"
+else
+	bad "S: ${S_SERVED} × 200, ${S_SHED} × 529, ${S_HUNG} unanswered of ${R_ATTEMPTS} — this scenario needs a pool that could not keep up"
+fi
+
+# The work granted. This pool never collapsed as far as worker mode does — it
+# clears the departed from its queue without running them — so the two sides
+# are close together and the bar has to be placed with both of them in view:
+# around 43 of 240 with the budget pinned at its ceiling, around 75 once it
+# moves, against a ceiling of some 80 that one worker on a 100 ms sleep can
+# serve in the window. 55 therefore sits 12 above the unfixed build and 20
+# below the fixed one, and the narrow side is the one that would produce a
+# false pass — which is why this reading does not carry the scenario alone:
+# the refusal count below separates the two by two orders of magnitude, and
+# the gauge after it reads the mechanism directly. It is also the first of the
+# three to suffer on a loaded host: the waves are paced by wall-clock sleeps,
+# so the window does not stretch to compensate, and enough contention on the
+# docker daemon to cost a quarter of the service rate would bring the fixed
+# build down towards this bar. A red here with the refusal count and the gauge
+# both green is that, not a regression.
+if [ "$S_SERVED" -ge 55 ]; then
+	ok "S: the pool kept serving clients less patient than its budget (${S_SERVED} × 200)"
+else
+	bad "S: only ${S_SERVED} × 200 out of ${R_ATTEMPTS} — the per-request pool is admitting requests whose clients are already gone"
+fi
+
+# And bounded. With the budget at its ceiling the refusal arrives after the
+# client has given up and is recorded as no answer at all, so this count is
+# near zero there and in the hundreds once the budget is under the patience in
+# front of it — the cleanest of the three readings.
+if [ "$S_SHED" -ge 60 ]; then
+	ok "S: and refused the surplus to clients still waiting (${S_SHED} × 529)"
+else
+	bad "S: only ${S_SHED} × 529 against ${S_HUNG} unanswered — the surplus was left hanging rather than turned away"
+fi
+
+# The mechanism behind both.
+if [ "${S_MIN_BUDGET:--1}" -ge 0 ] && [ "${S_MIN_BUDGET:-99999999}" -le 250000 ]; then
+	ok "S: the wait budget shortened itself here too (${S_MIN_BUDGET} µs of 1000000 µs)"
+else
+	bad "S: oxphp_admission_wait_budget_us never went below ${S_MIN_BUDGET:-?} µs (-1 = the series is not exported at all) — a request answered 499 before it ran is still a wait that outlived its client"
+fi
+
+# And the way out, as in R.
+S_RECOVERED=""
+for _ in $(seq 1 20); do
+	if [ "$(gauge 'oxphp_admission_wait_budget_us')" = "1000000" ]; then
+		S_RECOVERED=1
+		break
+	fi
+	sleep 0.5
+done
+if [ -n "$S_RECOVERED" ]; then
+	ok "S: and went back to the configured budget once the queue drained"
+else
+	bad "S: oxphp_admission_wait_budget_us stayed at $(gauge 'oxphp_admission_wait_budget_us') µs on an idle pool — the shortening has no way out"
+fi
+
+# As in R, and load-bearing here in a way it is not there: on this pool model
+# the abandoned request is the cheap 499, and counting it is the whole reason
+# the budget moves at all. A build that stopped counting it would leave every
+# other reading in this scenario looking like the unfixed one.
+S_ABANDONED="$(gauge 'oxphp_abandoned_work_total')"
+if [ "${S_ABANDONED:--1}" -ge 10 ]; then
+	ok "S: and counted the work it was reacting to (${S_ABANDONED} × abandoned)"
+else
+	bad "S: oxphp_abandoned_work_total reads ${S_ABANDONED} (-1 = the series is not exported at all) — the per-request pool is not reporting the queued-499 as a wait that outlived its client"
+fi
+
+# The same negative control as in R.
+S_WASTED="$(gauge 'oxphp_admission_wait_wasted_total')"
+if [ "${S_WASTED:--1}" -ge 0 ] && [ "${S_WASTED:-99999}" -le 5 ]; then
+	ok "S: and left oxphp_admission_wait_wasted_total alone (${S_WASTED})"
+else
+	bad "S: oxphp_admission_wait_wasted_total reads ${S_WASTED} against ${S_SHED} refusals — the wasted-wait reading is following the budget down and calling a working pool wedged"
+fi
+docker rm -f "$SRV" >/dev/null 2>&1
+wait
+
+# ── T: the wasted-wait reading under a budget the server has shortened ───────
+#
+# R and S both leave oxphp_admission_wait_wasted_total at zero, and neither of
+# them says why. Their budgets bottom out at 125 ms and 250 ms against a
+# handler of 100 ms, so a wait that ends on the deadline still spans a pickup,
+# and the reading "the pool began nothing while this one waited" is false on
+# its own terms. That stops being true as soon as the budget falls below the
+# spacing between two starts, and the budget is driven by the patience in front
+# of the pool, which nothing here controls.
+#
+# So: the same pool with a 200 ms handler and clients giving up at 350 ms. The
+# budget comes down to 62 ms — under a third of the gap between two pickups — and
+# from then on most waits do end between them. The pool is serving the whole
+# time, tens of clients get answers, and a reading that followed the budget
+# down would report it as one that picks nothing up at all. Measured before the
+# window was pinned to the configured budget: 42 served, 227 refused, and 108
+# wasted waits on a pool that had started work every 200 ms throughout.
+T_WAVES=60
+T_PER_WAVE=6
+T_PATIENCE=0.35
+
+if start_collapse_container; then
+	ok "T: container up (worker mode, 1 worker, 200 ms handler, capacity 64, budget 1000 ms)"
+else
+	bad "T: container failed to start"; docker logs "$SRV" 2>&1 | tail -5 >&2; exit 1
+fi
+
+: > "$TMP/tbudget"
+rm -f "$TMP/tstop"
+(
+	while [ ! -f "$TMP/tstop" ]; do
+		gauge 'oxphp_admission_wait_budget_us' >> "$TMP/tbudget"
+		sleep 0.5
+	done
+) &
+T_SAMPLER=$!
+
+# Same shape as R — see there for why the load loop has a subshell of its own.
+(
+	for w in $(seq 1 "$T_WAVES"); do
+		for c in $(seq 1 "$T_PER_WAVE"); do
+			curl -s -o /dev/null -w '%{http_code}\n' --max-time "$T_PATIENCE" \
+				"http://localhost:${PORT}/work?ms=200" \
+				> "$TMP/t.${w}_${c}" 2>&1 &
+		done
+		sleep 0.2
+	done
+	wait
+)
+
+touch "$TMP/tstop"
+wait "$T_SAMPLER" 2>/dev/null
+
+T_ATTEMPTS=$((T_WAVES * T_PER_WAVE))
+T_SERVED="$(count t 200)"
+T_SHED="$(count t 529)"
+T_HUNG="$(count t 000)"
+T_MIN_BUDGET="$(grep -v '^-1$' "$TMP/tbudget" | sort -n | head -1)"
+
+# Premise one: over-offered, as in R.
+if [ "$((T_SERVED + T_SHED + T_HUNG))" -eq "$T_ATTEMPTS" ] \
+	&& [ "$((T_SHED + T_HUNG))" -ge 120 ]; then
+	ok "T: the pool was genuinely over-offered (${T_SERVED} × 200, ${T_SHED} × 529, ${T_HUNG} unanswered of ${T_ATTEMPTS})"
+else
+	bad "T: ${T_SERVED} × 200, ${T_SHED} × 529, ${T_HUNG} unanswered of ${T_ATTEMPTS} — this scenario needs a pool that could not keep up"
+fi
+
+# Premise two, and the one the whole scenario rests on: the budget went under
+# the 200 ms that separates two pickups. Above it every wait spans a start and
+# the reading below is held down by that alone, which is exactly what makes R
+# and S unable to say anything about this.
+if [ "${T_MIN_BUDGET:--1}" -ge 0 ] && [ "${T_MIN_BUDGET:-99999999}" -le 125000 ]; then
+	ok "T: the budget came down below the pool's own pickup spacing (${T_MIN_BUDGET} µs against a 200000 µs handler)"
+else
+	bad "T: oxphp_admission_wait_budget_us never went below ${T_MIN_BUDGET:-?} µs (-1 = the series is not exported at all) — without a budget under the handler the check below is satisfied by a pool nobody shortened anything for"
+fi
+
+# Premise three: it was serving. A pool that delivered nothing would be a pool
+# this counter is entitled to describe.
+if [ "$T_SERVED" -ge 15 ]; then
+	ok "T: and kept delivering while it was down there (${T_SERVED} × 200)"
+else
+	bad "T: only ${T_SERVED} × 200 of ${T_ATTEMPTS} — a pool this idle is not a counter-example to anything"
+fi
+
+# The check. Both places a budget can run out are covered: the gate, where a
+# request never got a slot, and the queue, where it got one and no worker
+# reached it. The second is the one this load produces in bulk — capacity 64
+# admits nearly everything and lets it age — and a build that pins the window
+# only at the gate reads exactly like one that pins it nowhere.
+T_WASTED="$(gauge 'oxphp_admission_wait_wasted_total')"
+if [ "${T_WASTED:--1}" -ge 0 ] && [ "${T_WASTED:-99999}" -le 5 ]; then
+	ok "T: and left oxphp_admission_wait_wasted_total alone (${T_WASTED}) — a shortened wait is not evidence about the pool"
+else
+	bad "T: oxphp_admission_wait_wasted_total reads ${T_WASTED} against ${T_SHED} refusals on a pool serving ${T_SERVED} clients — the wasted-wait reading is following the budget down and calling a working pool wedged"
+fi
+docker rm -f "$SRV" >/dev/null 2>&1
+wait
+
+# ── U: a stream its client closes is not abandoned work ──────────────
+# oxphp_abandoned_work_total is what the budget shortens on, and it means a
+# client that stopped waiting for its response. A stream hands its response
+# over with the first flush and goes on running; a client that closes it after
+# that has had its answer, and every SSE session ends that way. From inside the
+# request the two look alike — the flush that finds the connection gone writes
+# the same client-abort reason a client leaving mid-handler does — so they are
+# told apart by whether the response had gone out, and this is where that is
+# pinned, once per pool model.
+#
+# Idle pools with nothing queued, so the budget itself cannot move here and the
+# counter is what is asserted — against a control in the same container that
+# it still counts a client leaving before its response went out.
+U_CLIENTS=4
+
+# $1 label, $2 path. Each client takes the first events and leaves at 300 ms,
+# a few flushes into a 10 s stream. $3 is the same handler run as an ordinary
+# 600 ms request, for the control.
+u_streams() {
+	local label="$1" path="$2" plain="$3" i got seen counted
+	docker exec "$SRV" rm -f /tmp/streams
+	for i in $(seq 1 "$U_CLIENTS"); do
+		curl -sN --max-time 0.3 "http://localhost:${PORT}${path}" > "$TMP/ubody.$i" 2>/dev/null
+	done
+	# The next flush after a close notices it within one 50 ms event; a
+	# second is room for the four of them to unwind and record it.
+	sleep 1
+
+	# Premise one: the streams started, so each response had gone out before
+	# its client left. A client that got nothing proves nothing about a
+	# response it never had.
+	got="$(grep -l '^data: 0$' "$TMP"/ubody.* 2>/dev/null | wc -l | tr -d ' ')"
+	if [ "$got" -eq "$U_CLIENTS" ]; then
+		ok "U ($label): every client received the stream's first event before closing it (${got}/${U_CLIENTS})"
+	else
+		bad "U ($label): only ${got}/${U_CLIENTS} clients received a first event — the streams never started, and the check below would pass on a response nobody had"
+	fi
+
+	# Premise two: each handler saw its client go, which is what writes the
+	# client-abort reason the counter reads. Without it the counter stays
+	# still on every build, fixed or not.
+	seen="$(docker exec "$SRV" sh -c 'grep -c "^aborted$" /tmp/streams 2>/dev/null || echo 0')"
+	if [ "${seen:-0}" -eq "$U_CLIENTS" ]; then
+		ok "U ($label): and every stream observed its client leaving (${seen}/${U_CLIENTS} connection_aborted())"
+	else
+		bad "U ($label): ${seen:-0}/${U_CLIENTS} streams observed their client leave — the stream did not run into the closed connection, so nothing here was put to the counter"
+	fi
+
+	counted="$(gauge 'oxphp_abandoned_work_total')"
+	if [ "${counted:--1}" -eq 0 ]; then
+		ok "U ($label): and oxphp_abandoned_work_total stayed at 0"
+	else
+		bad "U ($label): oxphp_abandoned_work_total reads ${counted} (-1 = not exported) after ${U_CLIENTS} streams closed by clients that already had them — an ordinary end of an SSE session is being read as a client giving up on the wait"
+	fi
+	rm -f "$TMP"/ubody.*
+
+	# The control. A build that stopped counting after handlers altogether
+	# passes everything above, so the same counter, in the same container,
+	# must still see a client that left 200 ms into a 600 ms handler that had
+	# sent nothing yet — the departure the budget is tuned against.
+	# Read as a step, so the reading above does not decide this one too.
+	local before after
+	before="$(gauge 'oxphp_abandoned_work_total')"
+	curl -s --max-time 0.2 "http://localhost:${PORT}${plain}" >/dev/null 2>&1
+	sleep 1
+	after="$(gauge 'oxphp_abandoned_work_total')"
+	if [ "${before:--1}" -ge 0 ] && [ "$((after - before))" -eq 1 ]; then
+		ok "U ($label): while a client leaving an ordinary handler before its answer is still counted (${before} → ${after})"
+	else
+		bad "U ($label): oxphp_abandoned_work_total went ${before} → ${after} for one client that left a handler which had sent nothing — expected a step of exactly 1; the streams above prove nothing if the counter no longer counts this"
+	fi
+}
+
+u_start() { # extra docker-run arguments
+	docker rm -f "$SRV" >/dev/null 2>&1
+	docker run -d --name "$SRV" \
+		-e DOCUMENT_ROOT=/var/www/html \
+		-e INTERNAL_ADDR=0.0.0.0:9090 \
+		-e LOG_LEVEL=error \
+		"$@" \
+		-p "${PORT}":80 \
+		-v "$FIX:/var/www/html:ro" \
+		"$IMAGE" >/dev/null || return 1
+}
+
+u_ready() { # $1 probe path
+	for _ in $(seq 1 30); do
+		curl -fsS --max-time 2 "http://localhost:${PORT}$1" >/dev/null 2>&1 && return 0
+		sleep 1
+	done
+	return 1
+}
+
+if u_start && u_ready "/stream.php?n=0"; then
+	ok "U: container up (per-request pool, SSE)"
+	u_streams "per-request" "/stream.php" "/stream.php?n=0&ms=600"
+else
+	bad "U: per-request container failed to start"; docker logs "$SRV" 2>&1 | tail -5 >&2
+fi
+
+if u_start -e WORKER_MODE_ENABLED=true -e ENTRY_FILE=/var/www/html/wstream.php && u_ready "/?n=0"; then
+	ok "U: container up (worker mode, SSE)"
+	u_streams "worker" "/" "/?n=0&ms=600"
+else
+	bad "U: worker-mode container failed to start"; docker logs "$SRV" 2>&1 | tail -5 >&2
+fi
+docker rm -f "$SRV" >/dev/null 2>&1
 
 say ""
 say "passed: $PASS, failed: $FAIL"

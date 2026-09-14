@@ -48,9 +48,12 @@ pub struct WorkerIncomingRequest {
     /// `setup_request_tls`); the traditional loop drops it explicitly.
     pub permit: tokio::sync::OwnedSemaphorePermit,
     /// When the request stops being worth starting, or `None` in fail-fast
-    /// mode. Set once on arrival from `QUEUE_WAIT_TIMEOUT_MS` and shared with
-    /// the wait for a queue slot, so it bounds the whole time the request
-    /// spends not executing rather than the admission half of it.
+    /// mode. Set once on arrival from the wait budget in force — at most
+    /// `QUEUE_WAIT_TIMEOUT_MS`, less where the server has shortened it — and
+    /// shared with the wait for a queue slot, so it bounds the whole time the
+    /// request spends not executing rather than the admission half of it. Once
+    /// stamped it does not move: a budget that shortened under a waiting
+    /// request would be cutting short a wait it had already been promised.
     pub deadline: Option<Instant>,
 }
 
@@ -3033,6 +3036,15 @@ fn continue_after_refusal(req: WorkerIncomingRequest) {
 /// Counts no refusal, and keeps its wait out of the pickup-latency
 /// histogram — see `Pickup::Cancelled`.
 fn answer_departed_client(req: WorkerIncomingRequest, expired: bool) {
+    // Counted here because the request goes no further: the pickup answers it
+    // and never hands it to a fiber, so `worker_send_callback` — which counts
+    // the same thing for a client that leaves while its handler runs — is
+    // never reached. Only `ClientAbort`: the other reasons are the server's
+    // own decisions, and a wait that shortened in answer to those would be
+    // answering itself.
+    if req.script.cancel_state.get() == crate::bridge::cancel::CancelReason::ClientAbort {
+        crate::metrics::abandoned_work();
+    }
     let answer = if expired {
         crate::types::ScriptResponse::client_closed_unpicked()
     } else {
@@ -3187,6 +3199,23 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
     let profile_tree: Option<std::sync::Arc<crate::profiling::SpanTree>> = None;
 
     let cancel_reason = bindings::oxphp_bridge_get_cancel_reason();
+    // Work the pool spent on nobody: a client that left while this handler was
+    // running. Counted here, where the response is still to be handed over,
+    // and not in `worker_request_teardown`, which the early returns above also
+    // reach — a stream whose headers went out, or an `oxphp_finish_request()`
+    // answer, belongs to a client that already has its response, and closing
+    // it afterwards is the end of that response rather than a client giving up
+    // on the wait. A stream's own flush writes `ClientAbort` when it finds the
+    // connection gone, so the reason alone would count every SSE session that
+    // ended. A client that left while the request was still queued is counted
+    // at that pickup instead, in `answer_departed_client`.
+    //
+    // Only `ClientAbort` counts: the other reasons are the server's own
+    // decisions, and a wait that shortened in answer to those would be
+    // answering itself.
+    if cancel_reason == crate::bridge::cancel::CancelReason::ClientAbort as u8 {
+        crate::metrics::abandoned_work();
+    }
     EARLY_TX.with(|slot| {
         if let Some((start, tx)) = slot.borrow_mut().take() {
             let _ = tx.send(ScriptResponse {

@@ -27,7 +27,7 @@
 //! Kept out of `super::sapi` (which is gated behind the `php` feature) so the
 //! policy is unit-testable on a host without `libphp.so`.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -148,6 +148,201 @@ impl Drop for BytesCharge {
     }
 }
 
+/// What the pool did over one tick, as the wait budget reads it.
+///
+/// Three numbers because the question needs all three: whether anything was
+/// waiting, whether the pool was working, and how much of that work went to
+/// clients who were no longer there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoadSample {
+    /// Requests the pool began during the tick — work actually started, not
+    /// every entry a worker took off the queue.
+    pub started: u64,
+    /// Requests during the tick whose client had already gone when a worker
+    /// answered them. Not a subset of `started`: this is a second counter read
+    /// over the same window, and a request counted here may have started
+    /// several ticks ago or, answered at the pickup, never started at all. The
+    /// two are compared as rates, so under a transient the ratio can exceed
+    /// one.
+    pub abandoned: u64,
+    /// Requests sitting in the queue at the end of the tick.
+    pub queue_depth: usize,
+}
+
+/// How long a request may wait, as a quantity the server adjusts rather than a
+/// constant it was configured with.
+///
+/// The failure this exists for: both waits are FIFO, so the request a worker
+/// picks up is always the oldest one still alive, and it has therefore waited
+/// the whole budget. Where clients are less patient than the budget plus the
+/// time the handler takes, every request the pool starts belongs to a client
+/// who has already left — the pool runs flat out and delivers nothing, and no
+/// amount of capacity helps because the capacity is not what ran out. The wait
+/// is, and the wait is the server's to shorten.
+///
+/// `QUEUE_WAIT_TIMEOUT_MS` becomes the ceiling: how long a request may wait
+/// when waiting is paying off. The value in force is
+/// [`WaitBudget::effective`], published as `oxphp_admission_wait_budget_us`.
+pub struct WaitBudget {
+    /// `QUEUE_WAIT_TIMEOUT_MS` — the ceiling, and the value the budget returns
+    /// to once the queue drains.
+    configured: Duration,
+    /// How far down the budget may be driven. Strictly positive, and never
+    /// zero: a budget of zero is fail-fast, which is a different admission
+    /// policy and not a shorter wait — the caller stamps no deadline at all,
+    /// so a request that does get queued is then bounded by nothing.
+    floor: Duration,
+    /// The value in force. Microseconds so the halving keeps its resolution
+    /// near the floor.
+    effective_us: AtomicU64,
+    /// Work seen since the last decision. A tick is a unit of time, not of
+    /// evidence: on a pool with slow handlers 250 ms sees one or two
+    /// completions, and a ratio read off that denominator says "a quarter of
+    /// what the pool produced was wasted" when what happened was one client
+    /// changing its mind. So the sample is carried forward until the pool has
+    /// started enough for the threshold to mean what it says.
+    ///
+    /// Written only by the controller task, which is the only caller of
+    /// [`WaitBudget::observe`].
+    window_started: AtomicU64,
+    window_abandoned: AtomicU64,
+}
+
+/// How much the pool must have started before the abandonment ratio is read.
+///
+/// Eight, so one client changing its mind is an eighth — under the quarter the
+/// rule asks for — and two out of eight consecutive completions going nowhere
+/// is what it takes to move the budget. Below that the window stays open and
+/// the next tick adds to it.
+const MIN_STARTS_PER_DECISION: u64 = 8;
+
+/// A duration in microseconds, saturating rather than wrapping.
+///
+/// `QUEUE_WAIT_TIMEOUT_MS` is parsed as an integer with no upper bound, so an
+/// operator writing a huge value to mean "never give up" can name a duration
+/// whose microseconds do not fit a `u64`. Wrapping there would turn the longest
+/// wait anyone asked for into the shortest one the server can express.
+fn micros(d: Duration) -> u64 {
+    u64::try_from(d.as_micros()).unwrap_or(u64::MAX)
+}
+
+impl WaitBudget {
+    /// The floor is a sixty-fourth of the ceiling — six halvings from the top —
+    /// with a lower bound of 10 ms so a short ceiling cannot produce a floor
+    /// measured in microseconds, and an upper bound of the ceiling itself so a
+    /// ceiling under 10 ms is its own floor rather than being raised past what
+    /// the operator asked for.
+    pub fn new(configured: Duration) -> Self {
+        let floor = (configured / 64)
+            .max(Duration::from_millis(10))
+            .min(configured);
+        Self {
+            configured,
+            floor,
+            effective_us: AtomicU64::new(micros(configured)),
+            window_started: AtomicU64::new(0),
+            window_abandoned: AtomicU64::new(0),
+        }
+    }
+
+    /// The ceiling this budget was configured with, in microseconds.
+    ///
+    /// Microseconds because the only two things that read it — the gauge pair
+    /// on `/metrics` and the test for whether the budget is still at its
+    /// ceiling — both compare it against [`WaitBudget::effective_us`], and a
+    /// comparison in milliseconds would call a budget of 15.6 ms equal to one
+    /// of 15.0 ms.
+    pub fn configured_us(&self) -> u64 {
+        micros(self.configured)
+    }
+
+    /// The budget in force right now, in microseconds — the unit it is held
+    /// and published in.
+    pub fn effective_us(&self) -> u64 {
+        self.effective_us.load(Ordering::Relaxed)
+    }
+
+    /// The budget in force right now.
+    pub fn effective(&self) -> Duration {
+        Duration::from_micros(self.effective_us.load(Ordering::Relaxed))
+    }
+
+    /// The budget a request arriving now is stamped with, and whether that is
+    /// the configured ceiling.
+    ///
+    /// One load, deliberately: the deadline and the window the wait will be
+    /// measured against are a single fact about a single request. Read
+    /// separately, a request could be given a shortened wait by one load and
+    /// then judged, when that wait ran out, as though it had been given the
+    /// whole configured one by the next.
+    pub fn in_force(&self) -> (Duration, bool) {
+        let us = self.effective_us.load(Ordering::Relaxed);
+        (Duration::from_micros(us), us == self.configured_us())
+    }
+
+    /// Fold one tick of pool behaviour into the budget.
+    ///
+    /// Halve on evidence that the wait is handing the pool work nobody wants,
+    /// and walk back up in eighths of the ceiling once there is nothing left
+    /// waiting and under a quarter of the work is going to clients who have
+    /// gone. Multiplicative down and additive up, because the two directions
+    /// are not symmetrical: the cost of a budget that is too long is paid every
+    /// request, and the cost of one that is too short is a burst shed that
+    /// could have been absorbed.
+    ///
+    /// A tick with a queue behind it and too little work in it decides
+    /// nothing and is carried into the next — see [`MIN_STARTS_PER_DECISION`].
+    /// An empty queue always closes the window, whether or not it goes on to
+    /// decide anything: it is the recovery condition, and discarding the
+    /// partial evidence there is what keeps an abandonment from one episode
+    /// out of the next one.
+    pub fn observe(&self, sample: LoadSample) {
+        let started = self.window_started.load(Ordering::Relaxed) + sample.started;
+        let abandoned = self.window_abandoned.load(Ordering::Relaxed) + sample.abandoned;
+        if sample.queue_depth > 0 && started < MIN_STARTS_PER_DECISION {
+            self.window_started.store(started, Ordering::Relaxed);
+            self.window_abandoned.store(abandoned, Ordering::Relaxed);
+            return;
+        }
+        self.window_started.store(0, Ordering::Relaxed);
+        self.window_abandoned.store(0, Ordering::Relaxed);
+
+        let current = self.effective_us.load(Ordering::Relaxed);
+
+        // Each conjunct rules out a state where a shorter wait is the wrong
+        // answer:
+        //
+        // - nothing queued and the budget is not what anybody is spending —
+        //   the abandonments are single clients changing their minds, or a
+        //   deployment whose handler simply outlasts its callers, and
+        //   shortening the wait would not have saved either;
+        // - and the ratio, which is what says the waiting is the problem
+        //   rather than a few impatient clients among many served.
+        //
+        // A pool that has started nothing needs no conjunct of its own: the
+        // window above never fills behind a queue, so a wedged pool — queue
+        // full, nothing moving — never reaches this decision at all, and the
+        // `0 >= 0` the ratio would otherwise satisfy is out of reach.
+        //
+        // Recovery reads the same ratio from the other side rather than
+        // wanting no abandonment at all. A busy pool loses a few clients to
+        // closed tabs and proxy timeouts in nearly every tick, and a rule that
+        // waited for a tick without one would keep the budget on its floor
+        // long after the episode that put it there. `abandoned == 0` stays as
+        // its own arm for the idle tick, where the ratio reads `0 < 0`.
+        let ceiling = self.configured_us();
+        let next = if sample.queue_depth > 0 && abandoned * 4 >= started {
+            (current / 2).max(micros(self.floor))
+        } else if sample.queue_depth == 0 && (abandoned == 0 || abandoned * 4 < started) {
+            current.saturating_add(ceiling / 8).min(ceiling)
+        } else {
+            return;
+        };
+
+        self.effective_us.store(next, Ordering::Relaxed);
+    }
+}
+
 /// Queue admission gate: a permit per queue slot, the budget a request may
 /// spend not executing, and a cap on how many may wait at once.
 pub struct Admission {
@@ -160,7 +355,7 @@ pub struct Admission {
     waiting_bytes: Arc<WaitingBytes>,
     /// `None` = fail fast: a request that finds no free slot is shed
     /// immediately rather than waiting.
-    budget: Option<Duration>,
+    budget: Option<WaitBudget>,
     /// How many permits `slots` was built with. Kept because the semaphore
     /// reports how many are free and not how many there are, and the two are
     /// only readable against each other.
@@ -191,7 +386,8 @@ impl Admission {
                 cap: max_waiting_bytes,
                 held: AtomicUsize::new(0),
             }),
-            budget: (wait_timeout_ms > 0).then(|| Duration::from_millis(wait_timeout_ms)),
+            budget: (wait_timeout_ms > 0)
+                .then(|| WaitBudget::new(Duration::from_millis(wait_timeout_ms))),
             capacity,
         }
     }
@@ -212,12 +408,29 @@ impl Admission {
         self.capacity
     }
 
-    /// How long a request may spend not executing, or `None` for fail-fast.
+    /// How long a request may spend not executing and whether that is the
+    /// configured ceiling, or `None` for fail-fast.
     ///
-    /// The caller turns this into one absolute deadline at arrival and carries
-    /// it through both waits, so a request cannot spend the budget twice.
-    pub fn budget(&self) -> Option<Duration> {
-        self.budget
+    /// The caller turns the duration into one absolute deadline at arrival and
+    /// carries both through the two waits, so a request cannot spend the
+    /// budget twice and cannot be measured against a window it was never
+    /// given — see [`WaitBudget::in_force`].
+    ///
+    /// Read fresh on every arrival rather than once at startup: the value is
+    /// the one [`WaitBudget`] currently has in force, which is at most the
+    /// configured ceiling and may be less. Requests already waiting keep the
+    /// deadline they were stamped with — a budget that shortened under them
+    /// would make the wait they were promised shorter after the fact.
+    pub fn budget(&self) -> Option<(Duration, bool)> {
+        self.budget.as_ref().map(WaitBudget::in_force)
+    }
+
+    /// The wait budget itself, for the controller that adjusts it. Everything
+    /// that only needs the value in force — the arrival path, the gauge —
+    /// reads [`Admission::budget`] instead. `None` in fail-fast mode, where
+    /// there is no wait to adjust.
+    pub fn wait_budget(&self) -> Option<&WaitBudget> {
+        self.budget.as_ref()
     }
 
     /// Non-blocking claim on a queue slot — the hot path.
@@ -348,7 +561,7 @@ mod tests {
     /// What the executor does on a missed fast path: claim a place, then wait
     /// for a slot until the budget runs out.
     async fn park_and_admit(admission: &Admission) -> Admitted {
-        let budget = admission
+        let (budget, _at_ceiling) = admission
             .budget()
             .expect("no budget — the caller fails fast instead of waiting");
         match admission.try_park() {
@@ -702,6 +915,392 @@ mod tests {
             labels.len(),
             ShedReason::ALL.len(),
             "two reasons render as the same series and would sum into one"
+        );
+    }
+
+    // ── WaitBudget ──────────────────────────────────────────────
+    //
+    // One test per conjunct of `observe`, each built so that dropping that
+    // conjunct alone turns it red. The shortening rule and the recovery rule
+    // are separate conditions, so they are mutated separately.
+
+    /// The load this controller exists for: a queue with work in it, a pool
+    /// working through it, and the work coming out the far end going to
+    /// clients who have gone.
+    const COLLAPSING: LoadSample = LoadSample {
+        started: 8,
+        abandoned: 8,
+        queue_depth: 12,
+    };
+
+    #[test]
+    fn a_new_budget_starts_at_its_ceiling() {
+        let budget = WaitBudget::new(Duration::from_millis(1000));
+        assert_eq!(budget.effective(), Duration::from_millis(1000));
+        assert_eq!(budget.configured_us(), 1_000_000);
+    }
+
+    #[test]
+    fn work_finishing_for_departed_clients_halves_the_budget() {
+        let budget = WaitBudget::new(Duration::from_millis(1000));
+        budget.observe(COLLAPSING);
+        assert_eq!(
+            budget.effective(),
+            Duration::from_millis(500),
+            "a tick where the pool served nobody must shorten the wait"
+        );
+        budget.observe(COLLAPSING);
+        assert_eq!(budget.effective(), Duration::from_millis(250));
+    }
+
+    #[test]
+    fn an_empty_queue_leaves_the_budget_alone() {
+        // Mutant: drop `queue_depth > 0`. Nothing is waiting, so the budget is
+        // not what these clients spent — they left while being served. A
+        // deployment whose handler simply outlasts its callers would otherwise
+        // drive its own admission control to the floor for no gain.
+        let budget = WaitBudget::new(Duration::from_millis(1000));
+        budget.observe(LoadSample {
+            queue_depth: 0,
+            ..COLLAPSING
+        });
+        assert_eq!(
+            budget.effective(),
+            Duration::from_millis(1000),
+            "with nothing queued there is no wait to shorten"
+        );
+    }
+
+    #[test]
+    fn a_pool_that_started_nothing_leaves_the_budget_alone() {
+        // Mutant: drop the minimum-work guard. Zero abandoned out of zero
+        // started satisfies the ratio outright, so without it a wedged pool —
+        // queue full, nothing moving — would drive the budget to the floor
+        // every tick and answer a fault with a stream of tidy refusals.
+        let budget = WaitBudget::new(Duration::from_millis(1000));
+        for _ in 0..40 {
+            budget.observe(LoadSample {
+                started: 0,
+                abandoned: 0,
+                queue_depth: 40,
+            });
+        }
+        assert_eq!(
+            budget.effective(),
+            Duration::from_millis(1000),
+            "a pool that is not working is not an overloaded pool"
+        );
+    }
+
+    #[test]
+    fn one_client_changing_its_mind_does_not_move_a_slow_pool() {
+        // Mutant: decide on every tick instead of on enough work. A pool with
+        // slow handlers completes one or two requests per tick, so a single
+        // abandonment reads as a third or a half of everything the pool
+        // produced — and a healthy pool with a standing queue would ratchet
+        // its own budget down to the floor on ordinary client behaviour.
+        let budget = WaitBudget::new(Duration::from_millis(1000));
+        budget.observe(LoadSample {
+            started: 3,
+            abandoned: 1,
+            queue_depth: 2,
+        });
+        for _ in 0..2 {
+            budget.observe(LoadSample {
+                started: 3,
+                abandoned: 0,
+                queue_depth: 2,
+            });
+        }
+        assert_eq!(
+            budget.effective(),
+            Duration::from_millis(1000),
+            "one abandonment in nine completions is not a wait that is failing"
+        );
+    }
+
+    #[test]
+    fn ticks_too_small_to_decide_are_carried_into_the_next() {
+        // The other half of the test above: the window is carried, not
+        // discarded, so a pool that really is serving nobody still reaches the
+        // decision — it just takes as many ticks as the evidence needs.
+        let budget = WaitBudget::new(Duration::from_millis(1000));
+        for _ in 0..2 {
+            budget.observe(LoadSample {
+                started: 3,
+                abandoned: 3,
+                queue_depth: 2,
+            });
+            assert_eq!(
+                budget.effective(),
+                Duration::from_millis(1000),
+                "six completions is not yet enough to read a quarter off"
+            );
+        }
+        budget.observe(LoadSample {
+            started: 3,
+            abandoned: 3,
+            queue_depth: 2,
+        });
+        assert_eq!(budget.effective(), Duration::from_millis(500));
+    }
+
+    #[test]
+    fn an_empty_queue_closes_an_unfinished_window() {
+        // A drained queue decides whatever the window holds, and clears it:
+        // the recovery rule has to stay reachable on a pool whose ticks never
+        // fill a window, and an abandonment from one episode must not be left
+        // lying around to be read during the next.
+        let budget = WaitBudget::new(Duration::from_millis(1000));
+        for _ in 0..40 {
+            budget.observe(COLLAPSING);
+        }
+        assert_eq!(budget.effective(), Duration::from_micros(15_625));
+
+        budget.observe(LoadSample {
+            started: 1,
+            abandoned: 1,
+            queue_depth: 4,
+        });
+        budget.observe(LoadSample {
+            started: 0,
+            abandoned: 0,
+            queue_depth: 0,
+        });
+        assert_eq!(
+            budget.effective(),
+            Duration::from_micros(15_625),
+            "the drained tick still carries the abandonment the window held"
+        );
+        budget.observe(LoadSample {
+            started: 0,
+            abandoned: 0,
+            queue_depth: 0,
+        });
+        assert_eq!(
+            budget.effective(),
+            Duration::from_micros(140_625),
+            "and the window it cleared does not hold that abandonment twice"
+        );
+    }
+
+    #[test]
+    fn a_minority_of_impatient_clients_leaves_the_budget_alone() {
+        // Mutant: weaken the ratio to "any abandonment at all". A pool taking
+        // work off its queue several times faster than clients are leaving is
+        // being helped by the wait, not hurt by it.
+        let budget = WaitBudget::new(Duration::from_millis(1000));
+        budget.observe(LoadSample {
+            started: 40,
+            abandoned: 9,
+            queue_depth: 12,
+        });
+        assert_eq!(
+            budget.effective(),
+            Duration::from_millis(1000),
+            "under a quarter abandoned is a pool the wait is working for"
+        );
+    }
+
+    #[test]
+    fn a_quarter_abandoned_is_already_enough() {
+        // The boundary the test above sits just under, so the two together
+        // pin the threshold rather than only its direction.
+        let budget = WaitBudget::new(Duration::from_millis(1000));
+        budget.observe(LoadSample {
+            started: 40,
+            abandoned: 10,
+            queue_depth: 12,
+        });
+        assert_eq!(budget.effective(), Duration::from_millis(500));
+    }
+
+    #[test]
+    fn the_budget_never_falls_below_its_floor() {
+        // Mutant: drop the floor. A budget of zero is not a shorter wait — it
+        // is fail-fast, and `Admission::budget` returning `None` means no
+        // deadline is stamped at all, so a request that does reach the queue
+        // is then bounded by nothing. The collapse would come back worse than
+        // it started.
+        let budget = WaitBudget::new(Duration::from_millis(1000));
+        for _ in 0..40 {
+            budget.observe(COLLAPSING);
+        }
+        assert_eq!(
+            budget.effective(),
+            Duration::from_micros(15_625),
+            "1000 / 64, and never zero"
+        );
+    }
+
+    #[test]
+    fn a_short_ceiling_keeps_a_usable_floor() {
+        // 200 / 64 is 3 ms, which is a wait nothing can use. The floor is
+        // bounded below by 10 ms for that reason — and by the ceiling itself,
+        // so a ceiling under 10 ms is its own floor rather than being raised
+        // past what the operator asked for.
+        let short = WaitBudget::new(Duration::from_millis(200));
+        for _ in 0..40 {
+            short.observe(COLLAPSING);
+        }
+        assert_eq!(short.effective(), Duration::from_millis(10));
+
+        let shorter = WaitBudget::new(Duration::from_millis(4));
+        for _ in 0..40 {
+            shorter.observe(COLLAPSING);
+        }
+        assert_eq!(
+            shorter.effective(),
+            Duration::from_millis(4),
+            "the floor must never exceed the configured ceiling"
+        );
+    }
+
+    #[test]
+    fn an_absurd_ceiling_stays_absurd_rather_than_wrapping() {
+        // Mutant: `as_micros() as u64`. QUEUE_WAIT_TIMEOUT_MS is parsed with no
+        // upper bound, so an operator can write a sentinel meaning "never give
+        // up"; a wrapping conversion turns the longest wait anyone asked for
+        // into a few microseconds, which is the opposite of what was written.
+        let absurd = WaitBudget::new(Duration::from_millis(u64::MAX));
+        assert_eq!(absurd.effective(), Duration::from_micros(u64::MAX));
+
+        // And the recovery arm adds to it without overflowing back to zero.
+        absurd.observe(LoadSample {
+            started: 8,
+            abandoned: 0,
+            queue_depth: 0,
+        });
+        assert_eq!(absurd.effective(), Duration::from_micros(u64::MAX));
+    }
+
+    #[test]
+    fn a_drained_queue_walks_the_budget_back_up() {
+        let budget = WaitBudget::new(Duration::from_millis(1000));
+        for _ in 0..40 {
+            budget.observe(COLLAPSING);
+        }
+        assert_eq!(budget.effective(), Duration::from_micros(15_625));
+
+        let idle = LoadSample {
+            started: 0,
+            abandoned: 0,
+            queue_depth: 0,
+        };
+        budget.observe(idle);
+        assert_eq!(
+            budget.effective(),
+            Duration::from_micros(140_625),
+            "recovery is additive: an eighth of the ceiling per tick"
+        );
+    }
+
+    #[test]
+    fn recovery_stops_at_the_ceiling() {
+        // Mutant: drop the `min` against the ceiling. The operator's
+        // QUEUE_WAIT_TIMEOUT_MS is a bound, and a budget that climbed past it
+        // on an idle pool would hand every waiter more than was configured.
+        let budget = WaitBudget::new(Duration::from_millis(1000));
+        let idle = LoadSample {
+            started: 0,
+            abandoned: 0,
+            queue_depth: 0,
+        };
+        for _ in 0..40 {
+            budget.observe(idle);
+        }
+        assert_eq!(budget.effective(), Duration::from_millis(1000));
+    }
+
+    #[test]
+    fn a_busy_queue_does_not_recover_even_with_nothing_abandoned() {
+        // Mutant: drop `queue_depth == 0` from the recovery rule. Under a
+        // sustained overload the shortened budget is what stops the
+        // abandonment, so "nothing abandoned" is the controller reading its
+        // own output — lengthening on it would swing the budget up and down
+        // for the whole episode instead of holding it where it works.
+        let budget = WaitBudget::new(Duration::from_millis(1000));
+        budget.observe(COLLAPSING);
+        assert_eq!(budget.effective(), Duration::from_millis(500));
+
+        budget.observe(LoadSample {
+            started: 8,
+            abandoned: 0,
+            queue_depth: 12,
+        });
+        assert_eq!(
+            budget.effective(),
+            Duration::from_millis(500),
+            "a queue that is still busy has not shown the budget can be longer"
+        );
+    }
+
+    #[test]
+    fn ordinary_client_aborts_do_not_hold_a_drained_budget_down() {
+        // Mutant: require `abandoned == 0` to recover. A healthy pool at 2000
+        // requests a second loses a few clients to closed tabs and proxy
+        // timeouts in every 250 ms tick, and those write the same ClientAbort
+        // as a collapse does. On a rule that wants a tick with none of them the
+        // budget stays on its floor for hours after the episode is over,
+        // refusing bursts the ceiling was configured to absorb.
+        let budget = WaitBudget::new(Duration::from_millis(1000));
+        for _ in 0..40 {
+            budget.observe(COLLAPSING);
+        }
+        assert_eq!(budget.effective(), Duration::from_micros(15_625));
+
+        let healthy = LoadSample {
+            started: 500,
+            abandoned: 10,
+            queue_depth: 0,
+        };
+        for _ in 0..8 {
+            budget.observe(healthy);
+        }
+        assert_eq!(budget.effective(), Duration::from_millis(1000));
+    }
+
+    #[test]
+    fn a_drained_queue_with_a_quarter_abandoned_does_not_recover() {
+        // Mutant: drop the abandonment clause from the recovery rule, or read
+        // the ratio with `<=`. A tick with the queue momentarily empty is not
+        // evidence the wait is safe to lengthen while a quarter of the work is
+        // still finishing for clients who have gone — the same share that
+        // shortens it behind a queue.
+        let budget = WaitBudget::new(Duration::from_millis(1000));
+        budget.observe(COLLAPSING);
+        budget.observe(LoadSample {
+            started: 4,
+            abandoned: 1,
+            queue_depth: 0,
+        });
+        assert_eq!(budget.effective(), Duration::from_millis(500));
+    }
+
+    #[test]
+    fn fail_fast_has_no_budget_to_adjust() {
+        let admission = Admission::new(4, 0, 64, usize::MAX);
+        assert!(admission.budget().is_none());
+        assert!(admission.wait_budget().is_none());
+    }
+
+    #[test]
+    fn admission_hands_out_the_budget_in_force_not_the_ceiling() {
+        let admission = Admission::new(4, 1000, 64, usize::MAX);
+        assert_eq!(
+            admission.budget(),
+            Some((Duration::from_millis(1000), true))
+        );
+
+        admission
+            .wait_budget()
+            .expect("configured budget")
+            .observe(COLLAPSING);
+        assert_eq!(
+            admission.budget(),
+            Some((Duration::from_millis(500), false)),
+            "a request arriving now must be stamped with the shortened budget, \
+             and told that it is not the configured one"
         );
     }
 }

@@ -39,7 +39,10 @@ services:
       # entry file. With one worker there is nobody serving in the meantime, so
       # the request that follows a retire has to be allowed to wait for it: the
       # 1 s default refuses it, and a queue refusal in that spot reads exactly
-      # like the wedge this profile is here to catch.
+      # like the wedge this profile is here to catch. This is a ceiling rather
+      # than a guarantee — the server shortens the wait under it while the pool
+      # is picking up requests whose clients have left — but this profile's
+      # client waits for every answer, so nothing here produces that signal.
       QUEUE_WAIT_TIMEOUT_MS: "10000"
       # Read once at MINIT: it decides whether the observer is registered at
       # all, and the observer is the whole point of the profile. No profile is
