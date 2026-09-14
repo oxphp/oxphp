@@ -20,7 +20,9 @@ impl StubExecutor {
 }
 
 impl ScriptExecutor for StubExecutor {
-    fn execute(&self, _request: ScriptRequest) -> ExecuteResult {
+    fn execute(&self, request: ScriptRequest) -> ExecuteResult {
+        // No queue: the request is in hand the moment it arrives.
+        request.cancel_state.mark_taken();
         ExecuteResult::Immediate(ScriptResponse {
             status: 200,
             headers: vec![(
@@ -91,6 +93,18 @@ mod tests {
         assert_eq!(response.headers.len(), 1);
         assert_eq!(response.headers[0].0, "content-type");
         assert_eq!(response.headers[0].1, "text/plain");
+    }
+
+    /// The dispatch side records a queue wait only for a request some executor
+    /// says it took, so a stub that never said so would leave the histogram
+    /// empty in benchmark mode.
+    #[test]
+    fn test_stub_executor_marks_the_request_taken() {
+        let executor = StubExecutor::new();
+        let request = make_request();
+        let cancel_state = Arc::clone(&request.cancel_state);
+        let _ = executor.execute(request);
+        assert!(cancel_state.taken_at().is_some());
     }
 
     #[test]

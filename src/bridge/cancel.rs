@@ -2,6 +2,8 @@
 //! task and the worker thread.
 
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
+use std::sync::OnceLock;
+use std::time::Instant;
 
 #[repr(u8)]
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -44,6 +46,20 @@ pub struct CancellationState {
     /// A single claim cannot split that way — the CAS orders the two sides
     /// against each other, whatever the clock did.
     claimed_from_queue: AtomicBool,
+    /// When a worker took the request off the queue: the end of the wait
+    /// `oxphp_queue_wait_us` measures, stamped where that wait ends rather
+    /// than inferred on the dispatch side from when the answer came back.
+    /// Between those two moments lie what the worker does with the request
+    /// before answering it, the script being only part of that, and the
+    /// handoff of its answer to the request's task — none of which is waiting
+    /// for a worker.
+    ///
+    /// Stamped by whichever worker takes the request, whatever it then does
+    /// with it, refusing it on its deadline included: whether the wait is
+    /// recorded is for the dispatch side to decide from the answer. Left unset
+    /// for a request the dispatch side answered on its deadline first — a
+    /// worker still drops that one from the channel later, but never takes it.
+    taken_at: OnceLock<Instant>,
 }
 
 impl CancellationState {
@@ -52,6 +68,7 @@ impl CancellationState {
             reason: AtomicU8::new(CancelReason::None as u8),
             done: AtomicBool::new(false),
             claimed_from_queue: AtomicBool::new(false),
+            taken_at: OnceLock::new(),
         }
     }
 
@@ -108,6 +125,18 @@ impl CancellationState {
         self.claimed_from_queue
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
+    }
+
+    /// Records that a worker has just taken the request off the queue. Only
+    /// the first call counts: a request is delivered to one worker, and a
+    /// second reading could only move the end of its wait.
+    pub fn mark_taken(&self) {
+        let _ = self.taken_at.set(Instant::now());
+    }
+
+    /// When a worker took the request off the queue, or `None` if none has.
+    pub fn taken_at(&self) -> Option<Instant> {
+        self.taken_at.get().copied()
     }
 
     pub fn as_ptr(&self) -> *const AtomicU8 {
@@ -191,6 +220,17 @@ mod tests {
         // answer, which says nothing about the client still being there.
         assert!(!s.is_done());
         assert_eq!(s.get(), CancelReason::None);
+    }
+
+    #[test]
+    fn taken_at_is_unset_until_marked_and_keeps_its_first_reading() {
+        let s = CancellationState::new();
+        assert_eq!(s.taken_at(), None);
+        s.mark_taken();
+        let first = s.taken_at().expect("marked");
+        thread::sleep(std::time::Duration::from_millis(2));
+        s.mark_taken();
+        assert_eq!(s.taken_at(), Some(first));
     }
 
     #[test]
