@@ -31,6 +31,22 @@ RUN set -eux; \
     apk del .hooks-db-build; \
     php -m | grep -E '^(pdo_mysql|mysqli|redis)$'
 
+# mysqli and redis are enabled from files that sort after the dev image's
+# extension.ini, the way a hand-written mysqli.ini or redis.ini does, while
+# pdo_mysql keeps the docker-php-ext-* name that sorts before it. Extensions load
+# in the order their ini files are read, and under RUNTIME_HOOKS=streams the
+# methods among the database entry points are guarded from oxphp_sapi's own module
+# startup, on the classes that exist by then — so this is the layout where a
+# client's class would appear after oxphp_sapi started and never be guarded,
+# unless oxphp_sapi is started after it regardless. Every mysqli and redis test in
+# this profile runs in that layout, and test_late_loaded_clients_start_before_oxphp
+# checks that the layout is still this one.
+RUN set -eux; \
+    cd /usr/local/etc/php/conf.d; \
+    mv docker-php-ext-mysqli.ini mysqli.ini; \
+    mv docker-php-ext-redis.ini redis.ini; \
+    php -m | grep -E '^(pdo_mysql|mysqli|redis)$'
+
 # The bound on waiting for a connection another fiber holds is the smaller of
 # max_execution_time and default_socket_timeout. Left alone both stand at the
 # engine's defaults for a server SAPI — measured in this image, 30 and 60 — which

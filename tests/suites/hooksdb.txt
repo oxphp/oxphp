@@ -2,6 +2,12 @@
 # description: Runtime hooks against real MySQL and Redis — mysqlnd and phpredis waits multiplex fibers
 
 hooksdb/test_db_clients_reachable
+
+# The image loads mysqli and redis from ini files that sort after oxphp's, which
+# is what would leave their classes unguarded if they started after it; every
+# mysqli and redis test below runs in that layout, and this one says it still is
+# that layout and that both clients started first regardless.
+hooksdb/test_late_loaded_clients_start_before_oxphp
 hooksdb/test_mysql_task_multiplex
 hooksdb/test_mysql_request_multiplex
 hooksdb/test_redis_task_multiplex

@@ -3786,14 +3786,14 @@ static bool oxphp_db_class_guarded(const char *cls)
  *
  * Asked once every module has started rather than from our own module startup,
  * because a class that is absent when our MINIT runs is indistinguishable there
- * from an extension that is not installed: modules start in the order they were loaded
- * (compiled-in ones first, then as the ini files name them), and a dependency one
- * module declares on another can move the first of them behind ours without either
- * naming us. So a client extension whose file sorts after ours, or that such a
- * dependency pushed behind us, has not registered its classes yet when we look. Once
- * all of them have started, a class that is present and unguarded was loaded too
- * late — worth a line, because an unguarded entry point looks exactly like a guarded
- * one until data crosses between requests.
+ * from an extension that is not installed. An extension loaded at startup under one
+ * of these names is not what this finds: oxphp_sapi_deps has PHP start this module
+ * after it, wherever its ini file sorts. What is left is a class of one of these
+ * names registered by something that ordering does not place — an extension under
+ * another module name, or a Zend extension, which PHP starts only once every module
+ * has. Present and unguarded once all of them have started, such a class is worth a
+ * line, because an unguarded entry point looks exactly like a guarded one until data
+ * crosses between requests.
  *
  * Diagnostic only: it names what module startup could not guard and installs
  * nothing. */
@@ -3806,12 +3806,13 @@ static void oxphp_db_report_late_classes(void)
         if (zend_hash_str_find_ptr(CG(class_table), cls, strlen(cls)) == NULL) continue;
         if (oxphp_db_class_guarded(cls)) continue;
 
-        char msg[320];
+        char msg[400];
         snprintf(msg, sizeof(msg),
-                 "oxphp: the %s extension registered its classes after oxphp started, so its "
-                 "calls are not kept apart between concurrent fibers sharing one connection. "
-                 "oxphp has to start after it: its ini file must sort after the one that "
-                 "enables %s",
+                 "oxphp: the %s class was registered after oxphp started, so calls to its "
+                 "methods are not kept apart between concurrent fibers sharing one "
+                 "connection. oxphp starts after an extension named %s whenever one is "
+                 "loaded at startup, so this class came from somewhere else, such as an "
+                 "extension under another name or a Zend extension",
                  cls, cls);
         php_log_err(msg);
     }
@@ -7621,9 +7622,32 @@ PHP_RSHUTDOWN_FUNCTION(oxphp_sapi)
 }
 /* }}} */
 
+/* {{{ module dependencies
+ *
+ * A start order rather than a need: each of these is optional and absent from
+ * plenty of builds. Under RUNTIME_HOOKS=streams the database clients' entry points
+ * are swapped from this module's startup, and the methods among them only on the
+ * classes that exist by then: an extension creates its classes in its own startup,
+ * while its plain functions are registered as soon as it is loaded. PHP starts
+ * modules in the order they were loaded — compiled-in ones first, then as the ini
+ * names them — rearranged only where a module declares a dependency. So a client
+ * loaded from an ini file that sorts after ours would start later, and the methods
+ * of its class would stay unguarded for the life of the process. Declared
+ * optional, PHP starts this module after whichever of them is loaded at startup
+ * and asks nothing of the ones that are not. The names are module names, matched
+ * regardless of case, of the extensions that register the classes in
+ * oxphp_db_guarded_classes. */
+static const zend_module_dep oxphp_sapi_deps[] = {
+    ZEND_MOD_OPTIONAL("pdo")
+    ZEND_MOD_OPTIONAL("mysqli")
+    ZEND_MOD_OPTIONAL("redis")
+    ZEND_MOD_END
+};
+/* }}} */
+
 /* {{{ module entry */
 zend_module_entry oxphp_sapi_module_entry = {
-    STANDARD_MODULE_HEADER,
+    STANDARD_MODULE_HEADER_EX, NULL, oxphp_sapi_deps,
     PHP_OXPHP_SAPI_EXTNAME,
     oxphp_sapi_functions,
     PHP_MINIT(oxphp_sapi),
