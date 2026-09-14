@@ -55,6 +55,13 @@ start_container() {
 	# single worker for seconds, and at the default budget admission would
 	# answer them 529 before the drain ever reached them. Admission is covered
 	# by tests/overload_529.sh; here it has to stay out of the way.
+	#
+	# The value is a ceiling and the server may shorten the wait under it, so
+	# "out of the way" is not unconditional: the shortening needs the pool to
+	# be picking up requests whose clients have already left, and these
+	# scenarios' clients wait for their answers. A drain scenario that starts
+	# hanging up mid-request would need to check the budget rather than assume
+	# it.
 	docker run -d --name "$1" \
 		-e WORKER_FILE=/var/www/html/worker_drain.php \
 		-e DOCUMENT_ROOT=/var/www/html \

@@ -6,7 +6,7 @@ use crossbeam_channel::{self, TrySendError};
 use http::{HeaderName, HeaderValue};
 
 use crate::config::{Config, WorkerMode};
-use crate::executor::admission::{Admission, Admitted, ShedReason};
+use crate::executor::admission::{Admission, Admitted, ShedReason, WaitBudget};
 use crate::executor::ScriptExecutor;
 use crate::metrics::{Metrics, WorkerMetrics};
 use crate::php::bindings;
@@ -302,6 +302,10 @@ impl SapiExecutor {
                 depth: queue.len(),
                 capacity: admission.capacity(),
                 slots_available: admission.slots_available(),
+                wait_budget_us: admission.wait_budget().map_or(0, WaitBudget::effective_us),
+                wait_budget_ceiling_us: admission
+                    .wait_budget()
+                    .map_or(0, WaitBudget::configured_us),
             }));
         }
 
@@ -336,10 +340,15 @@ impl ScriptExecutor for SapiExecutor {
         // the deadline, and nothing at all in fail-fast mode. Measured on a
         // pool serving an empty handler, the pair is indistinguishable from
         // zero: −0.27 %, 95 % CI [−1.19 %, +0.64 %].
-        let deadline = self
-            .admission
-            .budget()
-            .map(|budget| std::time::Instant::now() + budget);
+        //
+        // Stamped together with the answer to what window this request's wait
+        // will be measured over, from the one reading of the budget: a request
+        // given a shortened wait must not be judged, when that wait runs out,
+        // as though it had been given the configured one.
+        let (deadline, wait_at_ceiling) = match self.admission.budget() {
+            Some((budget, at_ceiling)) => (Some(std::time::Instant::now() + budget), at_ceiling),
+            None => (None, false),
+        };
 
         // Fast path: a free queue slot is available right now. Stays
         // synchronous and allocation-free — the overwhelming majority of
@@ -357,6 +366,7 @@ impl ScriptExecutor for SapiExecutor {
                     Ok(()) => ExecuteResult::Deferred(crate::executor::Queued {
                         rx: response_rx,
                         deadline,
+                        wait_at_ceiling,
                     }),
                     Err(resp) => ExecuteResult::Rejected(resp),
                 }
@@ -439,6 +449,7 @@ impl ScriptExecutor for SapiExecutor {
                         |()| crate::executor::Queued {
                             rx: response_rx,
                             deadline: Some(deadline),
+                            wait_at_ceiling,
                         },
                     )
                 }
@@ -487,7 +498,30 @@ impl ScriptExecutor for SapiExecutor {
                     // it. This is the shape an application calling back into
                     // itself takes when the queue is short enough that its
                     // inner request never gets into it.
+                    //
+                    // Only asked over a full-length window. "The pool began
+                    // nothing while this request waited" is a statement about
+                    // the pool only for as long as the wait was: a healthy
+                    // pool of four workers on quarter-second handlers starts
+                    // one request every 62 ms, so once the budget is down at
+                    // its floor most waits end between two starts and the
+                    // counter would climb on a pool that is serving perfectly
+                    // well. A shortened budget is also never the diagnosis
+                    // this counter leads to — it names a wait that cannot be
+                    // bought out at any length, and the server has already
+                    // shortened the only thing the operator would be told to
+                    // shorten. The wedge it does exist for holds the budget at
+                    // its ceiling on its own: a pool starting nothing never
+                    // fills the controller's window, so nothing is ever
+                    // decided, and this reading stays armed exactly there. One
+                    // order it does not survive — a pool that wedges while an
+                    // overload already had the budget down, which then stays
+                    // down because a wedged queue never drains. The other
+                    // three readings that name a wedge are unaffected, and the
+                    // budget sitting at its floor with a queue that will not
+                    // fall is itself the fourth.
                     if reason == ShedReason::WaitTimeout
+                        && wait_at_ceiling
                         && crate::metrics::pool_starts() == starts_on_arrival
                     {
                         metrics.admission_wait_wasted();
@@ -556,6 +590,19 @@ impl ScriptExecutor for SapiExecutor {
         let metrics = Arc::clone(&self.metrics);
         let strategy = Arc::clone(&self.strategy);
 
+        // One controller for either pool model — what it reads is the queue and
+        // the pool's own output, and neither depends on how the workers are
+        // managed. Spawned before the match for that reason.
+        if self.admission.wait_budget().is_some() {
+            let admission = Arc::clone(&self.admission);
+            let queue = self.request_rx.clone();
+            let shutdown = Arc::clone(&self.global_shutdown);
+            tokio::spawn(async move {
+                run_wait_budget_controller(admission, queue, shutdown).await;
+            });
+            tracing::info!("Admission wait budget controller started");
+        }
+
         match &self.mode {
             WorkerMode::Static(target) => {
                 let target = *target;
@@ -591,6 +638,68 @@ impl ScriptExecutor for SapiExecutor {
                 });
                 tracing::info!(min, max, "Scale manager started");
             }
+        }
+    }
+}
+
+/// How often the wait budget is recomputed.
+///
+/// How often the pool is sampled, not how often the budget moves: a tick with
+/// a queue behind it and too little work in it is carried forward by
+/// [`admission::WaitBudget::observe`] rather than decided on, so how long the
+/// budget takes to come down is set by how fast the pool starts requests, not
+/// by this period. What the period has to be is short enough that a pool
+/// starting work at a healthy rate is not the thing holding the decision up —
+/// at four samples a second it is not.
+const WAIT_BUDGET_TICK: std::time::Duration = std::time::Duration::from_millis(250);
+
+/// Keeps the admission wait budget matched to what the pool is getting out of
+/// the waiting.
+///
+/// Reads three things per tick and hands them to [`admission::WaitBudget`]:
+/// how much the pool started, how much of what it finished went to clients who
+/// had already left, and whether anything is queued. Two counters read as
+/// deltas and one depth read as a level, because that is what each question
+/// is: the first two are rates, the third is a state. How many ticks it takes
+/// to move the budget is the budget's own business — this task only feeds it.
+async fn run_wait_budget_controller(
+    admission: Arc<Admission>,
+    queue: crossbeam_channel::Receiver<WorkerRequest>,
+    global_shutdown: Arc<AtomicBool>,
+) {
+    let mut interval = tokio::time::interval(WAIT_BUDGET_TICK);
+    // Ticks the task slept through are dropped rather than delivered back to
+    // back. They carry no new work — the counters were read once — so a burst
+    // of them would land on the recovery arm and walk the budget from its
+    // floor to its ceiling inside one scheduling slice, which is the ramp this
+    // controller exists to make gradual. A stall is exactly when that is
+    // reachable: a small `TOKIO_WORKERS` count under the load the budget is
+    // there for.
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    let mut last_started = crate::metrics::pool_starts();
+    let mut last_abandoned = crate::metrics::abandoned_work_total();
+
+    loop {
+        interval.tick().await;
+        if global_shutdown.load(Ordering::Relaxed) {
+            break;
+        }
+
+        let started = crate::metrics::pool_starts();
+        let abandoned = crate::metrics::abandoned_work_total();
+        let sample = crate::executor::admission::LoadSample {
+            started: started.wrapping_sub(last_started),
+            abandoned: abandoned.wrapping_sub(last_abandoned),
+            queue_depth: queue.len(),
+        };
+        last_started = started;
+        last_abandoned = abandoned;
+
+        // `wait_budget()` is `Some` for the life of the executor — the task is
+        // only spawned when it is — but reading it per tick keeps the fail-fast
+        // case a single expression rather than an unwrap justified elsewhere.
+        if let Some(budget) = admission.wait_budget() {
+            budget.observe(sample);
         }
     }
 }

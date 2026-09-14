@@ -50,12 +50,46 @@ pub(super) fn spawn_worker(
         .expect("failed to spawn PHP worker thread")
 }
 
+/// Count a request the pool took up whose client was gone before its response
+/// was handed back.
+///
+/// Counted whether or not PHP ran. A request whose client left while it sat in
+/// the queue is answered at the pickup without starting anything, so it is
+/// nearly free — but what this feeds is not an account of what the pool spent.
+/// It is the one question the admission budget is tuned against: is the
+/// waiting in front of the pool outliving the clients doing it? A client that
+/// left while queued is the most direct answer there is, and leaving it out
+/// costs the pool half its useful throughput. For a request that did run, the
+/// reason is read once its handler has returned: until then it is not final,
+/// since a client can leave at any point while its script runs and the guard
+/// on the dispatch side writes the reason when it does.
+///
+/// Not called for a request whose response left before its handler finished —
+/// a stream whose headers were sent, or an early answer through
+/// `oxphp_finish_request()`. The connection already has that response, and a
+/// client closing afterwards is done with it rather than tired of waiting for
+/// it: an SSE client ending its session is the everyday case. The reason alone
+/// cannot tell the two apart, because a stream's own flush writes `ClientAbort`
+/// when it finds the connection gone, so the exclusion is where this is called
+/// from. The cost is a client that left before such a handler handed its
+/// response over, which goes uncounted.
+///
+/// Only `ClientAbort` counts. The other cancel reasons are the server's own
+/// decisions — a request timeout, a drain, a supervisor cutting a stuck
+/// worker loose — and a wait shortened in answer to those would be shortening
+/// itself in answer to itself.
+fn note_if_abandoned(script: &ScriptRequest) {
+    if script.cancel_state.get() == crate::bridge::cancel::CancelReason::ClientAbort {
+        crate::metrics::abandoned_work();
+    }
+}
+
 /// Answer a request whose budget ran out while it sat in the queue, without
 /// starting it. The permit goes back with the rest of `wr`.
 ///
 /// The wait for a queue slot and the wait inside the queue share one deadline,
-/// so this is the second half of `QUEUE_WAIT_TIMEOUT_MS` — and on a slow pool
-/// the larger half. Refusing costs nothing; executing costs a worker on a
+/// so this is the second half of the request's wait budget — and on a slow
+/// pool the larger half. Refusing costs nothing; executing costs a worker on a
 /// request already answered later than the operator asked for, ahead of
 /// arrivals that can still make their deadline.
 fn refuse_expired(wr: WorkerRequest, metrics: &crate::metrics::Metrics) {
@@ -76,6 +110,13 @@ fn refuse_expired(wr: WorkerRequest, metrics: &crate::metrics::Metrics) {
 /// out, which is the only thing separating the two answers — see
 /// `Pickup::Cancelled`.
 fn answer_departed_client(wr: WorkerRequest, expired: bool) {
+    // Nothing runs, so `execute_request` never counts this one, and it is the
+    // shape the wait budget is tuned against: a client that left while its
+    // request sat in the queue is the most direct evidence there is that the
+    // waiting in front of the pool is outliving the clients doing it. Skipping
+    // the handler makes the request cheap; it does not make the wait any less
+    // spent.
+    note_if_abandoned(&wr.script);
     let answer = if expired {
         crate::types::ScriptResponse::client_closed_unpicked()
     } else {
@@ -352,6 +393,7 @@ fn execute_request(
     // cell; a request whose client left before that is answered there. Drop
     // guard already wrote the reason; ship 499 and skip PHP.
     if request.cancel_state.get() != crate::bridge::cancel::CancelReason::None {
+        note_if_abandoned(request);
         let _ = response_tx.send(crate::types::ScriptResponse::client_closed());
         return None;
     }
@@ -518,6 +560,9 @@ fn execute_request(
         sapi::clear_buffers();
         return None;
     }
+    // Past the early return on purpose: a client closing a response it
+    // already has is not one that gave up waiting — see `note_if_abandoned`.
+    note_if_abandoned(request);
 
     // Single batched TLS lookup for all response data.
     let (raw_output, raw_headers, status) = sapi::take_response();

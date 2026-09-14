@@ -468,14 +468,15 @@ struct PhpExecData {
 /// Wait for the pool's answer, and no longer than the request is allowed to
 /// wait for one.
 ///
-/// `QUEUE_WAIT_TIMEOUT_MS` is one deadline covering both waits a request can
-/// face — for a queue slot, then inside the queue for a worker. The pool
-/// enforces the second half when it takes the request off the channel, which
-/// answers it only as early as the next pickup and not at all when no pickup
-/// is coming: an application calling back into this same server occupies a
-/// worker while it waits for one, so where every worker is held that way the
-/// queue cannot move until a request that cannot finish does. The clock on
-/// this side is the one that keeps running.
+/// The wait budget is one deadline covering both waits a request can face —
+/// for a queue slot, then inside the queue for a worker — stamped on arrival
+/// at whatever the budget was worth then, which `QUEUE_WAIT_TIMEOUT_MS` bounds
+/// from above. The pool enforces the second half when it takes the request off
+/// the channel, which answers it only as early as the next pickup and not at
+/// all when no pickup is coming: an application calling back into this same
+/// server occupies a worker while it waits for one, so where every worker is
+/// held that way the queue cannot move until a request that cannot finish
+/// does. The clock on this side is the one that keeps running.
 ///
 /// What the deadline gates is whether a worker has the request, never how long
 /// the request has taken: a worker that claimed it first keeps it, whatever it
@@ -489,7 +490,11 @@ async fn await_queued(
     starts_on_arrival: u64,
     rejected: &mut bool,
 ) -> Result<crate::types::ScriptResponse, ()> {
-    let crate::executor::Queued { mut rx, deadline } = queued;
+    let crate::executor::Queued {
+        mut rx,
+        deadline,
+        wait_at_ceiling,
+    } = queued;
     // Fail-fast mode has no wait to bound, so it arms no timer.
     let Some(deadline) = deadline else {
         return rx.await.map_err(|_| ());
@@ -544,7 +549,15 @@ async fn await_queued(
     // Whether this wait ever stood a chance. Unchanged means the pool began
     // no request at all for the whole budget, so this one was not outrun by
     // others — there was no work being started to be outrun by.
-    if crate::metrics::pool_starts() == starts_on_arrival {
+    //
+    // Only asked of a wait that was given the configured budget. "The pool
+    // began nothing while this request waited" is a statement about the pool
+    // only for as long as the wait was, and a shortened budget can fall below
+    // the spacing between two starts — measured, a pool serving 42 clients
+    // through a 200 ms handler with the budget down at 62 ms reported 108 of
+    // these, every one of them a wait that ended between two starts on a pool
+    // that was working the whole time.
+    if wait_at_ceiling && crate::metrics::pool_starts() == starts_on_arrival {
         metrics.admission_wait_wasted();
     }
     Ok(crate::types::ScriptResponse::overloaded())
@@ -945,6 +958,9 @@ mod tests {
         let queued = crate::executor::Queued {
             rx,
             deadline: deadline.map(|d| std::time::Instant::now() + d),
+            // The configured budget unless a test says otherwise: the
+            // shortened-budget case has one of its own below.
+            wait_at_ceiling: true,
         };
         (
             tx,
@@ -1085,6 +1101,42 @@ mod tests {
             .expect("the deadline answered");
 
         assert_eq!(resp.status, 529);
+        let out = metrics.to_prometheus();
+        assert!(out.contains("oxphp_admission_refused_total{reason=\"wait_timeout\"} 1"));
+        assert!(out.contains("oxphp_admission_wait_wasted_total 0"));
+    }
+
+    /// The same refusal again, on a wait the server itself had shortened. The
+    /// pool may well have started nothing in a window that short, and saying
+    /// so would report a working pool as one that picks up nothing at all —
+    /// the reading is only meaningful over the window the operator configured.
+    #[tokio::test(flavor = "current_thread")]
+    async fn await_queued_does_not_judge_a_shortened_wait_against_the_pool() {
+        let (tx, queued, cancel, metrics) = queued_for(Some(std::time::Duration::from_millis(50)));
+        let queued = crate::executor::Queued {
+            wait_at_ceiling: false,
+            ..queued
+        };
+        let mut rejected = false;
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            drop(tx);
+        });
+
+        let resp = await_queued(
+            queued,
+            &cancel,
+            &metrics,
+            // Nothing started while it waited — the ceiling condition is the
+            // only thing standing between this and a false report.
+            crate::metrics::pool_starts(),
+            &mut rejected,
+        )
+        .await
+        .expect("the deadline answered");
+
+        assert_eq!(resp.status, 529);
+        assert!(rejected);
         let out = metrics.to_prometheus();
         assert!(out.contains("oxphp_admission_refused_total{reason=\"wait_timeout\"} 1"));
         assert!(out.contains("oxphp_admission_wait_wasted_total 0"));

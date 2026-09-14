@@ -741,6 +741,8 @@ mod tests {
                 depth,
                 capacity: 512,
                 slots_available: 512 - depth,
+                wait_budget_us: 1_000_000,
+                wait_budget_ceiling_us: 1_000_000,
             }
         }));
         metrics.set_workers_current(4);
@@ -759,6 +761,8 @@ mod tests {
             depth,
             capacity: 512,
             slots_available: 512 - depth,
+            wait_budget_us: 1_000_000,
+            wait_budget_ceiling_us: 1_000_000,
         }));
         metrics.set_workers_current(4);
         // Worker mode is the only pool that counts what it takes off the
@@ -983,6 +987,8 @@ mod tests {
             depth: 45,
             capacity: 512,
             slots_available: 467,
+            wait_budget_us: 1_000_000,
+            wait_budget_ceiling_us: 1_000_000,
         }));
         metrics.set_workers_current(4);
         metrics.record_queue_wait(120);

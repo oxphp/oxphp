@@ -44,7 +44,10 @@ services:
       # file. With one worker there is nobody serving in the meantime, so the
       # request that follows a retire has to be allowed to wait for it: the 1 s
       # default refuses it, and a queue refusal in that spot reads exactly like
-      # the breaker having failed.
+      # the breaker having failed. This is a ceiling rather than a guarantee —
+      # the server shortens the wait under it while the pool is picking up
+      # requests whose clients have left — but this profile's client waits for
+      # every answer, so nothing here produces that signal.
       QUEUE_WAIT_TIMEOUT_MS: "10000"
     volumes:
       - ../www:/var/www/html

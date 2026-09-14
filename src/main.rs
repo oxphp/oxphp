@@ -328,7 +328,9 @@ async fn async_main(
         "OxPHP HTTP server starting"
     );
 
-    // Start dynamic worker scale manager if configured
+    // Start the pool's own background tasks: the scale manager where the
+    // pool is dynamic, and the wait-budget controller wherever there is a
+    // wait to adjust, which is every configuration but fail-fast.
     executor.start_scale_manager();
 
     // Initialize optional rate limiter
