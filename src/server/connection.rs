@@ -749,7 +749,8 @@ async fn dispatch_request(
             // The request itself is about to be handed to the executor, and
             // the queue deadline has to be answerable from this side after
             // that: the pool reads it at pickup, and the case this covers is
-            // the one where no pickup happens.
+            // the one where no pickup happens. The pickup itself is read back
+            // through the same state, which is where the pool stamps it.
             let deadline_cancel = script_request.cancel_state.clone();
 
             let queue_start = Instant::now();
@@ -816,39 +817,43 @@ async fn dispatch_request(
                 Ok(resp) => {
                     drop(pending);
                     let php_exec_us = resp.execution_time_us;
-                    // Everything between dispatch and the response, minus the
-                    // time PHP spent running: waiting for admission plus
-                    // waiting in the queue. The elapsed time on its own is not
-                    // a queue wait — it also carries the script's execution
-                    // time, so an idle server reported its own PHP latency as
-                    // queueing and the metric could not answer the question it
-                    // is named for.
-                    let queue_wait_us =
-                        (queue_start.elapsed().as_micros() as u64).saturating_sub(php_exec_us);
-                    // A refused request never queued at all: the fail-fast shed
-                    // would contribute a zero and the budget-expired shed the
-                    // whole budget, either way describing refusals rather than
-                    // queueing. `oxphp_admission_refused_total` counts those instead.
-                    // This has to hold for the trace attribute below as well as
-                    // the histogram — a span claiming a second of queue wait for
-                    // a request that never entered the queue is the same lie,
-                    // told where it is harder to cross-check.
-                    // Two flags because those answers arrive two ways.
-                    // `resp.refused` covers the ones a worker decides: a
-                    // request reached past its queue deadline comes back
-                    // through the ordinary response channel, so the flag on
-                    // the executor side never sees it. `rejected` covers the
-                    // one this side decides, where the deadline passes before
-                    // any worker takes the request and no response is ever
-                    // sent through that channel at all.
+                    // From dispatch to the moment a worker took the request
+                    // off the queue: waiting for admission plus waiting in it.
+                    // The pool stamps that moment where it happens. Inferring
+                    // it from the answer instead, by subtracting the script's
+                    // execution time, left in the handoff of the answer to
+                    // this task and, in worker mode, the worker preparing the
+                    // request before the script's timer starts — reported as
+                    // queueing, and on a cheap script several times what the
+                    // script itself cost.
+                    //
+                    // No stamp, no reading. That covers every answer this side
+                    // makes without a worker — shed on arrival, refused at the
+                    // gate, answered on the queue deadline after winning the
+                    // claim — and `rejected` records the same answers here.
+                    let queue_wait_us = deadline_cancel
+                        .taken_at()
+                        .map(|at| at.saturating_duration_since(queue_start).as_micros() as u64);
+                    // A stamp alone is not enough. A worker that reaches a
+                    // request past its queue deadline has taken it, and
+                    // refuses it through the ordinary response channel; the
+                    // wait behind that answer is the whole budget, describing
+                    // a refusal rather than a pickup, and
+                    // `oxphp_admission_refused_total` counts those instead.
+                    // `resp.refused` is the only thing that says so. This has
+                    // to hold for the trace attribute below as well as the
+                    // histogram — a span claiming a second of queue wait for a
+                    // request that was refused is the same lie, told where it
+                    // is harder to cross-check.
                     //
                     // Neither flag means "refused" exactly — a deadline that
                     // passed on a request whose client had already gone is
                     // answered `499` and counted as a cancellation, not as a
                     // refusal. What both mean is the thing this line is
-                    // deciding: no worker picked the request up, so there is
-                    // no pickup latency to record.
-                    let queue_wait_us = (!rejected && !resp.refused).then_some(queue_wait_us);
+                    // deciding: the wait did not end in a worker taking the
+                    // request inside its budget, so there is no pickup latency
+                    // to record.
+                    let queue_wait_us = queue_wait_us.filter(|_| !rejected && !resp.refused);
                     if let Some(us) = queue_wait_us {
                         server.metrics.record_queue_wait(us);
                     }

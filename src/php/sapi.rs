@@ -131,6 +131,10 @@ impl WorkerIncomingRequest {
             if !self.script.cancel_state.claim_from_queue() {
                 return Pickup::Abandoned;
             }
+            // The wait `oxphp_queue_wait_us` measures ends here, whatever the
+            // deadline below makes of it: whether it is recorded is decided by
+            // how the request is answered, not by whether it was taken.
+            self.script.cancel_state.mark_taken();
             if Instant::now() > at {
                 // `ClientAbort` specifically — it is the absent client that
                 // makes the refusal pointless. Every other reason is written
@@ -144,6 +148,8 @@ impl WorkerIncomingRequest {
                     Pickup::Expired
                 };
             }
+        } else {
+            self.script.cancel_state.mark_taken();
         }
         if self.script.cancel_state.get() != crate::bridge::cancel::CancelReason::None {
             return Pickup::Cancelled { expired: false };
@@ -6095,5 +6101,35 @@ mod tests {
         let before = crate::metrics::pool_starts();
         assert_eq!(req.take_from_queue(), Pickup::Abandoned);
         assert_eq!(crate::metrics::pool_starts(), before);
+    }
+
+    /// The dispatch side reads a request's wait off the stamp this leaves, so
+    /// it has to be left on every request a worker takes — including one it
+    /// then refuses, whose answer is what keeps that wait out of the histogram,
+    /// and one whose client left while it waited, whose wait is recorded if
+    /// the worker reached it inside its budget — and on none the waiting side
+    /// answered, which it never took.
+    #[test]
+    fn pickup_stamps_every_request_it_takes_and_none_the_waiting_side_answered() {
+        let _tick = pickup_tick();
+        for deadline in [in_a_minute(), None, a_second_ago()] {
+            for client_left in [false, true] {
+                let req = queued_request(deadline);
+                if client_left {
+                    req.script
+                        .cancel_state
+                        .set(crate::bridge::cancel::CancelReason::ClientAbort);
+                }
+                let _ = req.take_from_queue();
+                assert!(
+                    req.script.cancel_state.taken_at().is_some(),
+                    "deadline {deadline:?}, client left: {client_left}"
+                );
+            }
+        }
+        let req = queued_request(in_a_minute());
+        assert!(req.script.cancel_state.claim_from_queue());
+        assert_eq!(req.take_from_queue(), Pickup::Abandoned);
+        assert_eq!(req.script.cancel_state.taken_at(), None);
     }
 }

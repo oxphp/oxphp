@@ -57,19 +57,23 @@ impl ScriptExecutor for HoldingExecutor {
     fn shutdown(&self) {}
 }
 
-/// An executor that answers every queued request with a fixed response, a
-/// measurable moment after taking it. The delay is what makes the queue-wait
-/// reading non-zero, so a test can tell "excluded" from "recorded as nought".
+/// An executor that answers every queued request with a fixed response after
+/// a measurable wait, taking the request only at the end of it, as a worker
+/// that reached the request only then would. The mark is what gets a request
+/// answered this way recorded at all; the wait only keeps its reading off
+/// zero.
 struct AnsweringExecutor {
     answer: fn() -> ScriptResponse,
 }
 
 impl ScriptExecutor for AnsweringExecutor {
-    fn execute(&self, _request: ScriptRequest) -> ExecuteResult {
+    fn execute(&self, request: ScriptRequest) -> ExecuteResult {
         let (tx, rx) = tokio::sync::oneshot::channel();
         let answer = self.answer;
+        let cancel_state = request.cancel_state;
         tokio::spawn(async move {
             sleep(Duration::from_millis(20)).await;
+            cancel_state.mark_taken();
             let _ = tx.send(answer());
         });
         ExecuteResult::Deferred(Queued {

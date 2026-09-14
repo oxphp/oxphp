@@ -65,6 +65,12 @@ pub enum ExecuteResult {
 }
 
 pub trait ScriptExecutor: Send + Sync {
+    /// Whoever takes the request off the queue calls
+    /// `request.cancel_state.mark_taken()` at that moment, before answering it
+    /// and whatever it then does with it: the dispatch side measures the
+    /// request's queue wait up to that stamp, and records none for a request
+    /// that was never marked. A request taken after its budget ran out is
+    /// answered with `refused` set, or the whole budget is recorded as a wait.
     fn execute(&self, request: ScriptRequest) -> ExecuteResult;
 
     fn shutdown(&self);

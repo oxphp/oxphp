@@ -1210,7 +1210,7 @@ impl Metrics {
         // ── Queue wait histogram ──
         let _ = writeln!(
             out,
-            "# HELP oxphp_queue_wait_us Time waiting for admission and for worker pickup, excluding script execution."
+            "# HELP oxphp_queue_wait_us Time from dispatch until a worker took the request: waiting for admission and in the queue."
         );
         let _ = writeln!(out, "# TYPE oxphp_queue_wait_us histogram");
         let mut cumulative = 0u64;
