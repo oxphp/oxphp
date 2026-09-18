@@ -207,11 +207,14 @@ jobs:
             exit 1
           fi
 
-  # Two things nothing else catches: a documentation link that points at a page
-  # or heading which no longer exists, and llms.txt / llms-full.txt left behind
-  # by a docs edit. Both are pure shell over the working tree — no toolchain, no
-  # cache, a couple of seconds — so they run on every PR rather than behind a
-  # path filter, which also covers a link added to the README by a Rust-only PR.
+  # Things nothing else catches: a documentation link that points at a page or
+  # heading which no longer exists, llms.txt / llms-full.txt left behind by a
+  # docs edit, and a docs page carrying no title, which drops out of both
+  # generated files and — once such a run is committed — out of the diff that
+  # would otherwise catch it. All are pure shell over the working tree — no
+  # toolchain, no cache, a couple of seconds — so they run on every PR rather
+  # than behind a path filter, which also covers a link added to the README by
+  # a Rust-only PR.
   docs:
     name: Docs
     runs-on: ubuntu-latest
@@ -228,6 +231,6 @@ jobs:
       - name: llms.txt and llms-full.txt match docs/
         run: |
           if ! scripts/gen-llms-txt.sh --check; then
-            echo "::error::Generated files are stale. Run scripts/gen-llms-txt.sh and commit the result."
+            echo "::error::llms.txt / llms-full.txt do not match docs/. The reason and what to do about it are in the log above."
             exit 1
           fi

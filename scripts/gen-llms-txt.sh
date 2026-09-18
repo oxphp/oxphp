@@ -21,6 +21,13 @@
 # --check regenerates into temp files and diffs them against the committed
 # llms.txt / llms-full.txt, printing the drift and exiting non-zero instead of
 # writing anything, so a docs change that forgets to refresh them fails the build.
+#
+# Sections come from each page's first path component, and a page named
+# `index.md` is excluded — a page outside that set is not listed at all. A page
+# inside it that yields no title, with no non-empty `title:` and no `# ` heading
+# with text, has nothing to be listed under: both modes name it and exit
+# non-zero without writing, because --check on its own would never report it —
+# once such a run is committed, it recomputes the same omission, no drift.
 
 set -euo pipefail
 
@@ -34,7 +41,7 @@ DOCS_DIR="$ROOT/$DOCS_REL"
 # --- args --------------------------------------------------------------------
 BASE_URL="${BASE_URL:-}"
 CHECK=0
-usage() { sed -n '2,23p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,30p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 while [ $# -gt 0 ]; do
   case "$1" in
     --base-url) BASE_URL="${2:-}"; shift 2 ;;
@@ -108,12 +115,23 @@ gather() {
     # section early, dropping that page and every page after it in the section
     # while the run still writes its files and exits 0; `find` never listed such
     # a path in the first place.
-    [ -f "$f" ] || continue
+    [ -f "$f" ] || {
+      echo "gen-llms-txt: skipping $rel — git lists it, no regular file is there" >&2
+      continue
+    }
     meta="$(read_meta "$f")"
     t="${meta%%$'\t'*}"
     d="${meta#*$'\t'}"
     if [ -z "$t" ]; then
-      t="$(grep -m1 '^# ' "$f" | sed 's/^# *//')"
+      # awk rather than `grep -m1 '^# ' | sed`: grep exits 1 on a file with no
+      # H1, pipefail makes that the pipeline's status and therefore the
+      # assignment's, and `set -e` then kills the subshell this loop runs in.
+      # `sort` receives a truncated list, so the section loses this page and
+      # every page after it, while the run writes its files and exits 0. awk
+      # exits 0 whether or not it matched, so a page with no H1 no longer ends
+      # the section. (awk does exit non-zero on a file it cannot open, but
+      # read_meta above reads the same file first and would hit that already.)
+      t="$(awk '/^# /{ sub(/^# */, ""); print; exit }' "$f")"
     fi
     # Fields are joined with US (0x1f), a non-whitespace separator, so that an
     # empty description survives `read` (a tab would be IFS-collapsed away).
@@ -196,18 +214,25 @@ trap 'rm -f "$pages" "$tmp_index" "$tmp_full"' EXIT
 
 # --- body --------------------------------------------------------------------
 count=0
+dropped=0
 for name in $sections; do
   title="$(section_title "$name")"
   # The heading is written by the first page that makes it, not by the section
   # existing. A section can still come out empty after its name is known — a
   # path the index lists whose working copy was deleted without `git rm` is
-  # skipped below, and so is a page with neither a title nor an H1 — and a
-  # heading with nothing under it is exactly the kind of content that has no
-  # business in a published file. The loop body runs in this shell (the page
-  # list arrives by process substitution, not a pipe), so the flag survives it.
+  # skipped below — and a heading with nothing under it is exactly the kind of
+  # content that has no business in a published file. A page with neither a
+  # title nor an H1 is skipped there too, but that one ends the run rather than
+  # reaching a file. The loop body runs in this shell (the page list arrives by
+  # process substitution, not a pipe), so what it sets survives the loop — this
+  # flag and the dropped counter both depend on that.
   emitted=0
   while IFS="$(printf '\037')" read -r t d rel; do
-    [ -n "$t" ] || continue
+    [ -n "$t" ] || {
+      echo "gen-llms-txt: $rel yields no title — no non-empty 'title:' in its frontmatter, no '# ' heading with text" >&2
+      dropped=$((dropped + 1))
+      continue
+    }
     [ "$emitted" = 1 ] || { printf '\n## %s\n\n' "$title" >> "$tmp_index"; emitted=1; }
     if [ -n "$BASE_URL" ]; then link="${BASE_URL%/}/$rel"; else link="$rel"; fi
     if [ -n "$d" ]; then
@@ -220,6 +245,18 @@ for name in $sections; do
     count=$((count + 1))
   done < <(gather "$name")
 done
+
+# A page that yields no title reaches neither artifact, and neither mode notices
+# on its own: once such a run is committed, the generated file and the committed
+# one omit the page alike, so --check diffs them clean and answers "up to date"
+# for as long as the page stays untitled. Refuse instead — in both modes, and
+# before anything is written, so the committed artifacts survive the refusal
+# intact. This counts only pages that reached the loop above: a page directly
+# under docs/ belongs to no section, so it never gets that far.
+[ "$dropped" = 0 ] || {
+  echo "gen-llms-txt: $dropped page(s) named above would be dropped — give each one a non-empty 'title:' or a '# ' heading with text" >&2
+  exit 1
+}
 
 if [ "$CHECK" = 1 ]; then
   drift=0
