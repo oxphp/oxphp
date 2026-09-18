@@ -81,7 +81,6 @@ pub struct PluginRequestActions {
     pub(crate) early_response: Option<http::Response<ResponseBody>>,
     pub(crate) request_id_override: Option<String>,
     pub(crate) profiling_mode: Option<crate::profiling::ProfilingMode>,
-    pub(crate) profiling_run_id: Option<String>,
 }
 
 impl PluginRequestActions {
@@ -91,7 +90,6 @@ impl PluginRequestActions {
             early_response: None,
             request_id_override: None,
             profiling_mode: None,
-            profiling_run_id: None,
         }
     }
 
@@ -110,17 +108,14 @@ impl PluginRequestActions {
         self.request_id_override = Some(id);
     }
 
-    /// Select a profiling mode for this request (and record its run id). The
-    /// worker thread reads these fields before calling
-    /// `ProfilingContext::reset`, so a later plugin can still override the
-    /// decision. Typical callers: `ox_profiler` (ProfileAll on trigger hit).
-    pub fn set_profiling_decision(
-        &mut self,
-        mode: crate::profiling::ProfilingMode,
-        run_id: String,
-    ) {
+    /// Select a profiling mode for this request. The worker thread reads this
+    /// before calling `ProfilingContext::reset`, so a later plugin can still
+    /// override the decision. Typical callers: `ox_profiler` (ProfileAll on
+    /// trigger hit). Anything else a plugin decides alongside the mode and
+    /// wants back at completion goes through `set_metadata`, which is the
+    /// channel that reaches `PluginCompleteView`.
+    pub fn set_profiling_mode(&mut self, mode: crate::profiling::ProfilingMode) {
         self.profiling_mode = Some(mode);
-        self.profiling_run_id = Some(run_id);
     }
 }
 

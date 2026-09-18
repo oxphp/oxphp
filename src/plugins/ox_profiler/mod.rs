@@ -24,6 +24,19 @@ use crate::profiling::ProfilingMode;
 use self::config::ProfilerConfig;
 use self::trigger::should_profile;
 
+/// Request-metadata key carrying the trigger's decision from the request
+/// handler, which runs before routing, to the complete handler, which runs
+/// after the response is sent. The metadata vector is the channel that spans
+/// both: it is taken off `RequestReceived`, carried through dispatch and
+/// `ResponseBuilding`, and moved into `RequestComplete`. Entries are read by
+/// key and no handler in the tree rewrites another's, so what is written here
+/// is what comes back — a convention, not something the type enforces.
+/// Prefixed so the key stays this plugin's, as `ox_otel`'s `otel.` ones are.
+///
+/// Only the source travels. The run id is minted at completion instead, where
+/// the request id is final.
+const META_SOURCE: &str = "profiler.source";
+
 /// Per-request profiling activation plugin.
 ///
 /// Feature-gated behind `plugin-profiler`. Standalone — does not depend on
@@ -48,9 +61,11 @@ impl ProfilerPlugin {
     }
 }
 
-/// Runs on the Tokio thread. Checks the trigger; if activated, writes the
-/// decision into `PluginRequestActions` so the worker will pick it up at
-/// RINIT.
+/// Runs on the Tokio thread. Checks the trigger; if activated, publishes the
+/// decision in two directions, because it is read in two places: the mode
+/// forward to the worker, which reads it at RINIT, and which trigger matched
+/// sideways to this plugin's own complete handler, which reads it after the
+/// response is sent. Nothing about the trigger reaches RINIT.
 struct ProfilerRequestHandler {
     config: ProfilerConfig,
 }
@@ -65,18 +80,32 @@ impl PluginRequestHandler for ProfilerRequestHandler {
             tracing::debug!(
                 plugin = "profiler",
                 source = ?decision.source,
-                run_id = %decision.run_id,
                 request_id = view.request_id,
                 "Profiling activated"
             );
-            actions.set_profiling_decision(decision.mode, decision.run_id);
+            // Two channels, because they are read in two places. The mode is a
+            // core concept the worker thread reads before RINIT; the source is
+            // this plugin's own and is read back by its complete handler, so it
+            // rides the request metadata that already carries the trace ids
+            // across the same three events.
+            actions.set_metadata(META_SOURCE, decision.source.as_wire());
+            actions.set_profiling_mode(decision.mode);
         }
     }
 
     fn priority(&self) -> Priority {
-        // Runs after trace_context (-95), before otel (-80) — same band as the
-        // APM request handler so trace metadata is already set by the time we
-        // mint a profiling run_id.
+        // After `trace_context` (-95) and before `ox_otel` (-80), which
+        // replaces `request_id` outright when tracing is on. That gap is why
+        // the run's name is minted at completion rather than here, and the
+        // order is pinned by a test that puts a stand-in for that handler
+        // behind this one:
+        // `a_later_handler_still_gets_to_change_the_id_the_run_will_be_filed_under`
+        // in tests/profiler_trigger_tests.rs.
+        //
+        // Nothing else constrains the number. `should_profile` reads only the
+        // request itself (header, cookie, query, path) and the config, so it
+        // depends on no other handler's output, and the one hard requirement
+        // is that it run before the worker thread reads the mode.
         -85
     }
 }
@@ -119,13 +148,7 @@ impl PluginCompleteHandler for ProfilerCompleteHandler {
             return;
         }
 
-        // Use request_id as the run_id (already path-safe hex).
-        // The trigger's run_id is not yet plumbed back to
-        // PluginCompleteView; a future change may extend the view
-        // to carry it.
-        let run_id = view.request_id.to_string();
-
-        let meta = build_run_meta(view, tree, &run_id);
+        let meta = run_meta_for(view, tree);
 
         // Counter bumps before the fan-out so metrics reflect every
         // dispatched run regardless of disk/http success.
@@ -139,7 +162,7 @@ impl PluginCompleteHandler for ProfilerCompleteHandler {
         // tree without waiting for the async disk write.
         self.storage
             .cache
-            .put(run_id.clone(), std::sync::Arc::clone(tree));
+            .put(meta.run_id.clone(), std::sync::Arc::clone(tree));
 
         if let Some(disk) = self.storage.disk.clone() {
             // Admission gate: try_acquire_owned returns immediately.
@@ -263,10 +286,45 @@ fn gethostname() -> Option<String> {
     None
 }
 
+/// Recover which trigger admitted this request from the request metadata.
+///
+/// An absent entry means this plugin's trigger did not admit it and something
+/// else turned profiling on: PHP mid-request with `OxPHP\Profile\start()`, or
+/// another plugin calling `set_profiling_mode`. Both land on `Sdk`, which is
+/// what that variant names. An entry that does not name a variant is treated
+/// the same way, rather than falling through to whichever variant happens to
+/// be first.
+fn source_from_metadata(view: &PluginCompleteView) -> ActivationSource {
+    view.metadata(META_SOURCE)
+        .and_then(ActivationSource::from_wire)
+        .unwrap_or(ActivationSource::Sdk)
+}
+
+/// Assemble the stored run's metadata from what survives to completion.
+///
+/// The one place the two facts are decided, so that the handler and its tests
+/// cannot drift apart: a test that reached them by repeating these calls would
+/// keep passing while the handler derived them differently.
+///
+/// The name is minted here rather than at admission because `view.request_id`
+/// is final only once every `RequestReceived` handler has run: under
+/// `OTEL_ENABLED=true`, `ox_otel` replaces it with one derived from the trace
+/// context, from a handler that runs after this plugin's. Minting once per
+/// stored run also keeps one name shape on disk whatever turned profiling on.
+fn run_meta_for(
+    view: &PluginCompleteView,
+    tree: &std::sync::Arc<crate::profiling::SpanTree>,
+) -> storage::RunMeta {
+    let source = source_from_metadata(view);
+    let run_id = trigger::generate_run_id(view.request_id, &mut rand::rng());
+    build_run_meta(view, tree, &run_id, source)
+}
+
 fn build_run_meta(
     view: &PluginCompleteView,
     tree: &std::sync::Arc<crate::profiling::SpanTree>,
     run_id: &str,
+    source: ActivationSource,
 ) -> storage::RunMeta {
     let trace_id = if tree.trace_id.is_empty() {
         None
@@ -299,10 +357,7 @@ fn build_run_meta(
         status: view.status,
         user_agent: None,
         client_ip: Some(view.remote_addr.ip().to_string()),
-        // The trigger's ActivationSource is not yet plumbed into the
-        // complete view; default to Header until the view is
-        // extended to surface it.
-        source: ActivationSource::Header,
+        source,
         span_count,
         event_count,
         error_count,
@@ -645,6 +700,7 @@ mod tests {
     use super::*;
     use crate::events::EventDispatcher;
     use crate::plugin::context::PluginDecoratorDef;
+    use crate::plugin::handler::PluginCompleteView;
     use crate::plugin::handler::{PluginInternalHandler, PluginMetricsCollector};
     use crate::plugin::php::PluginNativeFunctionDef;
     use std::collections::HashMap;
@@ -913,11 +969,95 @@ mod tests {
                 None,
             );
 
-            let meta = build_run_meta(&view, &tree, "req-1");
+            let meta = build_run_meta(&view, &tree, "req-1", ActivationSource::Header);
             assert_eq!(
                 meta.truncated, truncated,
                 "run meta must mirror the tree's truncated flag"
             );
         }
+    }
+
+    // ── build_run_meta: what the trigger decided reaches the stored run ──
+
+    fn empty_tree() -> std::sync::Arc<crate::profiling::SpanTree> {
+        std::sync::Arc::new(crate::profiling::SpanTree {
+            finished: Vec::new(),
+            trace_id: "".into(),
+            root_span_id: "".into(),
+            mode: ProfilingMode::ProfileAll,
+            truncated: false,
+        })
+    }
+
+    fn meta_from(metadata: &[(String, String)]) -> storage::RunMeta {
+        let tree = empty_tree();
+        let view = PluginCompleteView::new(
+            "6aad6572c21c00000014",
+            "GET",
+            "/checkout",
+            200,
+            std::time::Duration::from_millis(3),
+            "127.0.0.1:0".parse().unwrap(),
+            0,
+            0,
+            metadata,
+            &[],
+            Some(&tree),
+            None,
+            None,
+        );
+        // The function the complete handler calls, not a copy of its body:
+        // a copy would keep these tests green while the handler changed.
+        run_meta_for(&view, &tree)
+    }
+
+    #[test]
+    fn run_meta_takes_the_source_the_trigger_recorded() {
+        for (wire, expected) in [
+            ("header", ActivationSource::Header),
+            ("cookie", ActivationSource::Cookie),
+            ("query", ActivationSource::Query),
+            ("sample", ActivationSource::SampleRate),
+        ] {
+            let metadata = vec![(META_SOURCE.to_string(), wire.to_string())];
+            let meta = meta_from(&metadata);
+            assert_eq!(meta.source, expected, "source for {wire}");
+            // Two fields, two facts: the request id in full, and a run id of
+            // the documented shape minted from it.
+            assert_eq!(meta.request_id, "6aad6572c21c00000014");
+            assert_eq!(meta.run_id.split('-').nth(1), Some("6aad6572"));
+        }
+    }
+
+    #[test]
+    fn run_meta_without_a_decision_is_an_sdk_run_with_a_minted_id() {
+        // No trigger ran, so nothing was recorded — this is `Profile\start()`.
+        let meta = meta_from(&[]);
+        assert_eq!(meta.source, ActivationSource::Sdk);
+        assert_ne!(
+            meta.run_id, meta.request_id,
+            "a minted id must not be the request id under a second name"
+        );
+        let parts: Vec<&str> = meta.run_id.split('-').collect();
+        assert_eq!(
+            parts.len(),
+            3,
+            "run_id {} is not the documented shape",
+            meta.run_id
+        );
+        assert_eq!(
+            parts[1], "6aad6572",
+            "run_id should embed this request's id"
+        );
+        assert!(storage::disk::run_id_is_safe(&meta.run_id));
+    }
+
+    #[test]
+    fn an_unreadable_source_entry_does_not_masquerade_as_a_trigger() {
+        // Only the entry the request handler writes is trusted. One that does
+        // not name a source falls back to the same place a missing one does,
+        // rather than to the first variant.
+        let metadata = vec![(META_SOURCE.to_string(), "Header".to_string())];
+        assert_eq!(meta_from(&metadata).source, ActivationSource::Sdk);
     }
 }

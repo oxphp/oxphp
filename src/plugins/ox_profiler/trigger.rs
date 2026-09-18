@@ -21,6 +21,42 @@ pub enum ActivationSource {
     Cookie,
     Query,
     SampleRate,
+    /// No trigger matched and the request was profiled anyway. Reconstructed
+    /// at completion from the absence of a decision, so it names every such
+    /// run: PHP turning profiling on mid-request with `OxPHP\Profile\start()`,
+    /// which is the usual one, and equally another plugin selecting
+    /// `ProfileAll` through `set_profiling_mode` without going through this
+    /// trigger. This is the one activation `should_profile` never returns.
+    Sdk,
+}
+
+impl ActivationSource {
+    /// Wire name, shared by the Prometheus label, the `/stats` key and the
+    /// request-metadata entry that carries the decision from the request
+    /// handler to the complete handler. Kept in step with the label table in
+    /// `storage::metrics` by a test there.
+    pub fn as_wire(self) -> &'static str {
+        match self {
+            ActivationSource::Header => "header",
+            ActivationSource::Cookie => "cookie",
+            ActivationSource::Query => "query",
+            ActivationSource::SampleRate => "sample",
+            ActivationSource::Sdk => "sdk",
+        }
+    }
+
+    /// Inverse of [`as_wire`](Self::as_wire). `None` for anything else, which
+    /// the complete handler treats as "no decision was recorded".
+    pub fn from_wire(s: &str) -> Option<Self> {
+        Some(match s {
+            "header" => ActivationSource::Header,
+            "cookie" => ActivationSource::Cookie,
+            "query" => ActivationSource::Query,
+            "sample" => ActivationSource::SampleRate,
+            "sdk" => ActivationSource::Sdk,
+            _ => return None,
+        })
+    }
 }
 
 /// The outcome of `should_profile` when activation succeeds.
@@ -28,7 +64,6 @@ pub enum ActivationSource {
 pub struct ActivationDecision {
     pub source: ActivationSource,
     pub mode: ProfilingMode,
-    pub run_id: String,
 }
 
 /// Decide whether to profile this request.
@@ -49,7 +84,6 @@ pub fn should_profile<R: Rng + ?Sized>(
         return Some(ActivationDecision {
             source: src,
             mode: ProfilingMode::ProfileAll,
-            run_id: generate_run_id(req, rng),
         });
     }
 
@@ -62,7 +96,6 @@ pub fn should_profile<R: Rng + ?Sized>(
         return Some(ActivationDecision {
             source: ActivationSource::SampleRate,
             mode: ProfilingMode::ProfileAll,
-            run_id: generate_run_id(req, rng),
         });
     }
 
@@ -139,13 +172,37 @@ fn path_excluded(uri: &http::Uri, cfg: &ProfilerConfig) -> bool {
     }
 }
 
-fn generate_run_id<R: Rng + ?Sized>(req: &PluginRequestView, rng: &mut R) -> String {
+/// Mint the identifier a stored run is filed under:
+/// `<ts_ms>-<request_id[:8]>-<rand4>`.
+///
+/// Called once per stored run, from the complete handler, and never from the
+/// trigger. The request id is only final after every `RequestReceived` handler
+/// has run — under `OTEL_ENABLED=true`, `ox_otel` replaces it with one derived
+/// from the trace context — so minting at admission would embed an id that is
+/// not the one the run is filed under.
+///
+/// The id doubles as the stored file's name, so it has to survive
+/// `run_id_is_safe`. It does for both ids the server produces on its own — the
+/// twenty hex characters of a plain request id, and the `<trace_id>-<span_id>`
+/// prefixes `ox_otel` substitutes, whose first eight are hex too — and for any
+/// inbound override whose first eight characters are alphanumerics, `-` or
+/// `_`. It does not when one of those eight is a
+/// `.`, which the inbound `X-Request-ID` check admits and the disk writer
+/// refuses. Only the *disk copy* is lost, and only there is anything logged:
+/// by that point the run has already been counted in `runs_total`, put in the
+/// in-memory cache under that same name — where `/__profiler/runs/{id}` will
+/// not fetch it, because the route screens the id against this alphabet too
+/// and answers `400` — and, on a separate branch, pushed to an external
+/// collector, which does not screen it at all. Only the prefix is at stake:
+/// a `.` past the eighth character no longer reaches the name, where naming
+/// the file after the request id outright put the whole id at risk.
+pub fn generate_run_id<R: Rng + ?Sized>(request_id: &str, rng: &mut R) -> String {
     let ts_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0);
 
-    let req_id_prefix: String = req.request_id.chars().take(8).collect();
+    let req_id_prefix: String = request_id.chars().take(8).collect();
     let rand4: u16 = rng.random();
     format!("{ts_ms}-{req_id_prefix}-{rand4:04x}")
 }
@@ -231,7 +288,6 @@ mod tests {
         let d = should_profile(&fx.view(), &cfg, &mut rng).expect("should activate");
         assert_eq!(d.source, ActivationSource::Header);
         assert_eq!(d.mode, ProfilingMode::ProfileAll);
-        assert!(!d.run_id.is_empty());
     }
 
     #[test]
@@ -401,19 +457,70 @@ mod tests {
     }
 
     #[test]
+    fn test_source_wire_names_round_trip() {
+        // The wire name is what crosses the request-metadata channel between
+        // the request handler and the complete handler; a variant whose name
+        // does not come back is a run filed under the wrong source.
+        for src in [
+            ActivationSource::Header,
+            ActivationSource::Cookie,
+            ActivationSource::Query,
+            ActivationSource::SampleRate,
+            ActivationSource::Sdk,
+        ] {
+            assert_eq!(
+                ActivationSource::from_wire(src.as_wire()),
+                Some(src),
+                "{src:?} does not survive its own wire name"
+            );
+        }
+    }
+
+    #[test]
+    fn test_unknown_wire_name_is_not_a_source() {
+        assert_eq!(ActivationSource::from_wire(""), None);
+        assert_eq!(ActivationSource::from_wire("Header"), None);
+        assert_eq!(ActivationSource::from_wire("sampleRate"), None);
+    }
+
+    #[test]
+    fn test_generated_run_id_is_path_safe() {
+        // The id names the file a run is stored in, so the disk writer's
+        // validator has to accept it — for the id the server mints and for an
+        // override a plugin or an inbound header supplied.
+        let mut rng = StdRng::seed_from_u64(7);
+        for request_id in ["6aad6572c21c00000014", "req-test", "", "a"] {
+            let run_id = generate_run_id(request_id, &mut rng);
+            assert!(
+                crate::plugins::ox_profiler::storage::disk::run_id_is_safe(&run_id),
+                "run_id {run_id} from request_id {request_id:?} is not storable"
+            );
+        }
+    }
+
+    #[test]
+    fn test_a_dot_in_the_first_eight_characters_yields_an_unstorable_run_id() {
+        // `X-Request-ID: v1.2.3` passes the inbound check, which allows `.`,
+        // and the disk writer's alphabet does not. Only the prefix reaches the
+        // name, so a dot past the eighth character is harmless — both halves
+        // pinned here so neither is mistaken for the other.
+        let mut rng = StdRng::seed_from_u64(7);
+        let safe = crate::plugins::ox_profiler::storage::disk::run_id_is_safe;
+
+        let in_prefix = generate_run_id("v1.2.3", &mut rng);
+        assert!(!safe(&in_prefix), "{in_prefix} should not be storable");
+
+        let past_prefix = generate_run_id("deadbeef.v2", &mut rng);
+        assert!(safe(&past_prefix), "{past_prefix} should be storable");
+    }
+
+    #[test]
     fn test_run_id_shape() {
-        let cfg = base_config(true);
         let mut rng = StdRng::seed_from_u64(1234);
-        let mut h = HeaderMap::new();
-        h.insert("x-oxphp-profile", "x".parse().unwrap());
         // Use a request_id with no hyphens so split('-') is unambiguous.
-        let fx = ViewFixture {
-            request_id: "req1234abcdef".to_string(),
-            ..ViewFixture::new("/", h, vec![])
-        };
-        let d = should_profile(&fx.view(), &cfg, &mut rng).unwrap();
+        let run_id = generate_run_id("req1234abcdef", &mut rng);
         // Format: <ts_ms>-<req_id[:8]>-<rand[:4 hex]>
-        let parts: Vec<&str> = d.run_id.split('-').collect();
+        let parts: Vec<&str> = run_id.split('-').collect();
         assert_eq!(parts.len(), 3);
         assert_eq!(parts[1], "req1234a");
         assert_eq!(parts[2].len(), 4);

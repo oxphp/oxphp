@@ -190,12 +190,18 @@ pub async fn handle_request(
         remote_addr,
         request_id: String::new(),
         early_response: None,
-        // Pre-allocate: traceparent + trace_id + span_id + parent_span_id + trace_flags
-        // + tracestate + peer_addr + forwarded_proto + forwarded_host + forwarded_port
-        // ≈ 10 entries
+        // Pre-allocate for the common case: traceparent + trace_id + span_id
+        // + parent_span_id + trace_flags + tracestate + peer_addr
+        // + forwarded_proto + forwarded_host + forwarded_port ≈ 10 entries.
+        // This is a hint, not a bound. A request that collects everything at
+        // once — tracing on, so `ox_otel` adds its start time, behind a proxy
+        // sending all three forwarded headers, and profiled, so the profiler
+        // adds which trigger admitted it — reaches twelve and pays for one
+        // grow. The capacity is not raised to cover it: every entry past the
+        // tenth belongs to a feature that is off by default, and a request
+        // carrying all of them is already paying for a full profile.
         metadata: Vec::with_capacity(11),
         profiling_mode: None,
-        profiling_run_id: None,
     };
     server.dispatcher.dispatch(&mut received_event);
 
@@ -207,7 +213,6 @@ pub async fn handle_request(
     let request_id = std::mem::take(&mut received_event.request_id);
     let metadata = std::mem::take(&mut received_event.metadata);
     let profiling_mode = received_event.profiling_mode;
-    let profiling_run_id = std::mem::take(&mut received_event.profiling_run_id);
 
     // Check for early response (e.g., 429 from rate limiter)
     if let Some(early_resp) = received_event.early_response {
@@ -260,7 +265,6 @@ pub async fn handle_request(
             &request_id,
             &metadata,
             profiling_mode,
-            profiling_run_id,
             cancel_state.clone(),
             accepted.artifact(),
         );
@@ -572,7 +576,6 @@ async fn dispatch_request(
     request_id: &str,
     metadata: &[(String, String)],
     profiling_mode_override: Option<crate::profiling::ProfilingMode>,
-    profiling_run_id: Option<String>,
     cancel_state: std::sync::Arc<crate::bridge::cancel::CancellationState>,
     coding: Option<compression::Coding>,
 ) -> Result<(Response<ResponseBody>, usize, PhpExecData), crate::types::BoxError> {
@@ -743,7 +746,6 @@ async fn dispatch_request(
                     .and_then(|(_, v)| v.parse::<u16>().ok()),
                 denied_meta,
                 profiling_mode,
-                profiling_run_id: profiling_run_id.clone(),
             };
 
             // The request itself is about to be handed to the executor, and
@@ -1498,7 +1500,6 @@ mod tests {
             early_response: None,
             metadata: Vec::new(),
             profiling_mode: None,
-            profiling_run_id: None,
         };
 
         handler.handle(&mut event);
@@ -1528,7 +1529,6 @@ mod tests {
                     early_response: None,
                     metadata: Vec::new(),
                     profiling_mode: None,
-                    profiling_run_id: None,
                 };
 
                 handler.handle(&mut event);

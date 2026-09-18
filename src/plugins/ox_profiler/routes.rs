@@ -107,13 +107,16 @@ impl ProfilerRouter {
     fn stats_page(&self) -> Response<ResponseBody> {
         use std::sync::atomic::Ordering;
         let m = &self.storage.metrics;
+        // Keyed off the same table the Prometheus label is rendered from, so
+        // a source cannot be counted under one name here and another there.
+        let runs_total: serde_json::Map<String, serde_json::Value> =
+            super::storage::metrics::SOURCE_LABELS
+                .iter()
+                .zip(m.runs_total.iter())
+                .map(|(label, c)| ((*label).to_string(), c.load(Ordering::Relaxed).into()))
+                .collect();
         let body = serde_json::json!({
-            "runs_total": {
-                "header": m.runs_total[0].load(Ordering::Relaxed),
-                "cookie": m.runs_total[1].load(Ordering::Relaxed),
-                "query":  m.runs_total[2].load(Ordering::Relaxed),
-                "sample": m.runs_total[3].load(Ordering::Relaxed),
-            },
+            "runs_total": runs_total,
             "spans_collected_total": m.spans_collected_total.load(Ordering::Relaxed),
             "disk_drops_total": m.disk_drops_total.load(Ordering::Relaxed),
             "http_push_failures_total": m.http_push_failures_total.load(Ordering::Relaxed),

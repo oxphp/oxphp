@@ -49,6 +49,20 @@ services:
       # assertion helpers are observed too. Tenfold margin, so nothing
       # else in the suite is truncated by this.
       PROFILER_MAX_SPANS: "500"
+      # On so that the request id is replaced part-way through the request,
+      # which is what makes test_source_index's "run_id embeds its own
+      # request id" assertion a guard rather than a tautology: the run id is
+      # minted at completion, and with tracing off nothing ever changes the
+      # id between the two points, so that assertion holds even on a build
+      # that mints it at admission. With tracing on, the stored request id is
+      # `<trace_id[:16]>-<span_id[:8]>` and a run id minted at admission
+      # embeds the discarded one. Also turns on TRACE_CONTEXT, which no test
+      # in this profile reads.
+      #
+      # There is no collector on the test network, so each run logs one
+      # BatchSpanProcessor.ExportError for the refused connection to
+      # 127.0.0.1:4317. That line is expected and unrelated to any failure.
+      OTEL_ENABLED: "true"
     volumes:
       - ../www:/var/www/html
       - ./php:/var/www/html/public/tests
