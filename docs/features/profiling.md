@@ -457,7 +457,15 @@ FinishedSpan {
 
 Files live under `PROFILER_OUTPUT_DIR`, named `<run_id>.<ext>`, where
 `run_id = <ts_ms>-<req_id_prefix>-<rand4>` (e.g.
-`1713600000000-a1b2c3d4-0f5e`).
+`1713600000000-a1b2c3d4-0f5e`). The name is minted when the run is stored, so
+every run is named this way whatever turned profiling on — a trigger, the
+sampling draw, or `OxPHP\Profile\start()` from PHP.
+`req_id_prefix` is the first eight characters of the
+request id and is not a key on its own — in the id the server mints those
+characters are the epoch seconds, shared by every request of that second. To
+tie a profile to its access-log line, use the `request_id` field of the
+`index.json` entry, which carries the id in full and is what the access log
+prints.
 
 ### 10.1. speedscope (🏆 default for interactive analysis)
 
@@ -574,7 +582,7 @@ back to the `gethostname(2)` syscall when that variable is not set.
   "status": 200,
   "user_agent": "Mozilla/5.0 …",
   "client_ip": "10.0.0.42",
-  "source": "Header",                 // Header | Cookie | Query | SampleRate
+  "source": "Header",                 // Header | Cookie | Query | SampleRate | Sdk
   "span_count": 4821,
   "event_count": 7,
   "error_count": 0,
@@ -584,6 +592,12 @@ back to the `gethostname(2)` syscall when that variable is not set.
   "formats": ["xhprof.json", "speedscope.json"]
 }
 ```
+
+`source` names what admitted the run. `Header`, `Cookie` and `Query` are the
+three triggers of section 5 and `SampleRate` is the sampling draw; `Sdk` covers
+every run no trigger admitted — a request that turned profiling on for itself
+with `OxPHP\Profile\start()`, and equally a plugin that selected full
+profiling on its own.
 
 `index.json` is parsed by `/__profiler/runs`, sorted newest-first and
 paginated via `?limit=N&offset=M`.
@@ -677,7 +691,7 @@ E2E smoke test: `tests/php/profiler/test_xhgui_import.php`.
 Exposed on `/metrics`:
 
 ```
-oxphp_profiler_runs_total{source="header"|"cookie"|"query"|"sample"}
+oxphp_profiler_runs_total{source="header"|"cookie"|"query"|"sample"|"sdk"}
 oxphp_profiler_spans_collected_total
 oxphp_profiler_bytes_written_total{format="xhprof"|"speedscope"|"pprof"|"collapsed"}
 oxphp_profiler_disk_drops_total

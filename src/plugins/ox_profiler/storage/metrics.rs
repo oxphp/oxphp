@@ -12,7 +12,7 @@ use super::disk::OutputFormat;
 use crate::plugins::ox_profiler::trigger::ActivationSource;
 
 const FORMAT_COUNT: usize = 4;
-const SOURCE_COUNT: usize = 4;
+const SOURCE_COUNT: usize = 5;
 
 pub struct StorageMetrics {
     pub runs_total: [AtomicU64; SOURCE_COUNT],
@@ -191,7 +191,8 @@ impl StorageMetrics {
 }
 
 const FORMAT_LABELS: [&str; FORMAT_COUNT] = ["xhprof", "speedscope", "pprof", "collapsed"];
-const SOURCE_LABELS: [&str; SOURCE_COUNT] = ["header", "cookie", "query", "sample"];
+pub(crate) const SOURCE_LABELS: [&str; SOURCE_COUNT] =
+    ["header", "cookie", "query", "sample", "sdk"];
 
 fn format_index(f: OutputFormat) -> usize {
     match f {
@@ -208,12 +209,35 @@ fn source_index(s: ActivationSource) -> usize {
         ActivationSource::Cookie => 1,
         ActivationSource::Query => 2,
         ActivationSource::SampleRate => 3,
+        ActivationSource::Sdk => 4,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_labels_match_the_wire_names() {
+        // The Prometheus label and the metadata entry name a source with the
+        // same string; `/stats` builds its `runs_total` object from this very
+        // table, so it is covered by being the table rather than by this
+        // loop. A variant added to one and not the other would silently file
+        // its runs under a neighbour's counter.
+        for src in [
+            ActivationSource::Header,
+            ActivationSource::Cookie,
+            ActivationSource::Query,
+            ActivationSource::SampleRate,
+            ActivationSource::Sdk,
+        ] {
+            assert_eq!(
+                SOURCE_LABELS[source_index(src)],
+                src.as_wire(),
+                "{src:?} is labelled one way and wired another"
+            );
+        }
+    }
 
     #[test]
     fn counters_increment() {

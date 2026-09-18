@@ -50,9 +50,6 @@ impl<H: PluginRequestHandler + 'static> EventHandler<RequestReceived> for Plugin
                 if let Some(mode) = actions.profiling_mode {
                     event.profiling_mode = Some(mode);
                 }
-                if let Some(run_id) = actions.profiling_run_id {
-                    event.profiling_run_id = Some(run_id);
-                }
             }
             Err(_) => {
                 tracing::error!(plugin = %self.plugin_name, "Plugin request handler panicked");
@@ -190,7 +187,6 @@ mod tests {
             early_response: None,
             metadata: Vec::new(),
             profiling_mode: None,
-            profiling_run_id: None,
         }
     }
 

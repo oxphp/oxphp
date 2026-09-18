@@ -76,7 +76,6 @@ mod tests {
             forwarded_port: None,
             denied_meta: None,
             profiling_mode: crate::profiling::ProfilingMode::Off,
-            profiling_run_id: None,
         }
     }
 

@@ -5927,7 +5927,6 @@ mod tests {
                 fallback_script_uri: "/_security/denied.php".to_string(),
             })),
             profiling_mode: crate::profiling::ProfilingMode::Off,
-            profiling_run_id: None,
         };
 
         set_request_data(&req);
@@ -5998,7 +5997,6 @@ mod tests {
                 forwarded_port: None,
                 denied_meta: None,
                 profiling_mode: crate::profiling::ProfilingMode::Off,
-                profiling_run_id: None,
             },
             response_tx,
             permit: Arc::new(tokio::sync::Semaphore::new(1))

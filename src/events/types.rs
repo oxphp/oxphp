@@ -91,8 +91,6 @@ pub struct RequestReceived {
     /// plugin asked for a mode — the executor falls back to `ApmOnly` when
     /// APM is enabled, else `Off`.
     pub profiling_mode: Option<crate::profiling::ProfilingMode>,
-    /// Optional run identifier that accompanies the profiling mode decision.
-    pub profiling_run_id: Option<String>,
 }
 
 impl Event for RequestReceived {

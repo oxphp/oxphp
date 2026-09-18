@@ -94,12 +94,9 @@ pub struct ScriptRequest {
     pub denied_meta: Option<Arc<crate::config::DeniedMeta>>,
     /// Profiling mode selected for this request. The profiler plugin (or any
     /// future mode-aware plugin) writes this on the Tokio thread via
-    /// `PluginRequestActions::set_profiling_decision`; the worker thread reads
+    /// `PluginRequestActions::set_profiling_mode`; the worker thread reads
     /// it and passes it into `ProfilingContext::reset` at RINIT.
     pub profiling_mode: crate::profiling::ProfilingMode,
-    /// Run identifier minted by the profiler when `ProfileAll` is selected.
-    /// Used by future PRs for storage / export correlation.
-    pub profiling_run_id: Option<String>,
 }
 
 /// A PHP error captured during script execution (E_ERROR/E_WARNING/E_NOTICE, exceptions).
