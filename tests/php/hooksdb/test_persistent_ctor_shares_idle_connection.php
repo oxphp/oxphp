@@ -22,8 +22,8 @@ $t = new TestCase('persistent_ctor_shares_idle_connection', 'hooksdb');
 //
 // Both constructors below pass PDO::ATTR_AUTOCOMMIT, at the value the connection
 // already has. That is the option the busy case is refused for whatever its value
-// — PDO hands it to the driver, and being told is a command — so it is what tells
-// this test's two answers apart from that one.
+// — PDO hands it to the driver, and where an option goes is what the rule reads —
+// so it is what tells this test's two answers apart from that one.
 $dsn = 'mysql:host=' . (getenv('DB_MYSQL_HOST') ?: 'hooksdb-mysql')
     . ';port=3306;dbname=' . (getenv('DB_NAME') ?: 'appdb');
 $user = getenv('DB_USER') ?: 'appuser';

@@ -3051,14 +3051,24 @@ static bool oxphp_pdo_opt_long_or(HashTable *opts, unsigned attr, zend_long defv
  * PDO's own switch stores on the handle and returns from — the error mode, the
  * case folding, the null handling, the default fetch mode — writes a field and
  * does nothing else, so writing the value the field already holds is genuinely
- * nothing. Every other option is handed to the driver, which is free to put it on
- * the wire: PDO::ATTR_AUTOCOMMIT sends SET AUTOCOMMIT, PDO::ATTR_STRINGIFY_FETCHES
- * reaches mysqlnd's int_and_float_native and is read once per decoded row, and a
- * driver-private attribute can do anything at all. A command on the wire is the
- * one thing that must not happen here — it lands inside the holder's exchange,
- * where a write the claim refuses reads to the client as a server that has gone
- * away — so an option that reaches the driver is not answerable at any value and
- * the adoption is refused outright.
+ * nothing. Every other option is handed to the driver, which does what it likes
+ * with it: on pdo_mysql PDO::ATTR_AUTOCOMMIT reaches mysql_autocommit(), which
+ * can put a command on the wire; PDO::ATTR_STRINGIFY_FETCHES only reaches
+ * mysqlnd's int_and_float_native, a field read once per decoded row; and a
+ * driver-private attribute can do anything at all. Which of them does which is
+ * the driver's to decide and not answerable from here, so the rule reads where an
+ * option goes rather than what some driver does with it once it arrives.
+ * pdo_mysql is the worked example of why that distinction has to be the rule: it
+ * guards its autocommit call with `dbh->auto_commit ^ bval`, and the constructor
+ * has already stored that same option into dbh->auto_commit before its options
+ * loop runs, so an ordinary true or false sends nothing there — while an even
+ * non-zero integer, stored into that one-bit field as 0 and read back by the
+ * driver as true, does. Comparing values would call that pair neutral and let the
+ * command land inside the holder's exchange, where a write the claim refuses
+ * reads to the client as a server that has gone away — and a field the driver
+ * keeps on the connection is no more answerable, since there is nothing on the
+ * handle to compare it against. So an option that reaches the driver is not
+ * answerable at any value and the adoption is refused outright.
  *
  * PDO::ATTR_PERSISTENT is in the options of every persistent constructor by
  * definition, and PDO's switch has no case for it, so it takes the driver path
@@ -3255,10 +3265,10 @@ static zend_result oxphp_pdo_check_liveness(pdo_dbh_t *dbh)
                         "and on a connection in use those writes are the holder's — an error "
                         "mode or fetch mode changing under it, or, for an option the driver has "
                         "to be told about such as PDO::ATTR_AUTOCOMMIT or "
-                        "PDO::ATTR_STRINGIFY_FETCHES, a command sent inside its exchange. To "
-                        "share one connection, construct it with the same values everywhere and "
-                        "with no option the driver has to be told about (logged at most once a "
-                        "second on this thread)");
+                        "PDO::ATTR_STRINGIFY_FETCHES, whatever that driver does with it, up to "
+                        "a command sent inside its exchange. To share one connection, construct "
+                        "it with the same values everywhere and with no option the driver has to "
+                        "be told about (logged at most once a second on this thread)");
         }
         return FAILURE;
     }
