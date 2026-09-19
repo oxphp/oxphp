@@ -186,11 +186,20 @@ function oxphp_stream_flush(): bool {}
  * Cooperative sleep: suspends the current fiber to let other requests
  * proceed on this worker thread.
  *
- * When called inside a fiber (worker mode with multiplexing), the fiber
- * is suspended and a timer is registered. The scheduler resumes it after
- * the specified duration. Other requests can be handled in the meantime.
+ * When called inside a fiber (worker mode with multiplexing), and where a
+ * fiber switch is possible, the fiber is suspended and a timer is registered.
+ * The scheduler resumes it after the specified duration. Other requests can be
+ * handled in the meantime.
  *
  * When called outside a fiber (traditional mode), falls back to blocking usleep().
+ * So does a call made where a fiber switch is refused, which happens wherever
+ * leaving the current frame would be unsafe — among them inside a
+ * declare(ticks) handler, inside pcntl's signal dispatch, while the request's
+ * input is being built, inside a FILTER_CALLBACK reached from
+ * filter_input_array() given a definitions array, and inside the teardown walks
+ * that run destructors after a request has come apart — and one made inside a
+ * fiber a userland scheduler started (AMPHP, Revolt, a bare new Fiber), whose
+ * context OxPHP's scheduler cannot resume.
  *
  * @param float $seconds Duration to sleep in seconds (e.g. 0.5 for 500ms)
  * @return void
@@ -209,7 +218,9 @@ function oxphp_sleep(float $seconds): void {}
  * requests proceed on this worker thread.
  *
  * Identical to oxphp_sleep() but accepts microseconds as an integer.
- * Falls back to blocking usleep() when not inside a fiber.
+ * Falls back to blocking usleep() when not inside a fiber, and in the same
+ * contexts oxphp_sleep() names, where a fiber switch is refused or OxPHP does
+ * not own the context.
  *
  * @param int $microseconds Duration to sleep in microseconds
  * @return void

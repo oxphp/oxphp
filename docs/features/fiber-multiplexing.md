@@ -5,7 +5,7 @@ description: Handle hundreds of concurrent requests on a single PHP worker threa
 
 # Fiber Multiplexing
 
-OxPHP uses PHP Fibers to handle multiple HTTP requests concurrently on a single worker thread. When a request calls `oxphp_sleep()` or `oxphp_async_await()` (when the async pool is enabled), it suspends and the worker thread immediately picks up the next request. This allows one worker to manage hundreds of in-flight requests without additional threads.
+OxPHP uses PHP Fibers to handle multiple HTTP requests concurrently on a single worker thread. When a request calls `oxphp_sleep()` or `oxphp_async_await()` (when the async pool is enabled), it suspends and the worker thread immediately picks up the next request. This allows one worker to manage hundreds of in-flight requests without additional threads. A few contexts are excepted, and are listed under [Suspension Points](#suspension-points).
 
 ## How It Works
 
@@ -42,9 +42,9 @@ These functions suspend the current fiber and let other requests run on the same
 
 | Function | What happens |
 |----------|-------------|
-| `oxphp_sleep(float $seconds)` | Suspends the fiber for the given duration. Other fibers continue running |
+| `oxphp_sleep(float $seconds)` | Suspends the fiber for the given duration. Other fibers continue running — except in the contexts the note below lists, where the call waits on the worker thread instead |
 | `oxphp_usleep(int $microseconds)` | Same as `oxphp_sleep()` with microsecond granularity (minimum 1 ms) |
-| `oxphp_async_await(int $promise_id)` | Suspends the fiber until the async task completes on the background thread pool |
+| `oxphp_async_await(int $promise_id)` | Suspends the fiber until the async task completes on the background thread pool. Subject to the same contexts as `oxphp_sleep()` above, where it waits on the worker thread instead |
 
 These functions do **not** suspend the fiber:
 
@@ -53,7 +53,7 @@ These functions do **not** suspend the fiber:
 | `oxphp_stream_flush()` | Sends a chunk to the client immediately and returns. Use with `oxphp_sleep()` in SSE loops |
 | `oxphp_finish_request()` | Sends the complete response and continues PHP execution. Does not yield |
 
-> **Note:** PHP's built-in `sleep()` and `usleep()` block the entire worker thread by default. Either use `oxphp_sleep()` / `oxphp_usleep()`, or set `RUNTIME_HOOKS=sleep` to make the native builtins suspend the fiber automatically — useful when third-party code calls `sleep()` directly. To confirm the server picked the setting up, read `runtime_hooks` from `oxphp_server_info()` or from the internal server's `/config`; an unrecognised environment variable is not an error anywhere. See [Configuration](../operations/configuration.md#runtime-hooks).
+> **Note:** PHP's built-in `sleep()` and `usleep()` block the entire worker thread by default. Either use `oxphp_sleep()` / `oxphp_usleep()`, or set `RUNTIME_HOOKS=sleep` to make the native builtins suspend the fiber as well — useful when third-party code calls `sleep()` directly. The `oxphp_*` pair and the hooked builtins alike suspend only where a fiber switch is possible; where it is not, they wait on the worker thread instead, and the hooked builtins hand the call to the native `sleep()`/`usleep()` there, so the wait is the builtin's and so is what `sleep()` gives back when a signal cuts it short. That covers a `declare(ticks)` handler, pcntl's signal dispatch, a request's input build, a `FILTER_CALLBACK` from `filter_input_array()`, and the destructors run after a request comes apart — an open list, carried in full under [Runtime Hooks](../operations/configuration.md#runtime-hooks). A fiber the application starts itself, by `new Fiber` or through a scheduler it drives, is a separate case: OxPHP cannot resume a context it does not own, so a sleep inside one holds a worker thread, and that share of the load has to be sized as if the hook were off. To confirm the server picked the setting up, read `runtime_hooks` from `oxphp_server_info()` or from the internal server's `/config`; an unrecognised environment variable is not an error anywhere. See [Configuration](../operations/configuration.md#runtime-hooks).
 
 ## PHP Examples
 
@@ -128,7 +128,7 @@ Fiber multiplexing is **cooperative, not preemptive**. A fiber that calls a bloc
 - `file_get_contents()`, `fopen()`, `fread()`
 - `curl_exec()`, `curl_multi_exec()`
 - PDO queries, `mysqli_query()`
-- PHP's `sleep()`, `usleep()` (use `oxphp_sleep()` instead, or enable `RUNTIME_HOOKS=sleep`)
+- PHP's `sleep()`, `usleep()` (use `oxphp_sleep()` instead, or enable `RUNTIME_HOOKS=sleep` — within the limits given under [Suspension Points](#suspension-points))
 - DNS resolution (`gethostbyname()`)
 - Any synchronous network or disk I/O
 
@@ -234,6 +234,8 @@ Fiber multiplexing only works in worker mode. In traditional mode, `oxphp_sleep(
 
 **Fix:** Enable worker mode by setting `WORKER_MODE_ENABLED=true`.
 
+With worker mode already on, the call is somewhere a fiber switch is refused or OxPHP does not own the context, as listed under [Suspension Points](#suspension-points). A fiber the application started itself — by `new Fiber`, or through a scheduler it drives inside the request — is the common way to land there, and no setting changes it.
+
 ### High memory usage with many concurrent requests
 
 Each fiber uses a C stack (default 8 MiB, configured by PHP's `fiber.stack_size` ini setting) plus a PHP VM stack per request. With 256 concurrent fibers, worst-case C stack memory is 2 GiB per worker thread.
@@ -250,7 +252,7 @@ fiber.stack_size = 512K
 - **256 fibers per worker** — hard limit, not configurable at runtime
 - **Cooperative only** — CPU-bound code (tight loops, heavy computation) starves other fibers. There is no preemption
 - **Blocking I/O blocks the thread** — all blocking calls must be wrapped in `oxphp_async()` for true concurrency
-- **PHP's native `sleep()`/`usleep()` are not fiber-aware** — use `oxphp_sleep()`/`oxphp_usleep()`
+- **PHP's native `sleep()`/`usleep()` are not fiber-aware** — use `oxphp_sleep()`/`oxphp_usleep()`, or `RUNTIME_HOOKS=sleep`; neither of those suspends where a fiber switch is refused or a userland scheduler owns the context (see [Suspension Points](#suspension-points))
 - **`oxphp_async_await_race()` and `oxphp_async_await_any()` do not yield** — they currently block even inside a fiber. `oxphp_async_await_all()` *does* suspend the fiber while waiting, so it is fiber-friendly; for `race`/`any`, use sequential `oxphp_async_await()` calls if you need the thread to stay cooperative
 
 ## See Also
