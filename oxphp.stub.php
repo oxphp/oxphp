@@ -229,12 +229,16 @@ function oxphp_usleep(int $microseconds): void {}
  * headers, superglobals) without destroying the PHP heap. Bootstrap state
  * (autoloader, DI container, routes, variables in the outer scope) persists.
  *
- * Only available when WORKER_FILE env var is set. Returns true on graceful
- * shutdown (channel closed), or exits the loop on max_requests/max_memory
- * limits. Code after oxphp_worker() runs during shutdown.
+ * Only available in worker mode (WORKER_MODE_ENABLED=true with ENTRY_FILE).
+ * The loop exits when the server shuts down, when a dynamic pool
+ * (PHP_WORKERS=MIN:MAX) retires this worker after it has sat idle, when the
+ * application calls Worker::scheduleExit(), when the worker passes
+ * WORKER_MAX_MEMORY_MIB, or after three consecutive fatal errors.
+ * Code after oxphp_worker() runs once the loop has exited, for any of those
+ * reasons and not only on shutdown.
  *
  * @param callable $handler Called for each request with fresh superglobals
- * @return bool true on graceful exit, false if not in worker mode
+ * @return bool true once the loop exits, false if not in worker mode
  *
  * @example
  * $app = new App();  // boot once
