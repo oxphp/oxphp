@@ -2,13 +2,13 @@
 declare(strict_types=1);
 require_once __DIR__ . '/../test_helper.php';
 
-// Activated by the OXPROF cookie (see the suite line). The suite sends it under
-// the plugin cookie prefix — `__oxp_profiler_OXPROF` — because that is the only
-// spelling the plugin can currently see: cookies reach a plugin through a
-// per-plugin prefixed namespace, and the bare name the profiler looks up is the
-// name *after* that prefix is stripped. Sending the bare `OXPROF` activates
-// nothing. That gap is tracked separately; this probe is about what happens
-// once the cookie arm does fire, so it uses the spelling that gets there.
+// Activated by the OXPROF cookie (see the suite line), spelled the way the
+// documentation tells an operator to set it from the browser: the whole cookie
+// name, with no plugin prefix. The trigger reads it off the `Cookie` header
+// rather than through the per-plugin cookie namespace, which strips a
+// `__oxp_profiler_` prefix and so would only ever see `__oxp_profiler_OXPROF`.
+// A probe sending that namespaced spelling instead would pass while the one
+// name a user can discover activates nothing.
 //
 // profiler/test_source_index reads the resulting run back off index.json and
 // asserts source == "Cookie".

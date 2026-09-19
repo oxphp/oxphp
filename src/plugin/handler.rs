@@ -3,7 +3,7 @@ use std::time::Duration;
 
 use http::{HeaderName, HeaderValue, Method, StatusCode, Uri};
 
-use super::cookies::{CookieOptions, PluginCookies, PluginSetCookie};
+use super::cookies::{find_raw_cookie, CookieOptions, PluginCookies, PluginSetCookie};
 use crate::events::Priority;
 use crate::types::ResponseBody;
 
@@ -64,6 +64,21 @@ impl<'a> PluginRequestView<'a> {
     /// Read this plugin's cookie by key (prefix applied automatically).
     pub fn cookie(&self, key: &str) -> Option<&str> {
         self.cookies.get(key)
+    }
+
+    /// Read a cookie by its full name straight off the `Cookie` header,
+    /// outside the per-plugin namespace [`cookie`](Self::cookie) applies.
+    ///
+    /// Crate-internal on purpose. That namespace is what keeps a plugin from
+    /// reading the application's cookies, and it stays in force for everything
+    /// built against the public API. The exception is for a built-in whose
+    /// cookie *name* is itself part of a documented interface — something an
+    /// operator types into a browser — which a per-plugin prefix would make
+    /// unreachable. A cookie read this way is not stripped from the request,
+    /// so the application receives it too.
+    #[allow(dead_code)] // consumed by feature-gated plugins
+    pub(crate) fn global_cookie(&self, name: &str) -> Option<&str> {
+        find_raw_cookie(self.headers, name)
     }
 
     /// Look up a metadata value by key.
@@ -336,6 +351,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use super::super::cookies::extract_plugin_cookies;
     use super::*;
 
     #[test]
@@ -354,6 +370,29 @@ mod tests {
         assert!(view.header("Cookie").is_none());
         assert!(view.header("COOKIE").is_none());
         assert!(view.header("authorization").is_some());
+    }
+
+    #[test]
+    fn test_request_view_global_cookie_reads_outside_the_namespace() {
+        // The counterpart to the test above: `header()` never hands over the
+        // `Cookie` header, and `cookie()` only ever sees this plugin's
+        // namespace — `global_cookie` is the one way to a cookie whose whole
+        // name is the interface, and it matches that name whole.
+        let mut headers = http::HeaderMap::new();
+        headers.insert("cookie", "session=abc; OXPROF=tok".parse().unwrap());
+
+        let cookies = extract_plugin_cookies(&headers, "__oxp_test_");
+        let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
+        let uri: Uri = "/test".parse().unwrap();
+        let view =
+            PluginRequestView::new(&Method::GET, &uri, addr, "req123", &headers, cookies, &[]);
+
+        assert_eq!(view.global_cookie("OXPROF"), Some("tok"));
+        assert_eq!(view.global_cookie("session"), Some("abc"));
+        assert_eq!(view.global_cookie("absent"), None);
+        // The namespaced read still sees nothing here — neither cookie carries
+        // the `__oxp_test_` prefix.
+        assert_eq!(view.cookie("OXPROF"), None);
     }
 
     #[test]
