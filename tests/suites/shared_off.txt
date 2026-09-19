@@ -1,0 +1,5 @@
+# profile: shared_off
+# description: Shared state with the master switch off — the surface is gone
+
+shared_off/test_classes_absent
+shared_off/test_endpoints_absent

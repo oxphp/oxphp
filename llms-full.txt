@@ -8559,6 +8559,7 @@ All env vars are read at startup. Defaults are sized for hundreds of entries on 
 
 | Env var                         | Default | Effect                                                                |
 |---------------------------------|---------|-----------------------------------------------------------------------|
+| `SHARED_ENABLED`                | true    | Master switch. `false` registers none of the `OxPHP\Shared\*` classes. |
 | `SHARED_MAX_ENTRIES`            | 100 000 | Global cap on all Shared entries combined. Insert past this fails.    |
 | `SHARED_MAX_BYTES`              | 1 GiB   | Global cap on estimated memory across all Shared entries.             |
 | `SHARED_SOFT_LIMIT_RATIO`       | 0.7     | Start shedding lowest-priority work when usage crosses this fraction. |
@@ -8801,6 +8802,8 @@ release cycle:
 The deprecated metric `# HELP` lines carry a `(deprecated, removed in
 a future release; use *_count)` prefix, and the `ox_shared` plugin
 emits a startup `WARN` whenever introspection or metrics are enabled.
+With `SHARED_ENABLED=false` neither surface exists, so neither the
+deprecated names nor the warning appear.
 
 Migrate dashboards and alert rules to the `_count` names before the
 deprecation cycle closes. After removal, only the canonical names
@@ -8829,7 +8832,7 @@ Observability piggybacks on the [internal server](../features/internal-server.md
 INTERNAL_ADDR=127.0.0.1:9090
 ```
 
-Both the JSON endpoints and `/metrics` are then reachable at that address. No additional configuration is required.
+Both the JSON endpoints and `/metrics` are then reachable at that address. No additional configuration is required beyond leaving `SHARED_ENABLED` on.
 
 You can disable either independently:
 
@@ -8840,6 +8843,8 @@ You can disable either independently:
 | `SHARED_METRICS_ENABLED`        | `true`  | Toggles the `oxphp_shared_*` Prometheus metrics.             |
 
 Turn introspection off in hostile-tenant deployments; metrics are aggregate-only and safe to keep on.
+
+`SHARED_ENABLED=false` removes both surfaces as well, along with the rest of the subsystem — there is nothing left to introspect. The two switches above are for keeping the primitives while hiding what they hold.
 
 ## Introspection endpoints
 
@@ -14574,7 +14579,7 @@ In-process concurrency primitives (`OxPHP\Shared\Counter`, `Map`, `Channel`, `Mu
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SHARED_ENABLED` | `true` | Boolean — see [Boolean values](#boolean-values). Master switch for the entire `OxPHP\Shared\*` subsystem |
+| `SHARED_ENABLED` | `true` | Boolean — see [Boolean values](#boolean-values). Master switch for the entire `OxPHP\Shared\*` subsystem. Set to `false` and none of its classes are registered: `new OxPHP\Shared\Counter()` throws `Error: Class "OxPHP\Shared\Counter" not found`, and `/__ox_shared/*` and the `oxphp_shared_*` metrics are absent. Guard with `class_exists('OxPHP\Shared\Counter')` in code that must run either way — not with `interface_exists('OxPHP\Shared\Shareable')`, which stays true because the extension registers that interface either way |
 | `SHARED_MAX_ENTRIES` | `100000` | Global cap on all Shared entries combined. Insert past this fails with `CapacityException` |
 | `SHARED_MAX_BYTES` | `1073741824` (1 GiB) | Global cap on estimated memory across all Shared entries |
 | `SHARED_SOFT_LIMIT_RATIO` | `0.7` | Start shedding lowest-priority work when usage crosses this fraction of `SHARED_MAX_BYTES` / `SHARED_MAX_ENTRIES` |

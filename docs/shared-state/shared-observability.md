@@ -15,7 +15,7 @@ Observability piggybacks on the [internal server](../features/internal-server.md
 INTERNAL_ADDR=127.0.0.1:9090
 ```
 
-Both the JSON endpoints and `/metrics` are then reachable at that address. No additional configuration is required.
+Both the JSON endpoints and `/metrics` are then reachable at that address. No additional configuration is required beyond leaving `SHARED_ENABLED` on.
 
 You can disable either independently:
 
@@ -26,6 +26,8 @@ You can disable either independently:
 | `SHARED_METRICS_ENABLED`        | `true`  | Toggles the `oxphp_shared_*` Prometheus metrics.             |
 
 Turn introspection off in hostile-tenant deployments; metrics are aggregate-only and safe to keep on.
+
+`SHARED_ENABLED=false` removes both surfaces as well, along with the rest of the subsystem — there is nothing left to introspect. The two switches above are for keeping the primitives while hiding what they hold.
 
 ## Introspection endpoints
 
