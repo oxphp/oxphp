@@ -141,7 +141,7 @@ impl CpuStatCache {
 }
 
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::metrics::Metrics;
 use crate::php::heartbeat::monotonic_us;
@@ -178,6 +178,29 @@ const STALL_REPEAT_SCANS: u64 = 60;
 /// waiting, and the queue of a pool nothing is draining does not empty:
 /// requests leave it only when a worker takes one.
 const STALL_CLEAR_SCANS: u64 = 60;
+
+/// Scans a shedding episode keeps quiet between repeats.
+///
+/// One line a minute at the default scan period, chosen for the same reason
+/// [`STALL_REPEAT_SCANS`] is: an episode that began hours ago is still saying
+/// so in the last page of the log, without burying the traffic around it. An
+/// entry line alone would not do that — an operator running `docker logs`
+/// during a long incident would find the only mention of it scrolled away.
+const SHED_REPEAT_SCANS: u64 = 60;
+
+/// Scans without a single refusal before an episode is called over.
+///
+/// Not one. Shedding is bursty: a pool sitting at its capacity refuses in one
+/// scan, gets a batch through in the next and refuses again in the third, so
+/// ending the episode at the first quiet scan would write a pair of lines per
+/// burst — the per-request flood this is written to avoid, arrived at by
+/// another route. A minute of quiet coalesces such a run into one entry and
+/// one exit, and bounds the worst case at two lines a minute.
+///
+/// It delays the closing line by that minute, which is the price and is worth
+/// it: nothing acts on that line, and the duration it carries is measured to
+/// the last refusal, so the wait does not distort what it reports.
+const SHED_CLEAR_SCANS: u64 = 60;
 
 /// Consecutive stalled scans before the state is announced.
 ///
@@ -341,6 +364,149 @@ impl StallWatch {
     }
 }
 
+/// What the shedding watch has to say about the scan just taken.
+///
+/// The numbers travel on the variants rather than through accessors on the
+/// watch: the episode's totals are reset by the very scan that ends it, so a
+/// caller reading them afterwards would read the next episode's zeroes.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum ShedTransition {
+    /// Nothing worth a line.
+    Quiet,
+    /// The server has begun refusing requests for overload.
+    Started {
+        /// Refused during this scan.
+        refused: u64,
+    },
+    /// It is still doing that, and enough scans have passed to say so again.
+    Persisting {
+        /// Refused during this scan.
+        refused: u64,
+        /// Refused since the episode began, this scan included.
+        episode_refused: u64,
+    },
+    /// Nothing has been refused for long enough to call the episode over.
+    Stopped {
+        /// Refused over the whole episode.
+        episode_refused: u64,
+        /// From the first refusal to the last, so the quiet minute that proves
+        /// the episode over is not counted as part of it.
+        duration: Duration,
+    },
+}
+
+/// One shedding episode as it is being lived through.
+struct ShedEpisode {
+    /// Refused since it began.
+    refused: u64,
+    /// Scans since it began, counting the one that began it.
+    scans: u64,
+    /// `scans` as it stood when a line was last written about this episode.
+    reported_at_scan: u64,
+    /// Scans at the end of `scans` in which nothing at all was refused.
+    quiet_scans: u64,
+    started_at: Instant,
+    last_shed_at: Instant,
+}
+
+/// Watches the one thing a server under overload does that leaves no trace in
+/// the log: refuse requests.
+///
+/// Every refusal is counted — `oxphp_admission_refused_total` breaks them down
+/// by reason — and counting them is what an alert reads. A log is read by
+/// somebody who is already looking, during the incident, and what they need
+/// from it is the moment: a server shedding a fifth of its traffic wrote
+/// nothing at all, so the log of an overloaded instance and the log of an idle
+/// one were the same log. Per-request logging is not the answer at these rates
+/// — the line would become the outage — so the episode is what gets reported:
+/// once when it begins, about once a minute while it lasts, once when it ends.
+///
+/// Like [`StallWatch`], a state machine over totals: the caller supplies the
+/// reading, which is what makes the rule testable without an overloaded server
+/// to hand. The two [`Instant`]s exist only to put a duration on the closing
+/// line — no decision here is taken on a clock, so every transition is
+/// reproducible from a sequence of counter readings alone.
+#[derive(Default)]
+pub struct ShedWatch {
+    /// Deliberately starts at zero rather than at the first reading taken.
+    ///
+    /// A watch that spends its first scan seeding would be protecting against
+    /// history the counter cannot hold: it is folded only on the scans that
+    /// have a queue to describe, a refusal cannot be counted before the queue
+    /// exists, and both are born with the process. So the first fold's delta
+    /// is everything shed since the queue appeared, which is an episode worth
+    /// a line — and it is the likeliest one, a cold pool still loading its
+    /// application while requests pile up in front of it.
+    prev_refused: u64,
+    /// `None` between episodes.
+    episode: Option<ShedEpisode>,
+}
+
+impl ShedWatch {
+    /// Fold one reading of the overload refusal counter into the watch.
+    pub fn observe(&mut self, refused_total: u64) -> ShedTransition {
+        let refused = refused_total.saturating_sub(self.prev_refused);
+        self.prev_refused = refused_total;
+
+        let Some(episode) = self.episode.as_mut() else {
+            if refused == 0 {
+                return ShedTransition::Quiet;
+            }
+            // Announced on the first scan that refuses anything, with no
+            // confirmation delay. The stall watch waits for a second scan
+            // because its shape can be produced by sampling a healthy queue at
+            // the wrong microsecond; this one cannot. A refusal is a request
+            // that was answered `529`, and a burst shorter than two scans is
+            // precisely the episode nothing else would record.
+            let now = Instant::now();
+            self.episode = Some(ShedEpisode {
+                refused,
+                scans: 1,
+                reported_at_scan: 1,
+                quiet_scans: 0,
+                started_at: now,
+                last_shed_at: now,
+            });
+            return ShedTransition::Started { refused };
+        };
+
+        episode.scans += 1;
+
+        if refused > 0 {
+            episode.refused += refused;
+            episode.quiet_scans = 0;
+            episode.last_shed_at = Instant::now();
+            // Due by scans elapsed since the last line, but written only on a
+            // scan that is itself refusing: an episode ticking down the quiet
+            // minute that will end it must not be announced as still going.
+            if episode.scans - episode.reported_at_scan >= SHED_REPEAT_SCANS {
+                episode.reported_at_scan = episode.scans;
+                return ShedTransition::Persisting {
+                    refused,
+                    episode_refused: episode.refused,
+                };
+            }
+            return ShedTransition::Quiet;
+        }
+
+        episode.quiet_scans += 1;
+        if episode.quiet_scans < SHED_CLEAR_SCANS {
+            return ShedTransition::Quiet;
+        }
+
+        let episode = self
+            .episode
+            .take()
+            .expect("the episode was borrowed on this path");
+        ShedTransition::Stopped {
+            episode_refused: episode.refused,
+            duration: episode
+                .last_shed_at
+                .saturating_duration_since(episode.started_at),
+        }
+    }
+}
+
 pub struct Supervisor {
     pub scan_period: Duration,
     pub stuck_threshold_us: u64,
@@ -380,6 +546,7 @@ impl Supervisor {
         #[cfg(target_os = "linux")]
         let mut cpu_cache = CpuStatCache::new();
         let mut stall = StallWatch::default();
+        let mut shed = ShedWatch::default();
         while !shutdown.load(std::sync::atomic::Ordering::Relaxed) {
             std::thread::sleep(self.scan_period);
             if let Some(workers) = WORKERS.get() {
@@ -389,7 +556,99 @@ impl Supervisor {
                 self.scan_once(workers);
             }
             let _ = self.report_admission_stall(&mut stall);
+            let _ = self.report_shedding(&mut shed);
         }
+    }
+
+    /// Say out loud when the server starts shedding load, and when it stops.
+    ///
+    /// Every refusal is already counted, and an alert reads the counter. What
+    /// the counter cannot do is put the episode on the same timeline as
+    /// everything else that was happening — a deploy, a dependency going away,
+    /// the application's own errors — which is the timeline an operator has
+    /// open during an incident. Without these lines an instance shedding a
+    /// fifth of its traffic writes a log indistinguishable from an idle one's.
+    ///
+    /// Deliberately nothing but a log. Readiness is left green through an
+    /// episode on purpose: a uniform overload would take every replica out of
+    /// rotation in turn and make a degradation a total outage. The state this
+    /// watch holds drives no probe, no gauge and no decision, so there is no
+    /// path by which a wrong reading here can remove the traffic that would
+    /// correct it.
+    ///
+    /// Returns what it decided, so a test can pin the wiring between the
+    /// counter and the rule.
+    fn report_shedding(&self, watch: &mut ShedWatch) -> ShedTransition {
+        // An executor with no queue has no admission to refuse at: every
+        // refusal counted anywhere in the server is raised on a path that
+        // belongs to the queue this probe publishes, so its absence means
+        // there is nothing for an episode to be made of.
+        let Some(queue) = self.metrics.queue_snapshot() else {
+            return ShedTransition::Quiet;
+        };
+
+        // The four overload reasons only. `shutting_down` and
+        // `pool_unavailable` move during an ordinary restart and on a dead
+        // pool, neither of which is load, and an episode announced on them
+        // would report every teardown as an overload.
+        let transition = watch.observe(self.metrics.admission_refused_overload_total());
+
+        // The queue numbers are what makes the line diagnostic rather than
+        // merely alarming: a depth at capacity with no slots free is a pool
+        // behind on its work, and a wait budget well under its ceiling says
+        // the server has already shortened the wait rather than that the
+        // operator configured it that way. The ceiling travels with the
+        // budget for exactly that reason — the two numbers are the whole of
+        // that reading, and the budget alone cannot carry it: a server that
+        // has driven a one-second budget down to its floor and one configured
+        // with a short budget in the first place print the same figure.
+        //
+        // They are read at the scan, while `refused` covers the scan that has
+        // just passed, so the two are not the same instant and are not meant
+        // to be read as one: a burst that is over by the time the scan lands
+        // prints a large `refused` beside an empty queue, and that is the
+        // shape of a short episode rather than a contradiction.
+        match transition {
+            ShedTransition::Started { refused } => tracing::warn!(
+                refused,
+                queue_depth = queue.depth,
+                queue_capacity = queue.capacity,
+                admission_slots_available = queue.slots_available,
+                wait_budget_us = queue.wait_budget_us,
+                wait_budget_ceiling_us = queue.wait_budget_ceiling_us,
+                "PHP admission has started shedding requests under overload"
+            ),
+            ShedTransition::Persisting {
+                refused,
+                episode_refused,
+            } => tracing::warn!(
+                refused,
+                episode_refused,
+                queue_depth = queue.depth,
+                queue_capacity = queue.capacity,
+                admission_slots_available = queue.slots_available,
+                wait_budget_us = queue.wait_budget_us,
+                wait_budget_ceiling_us = queue.wait_budget_ceiling_us,
+                "PHP admission is still shedding requests under overload"
+            ),
+            ShedTransition::Stopped {
+                episode_refused,
+                duration,
+            } => tracing::info!(
+                episode_refused,
+                // `u64` rather than the `u128` the duration hands back: only
+                // the primitive widths render as JSON numbers, and a `u128`
+                // goes out quoted like a string, which is not what an alert
+                // rule reading this field expects. The saturation is
+                // unreachable — it would take an episode of 584 million years.
+                duration_ms = u64::try_from(duration.as_millis()).unwrap_or(u64::MAX),
+                queue_depth = queue.depth,
+                admission_slots_available = queue.slots_available,
+                "PHP admission has stopped shedding requests"
+            ),
+            ShedTransition::Quiet => {}
+        }
+        transition
     }
 
     /// Say out loud when the pool leaves work waiting that it has workers for.
@@ -1217,6 +1476,431 @@ mod tests {
         assert_eq!(
             watch.observe(wedged_scan(0, 36, 1)),
             StallTransition::Recovered
+        );
+    }
+
+    // ── The shedding episode ──────────────────────────────────────────────
+
+    /// The pool the issue was measured on: seven workers, a queue of 896 full
+    /// to the brim with no admission slot free, and the wait budget already
+    /// driven down. Deliberately without worker metrics — that makes it a
+    /// traditional-mode pool, which is both the default and the mode the
+    /// measurement was taken in.
+    fn shedding_supervisor() -> (Arc<Metrics>, Supervisor) {
+        let metrics = Arc::new(Metrics::new_with_workers(7));
+        metrics.set_queue_probe(Box::new(|| crate::metrics::QueueSnapshot {
+            depth: 896,
+            capacity: 896,
+            slots_available: 0,
+            wait_budget_us: 15_625,
+            wait_budget_ceiling_us: 1_000_000,
+        }));
+        metrics.set_workers_current(7);
+        let supervisor =
+            Supervisor::with_threshold(Arc::clone(&metrics), 500_000, Duration::from_millis(1));
+        (metrics, supervisor)
+    }
+
+    #[test]
+    fn the_very_first_scan_reports_what_has_already_been_shed() {
+        // The watch is folded only where there is a queue to describe, and a
+        // refusal cannot be counted before that queue exists — so whatever the
+        // first fold sees was shed inside the scan that just passed, not
+        // inherited from a process that has been up for a week. Seeding the
+        // window on that scan would throw away precisely the episode this is
+        // for: a pool still loading its application while a second's worth of
+        // arrivals piles up in front of it, over before a second scan lands.
+        let mut watch = ShedWatch::default();
+        assert_eq!(
+            watch.observe(5_000),
+            ShedTransition::Started { refused: 5_000 }
+        );
+        assert_eq!(
+            watch.observe(5_000),
+            ShedTransition::Quiet,
+            "and nothing has been refused since"
+        );
+    }
+
+    #[test]
+    fn an_episode_begins_on_the_first_scan_that_refuses_anything() {
+        // No confirmation delay, by contrast with the stall watch: a refusal
+        // is a request that was answered 529, not a gauge read at an awkward
+        // moment, and a burst shorter than two scans is exactly the episode
+        // nothing else in the log would record.
+        let mut watch = ShedWatch::default();
+        watch.observe(0);
+        assert_eq!(
+            watch.observe(1),
+            ShedTransition::Started { refused: 1 },
+            "one refused request is an episode"
+        );
+    }
+
+    #[test]
+    fn an_episode_is_not_over_until_a_whole_minute_without_a_refusal() {
+        // The premise the flapping rests on. Shedding is bursty — a pool at
+        // its capacity refuses in one scan and gets a batch through in the
+        // next — so an episode ended at the first quiet scan would write an
+        // entry and an exit per burst, which is the log flood this exists to
+        // avoid reached by another road.
+        let mut watch = ShedWatch::default();
+        watch.observe(0);
+        watch.observe(10);
+        let mut total = 10;
+        for scan in 1..SHED_CLEAR_SCANS {
+            assert_eq!(
+                watch.observe(total),
+                ShedTransition::Quiet,
+                "quiet scan {scan} of {SHED_CLEAR_SCANS} is not the end of the episode"
+            );
+        }
+        assert_eq!(
+            watch.observe(total),
+            ShedTransition::Stopped {
+                episode_refused: 10,
+                duration: Duration::ZERO,
+            },
+            "a minute without a refusal ends it"
+        );
+
+        // And the next burst is a new episode rather than a continuation.
+        total += 1;
+        assert_eq!(watch.observe(total), ShedTransition::Started { refused: 1 });
+    }
+
+    #[test]
+    fn a_refusal_inside_the_quiet_minute_keeps_the_episode_open() {
+        // The count on the closing line is cumulative over the episode, so an
+        // episode that ended and restarted every time the pool got a batch
+        // through would report a handful of refusals at a time on a server
+        // shedding millions.
+        let mut watch = ShedWatch::default();
+        watch.observe(0);
+        watch.observe(100);
+        let mut total = 100;
+        for _ in 0..(SHED_CLEAR_SCANS - 2) {
+            watch.observe(total);
+        }
+        total += 5;
+        assert_eq!(
+            watch.observe(total),
+            ShedTransition::Quiet,
+            "still inside the episode, and not yet due a repeat"
+        );
+        for _ in 0..(SHED_CLEAR_SCANS - 1) {
+            watch.observe(total);
+        }
+        assert!(
+            matches!(
+                watch.observe(total),
+                ShedTransition::Stopped {
+                    episode_refused: 105,
+                    ..
+                }
+            ),
+            "one episode of 105, not two of 100 and 5"
+        );
+    }
+
+    #[test]
+    fn the_repeat_waits_a_minute_and_lands_on_a_scan_that_is_shedding() {
+        // Two premises at once. The repeat is due by scans elapsed since the
+        // last line — an episode running for hours whose only mention is its
+        // first line is the same blind spot as no line at all — and it is
+        // written only on a scan that is itself refusing, or an episode
+        // ticking down the quiet minute that ends it would be announced as
+        // still going one scan before it stopped.
+        let mut watch = ShedWatch::default();
+        watch.observe(0);
+        let mut total = 7;
+        assert_eq!(watch.observe(total), ShedTransition::Started { refused: 7 });
+        for scan in 1..SHED_REPEAT_SCANS {
+            total += 7;
+            assert_eq!(
+                watch.observe(total),
+                ShedTransition::Quiet,
+                "scan {scan}: shedding, but not yet due a repeat"
+            );
+        }
+        total += 7;
+        assert_eq!(
+            watch.observe(total),
+            ShedTransition::Persisting {
+                refused: 7,
+                episode_refused: 7 * (SHED_REPEAT_SCANS + 1),
+            }
+        );
+
+        // A third premise, and the one the episode's length rests on: the line
+        // just written re-arms the throttle. Without that the repeat condition
+        // — due by scans elapsed since the last line — stays true for the rest
+        // of the episode, and every refusing scan from here on writes another
+        // WARN: a line a second for as long as the overload lasts, which is
+        // the flood these two thresholds exist to prevent.
+        for scan in 1..SHED_REPEAT_SCANS {
+            total += 7;
+            assert_eq!(
+                watch.observe(total),
+                ShedTransition::Quiet,
+                "scan {scan} after a repeat: still shedding, not yet due another"
+            );
+        }
+        total += 7;
+        assert_eq!(
+            watch.observe(total),
+            ShedTransition::Persisting {
+                refused: 7,
+                episode_refused: 7 * (2 * SHED_REPEAT_SCANS + 1),
+            }
+        );
+
+        // The next repeat falls due exactly where the quiet minute runs out,
+        // and what comes out there is the closing line rather than another
+        // "still shedding" — the episode has refused nothing since.
+        for scan in 1..SHED_CLEAR_SCANS {
+            assert_eq!(
+                watch.observe(total),
+                ShedTransition::Quiet,
+                "quiet scan {scan} must not be reported as still shedding"
+            );
+        }
+        assert!(
+            matches!(
+                watch.observe(total),
+                ShedTransition::Stopped {
+                    episode_refused, ..
+                } if episode_refused == 7 * (2 * SHED_REPEAT_SCANS + 1)
+            ),
+            "a scan that refused nothing ends the episode; it never repeats it"
+        );
+    }
+
+    #[test]
+    fn a_repeat_that_falls_due_inside_a_quiet_stretch_is_not_written() {
+        // The repeat is due by scans elapsed since the last line, so where a
+        // quiet run outlasts the one before it the due moment lands inside
+        // that run rather than at its end. The test above cannot see this:
+        // with the two thresholds equal, an episode whose only refusal was its
+        // first has its repeat fall due on the very scan that ends it. Here a
+        // refusal halfway through restarts the quiet run without moving the
+        // repeat, and an episode that has refused nothing for half a minute
+        // must not announce itself as still shedding.
+        let mut watch = ShedWatch::default();
+        watch.observe(0);
+        assert_eq!(watch.observe(5), ShedTransition::Started { refused: 5 });
+
+        for scan in 1..SHED_CLEAR_SCANS / 2 {
+            assert_eq!(
+                watch.observe(5),
+                ShedTransition::Quiet,
+                "quiet scan {scan} of the first stretch"
+            );
+        }
+        // Holds the episode open and restarts its quiet run; far too early to
+        // be due a repeat of its own.
+        assert_eq!(watch.observe(6), ShedTransition::Quiet);
+
+        for scan in 1..SHED_CLEAR_SCANS {
+            assert_eq!(
+                watch.observe(6),
+                ShedTransition::Quiet,
+                "quiet scan {scan} of the second stretch, repeat or no repeat"
+            );
+        }
+        assert!(
+            matches!(
+                watch.observe(6),
+                ShedTransition::Stopped {
+                    episode_refused: 6,
+                    ..
+                }
+            ),
+            "the episode ends on its quiet minute, carrying both refusals"
+        );
+    }
+
+    #[test]
+    fn the_longest_a_repeat_can_be_delayed_is_one_scan_short_of_two_minutes() {
+        // The published cadence — "no more often than once a minute, and the
+        // gap can run to almost two" — is two claims, and only the floor of it
+        // is pinned elsewhere. This is the ceiling, and it is not a minute: a
+        // refusal arriving one scan before the repeat falls due writes nothing
+        // and restarts the quiet run the exit is counted on, so the due moment
+        // then waits out a whole clear window before a refusing scan comes back
+        // to carry it. An operator who reads the doc and sizes an alert's
+        // for-duration on one minute of silence would page on a live episode.
+        let mut watch = ShedWatch::default();
+        let mut total = 1;
+        assert_eq!(watch.observe(total), ShedTransition::Started { refused: 1 });
+
+        // Scans 2..=59: nothing refused, nothing due.
+        for scan in 2..SHED_REPEAT_SCANS {
+            assert_eq!(
+                watch.observe(total),
+                ShedTransition::Quiet,
+                "quiet scan {scan}, before the repeat is due"
+            );
+        }
+
+        // Scan 60, one short of due: written off as an ordinary scan, but the
+        // episode's quiet run starts again from here.
+        total += 1;
+        assert_eq!(watch.observe(total), ShedTransition::Quiet);
+
+        // Scans 61..=119: the repeat is due throughout and stays unwritten,
+        // one scan short of the quiet window that would end the episode.
+        for scan in 1..SHED_CLEAR_SCANS {
+            assert_eq!(
+                watch.observe(total),
+                ShedTransition::Quiet,
+                "quiet scan {scan} after the repeat fell due"
+            );
+        }
+
+        // Scan 120 — the last scan on which a refusal still finds the episode
+        // open, and 119 scans after the line that opened it.
+        total += 1;
+        assert_eq!(
+            watch.observe(total),
+            ShedTransition::Persisting {
+                refused: 1,
+                episode_refused: 3,
+            },
+            "the repeat lands on the first refusing scan, however late that is"
+        );
+    }
+
+    #[test]
+    fn the_duration_runs_to_the_last_refusal_and_not_to_the_closing_scan() {
+        // Two premises the suite could not tell apart before. That the last
+        // refusal moves the end of the episode at all — without it every
+        // episode closes as `duration: ZERO`, and an overload lasting an hour
+        // reports itself as instantaneous next to the count it refused. And
+        // that the quiet minute which proves the episode over stays out of the
+        // figure. The single-scan episode elsewhere in this module pins
+        // neither: there the first refusal is the last one, and the two
+        // instants are equal by construction.
+        let opened_at = Instant::now();
+        let mut watch = ShedWatch::default();
+        assert_eq!(watch.observe(1), ShedTransition::Started { refused: 1 });
+
+        // A gap worth a figure between the first refusal and the last.
+        std::thread::sleep(Duration::from_millis(2));
+        assert_eq!(watch.observe(2), ShedTransition::Quiet);
+        let shedding_ended = Instant::now();
+
+        // Then a tail an order of magnitude longer, which must not reach it.
+        std::thread::sleep(Duration::from_millis(50));
+        for scan in 1..SHED_CLEAR_SCANS {
+            assert_eq!(
+                watch.observe(2),
+                ShedTransition::Quiet,
+                "quiet scan {scan} of the tail"
+            );
+        }
+        let ShedTransition::Stopped { duration, .. } = watch.observe(2) else {
+            panic!("a whole quiet minute ends the episode");
+        };
+
+        assert!(
+            duration >= Duration::from_millis(2),
+            "the episode has to run from its first refusal to its last: {duration:?}"
+        );
+        // Both instants were taken inside this window, so it bounds the
+        // episode however the scheduler behaved — and it excludes the tail,
+        // which a duration measured at the closing scan would carry.
+        assert!(
+            duration <= shedding_ended.duration_since(opened_at),
+            "and no further: the quiet minute is not part of it: {duration:?}"
+        );
+    }
+
+    #[test]
+    fn a_drain_and_a_dead_pool_are_not_an_overload_episode() {
+        // The wiring between the metric and the rule: the counter read has to
+        // be the overload one. `shutting_down` moves on every graceful
+        // restart and `pool_unavailable` on a pool that has lost its threads,
+        // and an episode announced on either would report a deploy as a
+        // traffic spike — and an outage as overload.
+        use crate::executor::admission::ShedReason;
+
+        let (metrics, supervisor) = shedding_supervisor();
+        let mut watch = ShedWatch::default();
+        assert_eq!(
+            supervisor.report_shedding(&mut watch),
+            ShedTransition::Quiet
+        );
+
+        metrics.request_admission_refused(ShedReason::ShuttingDown);
+        metrics.request_admission_refused(ShedReason::PoolUnavailable);
+        assert_eq!(
+            supervisor.report_shedding(&mut watch),
+            ShedTransition::Quiet,
+            "a drain and a dead pool are not load"
+        );
+
+        metrics.request_admission_refused(ShedReason::QueueFull);
+        assert_eq!(
+            supervisor.report_shedding(&mut watch),
+            ShedTransition::Started { refused: 1 },
+            "and the overload reasons still count"
+        );
+    }
+
+    #[test]
+    fn every_overload_reason_opens_an_episode() {
+        // Four reasons answer 529 and all four are shed load: a queue full
+        // with no budget to wait, a budget spent, a waiting set full in
+        // places, and one full in the bytes the parked bodies hold. An
+        // episode that only knew about one of them would stay silent through
+        // the overloads the other three describe.
+        use crate::executor::admission::ShedReason;
+
+        for reason in [
+            ShedReason::QueueFull,
+            ShedReason::WaitTimeout,
+            ShedReason::WaitingFull,
+            ShedReason::WaitingBytes,
+        ] {
+            let (metrics, supervisor) = shedding_supervisor();
+            let mut watch = ShedWatch::default();
+            supervisor.report_shedding(&mut watch);
+            metrics.request_admission_refused(reason);
+            assert_eq!(
+                supervisor.report_shedding(&mut watch),
+                ShedTransition::Started { refused: 1 },
+                "{} is shed load",
+                reason.as_str()
+            );
+        }
+    }
+
+    #[test]
+    fn the_supervisor_reports_no_shedding_without_a_queue_to_watch() {
+        // The stub executor has no queue and no admission, so nothing can be
+        // refused at one. Reading the counter regardless would be harmless
+        // today and a silent dependency on that tomorrow.
+        let metrics = Arc::new(Metrics::new_with_workers(4));
+        metrics.set_workers_current(4);
+        let supervisor =
+            Supervisor::with_threshold(Arc::clone(&metrics), 500_000, Duration::from_millis(1));
+        let mut watch = ShedWatch::default();
+
+        metrics.request_admission_refused(crate::executor::admission::ShedReason::WaitTimeout);
+        assert_eq!(
+            supervisor.report_shedding(&mut watch),
+            ShedTransition::Quiet
+        );
+
+        // Twice, and the second time is the one that matters: a watch folded
+        // here would carry the first refusal into `prev_refused` and could
+        // only be caught on a later scan. Nothing about this pool changes
+        // between the two, so both readings have to be silent.
+        metrics.request_admission_refused(crate::executor::admission::ShedReason::WaitTimeout);
+        assert_eq!(
+            supervisor.report_shedding(&mut watch),
+            ShedTransition::Quiet
         );
     }
 }
