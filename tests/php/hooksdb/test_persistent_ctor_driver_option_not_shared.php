@@ -9,9 +9,10 @@ $t = new TestCase('persistent_ctor_driver_option_not_shared', 'hooksdb');
 // The other edge of the same rule, and the one an application is most likely to
 // stand on: a pooled connection in use is shared only with a constructor whose
 // options PDO stores on the handle and nothing more. An option the driver has to
-// be told about is refused whatever its value, because being told is a command,
-// and a command here lands inside the holder's exchange — where a write the claim
-// refuses reads to the client as a server that has gone away.
+// be told about is refused whatever its value, because what a driver does with one
+// is its own — up to a command, which here lands inside the holder's exchange,
+// where a write the claim refuses reads to the client as a server that has gone
+// away.
 //
 // PDO::ATTR_AUTOCOMMIT is the sharpest way to say that. PDO writes `auto_commit`
 // onto the handle from the options with its own default of 1 when the key is

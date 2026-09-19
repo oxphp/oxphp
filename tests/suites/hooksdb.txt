@@ -56,8 +56,9 @@ hooksdb/test_shared_redis_wait_gives_up
 # sharing, from its two sides: adopting a pooled connection is also how a
 # constructor writes its own options onto a connection someone else is using, so
 # one that would write a different value gets a connection of its own, and so does
-# one carrying an option the driver has to be told about — being told is a command,
-# and its value being the one already set does not make it less of one. The last
+# one carrying an option the driver has to be told about — the rule reads
+# where an option goes rather than what a driver does with it once it arrives,
+# so the value being the one already set does not change the answer. The last
 # two are the other half of that answer, which must stay an answer about
 # connections a call can be in flight on: a claim is held to the end of a request
 # while the handle it was taken for can be dropped at any point inside it, so a
