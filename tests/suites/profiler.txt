@@ -22,7 +22,7 @@ profiler/test_truncated_over_cap
 profiler/test_truncated_after_cap
 profiler/test_truncated_index
 profiler/test_source_header | GET | -H "X-OxPHP-Profile: test-token" | 200
-profiler/test_source_cookie | GET | -b "__oxp_profiler_OXPROF=test-token" | 200
+profiler/test_source_cookie | GET | -b "OXPROF=test-token" | 200
 profiler/test_source_query >> ?__oxprof=test-token
 profiler/test_source_sdk
 profiler/test_source_index

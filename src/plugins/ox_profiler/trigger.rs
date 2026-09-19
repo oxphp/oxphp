@@ -108,7 +108,10 @@ fn check_explicit(req: &PluginRequestView, cfg: &ProfilerConfig) -> Option<Activ
             return Some(ActivationSource::Header);
         }
     }
-    if let Some(v) = req.cookie("OXPROF") {
+    // The whole cookie name, not a key inside this plugin's `__oxp_profiler_`
+    // namespace: `OXPROF` is what the documentation tells an operator to set
+    // from the browser, and the namespaced read would never see it.
+    if let Some(v) = req.global_cookie("OXPROF") {
         if validate_token(v, cfg) {
             return Some(ActivationSource::Cookie);
         }
@@ -210,7 +213,7 @@ pub fn generate_run_id<R: Rng + ?Sized>(request_id: &str, rng: &mut R) -> String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plugin::cookies::PluginCookies;
+    use crate::plugin::cookies::extract_plugin_cookies;
     use http::{HeaderMap, Method, Uri};
     use rand::rngs::StdRng;
     use rand::SeedableRng;
@@ -224,31 +227,45 @@ mod tests {
         }
     }
 
+    /// The prefix the plugin manager hands this plugin at init —
+    /// `format!("__oxp_{}_", plugin.name())` in `plugin::manager` — for a
+    /// plugin whose `name()` is `profiler`.
+    const PROFILER_COOKIE_PREFIX: &str = "__oxp_profiler_";
+
     /// Hold the allocations that back a `PluginRequestView` for the duration
     /// of a single test. Required because `PluginRequestView` borrows its
     /// fields.
+    ///
+    /// The cookies arrive as a raw `Cookie` header and the plugin's namespaced
+    /// view of them is derived from that header exactly as
+    /// `PluginRequestWrapper` derives it, rather than being handed over
+    /// already parsed. Building `PluginCookies` directly would let a trigger
+    /// read a cookie name the real pipeline never produces and still pass
+    /// here.
     struct ViewFixture {
         method: Method,
         uri: Uri,
         headers: HeaderMap,
-        cookies: PluginCookies,
         metadata: Vec<(String, String)>,
         request_id: String,
         addr: SocketAddr,
     }
 
     impl ViewFixture {
-        fn new(uri: &str, headers: HeaderMap, cookies: Vec<(&'static str, &'static str)>) -> Self {
+        /// `cookie_header` is the verbatim value of the `Cookie` request
+        /// header, e.g. `"session=abc; OXPROF=tok"`. Empty means the request
+        /// carries no `Cookie` header at all.
+        fn new(uri: &str, mut headers: HeaderMap, cookie_header: &str) -> Self {
+            if !cookie_header.is_empty() {
+                headers.insert(
+                    http::header::COOKIE,
+                    http::HeaderValue::from_str(cookie_header).unwrap(),
+                );
+            }
             Self {
                 method: Method::GET,
                 uri: uri.parse().unwrap(),
                 headers,
-                cookies: PluginCookies {
-                    cookies: cookies
-                        .into_iter()
-                        .map(|(k, v)| (k.to_string(), v.to_string()))
-                        .collect(),
-                },
                 metadata: Vec::new(),
                 request_id: "req-1234abcdef".to_string(),
                 addr: "127.0.0.1:0".parse().unwrap(),
@@ -262,9 +279,7 @@ mod tests {
                 self.addr,
                 &self.request_id,
                 &self.headers,
-                PluginCookies {
-                    cookies: self.cookies.cookies.clone(),
-                },
+                extract_plugin_cookies(&self.headers, PROFILER_COOKIE_PREFIX),
                 &self.metadata,
             )
         }
@@ -274,7 +289,7 @@ mod tests {
     fn test_disabled_returns_none() {
         let cfg = base_config(false);
         let mut rng = StdRng::seed_from_u64(0);
-        let fx = ViewFixture::new("/", HeaderMap::new(), vec![]);
+        let fx = ViewFixture::new("/", HeaderMap::new(), "");
         assert!(should_profile(&fx.view(), &cfg, &mut rng).is_none());
     }
 
@@ -284,7 +299,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0);
         let mut h = HeaderMap::new();
         h.insert("x-oxphp-profile", "anything".parse().unwrap());
-        let fx = ViewFixture::new("/", h, vec![]);
+        let fx = ViewFixture::new("/", h, "");
         let d = should_profile(&fx.view(), &cfg, &mut rng).expect("should activate");
         assert_eq!(d.source, ActivationSource::Header);
         assert_eq!(d.mode, ProfilingMode::ProfileAll);
@@ -294,16 +309,61 @@ mod tests {
     fn test_cookie_activates_without_token() {
         let cfg = base_config(true);
         let mut rng = StdRng::seed_from_u64(0);
-        let fx = ViewFixture::new("/", HeaderMap::new(), vec![("OXPROF", "whatever")]);
+        let fx = ViewFixture::new("/", HeaderMap::new(), "OXPROF=whatever");
         let d = should_profile(&fx.view(), &cfg, &mut rng).unwrap();
         assert_eq!(d.source, ActivationSource::Cookie);
+    }
+
+    #[test]
+    fn test_cookie_activates_among_other_cookies() {
+        // The trigger has to find its own cookie beside the application's,
+        // which is the shape every browser request has. Splitting them across
+        // several `Cookie` field lines, which HTTP/2 allows, is covered by
+        // `find_raw_cookie`'s own tests.
+        let cfg = base_config(true);
+        let mut rng = StdRng::seed_from_u64(0);
+        let fx = ViewFixture::new(
+            "/",
+            HeaderMap::new(),
+            "session=abc; OXPROF=whatever; theme=dark",
+        );
+        let d = should_profile(&fx.view(), &cfg, &mut rng).expect("should activate");
+        assert_eq!(d.source, ActivationSource::Cookie);
+    }
+
+    #[test]
+    fn test_cookie_carries_the_token_through() {
+        // The value the browser set has to reach the comparison intact, not
+        // merely be present: this is the shape the e2e probe sends.
+        let mut cfg = base_config(true);
+        cfg.auth_token = Some(Arc::<str>::from("secret-123"));
+        let mut rng = StdRng::seed_from_u64(0);
+        let fx = ViewFixture::new("/", HeaderMap::new(), "OXPROF=secret-123");
+        let d = should_profile(&fx.view(), &cfg, &mut rng).expect("should activate");
+        assert_eq!(d.source, ActivationSource::Cookie);
+
+        let wrong = ViewFixture::new("/", HeaderMap::new(), "OXPROF=secret-456");
+        assert!(should_profile(&wrong.view(), &cfg, &mut rng).is_none());
+    }
+
+    #[test]
+    fn test_plugin_namespaced_cookie_name_does_not_activate() {
+        // `OXPROF` is the whole cookie name, not a key inside this plugin's
+        // `__oxp_profiler_` namespace. A cookie spelled the namespaced way is
+        // a different cookie and activates nothing. Pinned so the lookup is
+        // not moved back behind `extract_plugin_cookies`, where the only name
+        // the documentation gives is unreachable.
+        let cfg = base_config(true);
+        let mut rng = StdRng::seed_from_u64(0);
+        let fx = ViewFixture::new("/", HeaderMap::new(), "__oxp_profiler_OXPROF=whatever");
+        assert!(should_profile(&fx.view(), &cfg, &mut rng).is_none());
     }
 
     #[test]
     fn test_query_activates_without_token() {
         let cfg = base_config(true);
         let mut rng = StdRng::seed_from_u64(0);
-        let fx = ViewFixture::new("/foo?__oxprof=yes&other=ok", HeaderMap::new(), vec![]);
+        let fx = ViewFixture::new("/foo?__oxprof=yes&other=ok", HeaderMap::new(), "");
         let d = should_profile(&fx.view(), &cfg, &mut rng).unwrap();
         assert_eq!(d.source, ActivationSource::Query);
     }
@@ -314,7 +374,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0);
         let mut h = HeaderMap::new();
         h.insert("x-oxphp-profile", "x".parse().unwrap());
-        let fx = ViewFixture::new("/?__oxprof=q", h, vec![("OXPROF", "c")]);
+        let fx = ViewFixture::new("/?__oxprof=q", h, "OXPROF=c");
         assert_eq!(
             should_profile(&fx.view(), &cfg, &mut rng).unwrap().source,
             ActivationSource::Header
@@ -325,7 +385,7 @@ mod tests {
     fn test_cookie_priority_over_query() {
         let cfg = base_config(true);
         let mut rng = StdRng::seed_from_u64(0);
-        let fx = ViewFixture::new("/?__oxprof=q", HeaderMap::new(), vec![("OXPROF", "c")]);
+        let fx = ViewFixture::new("/?__oxprof=q", HeaderMap::new(), "OXPROF=c");
         assert_eq!(
             should_profile(&fx.view(), &cfg, &mut rng).unwrap().source,
             ActivationSource::Cookie
@@ -339,7 +399,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0);
         let mut h = HeaderMap::new();
         h.insert("x-oxphp-profile", "secret-123".parse().unwrap());
-        let fx = ViewFixture::new("/", h, vec![]);
+        let fx = ViewFixture::new("/", h, "");
         assert!(should_profile(&fx.view(), &cfg, &mut rng).is_some());
     }
 
@@ -350,7 +410,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0);
         let mut h = HeaderMap::new();
         h.insert("x-oxphp-profile", "wrong-1234".parse().unwrap());
-        let fx = ViewFixture::new("/", h, vec![]);
+        let fx = ViewFixture::new("/", h, "");
         assert!(should_profile(&fx.view(), &cfg, &mut rng).is_none());
     }
 
@@ -361,7 +421,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0);
         let mut h = HeaderMap::new();
         h.insert("x-oxphp-profile", "short".parse().unwrap());
-        let fx = ViewFixture::new("/", h, vec![]);
+        let fx = ViewFixture::new("/", h, "");
         assert!(should_profile(&fx.view(), &cfg, &mut rng).is_none());
     }
 
@@ -370,7 +430,7 @@ mod tests {
         let mut cfg = base_config(true);
         cfg.sample_rate = 1.0; // always fires
         let mut rng = StdRng::seed_from_u64(0);
-        let fx = ViewFixture::new("/", HeaderMap::new(), vec![]);
+        let fx = ViewFixture::new("/", HeaderMap::new(), "");
         let d = should_profile(&fx.view(), &cfg, &mut rng).unwrap();
         assert_eq!(d.source, ActivationSource::SampleRate);
     }
@@ -380,7 +440,7 @@ mod tests {
         let mut cfg = base_config(true);
         cfg.sample_rate = 0.0;
         let mut rng = StdRng::seed_from_u64(0);
-        let fx = ViewFixture::new("/", HeaderMap::new(), vec![]);
+        let fx = ViewFixture::new("/", HeaderMap::new(), "");
         assert!(should_profile(&fx.view(), &cfg, &mut rng).is_none());
     }
 
@@ -403,7 +463,7 @@ mod tests {
     fn test_excluded_path_not_sampled() {
         let cfg = config_excluding("/_profiler/**");
         let mut rng = StdRng::seed_from_u64(0);
-        let fx = ViewFixture::new("/_profiler/abc", HeaderMap::new(), vec![]);
+        let fx = ViewFixture::new("/_profiler/abc", HeaderMap::new(), "");
         assert!(should_profile(&fx.view(), &cfg, &mut rng).is_none());
     }
 
@@ -411,7 +471,7 @@ mod tests {
     fn test_non_excluded_path_is_sampled() {
         let cfg = config_excluding("/_profiler/**");
         let mut rng = StdRng::seed_from_u64(0);
-        let fx = ViewFixture::new("/app/dashboard", HeaderMap::new(), vec![]);
+        let fx = ViewFixture::new("/app/dashboard", HeaderMap::new(), "");
         let d = should_profile(&fx.view(), &cfg, &mut rng).expect("sampled");
         assert_eq!(d.source, ActivationSource::SampleRate);
     }
@@ -422,7 +482,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(0);
         let mut h = HeaderMap::new();
         h.insert("x-oxphp-profile", "anything".parse().unwrap());
-        let fx = ViewFixture::new("/_profiler/abc", h, vec![]);
+        let fx = ViewFixture::new("/_profiler/abc", h, "");
         let d = should_profile(&fx.view(), &cfg, &mut rng).expect("explicit wins");
         assert_eq!(d.source, ActivationSource::Header);
     }
@@ -438,7 +498,7 @@ mod tests {
         // literal — the gap only shows on exact patterns and on dot-segments.)
         let cfg = config_excluding("/_profiler/abc");
         let mut rng = StdRng::seed_from_u64(0);
-        let fx = ViewFixture::new("/_profiler/%61bc", HeaderMap::new(), vec![]);
+        let fx = ViewFixture::new("/_profiler/%61bc", HeaderMap::new(), "");
         assert!(should_profile(&fx.view(), &cfg, &mut rng).is_some());
     }
 
@@ -447,12 +507,12 @@ mod tests {
         // "/_profiler/**" does NOT cover bare "/_profiler"; the recipe adds it.
         let only_subtree = config_excluding("/_profiler/**");
         let mut rng = StdRng::seed_from_u64(0);
-        let fx = ViewFixture::new("/_profiler", HeaderMap::new(), vec![]);
+        let fx = ViewFixture::new("/_profiler", HeaderMap::new(), "");
         assert!(should_profile(&fx.view(), &only_subtree, &mut rng).is_some());
 
         let with_bare = config_excluding("/_profiler,/_profiler/**");
         let mut rng2 = StdRng::seed_from_u64(0);
-        let fx2 = ViewFixture::new("/_profiler", HeaderMap::new(), vec![]);
+        let fx2 = ViewFixture::new("/_profiler", HeaderMap::new(), "");
         assert!(should_profile(&fx2.view(), &with_bare, &mut rng2).is_none());
     }
 

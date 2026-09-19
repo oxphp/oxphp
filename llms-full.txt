@@ -5272,6 +5272,13 @@ As long as the cookie is alive, every request is profiled. Delete it to
 stop. Useful for walking a user scenario (open product → add to cart →
 checkout) and collecting a **series** of profiles.
 
+The cookie is not stripped from the request: the token stays visible to the
+code being profiled and to anything that logs or forwards cookies. It appears
+in `$_COOKIE` like any other cookie when the browser sends its cookies on a
+single `Cookie` header, and in `$_SERVER['HTTP_COOKIE']` when it splits them
+across several, which HTTP/2 permits. One more reason to keep a production
+token off this path — see §17.
+
 ### 5.3. Query string (for sharing links)
 
 ```
