@@ -118,18 +118,22 @@ oxphp_finish_request();
 
 For work that regularly takes more than a few seconds, publish a message to Redis, RabbitMQ, or a similar queue and let a dedicated consumer handle it asynchronously.
 
-### Session changes are lost
+### A session cannot be started after the response has gone
 
-Session data must be written before calling `oxphp_finish_request()`. Changes made after the call are discarded.
+`oxphp_finish_request()` sends the response as it stands — status, headers and body — and nothing added to it afterwards is sent. Sending it also means the headers have been sent, and PHP refuses to start a session once that has happened: `session_start()` raises `Session cannot be started after headers have already been sent` and returns `false`, and `session_regenerate_id()` refuses in the same way. The session is not started at all, so `$_SESSION` writes after that point go into an ordinary array that nothing saves — and under a framework that turns warnings into exceptions, the refusal is a throw inside a request that has already answered.
 
-**Fix:** Call `session_write_close()` before `oxphp_finish_request()`:
+**Fix:** start the session before the call, and close it before the call as well, so the write and the unlock happen where you put them:
 
 ```php
 <?php
+session_start();            // Before the response goes out, not after
 $_SESSION['last_seen'] = time();
-session_write_close();      // Persist session before finishing
+session_write_close();      // Persist the session and release the save handler's lock
 oxphp_finish_request();     // Send response
+// ... work that no longer has a session ...
 ```
+
+In worker mode this is worth doing whether or not the request finishes early. A worker has no end-of-request at which to close a session, so one left open is closed only when that worker next has an idle moment to give it back — and until then the save handler is still holding whatever it locked, which for the default handler is an exclusive lock that blocks anyone else reading that session. See [Worker Mode](worker-mode.md#what-gets-reset-between-requests) for the full boundary, including why `session_write_close()` is not a separation between requests that overlap on a worker.
 
 ### Response body is empty after calling `oxphp_finish_request()`
 

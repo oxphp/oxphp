@@ -4548,18 +4548,22 @@ oxphp_finish_request();
 
 For work that regularly takes more than a few seconds, publish a message to Redis, RabbitMQ, or a similar queue and let a dedicated consumer handle it asynchronously.
 
-### Session changes are lost
+### A session cannot be started after the response has gone
 
-Session data must be written before calling `oxphp_finish_request()`. Changes made after the call are discarded.
+`oxphp_finish_request()` sends the response as it stands — status, headers and body — and nothing added to it afterwards is sent. Sending it also means the headers have been sent, and PHP refuses to start a session once that has happened: `session_start()` raises `Session cannot be started after headers have already been sent` and returns `false`, and `session_regenerate_id()` refuses in the same way. The session is not started at all, so `$_SESSION` writes after that point go into an ordinary array that nothing saves — and under a framework that turns warnings into exceptions, the refusal is a throw inside a request that has already answered.
 
-**Fix:** Call `session_write_close()` before `oxphp_finish_request()`:
+**Fix:** start the session before the call, and close it before the call as well, so the write and the unlock happen where you put them:
 
 ```php
 <?php
+session_start();            // Before the response goes out, not after
 $_SESSION['last_seen'] = time();
-session_write_close();      // Persist session before finishing
+session_write_close();      // Persist the session and release the save handler's lock
 oxphp_finish_request();     // Send response
+// ... work that no longer has a session ...
 ```
+
+In worker mode this is worth doing whether or not the request finishes early. A worker has no end-of-request at which to close a session, so one left open is closed only when that worker next has an idle moment to give it back — and until then the save handler is still holding whatever it locked, which for the default handler is an exclusive lock that blocks anyone else reading that session. See [Worker Mode](worker-mode.md#what-gets-reset-between-requests) for the full boundary, including why `session_write_close()` is not a separation between requests that overlap on a worker.
 
 ### Response body is empty after calling `oxphp_finish_request()`
 
@@ -4592,7 +4596,7 @@ OxPHP uses PHP Fibers to handle multiple HTTP requests concurrently on a single 
 2. The fiber runs the `oxphp_worker()` handler. If the handler completes without suspending, the response is sent and the fiber is recycled — zero overhead compared to a single-request worker
 3. If the handler calls a suspending function (`oxphp_sleep()`, `oxphp_usleep()`, `oxphp_async_await()`), the fiber yields back to the scheduler
 4. The scheduler picks up new incoming requests (creating new fibers) and resumes suspended fibers whose wait conditions are met (timer expired, async result ready)
-5. Each fiber's PHP state — `$_GET`, `$_POST`, `$_COOKIE`, `$_SERVER`, `$_FILES`, `$_REQUEST`, response headers, output buffers, VM stack — is saved on suspension and restored on resumption, so a resuming fiber finds its own rather than whatever ran in the window. What is not on that list is not parked per fiber: while two requests overlap on a thread, they share it. `$_ENV` goes further — it is worker state rather than request state by design, so a write one request makes there is read by every other request that worker serves, overlapping or not — see [Superglobals](../php/superglobals.md#_env)
+5. Each fiber's PHP state — `$_GET`, `$_POST`, `$_COOKIE`, `$_SERVER`, `$_FILES`, `$_REQUEST`, response headers, output buffers, VM stack — is saved on suspension and restored on resumption, so a resuming fiber finds its own rather than whatever ran in the window. What is not on that list is not parked per fiber: while two requests overlap on a thread, they share it. The session is the one to know by name — `$_SESSION`, the session id and the open session behind them are one set per worker thread, so a request the scheduler admits beside a suspended one that left a session open is handed that session rather than its own, and `session_write_close()` does not separate them; see [Worker Mode](worker-mode.md#what-gets-reset-between-requests). `$_ENV` goes further — it is worker state rather than request state by design, so a write one request makes there is read by every other request that worker serves, overlapping or not — see [Superglobals](../php/superglobals.md#_env)
 
 ```text
 Worker Thread
@@ -7705,7 +7709,7 @@ Worker mode runs persistent PHP processes that bootstrap once and handle multipl
 1. **Set `WORKER_MODE_ENABLED=true`** and point **`ENTRY_FILE`** at your bootstrap script. This enables worker mode for all PHP workers in the pool.
 2. **PHP starts and runs the outer scope once** — autoloader registration, configuration loading, database connections, and any other initialization code execute a single time.
 3. **Call `oxphp_worker(callback)`** to enter the request loop. OxPHP begins dispatching incoming HTTP requests to your callback.
-4. **Between requests**, superglobals (`$_GET`, `$_POST`, `$_SERVER`, `$_COOKIE`, `$_FILES`, `$_REQUEST`, `php://input`), output buffers, response headers, and the ini directives a request changed are reset automatically — see [What Gets Reset Between Requests](#what-gets-reset-between-requests) for what that covers and where it stops. A soft reset cleans per-request state while preserving bootstrapped resources in the outer scope. `$_ENV` is a deliberate exception: with PHP's default `auto_globals_jit=1` it is **not** reset — see [Superglobals](../php/superglobals.md#_env).
+4. **Between requests**, superglobals (`$_GET`, `$_POST`, `$_SERVER`, `$_COOKIE`, `$_FILES`, `$_REQUEST`, `php://input`), output buffers, response headers, the session a request opened, and the ini directives a request changed are reset automatically — see [What Gets Reset Between Requests](#what-gets-reset-between-requests) for what that covers and where it stops. A soft reset cleans per-request state while preserving bootstrapped resources in the outer scope. `$_ENV` is a deliberate exception: with PHP's default `auto_globals_jit=1` it is **not** reset — see [Superglobals](../php/superglobals.md#_env).
 5. **Outer scope persists** — variables defined before `oxphp_worker()`, static properties, database connections, and autoloaders remain available across all requests handled by that worker.
 
 > **Note:** Worker mode changes routing behavior. All requests that do not match a static file on disk are dispatched to the worker instead of returning 404. See [Routing](routing.md) for details.
@@ -7755,6 +7759,10 @@ OxPHP performs a soft reset between requests. The following state is cleaned aut
 - **Output buffers** — all output buffers are flushed and cleaned
 - **Response headers** — HTTP status code and headers are reset to defaults
 - **Error state** — last error information (message, file, line, type) and connection status are cleared. User-registered error handlers (`set_error_handler()`) and exception handlers (`set_exception_handler()`) persist across requests
+- **Session state** — the session a request opened is closed before the worker takes its next one: the data is handed to the save handler, the session id is released, and `$_SESSION` leaves the symbol table. The next request therefore starts a session under its own cookie, reads `''` from `session_id()` until it does, and finds `$_SESSION` undefined until then. Two boundaries here as well:
+    - **The close happens when the worker next has an idle moment to give the session back, not when the request that opened it returns.** Until then the worker is still holding that session open, which also means the save handler still holds whatever it locked. In the default `files` handler that is an exclusive lock on the session file, taken with a blocking call and held until the handler is closed — so a request for the same session id arriving anywhere else, on another worker or in another process, waits inside the save handler until this worker gives the session back, and because that wait is a blocking system call on the worker thread it stalls every request that worker is carrying. Call `session_write_close()` once the session data is final, and both the write and the unlock happen where your application put them.
+    - **A session belongs to the worker thread, not to the request, so requests that overlap on one share it.** A worker takes new requests whenever the one it is running suspends — in `oxphp_async_await()`, `oxphp_sleep()`, `oxphp_usleep()`, or a socket read under `RUNTIME_HOOKS` — and it cannot give a session back while any request it is carrying could still be in it. The request taken in that window is handed it instead: `session_start()` answers `true` without looking at the new request's cookie, and `$_SESSION` is the paused request's array. `session_write_close()` does not separate the two either. It closes the session but leaves its id installed, and the request taken in the window then starts *that* id — reading the paused request's data out of the store and getting the same id back in a `Set-Cookie` of its own. Where an application both uses sessions and lets requests suspend, the separation to rely on is not to leave a session open across a suspension point.
+    - **A request that was already paused before a session appeared is not treated as being in it.** Sharing is counted from the moment a request is taken: the request that starts a session and every request taken while one is standing are in it, and the worker keeps the session for as long as one of them is alive. A request that suspended *earlier*, before any session existed, is not — otherwise one long-lived request that never touches sessions would stop the worker giving any session back for as long as it ran, which is the leak this section is about. Such a request can still read `$_SESSION` after it wakes, and what it would read is whatever is standing then, which may be another client's. Do not read `$_SESSION` after a suspension point in a request that did not start a session of its own.
 - **ini directives changed by the request** — anything a request altered with `ini_set()`, `set_time_limit()` or `error_reporting()` is put back before the next request the worker takes on its own, as it would be under PHP-FPM. `ini_set('default_socket_timeout', 5)` around one HTTP call and `set_time_limit(0)` in a background branch apply to the request that made them and not to the next one. What your **bootstrap** set is the baseline they are restored to, not the value in `php.ini` — an `ini_set()` in the outer scope is application configuration and survives every request. See [What Persists](#what-persists). Three boundaries are worth knowing:
     - **The rollback happens when the worker takes its next request with nothing else running on it.** ini directives belong to a worker thread, not to a request, so a worker serving several requests at once — the case whenever a request pauses on an await, a sleep or a socket read, and also while a fire-and-forget promise is still being reclaimed — cannot put one request's changes back without taking them away from another that is still running. It does not try: while a worker has work in flight, changes made on it stay visible to the requests it takes in that window. Do not rely on the rollback to contain a directive whose leakage would matter, such as `display_errors`, in an application that serves requests concurrently.
     - **`memory_limit` is restored as a value before it is restored as a limit.** PHP refuses to lower the allocator's ceiling while more than the new limit is still held, so a worker left holding what the request allocated reports the restored `memory_limit` from `ini_get()` while the allocator is still enforcing the raised one. The ceiling follows as soon as the worker's own footprint leaves room for it.
@@ -12317,6 +12325,7 @@ oxphp_worker(function () {
             session_start();
             $_SESSION['user'] = $username;
             $_SESSION['authenticated'] = true;
+            session_write_close();
             header('Location: /dashboard');
         } else {
             http_response_code(401);
@@ -12330,14 +12339,18 @@ oxphp_worker(function () {
         $session = $request->session();
 
         if (!$session || !$session->get('authenticated')) {
+            session_write_close();
             header('Location: /login');
             return;
         }
 
         echo 'Welcome, ' . htmlspecialchars($session->get('user'));
+        session_write_close();
     }
 });
 ```
+
+`session_write_close()` on every path out is what makes the session a request's own rather than the worker's. A worker has no end-of-request to close a session at, so one left open is closed only when that worker takes its next request — and until then the save handler is still holding whatever it locked. Closing it yourself also puts the write where your application put it. It is not a separation between requests that **overlap**, though: a worker admits new requests whenever the one it is running suspends, and a session still open at a suspension point is handed to whatever is admitted in that window. See [Worker Mode](../features/worker-mode.md#what-gets-reset-between-requests).
 
 ---
 
@@ -14065,7 +14078,7 @@ The following remain available regardless of this setting:
 
 | What | Why |
 |------|-----|
-| `$_SESSION` | Managed by PHP's session module, not by the SAPI |
+| `$_SESSION` | Filled by PHP's session module when a request starts a session, not by the SAPI |
 | `php://input` | A stream, not a superglobal |
 | `header()`, `headers_list()`, etc. | SAPI functions, not superglobals |
 | `session_start()` and other `session_*()` functions | Native PHP functions |

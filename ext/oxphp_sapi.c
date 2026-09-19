@@ -4668,22 +4668,13 @@ static void oxphp_soft_reset(void) {
     /* 0. Session cleanup — MUST come before CG(unclean_shutdown) reset.
      * Matches PHP-FPM behavior: always write session data, even on crash.
      * This ensures the file lock is released and data is persisted.
-     * SYNC: php-src/ext/session/session.c php_rshutdown_session_globals() */
-    if (PS(session_status) == php_session_active) {
-        zend_try {
-            php_session_flush(1);
-        } zend_end_try();
-    }
-    if (!Z_ISUNDEF(PS(http_session_vars))) {
-        zval_ptr_dtor(&PS(http_session_vars));
-        ZVAL_UNDEF(&PS(http_session_vars));
-    }
-    if (PS(id)) { zend_string_release(PS(id)); PS(id) = NULL; }
-    if (PS(session_vars)) { zend_string_release(PS(session_vars)); PS(session_vars) = NULL; }
-    if (PS(mod_user_class_name)) {
-        zend_string_release(PS(mod_user_class_name));
-        PS(mod_user_class_name) = NULL;
-    }
+     *
+     * Unconditional here, and only here: this path runs with nothing else on the
+     * worker, so whatever session state is standing belongs to a request that has
+     * ended. The event loop shares the same release but has to ask first, because
+     * a request it admits can be arriving beside a suspended one still working in
+     * a session — see oxphp_session_release_if_idle(). */
+    oxphp_session_release_request_state();
 
     /* Undo the ini directives the last request changed.
      * ini_set(), set_time_limit(), error_reporting() and `@` all write into one
