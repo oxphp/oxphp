@@ -730,6 +730,15 @@ int64_t oxphp_async_sched_poll_completed(void **out_retval,
 void    oxphp_async_sched_release(int64_t fiber_id);
 int     oxphp_async_sched_cancel(int64_t fiber_id);
 
+/* ─── Pending-exception discard ──────────────────────────
+ * Drop whatever is standing in EG(exception), slot before object, draining
+ * until the slot is empty. Bounded: after OXPHP_EXCEPTION_DRAIN_LIMIT turns the
+ * last object is dropped with its destructor refused, because a pair of
+ * destructors that throw each other would otherwise spin for ever on flat
+ * memory. See the definition in oxphp_fiber.c for the whole argument. */
+#define OXPHP_EXCEPTION_DRAIN_LIMIT 16u
+void    oxphp_discard_pending_exception(void);
+
 /* Destroy this thread's task scheduler (frees fiber C stacks + task payload).
  * Called from the extension RSHUTDOWN; a no-op if no task ever spawned. */
 void    oxphp_async_sched_shutdown(void);
