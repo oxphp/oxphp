@@ -332,6 +332,7 @@ All env vars are read at startup. Defaults are sized for hundreds of entries on 
 
 | Env var                         | Default | Effect                                                                |
 |---------------------------------|---------|-----------------------------------------------------------------------|
+| `SHARED_ENABLED`                | true    | Master switch. `false` registers none of the `OxPHP\Shared\*` classes. |
 | `SHARED_MAX_ENTRIES`            | 100 000 | Global cap on all Shared entries combined. Insert past this fails.    |
 | `SHARED_MAX_BYTES`              | 1 GiB   | Global cap on estimated memory across all Shared entries.             |
 | `SHARED_SOFT_LIMIT_RATIO`       | 0.7     | Start shedding lowest-priority work when usage crosses this fraction. |

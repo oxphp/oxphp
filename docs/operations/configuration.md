@@ -352,7 +352,7 @@ In-process concurrency primitives (`OxPHP\Shared\Counter`, `Map`, `Channel`, `Mu
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SHARED_ENABLED` | `true` | Boolean — see [Boolean values](#boolean-values). Master switch for the entire `OxPHP\Shared\*` subsystem |
+| `SHARED_ENABLED` | `true` | Boolean — see [Boolean values](#boolean-values). Master switch for the entire `OxPHP\Shared\*` subsystem. Set to `false` and none of its classes are registered: `new OxPHP\Shared\Counter()` throws `Error: Class "OxPHP\Shared\Counter" not found`, and `/__ox_shared/*` and the `oxphp_shared_*` metrics are absent. Guard with `class_exists('OxPHP\Shared\Counter')` in code that must run either way — not with `interface_exists('OxPHP\Shared\Shareable')`, which stays true because the extension registers that interface either way |
 | `SHARED_MAX_ENTRIES` | `100000` | Global cap on all Shared entries combined. Insert past this fails with `CapacityException` |
 | `SHARED_MAX_BYTES` | `1073741824` (1 GiB) | Global cap on estimated memory across all Shared entries |
 | `SHARED_SOFT_LIMIT_RATIO` | `0.7` | Start shedding lowest-priority work when usage crosses this fraction of `SHARED_MAX_BYTES` / `SHARED_MAX_ENTRIES` |

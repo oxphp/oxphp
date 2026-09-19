@@ -99,6 +99,14 @@ pub fn take_evict_request() -> bool {
     false
 }
 
+/// True once `start_scheduler` has claimed the one-shot latch. Tests that
+/// rest on "the scheduler has not been started yet" read it to check that
+/// premise instead of assuming it.
+#[cfg(test)]
+pub(crate) fn scheduler_running() -> bool {
+    SCHEDULER_RUNNING.load(Ordering::Acquire)
+}
+
 /// Start the background scheduler on the current Tokio runtime.
 /// Idempotent. Called from `SharedPlugin::on_ready`.
 pub fn start_scheduler(interval: Duration) {

@@ -200,6 +200,8 @@ release cycle:
 The deprecated metric `# HELP` lines carry a `(deprecated, removed in
 a future release; use *_count)` prefix, and the `ox_shared` plugin
 emits a startup `WARN` whenever introspection or metrics are enabled.
+With `SHARED_ENABLED=false` neither surface exists, so neither the
+deprecated names nor the warning appear.
 
 Migrate dashboards and alert rules to the `_count` names before the
 deprecation cycle closes. After removal, only the canonical names
