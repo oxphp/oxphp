@@ -99,6 +99,34 @@ The warning is emitted in worker mode only. That second guard needs a count of w
 
 Note the queue does not have to be full for this: the fault starts as a queue nobody is draining while admission still has room. Arrivals are refused from the first one after the wedge, each on its own budget, so a refusal counter by itself cannot tell the state from ordinary overload — which is why the rule watches the queue too. A queue that is not falling while a worker sits idle is the fault itself rather than a symptom it shares with a pool that is simply behind.
 
+### What the log says while requests are being shed
+
+The refusal counter is what an alert reads, and for a while it was the only thing that knew: an instance turning away a fifth of its arrivals for overload wrote not one line about it, so the log of an overloaded server and the log of an idle one were the same log. Whoever went looking there during the incident — which is when a log is read — found no mention of it.
+
+The supervisor watches the four overload reasons of `oxphp_admission_refused_total` on the same one-second scan as the gauges above, and reports the episode rather than the requests: at the rates this happens at, a line per refusal would itself be the outage. The first scan that sees any of those four move logs
+
+```json
+{"timestamp":"2026-09-16T11:02:41.337104Z","level":"WARN","fields":{"message":"PHP admission has started shedding requests under overload","refused":4812,"queue_depth":896,"queue_capacity":896,"admission_slots_available":0,"wait_budget_us":15625,"wait_budget_ceiling_us":1000000}}
+```
+
+`refused` is what that one scan turned away, not a running total — with one exception, the first scan that has a queue to look at, which reports everything shed before it: a pool still loading its application while arrivals pile up in front of it is a real episode, and seeding the window on that scan would have thrown it away. The queue numbers are what make the line diagnostic rather than merely alarming: a depth at capacity with no admission slot free is a pool behind on its work, and a `wait_budget_us` well under `wait_budget_ceiling_us` says the server has already shortened the wait on its own. Both numbers are on the line because the reading needs both: a one-second budget driven to its floor prints `15625`, and a server configured with a budget of that order prints a figure indistinguishable from it at a glance, so only the ceiling beside it separates "already reacting" from "this is what you asked for". Read the queue figures as a snapshot taken at the scan, not as a picture of the refusals beside them: those cover the second that has just passed, so a burst already drained prints a large `refused` next to an empty queue — the shape of a short episode, not a contradiction.
+
+While the episode lasts the warning repeats, as `PHP admission is still shedding requests under overload`, no more often than once a minute and only on a scan that is itself refusing — so a repeat that falls due during a quiet stretch waits for the next scan that refuses something, and the gap between two of them can run to almost two minutes. Refusals spaced further apart than a minute do not stretch that gap; they end the episode and open the next one. The repeat carries `episode_refused` — the running total for the episode — beside the same per-scan `refused`. An entry line on its own would not survive the incident it describes: by the time an operator opens the log, an hour of ordinary traffic has scrolled it away.
+
+A minute with no refusal at all ends the episode, at `INFO`:
+
+```json
+{"timestamp":"2026-09-16T11:05:52.812440Z","level":"INFO","fields":{"message":"PHP admission has stopped shedding requests","episode_refused":18374,"duration_ms":131000,"queue_depth":0,"admission_slots_available":896}}
+```
+
+`duration_ms` runs to the last refusal rather than to the line, so the quiet minute that ends the episode is not counted into it — which is why the two samples sit 191 seconds apart while the second reports 131 of them. The fields sit under `fields`, as in the sample above — an alert rule wants `.fields.episode_refused`, not `.episode_refused`.
+
+A whole minute of quiet rather than the first quiet scan, because shedding at the edge of capacity is bursty: a queue that clears for two seconds and fills again is one episode, and a pair of lines per burst would bury what they report. The price is paid in the other direction — an episode reads as lasting up to a minute longer than it did, and a genuine gap shorter than a minute is folded into the episode around it. What that buys is a bound: two lines a minute at the very worst, whatever the traffic. Entry has no such delay, and deliberately not: a refusal is a request that was answered `529`, a fact rather than a sample that might be an artifact of when the scan happened to land.
+
+The report is emitted in every routing mode — unlike the stalled-pool warning above, it needs only the queue, which every mode has. It moves on the four overload reasons alone. `shutting_down` and `pool_unavailable` are left out, so an ordinary restart and a pool that is gone do not announce themselves as load.
+
+The state goes nowhere else. There is no gauge for it — the refusal counters above are what an alert rule reads — and no probe is told about it: shedding on its own never changes what `/health/readiness` answers, deliberately, because an instance shedding `529`s is answering quickly on a working pool, and an overload hitting every replica at once would otherwise take them out of rotation one after another until the service had no endpoints left. Overload is answered with capacity, not with rotation. That is a statement about load and not a promise that an episode always comes with a `200`: a wedged pool sheds too, and in worker mode that state answers `503` once it has held for a minute, as the section above describes. What separates them is the queue — a pool that is merely behind drains it, a wedged one does not.
+
 
 ## Worker Pool Metrics
 
