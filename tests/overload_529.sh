@@ -58,6 +58,18 @@
 #      where the budget has to be enforced by something other than a pickup
 #      that is never coming). M3 is the control the deadline must not catch: a
 #      request a worker did pick up in time runs past the budget and is served.
+#      M4 is the same wedge under clients who do not wait it out, which is the
+#      shape a deployment meets: the work it admits finishes for clients who
+#      have gone, that is the evidence the budget controller acts on, and so
+#      the budget — and with it the price of each self-call — comes down on
+#      its own. Nothing there detects the self-call; what it does mean is that
+#      the wasted-wait counter goes quiet on the one pattern its own
+#      documentation names as the classic cause — it is armed by the budget a
+#      request arrived on, so it counts while the ceiling stands and takes
+#      nothing that arrives after the drop, which is the contrast read inside
+#      that one run. Its control is the same load under callers who do wait:
+#      there nothing abandons, the ceiling stands, the counter goes on
+#      counting, and one self-call still costs the whole budget.
 #   N: the negative control for M. The same refusal, on a pool that is working
 #      its way through the queue the whole time a request waits: the wait fails
 #      but it failed a race, and the wasted-wait series must stay still for it.
@@ -1373,6 +1385,426 @@ if [ "$M3_CODE" = "200" ]; then
 	ok "M3: a request picked up in time runs past the budget and is served (200)"
 else
 	bad "M3: a 4 s handler under a 1 s budget answered $M3_CODE — the deadline is catching running requests"
+fi
+docker rm -f "$SRV" >/dev/null 2>&1
+wait
+
+# ── M4: the wedge under clients who do not wait it out ───────────────
+# M1 and M2 are the wedge at rest: patient clients, a budget spent in full,
+# and a counter that names it. This is the same wedge under the load a
+# deployment meets, where the outer clients are less patient than the outer
+# handler. Nothing here detects the self-call — the server cannot see where a
+# request came from — but the work the wedge admits is completing for clients
+# who have already gone, and that is the evidence the wait budget moves on
+# (scenario R). So the wedge has an exit after all, and the reading that is
+# supposed to name the wedge is the thing that goes quiet on the way out: the
+# wasted-wait counter is armed only while the budget is at its ceiling.
+#
+# Two populations against the same image, because "the counter read 0" on its
+# own is satisfied by a counter that never moves for any reason. The control
+# is the same wedge under patient callers: there the ceiling stands, the
+# counter climbs, and one self-call costs the whole budget. The pair is what
+# says the silence in the first is the arming gate and not the fixture.
+#
+# Three knobs carry the first population, and each was measured rather than
+# reasoned about.
+#
+# The delay the outer handler holds before calling back has to be *shorter*
+# than the client's patience, and this is the knob the scenario got wrong the
+# first time. A client that closes raises the VM interrupt on the worker
+# holding its request, and the handler dies at the next interrupt check with
+# "Request cancelled (client_abort)" unless ignore_user_abort is set, which
+# nothing here sets. usleep() is one blocking call, so the check it is caught
+# by is the one at the end of it: with a 300 ms delay against a 250 ms client
+# the interrupt is always pending by the time usleep() returns, and the
+# handler is unwound before it reaches file_get_contents(). Measured on the
+# idle pool, where oxphp_requests_total counts every arrival on the main port:
+# one outer call at 250 ms patience moved it by 1 — no inner call was ever
+# made — and the same call at 30 s patience moved it by 2 and came back
+# inner=529. So a delay above the patience turns this scenario into an
+# ordinary overload with no self-call in it, which is R, not M4. With no delay
+# the inner call goes out immediately, the client leaves while the handler is
+# inside it, and the interrupt is taken when that call returns — the self-call
+# happens, which is the whole point. The premise below reads
+# oxphp_requests_total rather than trusting any of this.
+#
+# What holds the queue occupied is then the inner wait itself: the worker is
+# held for a whole budget per started request, against arrivals every 0.2 s.
+# That matters because a tick that finds the queue empty discards the window
+# the controller accumulates, and the halving arm needs a queue behind it
+# either way, so a pool whose queue keeps emptying never shortens anything —
+# what such a tick does reach is the recovery arm, which only walks back up.
+# The shortened budget does
+# serve the outer clients that reach a worker promptly — their whole request
+# is the inner wait — but the backlog outlives that: arrivals outrun the pool
+# at every budget on this shape, so clients keep leaving from inside the
+# queue. The premise is read from the run rather than assumed.
+#
+# A 300 ms ceiling, so the eight starts a decision needs accumulate in seconds
+# rather than in a minute. Capacity 64 rather than the 1 M1 uses, for the
+# reason R gives: the collapse lives where the queue has room, and a full
+# queue refuses on the spot instead of letting requests age.
+M4_CEILING_MS=300
+M4_HANDLER_MS=0
+M4_WAVES=80
+M4_PER_WAVE=4
+M4_IMPATIENT=0.25
+M4_PATIENT=30
+# The probe is fired from inside the load, far enough in that the first
+# halving has had time to happen (measured at 2 s, the second at 6 s) and
+# ending well before the last wave. Both matter: once the queue drains the
+# controller walks the budget back up an eighth of the ceiling per 250 ms
+# tick, so a probe that lands after the load measures the recovery instead of
+# the episode. The window is wide because a single attempt is not likely to
+# be served — the pool is saturated and the probe queues behind older
+# arrivals — so it keeps trying, and its chance comes when a worker finishes
+# a handler and clears what the deadline already answered.
+M4_PROBE_AT=5
+M4_PROBE_WINDOW=10
+
+# One scrape per sample, three series out of it, because the question below is
+# about one moment: what the wasted-wait counter did *while* the budget was
+# under its ceiling. Three separate scrapes would answer it from three
+# different moments, and on Docker Desktop those are hundreds of milliseconds
+# apart.
+m4_sample() {
+	docker exec "$SRV" wget -qO- http://127.0.0.1:9090/metrics 2>/dev/null \
+		| awk '$1 == "oxphp_admission_wait_budget_us" {b = $2}
+		       $1 == "oxphp_queue_depth" {q = $2}
+		       $1 == "oxphp_admission_wait_wasted_total" {w = $2}
+		       END {print (b == "" ? -1 : b), (q == "" ? -1 : q), (w == "" ? -1 : w)}'
+}
+
+# Runs one population against a fresh container and leaves its readings in the
+# M4_* variables the checks below read. $1 is what the outer clients pass to
+# `curl --max-time`; everything else is the same on both runs, which is the
+# point of having two.
+#
+# The load runs in the foreground and the sampler stops on the line after it,
+# as in R, S and T: samples taken after the last client would count in the
+# denominator of the queue-occupancy premise without ever counting in its
+# numerator, and would catch the budget on its way back to the ceiling.
+m4_run() {
+	local patience="$1"
+	start_selfcall_container "$M4_CEILING_MS" 64 || return 1
+
+	# One patient self-call against the idle container, before anything else
+	# runs. This is M2's shape at M4's capacity: the single worker is inside
+	# the outer handler, the inner call is admitted to a queue nothing can
+	# pick up, and the pool starts nothing for the whole of its wait — so it
+	# is counted, at a budget that is still the configured ceiling. Without
+	# it the checks below would be comparing a counter that reads 0 against a
+	# counter that reads 0, which a build with no arming gate at all would
+	# also satisfy. It leaves one start and no abandonment behind, and the
+	# first tick that finds the queue empty discards that window, so the
+	# load's own eight-start window opens clean.
+	: > "$TMP/m4arm"
+	curl -s -o "$TMP/m4arm" --max-time 30 \
+		"http://localhost:${PORT}/selfcall.php?d=0&t=5" 2>/dev/null
+	M4_ARM_INNER="$(inner_of "$TMP/m4arm")"
+	M4_ARMED="$(gauge 'oxphp_admission_wait_wasted_total')"
+	M4_ARM_BUDGET="$(gauge 'oxphp_admission_wait_budget_us')"
+	# Every arrival on the main port, the test's own included. The inner
+	# calls the load makes are the difference between this and what the test
+	# fired, which is the only evidence from outside PHP that the handlers
+	# reached their inner call at all.
+	M4_REQ_BEFORE="$(gauge 'oxphp_requests_total')"
+	: > "$TMP/m4probe_tries"
+
+	: > "$TMP/m4_samples"
+	rm -f "$TMP/m4stop"
+	(
+		while [ ! -f "$TMP/m4stop" ]; do
+			m4_sample >> "$TMP/m4_samples"
+			sleep 0.5
+		done
+	) &
+	local sampler=$!
+
+	# A patient self-caller fired into the middle of the load: what it reports
+	# is the price of one self-call at the budget then in force. Retried
+	# because its own outer request has to reach a worker through the same
+	# overload, and most arrivals here do not. It records the budget as it
+	# reads it on the way out rather than leaving that to a wall clock — the
+	# claim is that the price tracks the budget, and a bar against a constant
+	# would be satisfied by any run that happened to be slow.
+	: > "$TMP/m4probe"
+	: > "$TMP/m4probe_budget"
+	(
+		sleep "$M4_PROBE_AT"
+		# Bounded by a deadline rather than by a number of tries: an attempt
+		# costs whatever the budget is, so a fixed count spans four times the
+		# wall clock at the ceiling that it spans at a quarter of it, and the
+		# window has to end inside the load either way.
+		deadline=$(( $(date +%s) + M4_PROBE_WINDOW ))
+		while [ "$(date +%s)" -lt "$deadline" ]; do
+			echo x >> "$TMP/m4probe_tries"
+			curl -s -o "$TMP/m4probe" --max-time 8 \
+				"http://localhost:${PORT}/selfcall.php?d=0&t=5" 2>/dev/null
+			if grep -q 'inner=' "$TMP/m4probe"; then
+				m4_sample | cut -d' ' -f1 > "$TMP/m4probe_budget"
+				break
+			fi
+			sleep 0.2
+		done
+	) &
+	local probe=$!
+
+	# Open-loop, like R: the waves arrive whether or not the pool is keeping
+	# up. In its own subshell so the `wait` inside it has only the curls to
+	# wait for — a bare `wait` would also wait for the sampler, which stops on
+	# a file written after this returns.
+	(
+		for w in $(seq 1 "$M4_WAVES"); do
+			for c in $(seq 1 "$M4_PER_WAVE"); do
+				curl -s -o /dev/null --max-time "$patience" \
+					"http://localhost:${PORT}/selfcall.php?d=${M4_HANDLER_MS}&t=5" \
+					>/dev/null 2>&1 &
+			done
+			sleep 0.2
+		done
+		wait
+	)
+
+	touch "$TMP/m4stop"
+	wait "$sampler" 2>/dev/null
+	wait "$probe" 2>/dev/null
+
+	M4_CEILING_US="$(gauge 'oxphp_admission_wait_budget_ceiling_us')"
+	M4_ABANDONED="$(gauge 'oxphp_abandoned_work_total')"
+	# Arrivals the server saw, less the ones this test made: the load's waves,
+	# and the probe's attempts. Scrapes go to the internal port and are not in
+	# this series. What is left is inner calls.
+	M4_REQ_AFTER="$(gauge 'oxphp_requests_total')"
+	M4_OWN_CALLS=$(( M4_WAVES * M4_PER_WAVE + $(wc -l < "$TMP/m4probe_tries" | tr -d ' ') ))
+	M4_INNER_CALLS=$(( ${M4_REQ_AFTER:-0} - ${M4_REQ_BEFORE:-0} - M4_OWN_CALLS ))
+	M4_INNER="$(inner_of "$TMP/m4probe")"
+	M4_WAITED="$(waited_of "$TMP/m4probe")"
+	M4_PROBE_BUDGET="$(cat "$TMP/m4probe_budget" 2>/dev/null)"
+	# The probe competes with the load for the one worker and usually loses,
+	# so "no body at all" is its own outcome and not a statement about the
+	# wedge. Told apart here rather than in the checks, which would otherwise
+	# both report a missing reading as a product failure.
+	if grep -q 'inner=' "$TMP/m4probe"; then M4_PROBE_GOT=1; else M4_PROBE_GOT=0; fi
+	# Failed scrapes print -1 on every field; drop them rather than let one
+	# win a minimum outright or read as an empty queue.
+	M4_MIN_BUDGET="$(awk '$1 >= 0 {print $1}' "$TMP/m4_samples" | sort -n | head -1)"
+	M4_SAMPLES="$(awk '$1 >= 0' "$TMP/m4_samples" | wc -l | tr -d ' ')"
+	M4_QUEUED="$(awk '$2 > 0' "$TMP/m4_samples" | wc -l | tr -d ' ')"
+	M4_WASTED_END="$(awk '$3 >= 0 {w = $3} END {print (w == "" ? -1 : w)}' "$TMP/m4_samples")"
+
+	# What the wasted-wait counter read when the budget first went under its
+	# ceiling, what it read two samples later, what it read at the end, and
+	# whether the budget ever came back up — all off the same samples, because
+	# the claim being checked is about one window and not about readings taken
+	# whenever. The two-sample skip is not slack: a request is armed by the
+	# budget in force when it *arrives*, not when its wait runs out, so the
+	# ones that arrived while the ceiling still stood go on being counted for
+	# up to a whole ceiling after the drop. Measured at one such straggler.
+	# What the claim is about is arrivals *after* the drop, and a second of
+	# samples at a 300 ms ceiling is past all of them. The tail count is also
+	# what stops a drop on the very last sample from comparing a value with
+	# itself.
+	local drop
+	drop="$(awk -v ceil="$M4_CEILING_US" '
+		$1 < 0 { next }
+		{ last = $3 }
+		dropped && $1 >= ceil { back = 1 }
+		dropped { n++; if (n == 3) tail = $3; if (n >= 3) tailn++ }
+		!dropped && $1 < ceil { dropped = 1; at = $3; n = 1 }
+		END { print (dropped ? at : -1), (tail == "" ? -1 : tail),
+		            (last == "" ? -1 : last), (back ? 1 : 0), (tailn ? tailn : 0) }
+	' "$TMP/m4_samples")"
+	M4_WASTED_AT_DROP="$(echo "$drop" | cut -d' ' -f1)"
+	M4_WASTED_TAIL="$(echo "$drop" | cut -d' ' -f2)"
+	M4_WASTED_AFTER="$(echo "$drop" | cut -d' ' -f3)"
+	M4_BACK_AT_CEILING="$(echo "$drop" | cut -d' ' -f4)"
+	M4_HELD_DOWN="$(echo "$drop" | cut -d' ' -f5)"
+}
+
+if m4_run "$M4_IMPATIENT"; then
+	ok "M4: container up (1 worker, queue capacity 64, budget ${M4_CEILING_MS} ms, impatient clients)"
+else
+	bad "M4: container failed to start"; docker logs "$SRV" 2>&1 | tail -5 >&2; exit 1
+fi
+
+# The counter can be reached on this pool, at this configuration, with the
+# budget at its ceiling. Every later statement about it going quiet is a
+# statement about the difference from this number.
+if [ "$M4_ARM_INNER" = "529" ] && [ "${M4_ARMED:--1}" -ge 1 ] \
+	&& [ "${M4_ARM_BUDGET:--1}" = "${M4_CEILING_US:-x}" ]; then
+	ok "M4: the counter is armed on this pool at its ceiling (${M4_ARMED} after one patient self-call, budget ${M4_ARM_BUDGET} µs)"
+else
+	bad "M4: one patient self-call on the idle pool answered '${M4_ARM_INNER:-nothing}' and left oxphp_admission_wait_wasted_total at ${M4_ARMED:-?} with the budget at ${M4_ARM_BUDGET:-?} µs — without an armed counter here the silence below says nothing"
+fi
+
+# Premises, read from the run rather than assumed. Without the first the
+# halving arm was never reachable — it needs a queue behind it, and a tick
+# that finds none discards the window instead. Two thirds rather than a bare
+# majority: the queue is at its shallowest right after each drain, so some
+# empty samples are expected even on a run that never lets up, but a run that
+# spent half its samples empty was a different load from the one described
+# above and its budget reading would not be this scenario's to interpret.
+if [ "${M4_SAMPLES:-0}" -ge 10 ] && [ "$((M4_QUEUED * 3))" -ge "$((M4_SAMPLES * 2))" ]; then
+	ok "M4: the queue was occupied for the run (${M4_QUEUED} of ${M4_SAMPLES} samples)"
+else
+	bad "M4: queue non-empty in only ${M4_QUEUED:-?} of ${M4_SAMPLES:-?} samples — a tick with an empty queue discards the controller's window, so the checks below are about nothing"
+fi
+
+# Clients left mid-request, which is the evidence the controller reads. Note
+# what this does *not* say: the series counts a request answered 499 at the
+# pickup as well as one whose handler finished for nobody, and only the
+# second moved the pool's start count. That the pool was starting work is
+# said by the halving below — a decision needs eight starts behind a queue,
+# and none of these pickups is one.
+if [ "${M4_ABANDONED:--1}" -ge 8 ]; then
+	ok "M4: and its clients were leaving mid-request (${M4_ABANDONED} × abandoned)"
+else
+	bad "M4: oxphp_abandoned_work_total reads ${M4_ABANDONED:-?} (-1 = the series is not exported at all) — these clients waited the handler out, which is not the load this scenario is about"
+fi
+
+# And the premise that makes this a self-call rather than an ordinary
+# overload: the load's own handlers called back into the server. This is the
+# reading that separates M4 from R, and it is read from the server rather
+# than from the responses, because an impatient client is gone before any
+# body reaches it — the run this scenario had before, where every handler was
+# unwound at the client abort before its inner call, passed every other check
+# here. A margin of eight because that is the window a decision needs; the
+# real counts are in the dozens.
+if [ "${M4_INNER_CALLS:--1}" -ge 8 ]; then
+	ok "M4: and the load's handlers did call back into the server (${M4_INNER_CALLS} inner calls, ${M4_OWN_CALLS} made by the test)"
+else
+	bad "M4: the server saw ${M4_REQ_AFTER:-?} − ${M4_REQ_BEFORE:-?} arrivals against ${M4_OWN_CALLS:-?} this test made, so ${M4_INNER_CALLS:-?} inner calls — with the handlers not reaching their own callback this is an ordinary overload and not the wedge"
+fi
+
+# The probe's own inner request never reached a worker and was answered by the
+# queue's own deadline.
+if [ "${M4_PROBE_GOT:-0}" = "1" ] && [ "$M4_INNER" = "529" ]; then
+	ok "M4: the inner call was still refused by the queue, not served (529)"
+elif [ "${M4_PROBE_GOT:-0}" = "0" ]; then
+	bad "M4: the probe never reached a worker in its ${M4_PROBE_WINDOW}s window — nothing was measured here, and the reading below is missing for that reason rather than for a behavioural one"
+else
+	bad "M4: the probe's inner call came back '${M4_INNER:-nothing}' — the wedge is not what this run measured"
+fi
+
+# The wedge does have an exit, and it is not a self-call detector: the server
+# never learns where the inner request came from. What it learns is that the
+# work the waiting admits is finishing for clients who are no longer there,
+# which is the same evidence R runs on. Half the ceiling is one halving, and
+# one is the whole claim — a budget that moves at all has taken the pool's own
+# behaviour as evidence, which needs the eight starts a decision requires and
+# so says the pool was starting work throughout.
+if [ "${M4_MIN_BUDGET:--1}" -ge 0 ] \
+	&& [ "$((M4_MIN_BUDGET * 2))" -le "${M4_CEILING_US:-0}" ]; then
+	ok "M4: the budget came off its ceiling on a self-calling pool (${M4_MIN_BUDGET} µs of ${M4_CEILING_US} µs)"
+else
+	bad "M4: oxphp_admission_wait_budget_us never went below ${M4_MIN_BUDGET:-?} µs against a ceiling of ${M4_CEILING_US:-?} µs (-1 = the series is not exported at all) — either the wedge had the evidence and the controller did not act on it, or the pool never started the eight requests a decision needs, which on a host slow enough to eat the ${M4_IMPATIENT}s patience before a pickup is the likelier of the two"
+fi
+
+# And the price of a self-call is that budget, so it comes down with it. Read
+# against the budget the probe itself saw rather than against the configured
+# ceiling: the budget is descending while the probe is in flight, so a bar at
+# a fixed fraction of the ceiling either passes a run that never halved or
+# fails one caught mid-descent — a run at 156 ms against a 150 ms bar did
+# exactly that. The scrape happens after the answer, so what it reads is the
+# budget at a slightly later moment: under this load that is a lower one, and
+# twice what the probe read is what absorbs one halving landing in that gap,
+# where half again would fail on it. It can also be a *higher* one — a tick
+# that finds the queue empty walks the budget back up — and that would loosen
+# this bar rather than tighten it, which is what the conjunct above is for:
+# a scrape back at the ceiling fails the check outright. The ceiling is the
+# outer bar either way, so a wait at full price cannot pass however the
+# budget moved.
+# The refusal is a conjunct rather than something the check above is trusted
+# for: a pool with a worker to spare answers the probe `200` in no time at
+# all, and a wait of 0 ms clears every bar below it.
+M4_PROBE_BUDGET_MS=$(( ${M4_PROBE_BUDGET:--1000} / 1000 ))
+if [ -n "$M4_WAITED" ] && [ "${M4_INNER:-}" = "529" ] \
+	&& [ "${M4_PROBE_BUDGET:--1}" -ge 0 ] \
+	&& [ "${M4_PROBE_BUDGET}" -lt "${M4_CEILING_US:-0}" ] \
+	&& [ "$M4_WAITED" -lt "$M4_CEILING_MS" ] \
+	&& [ "$M4_WAITED" -le "$((M4_PROBE_BUDGET_MS * 2))" ]; then
+	ok "M4: and the inner call was refused in ${M4_WAITED} ms, on the ${M4_PROBE_BUDGET_MS} ms budget then in force rather than the configured ${M4_CEILING_MS} ms"
+elif [ "${M4_PROBE_GOT:-0}" = "0" ]; then
+	bad "M4: the probe never reached a worker in its ${M4_PROBE_WINDOW}s window — nothing was measured here, and this reading is missing for that reason rather than for a behavioural one"
+else
+	bad "M4: the inner call answered '${M4_INNER:-nothing}' after ${M4_WAITED:-?} ms against a budget of ${M4_PROBE_BUDGET:-?} µs read at the same moment and a ceiling of ${M4_CEILING_US:-?} µs — anything but a 529 here is a pool that had a worker to spare, and a 529 this long is a shortened budget not reaching the wait it is supposed to bound"
+fi
+
+# The reading that is lost on the way out. oxphp_admission_wait_wasted_total is
+# armed by the budget a request arrives on, so once the shortening above has
+# outlived the arrivals that preceded it the counter stops — on the one pattern
+# its own documentation names as the classic cause. Two guards, because a
+# counter that is still can be still for either reason: the budget must not
+# have come back to the ceiling, and the window after the stragglers must be
+# long enough to have caught a movement. The third conjunct adds nothing to
+# the arming check above, which already said this counter had moved — it is
+# there because a failing check here does not stop the run, so this one states
+# the premise it rests on rather than inheriting it. The control below is what
+# says this fixture produces waits this counter will count.
+if [ "${M4_BACK_AT_CEILING:-1}" = "0" ] \
+	&& [ "${M4_HELD_DOWN:-0}" -ge 3 ] \
+	&& [ "${M4_WASTED_AT_DROP:--1}" -ge 1 ] \
+	&& [ "$M4_WASTED_AFTER" = "$M4_WASTED_TAIL" ]; then
+	ok "M4: and oxphp_admission_wait_wasted_total stopped counting what arrived after it (${M4_WASTED_TAIL} unchanged over the last ${M4_HELD_DOWN} samples; ${M4_WASTED_AT_DROP} → ${M4_WASTED_TAIL} while the arrivals from the ceiling drained out)"
+else
+	bad "M4: oxphp_admission_wait_wasted_total went ${M4_WASTED_TAIL:-?} → ${M4_WASTED_AFTER:-?} over the last ${M4_HELD_DOWN:-?} samples below the ceiling, having been ${M4_WASTED_AT_DROP:-?} at the drop (back at the ceiling: ${M4_BACK_AT_CEILING:-?}) — this check needs a budget that stayed down for long enough to see, or the counter is armed somewhere this says it is not"
+fi
+docker rm -f "$SRV" >/dev/null 2>&1
+wait
+
+# ── M4 control: the same wedge under callers who wait it out ─────────
+# Everything above is the same, and only the outer clients change: they sit
+# through the handler instead of leaving. Nothing abandons, so the controller
+# gets no evidence, the ceiling stands — and the counter that did not move
+# through the whole run above climbs here. Read what that does and does not
+# establish. It says this fixture produces waits this counter is willing to
+# count, so the silence above is not the load being incapable of moving it.
+# It does not separate the two reasons for that silence: patience decides
+# both whether the budget leaves its ceiling *and* whether a wait that runs
+# out is answered 529 or 499, and a 499 is excluded from this counter before
+# the arming gate is even consulted. Both are sufficient on their own, which
+# is what the published text says. The control's other half is the one the
+# server does not help with at all: one self-call still costs the whole
+# budget.
+if m4_run "$M4_PATIENT"; then
+	ok "M4 (control): container up (same, patient clients)"
+else
+	bad "M4 (control): container failed to start"; docker logs "$SRV" 2>&1 | tail -5 >&2; exit 1
+fi
+
+# Bounded rather than pinned at zero. The series counts a 499 at the pickup
+# too, so one client closing anywhere in the run's ~320 requests would fail an
+# equality without saying anything about the population, whose counterpart
+# above is in the dozens. The bound is the eight that check uses, for the same
+# reason: a decision needs that many starts behind a queue. What this does not
+# claim is that no decision could have been reached — that is said directly,
+# by the budget, in the check below.
+if [ "${M4_ABANDONED:--1}" -ge 0 ] && [ "${M4_ABANDONED}" -lt 8 ]; then
+	ok "M4 (control): next to nobody left, so the controller was given no evidence (${M4_ABANDONED} × abandoned, against the eight a decision needs)"
+else
+	bad "M4 (control): oxphp_abandoned_work_total reads ${M4_ABANDONED:-?} (-1 = the series is not exported at all) — enough clients left for this to be the population above rather than its control"
+fi
+
+if [ "${M4_MIN_BUDGET:--1}" -ge 0 ] && [ "$M4_MIN_BUDGET" = "${M4_CEILING_US}" ]; then
+	ok "M4 (control): and the budget stayed at its ceiling throughout (${M4_MIN_BUDGET} µs)"
+else
+	bad "M4 (control): oxphp_admission_wait_budget_us reached ${M4_MIN_BUDGET:-?} µs against a ceiling of ${M4_CEILING_US:-?} µs — something shortened it without a client leaving"
+fi
+
+if [ "${M4_WASTED_END:--1}" -gt "${M4_ARMED:-0}" ]; then
+	ok "M4 (control): so oxphp_admission_wait_wasted_total counts waits on this fixture when the ceiling stands (${M4_ARMED} → ${M4_WASTED_END}) — the silence above is not the load being unable to move it"
+else
+	bad "M4 (control): oxphp_admission_wait_wasted_total went ${M4_ARMED:-?} → ${M4_WASTED_END:-?} with the budget at its ceiling on a wedged pool — the load added nothing to what the single arming call already produced, so this is not the control it claims to be"
+fi
+
+if [ "${M4_PROBE_GOT:-0}" = "1" ] && [ "$M4_INNER" = "529" ] && [ -n "$M4_WAITED" ] \
+	&& [ "$M4_WAITED" -ge "$((M4_CEILING_MS * 2 / 3))" ]; then
+	ok "M4 (control): and one self-call still cost the whole budget (${M4_WAITED} ms of ${M4_CEILING_MS} ms)"
+elif [ "${M4_PROBE_GOT:-0}" = "0" ]; then
+	bad "M4 (control): the probe never reached a worker in its ${M4_PROBE_WINDOW}s window — nothing was measured here, and the reading is missing for that reason rather than for a behavioural one"
+else
+	bad "M4 (control): the inner call came back '${M4_INNER:-nothing}' after ${M4_WAITED:-?} ms of a ${M4_CEILING_MS} ms budget — the price the server does not bring down is not what this measured"
 fi
 docker rm -f "$SRV" >/dev/null 2>&1
 wait

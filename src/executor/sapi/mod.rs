@@ -510,16 +510,29 @@ impl ScriptExecutor for SapiExecutor {
                     // this counter leads to — it names a wait that cannot be
                     // bought out at any length, and the server has already
                     // shortened the only thing the operator would be told to
-                    // shorten. The wedge it does exist for holds the budget at
-                    // its ceiling on its own: a pool starting nothing never
-                    // fills the controller's window, so nothing is ever
-                    // decided, and this reading stays armed exactly there. One
-                    // order it does not survive — a pool that wedges while an
-                    // overload already had the budget down, which then stays
-                    // down because a wedged queue never drains. The other
-                    // three readings that name a wedge are unaffected, and the
-                    // budget sitting at its floor with a queue that will not
-                    // fall is itself the fourth.
+                    // shorten. A pool that starts nothing holds its ceiling on
+                    // its own — behind a queue it never fills the controller's
+                    // window, so nothing that could shorten it is ever decided
+                    // — and this reading is armed there. The self-calling pool
+                    // named above is not that pool: it starts about one
+                    // request per budget, and once its own clients are less
+                    // patient than its handlers, the work it finishes for
+                    // clients who have already left is the evidence the
+                    // controller halves on. What is left to count is armed by
+                    // the budget it arrived on, so the arrivals from before
+                    // the drop go on being counted for up to a whole ceiling
+                    // after it and then nothing is: measured at two halvings
+                    // within seconds, after which this counter took nothing
+                    // that arrived — the shape this comment opens with is one
+                    // it can miss for the whole of an episode. Where the
+                    // callers are patient there is no such evidence, the
+                    // ceiling stands, and this is what names the state.
+                    // Elsewhere nothing takes over: a budget under its
+                    // ceiling with abandoned work climbing is what the
+                    // controller decides on, so an ordinary overload of
+                    // impatient clients reads the same, and the wedge readings
+                    // built on no worker being busy are about a pool starting
+                    // nothing.
                     if reason == ShedReason::WaitTimeout
                         && wait_at_ceiling
                         && crate::metrics::pool_starts() == starts_on_arrival
