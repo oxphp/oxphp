@@ -336,7 +336,7 @@ for ($i = 0; $i < 10; $i++) {
     echo "id: $i\n";
     echo "data: " . json_encode(['counter' => $i]) . "\n\n";
     oxphp_stream_flush();
-    oxphp_sleep(1.0); // use oxphp_sleep instead of sleep — does not block the worker in fiber mode
+    oxphp_sleep(1.0); // use oxphp_sleep instead of sleep — cooperative in fiber mode, where a switch is possible
 }
 ```
 
@@ -348,9 +348,9 @@ for ($i = 0; $i < 10; $i++) {
 oxphp_sleep(float $seconds): void
 ```
 
-Sleeps for the specified duration. Inside a worker mode handler running in a fiber, this call is cooperative — it suspends the current fiber so other requests can be processed during the wait. Outside a fiber, it falls back to a standard blocking `usleep()`.
+Sleeps for the specified duration. Inside a worker mode handler running in a fiber, this call is cooperative — it suspends the current fiber so other requests can be processed during the wait. Outside a fiber, it falls back to a standard blocking `usleep()`, and so does a call made where a fiber switch is refused, which happens wherever leaving the current frame would be unsafe — among them inside a `declare(ticks)` handler, inside pcntl's signal dispatch, while the request's input is being built, inside a `FILTER_CALLBACK` reached from `filter_input_array()` given a definitions array, or inside the teardown walks that run destructors after a request has come apart — and one made inside a fiber a userland scheduler started (AMPHP, Revolt, a bare `new Fiber`), whose context OxPHP's scheduler cannot resume. See [Runtime Hooks](../operations/configuration.md#runtime-hooks), which describes the same boundary for the hooked native builtins.
 
-> **Not superseded by `RUNTIME_HOOKS`.** `oxphp_sleep()` cooperates in worker mode with no configuration and accepts fractional seconds. `RUNTIME_HOOKS=sleep` is a separate, opt-in retrofit that makes *native* `sleep()`/`usleep()` calls (e.g. inside third-party code) cooperate as well — it does not remove the need for `oxphp_sleep()` in code you control. See [Runtime Hooks](../operations/configuration.md#runtime-hooks).
+> **Not superseded by `RUNTIME_HOOKS`.** `oxphp_sleep()` cooperates in worker mode with no configuration and accepts fractional seconds. `RUNTIME_HOOKS=sleep` is a separate, opt-in retrofit that makes *native* `sleep()`/`usleep()` calls (e.g. inside third-party code) cooperate as well, within the same limits — it does not remove the need for `oxphp_sleep()` in code you control. See [Runtime Hooks](../operations/configuration.md#runtime-hooks).
 
 **Parameters:**
 - `$seconds` — Duration to sleep in seconds. Fractional values are accepted (e.g. `0.5` for 500 milliseconds). Values of `0` or less return immediately.
@@ -377,7 +377,7 @@ oxphp_worker(function () {
 oxphp_usleep(int $microseconds): void
 ```
 
-Sleeps for the specified number of microseconds. Like `oxphp_sleep()`, this is cooperative inside a fiber and falls back to blocking `usleep()` otherwise.
+Sleeps for the specified number of microseconds. Like `oxphp_sleep()`, this is cooperative inside a fiber and falls back to blocking `usleep()` otherwise — including in the contexts listed under `oxphp_sleep()`, where a fiber switch is refused or OxPHP does not own the context.
 
 **Parameters:**
 - `$microseconds` — Duration to sleep in microseconds. Values of `0` or less return immediately.
