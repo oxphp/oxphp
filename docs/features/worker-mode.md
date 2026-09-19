@@ -12,7 +12,7 @@ Worker mode runs persistent PHP processes that bootstrap once and handle multipl
 1. **Set `WORKER_MODE_ENABLED=true`** and point **`ENTRY_FILE`** at your bootstrap script. This enables worker mode for all PHP workers in the pool.
 2. **PHP starts and runs the outer scope once** — autoloader registration, configuration loading, database connections, and any other initialization code execute a single time.
 3. **Call `oxphp_worker(callback)`** to enter the request loop. OxPHP begins dispatching incoming HTTP requests to your callback.
-4. **Between requests**, superglobals (`$_GET`, `$_POST`, `$_SERVER`, `$_COOKIE`, `$_FILES`, `$_REQUEST`, `php://input`), output buffers, response headers, and the ini directives a request changed are reset automatically — see [What Gets Reset Between Requests](#what-gets-reset-between-requests) for what that covers and where it stops. A soft reset cleans per-request state while preserving bootstrapped resources in the outer scope. `$_ENV` is the exception and is deliberately **not** reset — see [Superglobals](../php/superglobals.md#_env).
+4. **Between requests**, superglobals (`$_GET`, `$_POST`, `$_SERVER`, `$_COOKIE`, `$_FILES`, `$_REQUEST`, `php://input`), output buffers, response headers, and the ini directives a request changed are reset automatically — see [What Gets Reset Between Requests](#what-gets-reset-between-requests) for what that covers and where it stops. A soft reset cleans per-request state while preserving bootstrapped resources in the outer scope. `$_ENV` is a deliberate exception: with PHP's default `auto_globals_jit=1` it is **not** reset — see [Superglobals](../php/superglobals.md#_env).
 5. **Outer scope persists** — variables defined before `oxphp_worker()`, static properties, database connections, and autoloaders remain available across all requests handled by that worker.
 
 > **Note:** Worker mode changes routing behavior. All requests that do not match a static file on disk are dispatched to the worker instead of returning 404. See [Routing](routing.md) for details.
@@ -77,6 +77,7 @@ The following state survives across requests within the same worker:
 - **Autoloaders** — registered autoloaders (Composer, custom) remain active
 - **Loaded classes and functions** — all previously loaded classes, interfaces, traits, and functions
 - **ini directives set during bootstrap** — an `ini_set()` in the outer scope holds for the life of the worker and is what per-request changes are rolled back to
+- **`$_ENV`** — deliberately not reset, with PHP's default `auto_globals_jit=1`. It describes the worker rather than the request, which is what keeps a `.env` loader's values alive past the boot that wrote them — and it keeps a write made from inside a request handler just as long, for every later request on that worker and for any request multiplexed alongside it. See [Superglobals](../php/superglobals.md#_env)
 
 ## Recycling
 
