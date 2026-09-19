@@ -78,6 +78,40 @@ input/test_php_input_multipart_empty | POST | -F "field=value" | |
 worker/test_upload_tmp_cleaned_after_request >> ?phase=upload | POST | -F "doc=@$FIXTURES_DIR/small.txt" | |
 worker/test_upload_tmp_cleaned_after_request >> ?phase=check
 
+# Three pairs about how a worker discards an uncaught exception, kept together
+# and kept late in the file. Late, because on a build that discards it the wrong
+# way round the throwing half raises a core error, and that flags every live
+# object on the worker that answered it as already destructed — so anything
+# after it that reads a destructor would fail for a reason that is not its own.
+# The pairs are ordered so that the only thing standing between one throwing
+# request and the next is that request's own check phase, and what follows all
+# three is the pair of gauge tests, which read a number rather than an object.
+
+# First pair, in order: the request throws an exception whose class declares a
+# __destruct and lets it go uncaught, the check asserts that destructor ran.
+worker/test_pending_exception_destructor >> ?phase=throw | GET | | 500 |
+worker/test_pending_exception_destructor >> ?phase=check
+
+# Second pair, same shape: the request throws an exception whose __destruct
+# itself throws, having registered a shutdown function; the check asserts that
+# shutdown function still ran. A discard that clears the slot only once leaves
+# the destructor's throw standing, and a pending exception makes every shutdown
+# function a no-op that reports nothing.
+worker/test_pending_exception_destructor >> ?phase=dtorthrow | GET | | 500 |
+worker/test_pending_exception_destructor >> ?phase=dtorcheck
+
+# Third pair, same shape again: the request throws an exception out of a pair of
+# classes whose destructors throw each other, so a discard that drains without a
+# ceiling is handed a new exception every turn and never reaches an empty slot.
+# The request also lifts its own deadline, because otherwise the deadline is what
+# ends the spin rather than the discard. Both halves discriminate, and both were
+# measured on a build with the ceiling removed: the throwing half then answers
+# nothing inside the 15 seconds the runner allows and is recorded as 000, and the
+# check, which reads how long the request took rather than whether it finished,
+# reads the runner's own patience — 15.003 seconds against a 2-second bound.
+worker/test_pending_exception_destructor >> ?phase=dtorloop | GET | | 500 |
+worker/test_pending_exception_destructor >> ?phase=dtorloopcheck
+
 # Last in the file on purpose: the gauge is written at the end of a request, so
 # a worker only has one to report once it has served something. By here the pool
 # has served the whole suite.

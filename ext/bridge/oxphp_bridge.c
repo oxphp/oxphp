@@ -1315,6 +1315,13 @@ void *oxphp_arg_array(void *args, uint32_t idx) {
 
 /* ── Exception extraction ── */
 
+/* Ceiling on the discard loop below. A destructor that throws is user code and
+ * gets another turn; a pair of classes whose destructors throw each other frees
+ * one object and allocates one per turn, so nothing bounds the loop by itself.
+ * Mirrors OXPHP_EXCEPTION_DRAIN_LIMIT in ext/oxphp_fiber.h — the two cannot
+ * share a header, because this file is a separate shared library. */
+#define OXPHP_BRIDGE_EXCEPTION_DRAIN_LIMIT 16u
+
 void oxphp_exception_capture(void *ex_v,
     const char **out_class, size_t *out_class_len,
     char **out_message, size_t *out_message_len,
@@ -1391,8 +1398,66 @@ void oxphp_exception_capture(void *ex_v,
 
     /* getTraceAsString() must not leave an exception; clear defensively before
      * restoring the caller's original exception (NULL on the non-decorator
-     * paths, the in-flight exception on the decorator path). */
-    if (EG(exception)) { OBJ_RELEASE(EG(exception)); EG(exception) = NULL; }
+     * paths, the in-flight exception on the decorator path).
+     *
+     * Slot first, then the object. The engine refuses to run a destructor on
+     * the object EG(exception) still names and makes that refusal a core
+     * error, so releasing in place costs a fatal for any class declaring
+     * __destruct — out of a capture that is only meant to read. No call here
+     * is known to reach this branch with such an object: getTraceAsString() is
+     * final on both Exception and Error and userland cannot implement Throwable
+     * directly, so the method dispatched above is always the engine's own. Not
+     * that this makes it userland-free: the engine's trace formatter diagnoses a
+     * tampered trace array with E_WARNING, and in worker mode an error handler
+     * an earlier request installed is still installed, so a handler that throws
+     * does reach this slot. The order is still the one every other
+     * discard in this tree uses, and the cost of the branch being wrong is not
+     * proportional to how easy it is to reach.
+     *
+     * Spelled out rather than done through zend_clear_exception(): that one
+     * also releases EG(prev_exception) and writes
+     * EG(current_execute_data)->opline, and this function's job is to read an
+     * exception its caller still owns — discarding the caller's saved exception
+     * or moving its instruction pointer is not part of that.
+     *
+     * Draining, because once a destructor actually runs it is user code and can
+     * throw, and the restore below overwrites EG(exception) outright: anything
+     * left standing would not merely be ignored, it would be dropped along with
+     * the only reference to it. Bounded, because a pair of destructors that
+     * throw each other trade one allocation for one free every turn and would
+     * spin here for ever; past the ceiling the last object is dropped with its
+     * destructor refused, which is what IS_OBJ_DESTRUCTOR_CALLED buys.
+     *
+     * And under the same guard the call above has, doing the same cleanup. A
+     * fatal out of a destructor here is a bailout leaving a function that has
+     * already taken the caller's exception out of the slot: without this the
+     * restore never happens, so the caller's in-flight exception goes with the
+     * only reference to it and both malloc'd out-strings leak. */
+    zend_try {
+        for (unsigned turn = 0; EG(exception); turn++) {
+            zend_object *stray = EG(exception);
+            EG(exception) = NULL;
+            if (turn >= OXPHP_BRIDGE_EXCEPTION_DRAIN_LIMIT) {
+                GC_ADD_FLAGS(stray, IS_OBJ_DESTRUCTOR_CALLED);
+                OBJ_RELEASE(stray);
+                fprintf(stderr,
+                        "oxphp_exception_capture: an exception destructor threw "
+                        "again on every attempt to discard it — the last one was "
+                        "dropped without running its destructor\n");
+                break;
+            }
+            OBJ_RELEASE(stray);
+        }
+    } zend_catch {
+        free(*out_message);
+        *out_message = NULL;
+        *out_message_len = 0;
+        free(*out_trace);
+        *out_trace = NULL;
+        *out_trace_len = 0;
+        EG(exception) = saved;
+        zend_bailout();
+    } zend_end_try();
     EG(exception) = saved;
 }
 
