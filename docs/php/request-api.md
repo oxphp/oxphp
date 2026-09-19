@@ -789,6 +789,7 @@ oxphp_worker(function () {
             session_start();
             $_SESSION['user'] = $username;
             $_SESSION['authenticated'] = true;
+            session_write_close();
             header('Location: /dashboard');
         } else {
             http_response_code(401);
@@ -802,14 +803,18 @@ oxphp_worker(function () {
         $session = $request->session();
 
         if (!$session || !$session->get('authenticated')) {
+            session_write_close();
             header('Location: /login');
             return;
         }
 
         echo 'Welcome, ' . htmlspecialchars($session->get('user'));
+        session_write_close();
     }
 });
 ```
+
+`session_write_close()` on every path out is what makes the session a request's own rather than the worker's. A worker has no end-of-request to close a session at, so one left open is closed only when that worker takes its next request — and until then the save handler is still holding whatever it locked. Closing it yourself also puts the write where your application put it. It is not a separation between requests that **overlap**, though: a worker admits new requests whenever the one it is running suspends, and a session still open at a suspension point is handed to whatever is admitted in that window. See [Worker Mode](../features/worker-mode.md#what-gets-reset-between-requests).
 
 ---
 

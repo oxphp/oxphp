@@ -1,5 +1,5 @@
 # profile: fibers
-# description: Fiber-visible semantics of a worker-mode request — identity, nesting, suspend and resume refusal, blocked-switch fallback, bounded suspension refusal
+# description: Fiber-visible semantics of a worker-mode request — identity, nesting, suspend and resume refusal, blocked-switch fallback, bounded suspension refusal, and the state a request must not inherit from or leave to another
 
 fibers/test_fiber_identity
 fibers/test_nested_userland_fiber
@@ -18,3 +18,8 @@ fibers/test_shutdown_throw_is_reported
 fibers/test_last_error_survives_suspend
 fibers/test_shutdown_function_survives_suspend
 fibers/test_fiber_census_counts_a_tick_admission
+fibers/test_session_fastpath_seed
+fibers/test_session_fastpath_leaves_nothing
+fibers/test_session_does_not_outlive_its_request
+fibers/test_session_survives_its_own_suspension
+fibers/test_session_is_not_released_under_a_live_neighbour

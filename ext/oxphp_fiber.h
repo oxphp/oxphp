@@ -405,6 +405,12 @@ typedef struct _oxphp_request_fiber {
      * nowhere else. */
     bool cancelled;
     bool completed;          /* set by coroutine before final switch — low-level API never sets DEAD */
+    /* This request is in the session standing on the thread — it opened one, or
+     * it was admitted while one was already there and was handed it. Session
+     * state is per thread, not per fiber, so it can only be given back while no
+     * live request carries this. Taken after every slice, by the rule in
+     * oxphp_fiber.c. */
+    bool session_touched;
     int consecutive_errors;
 
     /* ── Async-task mode (oxphp_async fiber, not an HTTP request) ──
@@ -714,6 +720,26 @@ void oxphp_request_body_hook_restore(void);
  * Unlike oxphp_soft_reset(), this does NOT touch global OB or other thread-wide state.
  * It only initializes fresh superglobals and SAPI headers for the new request. */
 void oxphp_fiber_init_request_state(void);
+
+/* Give the session state on this thread back, near enough to the way the end of
+ * a request would: write the session out and close the save handler, then
+ * release the id, the array and the symbol table's entry for $_SESSION. Every
+ * other SAPI does this per request, out of the session module's own request
+ * shutdown; a worker reaches that one only when it is torn down.
+ *
+ * Near enough, and not the whole of it: the module's request shutdown also
+ * drops the nine callables session_set_save_handler() stores, and this does not.
+ * A handler registered from the worker's bootstrap has to outlive the request
+ * that registered it or no later request has one at all, and nothing here can
+ * tell that apart from a handler a request registered for itself. So a request
+ * that registers its own leaves it — and whatever it closes over — standing on
+ * the worker until another registration replaces it.
+ *
+ * Unconditional, so the caller owns the question of whether it is safe — the
+ * blocking path between requests always is, because nothing else is on the
+ * worker. The event loop asks first, through a guarded counterpart private to
+ * ext/oxphp_fiber.c; the rule both share is described there. Runs PHP. */
+void oxphp_session_release_request_state(void);
 
 /* ─── Async-task scheduler (Rust-driven via bridge callbacks) ───
  * Registered into the bridge at MINIT via

@@ -324,7 +324,7 @@ The following remain available regardless of this setting:
 
 | What | Why |
 |------|-----|
-| `$_SESSION` | Managed by PHP's session module, not by the SAPI |
+| `$_SESSION` | Filled by PHP's session module when a request starts a session, not by the SAPI |
 | `php://input` | A stream, not a superglobal |
 | `header()`, `headers_list()`, etc. | SAPI functions, not superglobals |
 | `session_start()` and other `session_*()` functions | Native PHP functions |

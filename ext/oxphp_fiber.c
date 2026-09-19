@@ -32,6 +32,7 @@
 #include "main/php_output.h"
 #include "main/php_streams.h" /* php_stream_close: the request body is a stream */
 #include "main/rfc1867.h"     /* destroy_uploaded_files_hash: $_FILES temp files */
+#include "ext/session/php_session.h" /* PS(): session state is per thread, not per request */
 #include "ext/standard/basic_functions.h"
 #include "ext/standard/php_fopen_wrappers.h" /* php_stream_php_wrapper: php://input makes bodies */
 #include <unistd.h> /* sysconf(_SC_PAGESIZE) for fiber stack limits */
@@ -2214,6 +2215,7 @@ oxphp_request_fiber *oxphp_scheduler_create_fiber(
     fiber->handler_threw = false;
     fiber->cancelled = false;
     fiber->completed = false;
+    fiber->session_touched = false;
     fiber->consecutive_errors = 0;
     fiber->drain_kill = false;
     /* Capture this request's cancel cell here, in the one place both request
@@ -3019,6 +3021,232 @@ void oxphp_release_request_post_state(void) {
     oxphp_drop_body_res(&oxphp_owned_body_res);
 }
 
+/* ─── Session state between requests ───────────────────── */
+
+/* The session module keeps one set of state per thread: whether a session is
+ * active, its id, the array behind it, and the $_SESSION entry in the symbol
+ * table. Every other SAPI gives all of it back at the end of the request; a
+ * worker reaches that only when it is torn down, so between requests it is this
+ * file's and oxphp_soft_reset()'s to give back instead.
+ *
+ * The blocking path can release it unconditionally — it only runs with nothing
+ * else on the worker. The event loop cannot: a request it admits can be arriving
+ * beside a suspended one working in a session, and clearing it there would take
+ * that session away mid-flight.
+ *
+ * So the question the event loop asks is not who opened the session but whether
+ * anyone can still be in it. Asking who opened it is not enough: that request
+ * can finish first, and the next admission would then take the session away
+ * from a neighbour still working in it — the same leak this file exists to
+ * close, pointed the other way.
+ *
+ * A request is in the session if the state was not there and then was, while it
+ * was the one running: it opened the session, or it was admitted into one that
+ * was already standing and was therefore handed it. Each fiber carries that as
+ * its own flag, taken at the return from each of its slices, and the state is
+ * released only when no live fiber carries it.
+ *
+ * A request that was already parked before the session appeared does not carry
+ * it. Nothing was handed to it — it suspended in a thread with no session in it
+ * — and this is what keeps the rule from swallowing the path it is on: a worker
+ * carrying one long-lived request that never touches sessions would otherwise
+ * never give a session back to anyone, which is the leak again. It is a real
+ * edge, and it is named in docs/features/worker-mode.md: such a request can
+ * still read $_SESSION after it wakes, and what it would read is somebody
+ * else's.
+ *
+ * The flag cannot be taken at the PARK instead: a request that never suspends
+ * would never take it, and its session would be unaccounted for from the moment
+ * it appeared. And it cannot be narrowed to requests that actually touch the
+ * session, because a $_SESSION read happens in the array and reaches no PS()
+ * slot that could be watched. */
+
+/* Is there anything of a session standing on this thread?
+ *
+ * One question asked of the four places the state lives, because each of them
+ * alone outlives a request: session_write_close() marks the session none and
+ * leaves the id installed, php_session_track_init() puts the array in the symbol
+ * table under a reference of its own, and session_destroy() empties the PS()
+ * slots and leaves that entry behind.
+ * SYNC: php-src/ext/session/session.c php_session_flush() /
+ *       php_session_track_init() / php_rshutdown_session_globals() */
+static bool oxphp_session_state_present(void) {
+    return PS(session_status) == php_session_active
+           || PS(id) != NULL
+           || !Z_ISUNDEF(PS(http_session_vars))
+           || zend_hash_str_find_ind(&EG(symbol_table),
+                                     "_SESSION", sizeof("_SESSION") - 1) != NULL;
+}
+
+void oxphp_session_release_request_state(void) {
+    /* The write first, and always, the way every other SAPI ends a request:
+     * php_session_flush(1) both saves the data and closes the save handler, and
+     * closing the handler is what releases the store's lock on the session.
+     * SYNC: php-src/ext/session/session.c PHP_RSHUTDOWN_FUNCTION(session) */
+    if (PS(session_status) == php_session_active) {
+        zend_try {
+            php_session_flush(1);
+        } zend_end_try();
+    }
+    /* Unguarded, as upstream leaves it: whatever objects the request left in
+     * $_SESSION have had their destructors run by the time a release gets here,
+     * so this drop frees memory and runs no PHP. The step below is the one
+     * upstream does guard, and for the opposite reason.
+     * SYNC: php-src/ext/session/session.c php_rshutdown_session_globals() */
+    if (!Z_ISUNDEF(PS(http_session_vars))) {
+        zval_ptr_dtor(&PS(http_session_vars));
+        ZVAL_UNDEF(&PS(http_session_vars));
+    }
+
+    /* A save handler can be open without the session being active: userland
+     * reaches into the handler directly, and a handler that fails or bails part
+     * way through a start leaves the module's status and its own open state
+     * disagreeing. The write above closes the handler when there was a session
+     * to write; this is the case where there was not. Closing twice is not one
+     * of the risks — for the built-in handlers the close nulls mod_data, and for
+     * a userland one it clears mod_user_implemented and the close itself returns
+     * early on a second call.
+     * SYNC: php-src/ext/session/session.c php_rshutdown_session_globals() —
+     *       same guard, same reason upstream states for it. */
+    if (PS(mod_data) || PS(mod_user_implemented)) {
+        zend_try {
+            PS(mod)->s_close(&PS(mod_data));
+        } zend_end_try();
+    }
+
+    if (PS(id)) { zend_string_release(PS(id)); PS(id) = NULL; }
+    if (PS(session_vars)) { zend_string_release(PS(session_vars)); PS(session_vars) = NULL; }
+    if (PS(mod_user_class_name)) {
+        zend_string_release(PS(mod_user_class_name));
+        PS(mod_user_class_name) = NULL;
+    }
+
+    /* The script and line the already-active notice names. Kept because the
+     * module only replaces it when a later session_start() gets as far as
+     * reading the store, so a worker that did not release it would answer a
+     * request with the name of a request that ended long before it. */
+    if (PS(session_started_filename)) {
+        zend_string_release(PS(session_started_filename));
+        PS(session_started_filename) = NULL;
+        PS(session_started_lineno) = 0;
+    }
+
+    /* The write above moves the status only when there was an active session to
+     * write, and a save handler that ran user code on its way out can have left
+     * it anywhere, so the status is reset here rather than left where it landed.
+     *
+     * Every status but one. Upstream resets this unconditionally because the
+     * request start that follows it re-decides the question: a build with no
+     * usable save handler or serializer is put back into "disabled" there, and
+     * that arm is what stops a start from reaching the decoder with no
+     * serializer behind it. A worker runs that start once and this reset between
+     * every request, so a plain reset here would answer the question once, in
+     * the affirmative, for the life of the worker.
+     * SYNC: php-src/ext/session/session.c php_rinit_session() */
+    if (PS(session_status) != php_session_disabled) {
+        PS(session_status) = php_session_none;
+    }
+
+    /* And the entry the module installs for $_SESSION, which none of the above
+     * reaches: php_session_track_init() hands the symbol table a reference of its
+     * own, and what gives that one back upstream is the destruction of the table,
+     * which belongs to the worker rather than to the request. Left standing, a
+     * request that never calls session_start() reads the previous request's array
+     * under its own $_SESSION — and a request that does call it is handed that
+     * array too, because the id above is what session_start() consults before it
+     * looks at any cookie.
+     *
+     * Last, because the array it names is the one the write above serialises, and
+     * this is the drop of its final reference. Under zend_try not because a
+     * destructor is expected here — the objects a request left in the session
+     * have already been destructed by the time a release runs, and the drop of
+     * the module's own reference above is unguarded for that reason — but
+     * because this is the one step with no counterpart in the upstream
+     * teardown, and because the two statements after it have to run whatever
+     * this one does.
+     *
+     * And hence zend_delete_global_variable() rather than the delete by key: the
+     * two are the same hash delete, but on an INDIRECT bucket only this one
+     * empties the slot BEFORE running the destructor. The other empties it
+     * after, so a destructor that bails out would leave the slot naming a
+     * reference part way through being freed, for the next request to read as
+     * its $_SESSION. Whether this entry can be indirect at all is a property of
+     * how the symbol table was built rather than of anything here, so the
+     * question is left to the call that is right either way.
+     *
+     * The name is built outside the zend_try and released after it, where a
+     * bailout lands, so neither outcome leaks it.
+     *
+     * What a save handler leaves in EG(exception) and PG(last_error_*) is
+     * cleared by the step that follows this call in either caller.
+     * SYNC: php-src/Zend/zend_hash.c zend_hash_del_ind() vs zend_hash_str_del_ind() */
+    zend_string *session_var_name = ZSTR_INIT_LITERAL("_SESSION", 0);
+    zend_try {
+        zend_delete_global_variable(session_var_name);
+    } zend_end_try();
+    zend_string_release(session_var_name);
+
+    /* The write and the handler close above run PHP, each behind a zend_try, and
+     * a zend_try swallows a bailout without undoing what raising it set: the
+     * engine marks the shutdown unclean on its way out and nothing here lowers
+     * that again. Left standing
+     * it is read as the next request's own fatal — that request is filed as
+     * failed, counted toward the run of failures that retires a worker, and
+     * answers with someone else's death. The blocking path clears it a few steps
+     * further on for its own reasons; the event loop has nothing that would.
+     * SYNC: php-src/Zend/zend.c _zend_bailout() */
+    CG(unclean_shutdown) = 0;
+}
+
+/* Record whether this request is one of the ones in the session.
+ *
+ * present_at_entry is what the thread looked like when this slice began, and it
+ * is the whole of the distinction. A request is in the session if the state
+ * appeared while it was the one running — it opened it — or if it was handed one
+ * that was already standing when it was admitted, which is the overlap case the
+ * blocking path exists to prevent and this path cannot. Either way the state was
+ * not there and then was, from that request's point of view, so a caller passes
+ * present_at_entry = false for a first slice: admission is that moment for a
+ * request that has not run before.
+ *
+ * A request that was already parked when someone else's session appeared is not
+ * one of them. It was not handed anything — it went to sleep in a thread with no
+ * session in it — and it is the reason this path can release at all: a worker
+ * carrying one long-lived request that never touches sessions would otherwise
+ * never give a session back to anyone.
+ *
+ * Read afresh rather than latched for the other direction: a request that closed
+ * and cleared its own session, and every request that never had one, stops being
+ * in anything the moment there is nothing to be in. */
+static void oxphp_session_note_use(oxphp_request_fiber *fiber, bool present_at_entry) {
+    if (!oxphp_session_state_present()) {
+        fiber->session_touched = false;
+    } else if (!present_at_entry) {
+        fiber->session_touched = true;
+    }
+}
+
+/* Is any request this worker is carrying still in the session?
+ *
+ * A fiber already flagged completed is one whose request is over and whose
+ * finalize has not run yet, so it is not in anything. Its flag goes with the
+ * struct to the free list and is cleared when the struct is handed to the next
+ * request. */
+static bool oxphp_session_in_use(const oxphp_fiber_scheduler *sched) {
+    for (const oxphp_request_fiber *fiber = sched->fibers_head; fiber; fiber = fiber->next) {
+        if (!fiber->completed && fiber->session_touched) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void oxphp_session_release_if_idle(const oxphp_fiber_scheduler *sched) {
+    if (oxphp_session_state_present() && !oxphp_session_in_use(sched)) {
+        oxphp_session_release_request_state();
+    }
+}
+
 /* ─── Targeted per-fiber request init ──────────────────── */
 
 void oxphp_fiber_init_request_state(void) {
@@ -3126,6 +3354,15 @@ void oxphp_scheduler_start_fiber(oxphp_fiber_scheduler *sched, oxphp_request_fib
     EG(stack_limit) = saved_stack_limit;
     sched->current = NULL;
 
+    /* Before the early return below: a request that starts a session and returns
+     * without closing it is exactly the one whose state the next request must
+     * not be handed, so the fiber that never suspended has to be recorded too —
+     * otherwise the state is unaccounted for from the moment it appears.
+     *
+     * false, because this is the request's first slice: whatever it found on the
+     * thread it was handed, and whatever it started is its own. */
+    oxphp_session_note_use(fiber, false);
+
     if (fiber->completed) {
         /* Handler completed without suspending */
         return;
@@ -3137,6 +3374,11 @@ void oxphp_scheduler_start_fiber(oxphp_fiber_scheduler *sched, oxphp_request_fib
 
 void oxphp_scheduler_resume_fiber(oxphp_fiber_scheduler *sched, oxphp_request_fiber *fiber, zval *value) {
     sched->current = fiber;
+
+    /* Taken before the resume, because it is the difference between a request
+     * that finds a session and one that is merely awake while somebody else has
+     * one — see oxphp_session_note_use. */
+    const bool session_present_at_entry = oxphp_session_state_present();
 
     /* Restore fiber's PHP state (superglobals, SAPI headers, Rust TLS) */
     oxphp_fiber_restore_php_state(fiber);
@@ -3153,6 +3395,12 @@ void oxphp_scheduler_resume_fiber(oxphp_fiber_scheduler *sched, oxphp_request_fi
     EG(stack_limit) = saved_stack_limit;
     oxphp_current_fiber = NULL;
     sched->current = NULL;
+
+    /* A resumed request can start a session as readily as a fresh one, and a
+     * request that closes its own stops holding anything again — but one that
+     * merely woke up beside somebody else's was not handed it, which is what the
+     * reading taken before the resume says. */
+    oxphp_session_note_use(fiber, session_present_at_entry);
 
     if (!fiber->completed) {
         /* Suspended again — re-snapshot its PHP state */
@@ -4137,7 +4385,28 @@ int oxphp_scheduler_tick(oxphp_fiber_scheduler *sched) {
          * Instead, prepare_request handles Rust TLS setup, and
          * oxphp_fiber_init_request_state() does a targeted per-fiber init
          * (fresh superglobals, clean SAPI headers) without touching global OB. */
+        /* Session state is the one thing prepare_request and the targeted init
+         * below both leave alone, and it is thread-wide: a request admitted here
+         * would otherwise start with the session of whichever request left one
+         * standing. Released only when no request this worker is carrying is
+         * still in it — see oxphp_session_note_use.
+         *
+         * Before either of them, because the release belongs to the request that
+         * ended, not to the one arriving. It runs PHP — a userland save handler
+         * gets both the write and the close — and PHP run after prepare_request
+         * writes into the arriving request: its output would land in that
+         * request's body, an oxphp_finish_request() from it would answer that
+         * request, and it would read the cookie header through a pointer
+         * prepare_request has just replaced. Run first, all of that belongs to
+         * nobody, which is what it is.
+         *
+         * The init below then clears the EG(exception) and PG(last_error_*)
+         * a save handler can leave, so the arriving request does not start able
+         * to read them as its own. */
+        oxphp_session_release_if_idle(sched);
+
         oxphp_bridge_prepare_request();
+
         oxphp_fiber_init_request_state();
 
         /* Increment counter at request START (mirror of fast path in
