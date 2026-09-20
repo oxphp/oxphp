@@ -624,11 +624,12 @@ File layout of the runtime image:
 │   ├── libphp.so                                    # PHP ZTS runtime (8.4 or 8.5, matches the image tag)
 │   ├── liboxphp_bridge.so                           # C bridge library
 │   └── php/extensions/no-debug-zts-<ABI>/
-│       └── oxphp_sapi.so                            # OxPHP PHP extension
-├── etc/php/
-│   └── conf.d/
-│       ├── custom.ini                                # PHP settings for OxPHP
-│       └── oxphp.ini                                # extension=oxphp_sapi.so
+│       ├── oxphp_sapi.so                            # OxPHP PHP extension
+│       └── sodium.so, ...                           # from the PHP base image; the set depends on the tag
+└── etc/php/
+    └── conf.d/
+        ├── docker-php-ext-*.ini                     # from the PHP base image; the set depends on the tag
+        └── extension.ini                            # extension=oxphp_sapi.so
 ```
 
 > **The `<ABI>` value depends on the PHP minor.** PHP 8.4 uses `20240924`, PHP 8.5 uses a different date stamp. The examples below pin `20240924` because their `FROM` line targets `php:8.4-zts-alpine3.23` — switch the FROM and you must switch the date too. To derive it portably inside the build:
@@ -640,13 +641,15 @@ File layout of the runtime image:
 >
 > Use `$(php -r 'echo ini_get("extension_dir");')` in shell commands to avoid hardcoding.
 
-The three OxPHP components and their purpose:
+The image carries no `php.ini` of its own — beside `conf.d/`, `/usr/local/etc/php/` holds only the upstream `php.ini-development` and `php.ini-production` samples, and PHP loads neither — and no application settings either. Supply yours as a `.ini` file under `conf.d`, mounted or copied in; see the [Docker Guide](docker.md). PHP parses every `.ini` file in that directory in alphabetical order and skips any other name without a word, so what you call the file decides both whether it is read at all and where it lands relative to the image's own. For an ordinary setting the last value read is the one that applies, so a file that overrides one has to sort after the file that sets it; `extension=` and `zend_extension=` are collected from every file instead and all loaded, so a later `extension=` never replaces an earlier one.
+
+The three OxPHP components and their purpose, with the sizes measured in the `0.11.0` image — they differ between `linux/amd64` and `linux/arm64` and move from release to release:
 
 | Component | Size | Purpose |
 |-----------|------|---------|
-| `oxphp` | ~8 MB | HTTP server, routing, plugins, metrics |
-| `liboxphp_bridge.so` | ~50 KB | Shared bridge library that links the server to the PHP runtime |
-| `oxphp_sapi.so` | ~200 KB | PHP functions (`oxphp_request_id()`, `OxPHP\Http\Request`, etc.) |
+| `oxphp` | ~12–15 MB | HTTP server, routing, plugins, metrics |
+| `liboxphp_bridge.so` | ~150–170 KB | Shared bridge library that links the server to the PHP runtime |
+| `oxphp_sapi.so` | ~700 KB | PHP functions (`oxphp_request_id()`, `OxPHP\Http\Request`, etc.) |
 
 Dependency chain:
 
