@@ -257,7 +257,7 @@ fiber.stack_size = 512K
 
 ## See Also
 
-- [Worker Mode](worker-mode.md) -- persistent PHP processes and the `oxphp_worker()` API
+- [Worker Mode](worker-mode.md) -- persistent PHP workers and the `oxphp_worker()` API
 - [Async Promises](async-promises.md) -- background thread pool for offloading blocking I/O
 - [SSE](sse.md) -- real-time streaming combined with fiber-based cooperative sleep
 - [PHP Functions](../php/functions.md) -- `oxphp_sleep()`, `oxphp_usleep()`, and other fiber-aware functions

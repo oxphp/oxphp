@@ -111,10 +111,10 @@ See the full [documentation](docs/index.md) for details.
 - **Crash isolation** — a fatal error in one request does not take down the server
 
 ### Worker Model
-- **Worker mode** — persistent PHP processes that stay alive across requests; autoloaders, service containers, and DB connections are initialized once and reused — see [Worker mode](docs/features/worker-mode.md)
+- **Worker mode** — persistent PHP workers that stay alive across requests; autoloaders, service containers, and DB connections are initialized once and reused — see [Worker mode](docs/features/worker-mode.md)
 - **Fiber multiplexing** — each worker handles multiple concurrent requests via PHP 8.4 Fibers; `oxphp_sleep()` and `oxphp_async_await()` yield the current fiber instead of blocking the worker thread — see [Fiber multiplexing](docs/features/fiber-multiplexing.md)
 - **Automatic recycling** — in worker mode a worker is recycled when it passes `WORKER_MAX_MEMORY_MIB`, when the application calls `Worker::scheduleExit()`, or after three consecutive fatal errors — see [Recycling](docs/features/worker-mode.md#recycling)
-- **Worker health monitoring** — crashed workers are automatically detected and restarted
+- **Worker health monitoring** — crashed workers are automatically detected and replaced; a static pool refills to its configured count, a dynamic one to its minimum
 - **Early response** via `oxphp_finish_request()` — send the response and keep running background work — see [Early response](docs/features/early-response.md)
 
 ### Async Promises
@@ -238,7 +238,7 @@ flowchart TD
 - **PHP worker pool** — each worker is a dedicated OS thread; a crash in one worker does not affect the others
 - Requests wait in a bounded queue between the HTTP server and the PHP workers; the queue returns 529 when full
 - **Async pool** — separate threads for `oxphp_async()` tasks, preventing slowdowns in the main worker pool
-- **Worker mode** — persistent PHP processes that stay alive between requests; autoloaders and DB connections are shared across all requests handled by that worker
+- **Worker mode** — persistent PHP workers that stay alive between requests; autoloaders and DB connections are shared across all requests handled by that worker
 
 ### Internal Server
 

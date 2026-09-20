@@ -193,7 +193,7 @@ These metrics are only emitted when worker mode is active (`WORKER_MODE_ENABLED=
 |--------|------|-------------|
 | `oxphp_worker_mode_enabled` | gauge | Always `1` when worker mode is active |
 | `oxphp_worker_requests_handled_total` | counter | Total requests processed by persistent workers |
-| `oxphp_worker_recycles_total` | counter | Total worker recycles (worker exited and was respawned) |
+| `oxphp_worker_recycles_total` | counter | Total worker recycles — a worker's loop ended on one of the reasons below. A dynamic pool retiring an idle worker also ends its loop but is scaling down rather than recycling: it is counted in `oxphp_workers_retired_total`, not here or in the series below |
 | `oxphp_worker_recycles_by_reason_total` | counter | Recycles by reason. Label: `reason` (`scheduled`, `max_memory`, `error`) |
 | `oxphp_worker_soft_resets_total` | counter | Total soft resets performed between requests |
 

@@ -40,7 +40,7 @@
 - [Static Files](docs/features/static-files.md): OxPHP serves static files with automatic MIME detection, in-memory caching, HTTP cache headers, conditional 304 responses, and Range requests.
 - [Timeouts](docs/features/timeouts.md): Configure header read timeouts and PHP execution timeouts in OxPHP to protect against slow clients and runaway PHP scripts.
 - [TLS](docs/features/tls.md): Configure native TLS termination in OxPHP with support for TLS 1.2, TLS 1.3, a configurable minimum protocol version, HTTP/2 ALPN negotiation, and PEM certificates.
-- [Worker Mode](docs/features/worker-mode.md): Persistent PHP processes that bootstrap once and handle multiple requests, eliminating per-request startup overhead in OxPHP.
+- [Worker Mode](docs/features/worker-mode.md): Persistent PHP workers that bootstrap once and handle multiple requests, eliminating per-request startup overhead in OxPHP.
 
 ## Shared State
 

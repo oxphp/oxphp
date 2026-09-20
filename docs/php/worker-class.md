@@ -74,7 +74,7 @@ if ($worker->requestCount() === 1) {
 
 ### scheduleExit
 
-Application-driven worker recycling. The current request completes normally; the loop checks `isExitScheduled()` afterwards and breaks out. The supervisor respawns a fresh worker, re-running the outer scope of the worker file.
+Application-driven worker recycling. The current request completes normally; the loop checks `isExitScheduled()` afterwards and breaks out. The supervisor brings a fresh worker up in its place, re-running the outer scope of the worker file — on the pool's next scan for a static pool, and on a dynamic one only while the pool is at or below its minimum; see [Recycling](../features/worker-mode.md#recycling).
 
 ```php
 <?php
@@ -146,6 +146,6 @@ The legacy free functions remain available and route through the same internal s
 
 ## See Also
 
-- [Worker Mode](../features/worker-mode.md) — overview of persistent PHP processes and the bootstrap-once pattern
+- [Worker Mode](../features/worker-mode.md) — overview of persistent PHP workers and the bootstrap-once pattern
 - [PHP Functions](functions.md) — reference for the legacy `oxphp_*` free functions
 - [Request API](request-api.md) — `OxPHP\Http\RequestInterface::startTime()` for per-request timing

@@ -227,7 +227,7 @@ A handler blocked inside a single long-running **native** call (a native `sleep(
 
 ## See Also
 
-- [Worker Mode](worker-mode.md) -- persistent PHP processes for reduced bootstrap overhead
+- [Worker Mode](worker-mode.md) -- persistent PHP workers for reduced bootstrap overhead
 - [Timeouts](timeouts.md) -- configuring or disabling the request timeout for long-lived connections
 - [PHP Functions](../php/functions.md) -- full reference for `oxphp_stream_flush()` and `oxphp_is_streaming()`
 - [Compression](compression.md) -- which responses are compressed, and with which coding

@@ -185,4 +185,4 @@ If `free_memory` is consistently low, increase `opcache.memory_consumption`.
 
 - [Docker Guide](../getting-started/docker.md) -- container setup and mounting configuration files
 - [Configuration Reference](../operations/configuration.md) -- environment variables for OxPHP
-- [Worker Mode](../features/worker-mode.md) -- persistent PHP processes that benefit most from OPcache
+- [Worker Mode](../features/worker-mode.md) -- persistent PHP workers that benefit most from OPcache

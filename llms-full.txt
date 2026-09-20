@@ -580,7 +580,7 @@ The `/health` endpoint returns `200` when the server is healthy and `503` when d
 
 - [Configuration](../operations/configuration.md) — full environment variable reference
 - [Routing](../features/routing.md) — Traditional, Framework, SPA, and Worker routing modes
-- [Worker Mode](../features/worker-mode.md) — persistent PHP processes for framework applications
+- [Worker Mode](../features/worker-mode.md) — persistent PHP workers for framework applications
 - [TLS](../features/tls.md) — HTTPS with built-in TLS termination
 - [Health Checks](../operations/health-checks.md) — health endpoint details and Kubernetes integration
 - [Graceful Shutdown](../operations/graceful-shutdown.md) — drain behavior and shutdown sequence
@@ -949,7 +949,7 @@ Because `ACCESS_LOG=all` is set, every request appears as a structured JSON log 
 - [Docker Guide](docker.md) — development and production Dockerfiles, Compose configuration, PHP ini mounts, and health check setup
 - [Configuration](../operations/configuration.md) — full environment variable reference
 - [Routing](../features/routing.md) — Traditional, Framework, SPA, and Worker routing modes
-- [Worker Mode](../features/worker-mode.md) — persistent PHP processes that bootstrap once and handle multiple requests
+- [Worker Mode](../features/worker-mode.md) — persistent PHP workers that bootstrap once and handle multiple requests
 - [PHP Functions](../php/functions.md) — all OxPHP built-in PHP functions
 
 ---
@@ -3027,7 +3027,7 @@ In traditional mode, `oxphp_async_await()` blocks the worker thread. If all PHP 
 
 ## See Also
 
-- [Worker Mode](worker-mode.md) -- persistent PHP processes with fiber-based concurrency
+- [Worker Mode](worker-mode.md) -- persistent PHP workers with fiber-based concurrency
 - [PHP Functions](../php/functions.md) -- `oxphp_async()`, `oxphp_async_await()`, and related function reference
 - [Metrics](../operations/metrics.md) -- async pool Prometheus metrics
 - [Configuration Reference](../operations/configuration.md) -- `ASYNC_WORKERS` and `ASYNC_QUEUE_CAPACITY`
@@ -3729,7 +3729,7 @@ class RequireRole implements AttributeInterface
 
 ## Worker Mode Behavior
 
-In worker mode the PHP process persists across requests, but **decorator instances do not**: the per-worker instance cache is cleared at the end of every request. This means:
+In worker mode PHP state persists across requests, but **decorator instances do not**: the per-worker instance cache is cleared at the end of every request. This means:
 
 - Constructor logic runs once per request per decorated function — at that function's first call within the request — not once for the worker's lifetime
 - Instance state in properties is shared by every call to a decorated function within a single request, but does **not** carry over to the next request
@@ -4582,7 +4582,7 @@ If you call `oxphp_finish_request()` before any `echo` output, the client receiv
 
 ## See Also
 
-- [Worker Mode](worker-mode.md) -- persistent PHP processes and how early response interacts with the request loop
+- [Worker Mode](worker-mode.md) -- persistent PHP workers and how early response interacts with the request loop
 - [Timeouts](timeouts.md) -- how the request timeout applies to background work
 - [PHP Functions](../php/functions.md) -- full reference for `oxphp_finish_request()` and other built-in functions
 
@@ -4843,7 +4843,7 @@ fiber.stack_size = 512K
 
 ## See Also
 
-- [Worker Mode](worker-mode.md) -- persistent PHP processes and the `oxphp_worker()` API
+- [Worker Mode](worker-mode.md) -- persistent PHP workers and the `oxphp_worker()` API
 - [Async Promises](async-promises.md) -- background thread pool for offloading blocking I/O
 - [SSE](sse.md) -- real-time streaming combined with fiber-based cooperative sleep
 - [PHP Functions](../php/functions.md) -- `oxphp_sleep()`, `oxphp_usleep()`, and other fiber-aware functions
@@ -6894,7 +6894,7 @@ services:
 ## See Also
 
 - [Static Files](static-files.md) — MIME detection, caching, and streaming for served files
-- [Worker Mode](worker-mode.md) — persistent PHP processes and worker mode routing
+- [Worker Mode](worker-mode.md) — persistent PHP workers and worker mode routing
 - [Configuration Reference](../operations/configuration.md) — full list of environment variables
 
 ---
@@ -7124,7 +7124,7 @@ A handler blocked inside a single long-running **native** call (a native `sleep(
 
 ## See Also
 
-- [Worker Mode](worker-mode.md) -- persistent PHP processes for reduced bootstrap overhead
+- [Worker Mode](worker-mode.md) -- persistent PHP workers for reduced bootstrap overhead
 - [Timeouts](timeouts.md) -- configuring or disabling the request timeout for long-lived connections
 - [PHP Functions](../php/functions.md) -- full reference for `oxphp_stream_flush()` and `oxphp_is_streaming()`
 - [Compression](compression.md) -- which responses are compressed, and with which coding
@@ -7705,7 +7705,7 @@ services:
 
 # Worker Mode
 
-Worker mode runs persistent PHP processes that bootstrap once and handle multiple requests, eliminating per-request startup overhead. Instead of tearing down and rebuilding PHP state on every request, your application loads its autoloader, configuration, and database connections a single time and reuses them across the lifetime of the worker.
+Worker mode runs persistent PHP workers that bootstrap once and handle multiple requests, eliminating per-request startup overhead. Instead of tearing down and rebuilding PHP state on every request, your application loads its autoloader, configuration, and database connections a single time and reuses them across the lifetime of the worker.
 
 ## How It Works
 
@@ -7750,7 +7750,8 @@ oxphp_worker(function () use ($app) {
     $app->handle();
 });
 
-// Shutdown: runs when the worker exits
+// Teardown: runs when this worker's loop ends, which is not
+// only at server shutdown — see Recycling below
 $app->terminate();
 ```
 
@@ -7785,7 +7786,7 @@ The following state survives across requests within the same worker:
 
 ## Recycling
 
-Workers are automatically recycled (restarted with a fresh PHP process) when any of the following conditions are met:
+Workers are automatically recycled — the worker's loop ends and its PHP state is torn down; whether a fresh worker comes up in its place is decided by the pool, under the rules below — when any of the following conditions are met:
 
 - **Max memory exceeded** — the worker's PHP memory usage exceeds `WORKER_MAX_MEMORY_MIB` MiB
 - **Application requested exit** — the handler called [`Worker::scheduleExit()`](../php/worker-class.md#scheduleexit). Useful for app-controlled hot reload, file-mtime-based reload, or per-request bootstrap re-execution
@@ -7802,7 +7803,9 @@ Not every failed request counts, because not every failure says the worker is un
 
 "Neutral" means exactly that: one of those in the middle of a run of fatals neither adds to the count nor clears it, so `fatal, exception, fatal, fatal` still recycles the worker. A failure in a shutdown function is read the same way as one in the request handler. PHP runs shutdown functions under protection of its own, so the worker sees a request that failed inside one return normally — but a fatal there is a request coming apart on its own, exactly as one in the handler is, so it counts the same, and an exception there unwinds as cleanly as one from the handler, so it is neutral the same way. What decides is why a request ended and not what it left behind: whatever raised the bailout, the worker picks the abandoned frames back up and rewinds the VM stack the same way, so a deadline that expires while a shutdown function runs is cleaned up exactly as a fatal there is and leaves the worker in the same state — and it is still neutral, because the question the count answers is whether this worker is at fault, and a request the server itself cut short is not evidence against it. So a cancellation is neutral whether it lands on the handler — a client hanging up mid-write — or in a shutdown function, provided the request had not already hit a fatal. A deadline that expires in a shutdown function of a handler that came apart leaves that failure counted: what the worker answers for is having come apart, and a deadline afterwards does not take that back. Shutting the server down is the one cancellation that is neutral unconditionally — a worker on its way out is not a worker being judged. What none of this does is diagnose a worker that has wedged rather than failed: a request stuck in a syscall is reported through `oxphp_worker_stuck_total` for an operator to act on, not cancelled and not counted.
 
-When a worker is recycled, the PHP process terminates and a new one starts, re-executing the outer scope of the worker script. For memory-based and scheduled exit, the current request completes normally before the worker exits. For error-based recycling, the worker exits after the failed request.
+When a worker is recycled, that worker's loop ends and its replacement re-executes the outer scope of the worker script. Workers are OS threads inside the single OxPHP process rather than separate processes, so nothing the operating system sees restarts and `getmypid()` returns the same value in every worker, before and after. Whether a replacement arrives at once depends on the pool: a static pool (`PHP_WORKERS=N`) refills to `N` on its next scan, so the replacement is one-for-one, while a dynamic pool (`PHP_WORKERS=MIN:MAX`) refills only to `MIN` — a worker recycled above the minimum leaves the pool one smaller until ordinary scale-up grows it again. For memory-based and scheduled exit, the current request completes normally before the worker exits. For error-based recycling, the worker exits after the failed request.
+
+Retirement is not recycling and is not counted as such. A dynamic pool retiring an idle worker (see [Dynamic Pool](../architecture/overview.md#dynamic-pool)) also ends that worker's loop and also runs the code after `oxphp_worker()`, but it is scaling down rather than replacing: nothing is spawned to replace it, neither `oxphp_worker_recycles_total` nor `oxphp_worker_recycles_by_reason_total` moves, and it is `oxphp_workers_retired_total` that counts it instead. Application teardown placed after `oxphp_worker()` therefore runs on a healthy, serving pool as well — see [`oxphp_worker()`](../php/functions.md#oxphp_worker).
 
 Other requests the same worker was serving concurrently — suspended in `oxphp_async_await()`, `oxphp_sleep()`, or a socket read under `RUNTIME_HOOKS` — do not get to finish: each is cancelled where it is suspended and answered with `503 Service Unavailable` and a `Retry-After`, after running its own shutdown functions. Recycling is therefore visible to clients whose requests happen to be in flight, which is worth knowing when choosing `WORKER_MAX_MEMORY_MIB` or calling `scheduleExit()` on a worker that serves concurrent requests. A full server shutdown is different: there, in-flight requests get the drain window to finish normally.
 
@@ -7810,7 +7813,7 @@ Other requests the same worker was serving concurrently — suspended in `oxphp_
 
 Worker Mode persists bootstrap state (autoloader, DI container, DB connections) in memory, so `opcache.validate_timestamps=1` alone is not enough to pick up changes to code that ran during the outer scope. For development loops there are two options:
 
-- **Recycle every request.** Call `OxPHP\Server\Worker::current()->scheduleExit()` at the end of every handler invocation (gated on a `OXPHP_DEV` env flag, for example). The current request completes normally, then the worker exits and is respawned, re-executing the outer scope. This trades the worker-mode performance win for FPM-style reload semantics — simplest and most reliable for active development.
+- **Recycle every request.** Call `OxPHP\Server\Worker::current()->scheduleExit()` at the end of every handler invocation (gated on a `OXPHP_DEV` env flag, for example). The current request completes normally, then the worker exits and a replacement re-executes the outer scope — immediately on a static pool, which is what a development setup normally runs. This trades the worker-mode performance win for FPM-style reload semantics — simplest and most reliable for active development.
 - **Keep the worker warm, reload request handlers.** Skip `scheduleExit()` entirely, enable `opcache.validate_timestamps=1`, and keep your bootstrap minimal. Code loaded inside the request callback will be refreshed by OPcache on the next request; code loaded once in the outer scope will not. See [OPcache and JIT → Development Settings](../php/opcache.md#development-settings) for the full list of caveats.
 
 ## Troubleshooting
@@ -12371,7 +12374,7 @@ oxphp_worker(function () {
 
 - [Superglobals](superglobals.md) — how OxPHP populates `$_SERVER`, `$_GET`, `$_POST`, `$_COOKIE`, and `$_FILES`
 - [PHP Functions](functions.md) — full reference for `oxphp_http_request()`, `oxphp_superglobals_enabled()`, and all other built-in functions
-- [Worker Mode](../features/worker-mode.md) — persistent PHP processes and the request lifecycle
+- [Worker Mode](../features/worker-mode.md) — persistent PHP workers and the request lifecycle
 - [Configuration Reference](../operations/configuration.md) — `SUPERGLOBALS_ENABLED` and other environment variables
 
 ---
@@ -12559,7 +12562,7 @@ If `free_memory` is consistently low, increase `opcache.memory_consumption`.
 
 - [Docker Guide](../getting-started/docker.md) -- container setup and mounting configuration files
 - [Configuration Reference](../operations/configuration.md) -- environment variables for OxPHP
-- [Worker Mode](../features/worker-mode.md) -- persistent PHP processes that benefit most from OPcache
+- [Worker Mode](../features/worker-mode.md) -- persistent PHP workers that benefit most from OPcache
 
 ---
 
@@ -12819,13 +12822,16 @@ Enters the persistent worker mode loop. OxPHP calls `$handler` once for each inc
 **Parameters:**
 - `$handler` — Called once per request. The handler receives no arguments. Use superglobals (`$_SERVER`, `$_GET`, `$_POST`, etc.) or `oxphp_http_request()` inside the handler to access request data.
 
-**Returns:** `true` on graceful shutdown, `false` if not in worker mode.
+**Returns:** `true` once the loop has ended, `false` if not in worker mode. Every exit below returns `true`, so the value says nothing about why the loop ended.
 
 The worker loop exits when any of the following conditions are met:
 - The server shuts down gracefully
 - The handler hits 3 consecutive fatal errors (an uncaught exception is answered and does not count, and neither does a request the server cancelled unless a fatal was reported on it as well — see [Worker mode → Recycling](../features/worker-mode.md#recycling))
 - The worker exceeds `WORKER_MAX_MEMORY_MIB`
 - The application calls [`Worker::scheduleExit()`](worker-class.md#scheduleexit)
+- A dynamic pool (`PHP_WORKERS=MIN:MAX`) retires this worker for being idle longer than `PHP_WORKERS_IDLE_SECONDS` (default 30) while holding nothing. The server keeps serving; the pool is scaling down — see [Dynamic Pool](../architecture/overview.md#dynamic-pool)
+
+Code after `oxphp_worker()` runs on every one of those, not only on the first. On a dynamic pool that makes it a recurring event on a healthy server: an idle worker retires, its teardown runs, and the rest of the pool serves on. Write that block as worker teardown rather than as server shutdown — a line logging "server stopping" there is wrong every time but the last, and a resource shared beyond the worker is torn down underneath a running server.
 
 > **Note:** `oxphp_worker()` only works in worker mode (`WORKER_MODE_ENABLED=true`). In traditional mode it logs a warning and returns `false`.
 
@@ -12833,7 +12839,7 @@ The worker loop exits when any of the following conditions are met:
 
 ```php
 <?php
-// worker.php — runs once per worker process lifetime
+// worker.php — runs once per worker lifetime
 
 // Bootstrap: executed once on startup
 require __DIR__ . '/vendor/autoload.php';
@@ -12844,7 +12850,8 @@ oxphp_worker(function () use ($app) {
     $app->handle();
 });
 
-// Code after oxphp_worker() runs during shutdown
+// Reached when this worker's loop ends: server shutdown, recycling,
+// or a dynamic pool retiring this worker while the server keeps running
 $app->terminate();
 ```
 
@@ -14189,7 +14196,7 @@ if ($worker->requestCount() === 1) {
 
 ### scheduleExit
 
-Application-driven worker recycling. The current request completes normally; the loop checks `isExitScheduled()` afterwards and breaks out. The supervisor respawns a fresh worker, re-running the outer scope of the worker file.
+Application-driven worker recycling. The current request completes normally; the loop checks `isExitScheduled()` afterwards and breaks out. The supervisor brings a fresh worker up in its place, re-running the outer scope of the worker file — on the pool's next scan for a static pool, and on a dynamic one only while the pool is at or below its minimum; see [Recycling](../features/worker-mode.md#recycling).
 
 ```php
 <?php
@@ -14261,7 +14268,7 @@ The legacy free functions remain available and route through the same internal s
 
 ## See Also
 
-- [Worker Mode](../features/worker-mode.md) — overview of persistent PHP processes and the bootstrap-once pattern
+- [Worker Mode](../features/worker-mode.md) — overview of persistent PHP workers and the bootstrap-once pattern
 - [PHP Functions](functions.md) — reference for the legacy `oxphp_*` free functions
 - [Request API](request-api.md) — `OxPHP\Http\RequestInterface::startTime()` for per-request timing
 
@@ -14375,7 +14382,7 @@ In dynamic mode, OxPHP scales workers up when all are busy and scales down when 
 |----------|---------|-------------|
 | `WORKER_MAX_MEMORY_MIB` | `0` | Maximum memory in MiB per worker before recycling. `0` = unlimited |
 
-Set `WORKER_MODE_ENABLED=true` and point `ENTRY_FILE` at your worker bootstrap script (e.g. `ENTRY_FILE=worker.php` or `ENTRY_FILE=../worker.php`). PHP processes then stay alive across requests, keeping bootstrap state (autoloaders, database connections) in memory. Workers are recycled automatically when they exceed `WORKER_MAX_MEMORY_MIB`, or on demand when the application calls [`Worker::scheduleExit()`](../php/worker-class.md#scheduleexit). The `WORKER_MAX_REQUESTS` knob from earlier releases is deprecated and ignored — set neither, or migrate to `Worker::scheduleExit()`.
+Set `WORKER_MODE_ENABLED=true` and point `ENTRY_FILE` at your worker bootstrap script (e.g. `ENTRY_FILE=worker.php` or `ENTRY_FILE=../worker.php`). PHP workers then stay alive across requests, keeping bootstrap state (autoloaders, database connections) in memory. Workers are recycled automatically when they exceed `WORKER_MAX_MEMORY_MIB` or take three consecutive requests that came apart, and on demand when the application calls [`Worker::scheduleExit()`](../php/worker-class.md#scheduleexit); see [Recycling](../features/worker-mode.md#recycling) for what counts towards the third. The `WORKER_MAX_REQUESTS` knob from earlier releases is deprecated and ignored — set neither, or migrate to `Worker::scheduleExit()`.
 
 ### Deprecated: `INDEX_FILE` and `WORKER_FILE`
 
@@ -15370,7 +15377,7 @@ These metrics are only emitted when worker mode is active (`WORKER_MODE_ENABLED=
 |--------|------|-------------|
 | `oxphp_worker_mode_enabled` | gauge | Always `1` when worker mode is active |
 | `oxphp_worker_requests_handled_total` | counter | Total requests processed by persistent workers |
-| `oxphp_worker_recycles_total` | counter | Total worker recycles (worker exited and was respawned) |
+| `oxphp_worker_recycles_total` | counter | Total worker recycles — a worker's loop ended on one of the reasons below. A dynamic pool retiring an idle worker also ends its loop but is scaling down rather than recycling: it is counted in `oxphp_workers_retired_total`, not here or in the series below |
 | `oxphp_worker_recycles_by_reason_total` | counter | Recycles by reason. Label: `reason` (`scheduled`, `max_memory`, `error`) |
 | `oxphp_worker_soft_resets_total` | counter | Total soft resets performed between requests |
 
@@ -15650,7 +15657,7 @@ OxPHP supports two PHP execution models:
 
 **Standard mode** (default) creates a fresh PHP environment for every request. Autoloaders, configuration, and database connections are initialized on each request and torn down afterward. This model is compatible with all PHP applications out of the box.
 
-**Worker mode** keeps PHP processes alive across requests. Your application bootstraps once — loading the autoloader, configuration, and establishing database connections — and then enters a request loop. Between requests, OxPHP automatically resets superglobals, output buffers, and response headers while preserving the bootstrapped state. `$_ENV` is the deliberate exception: with PHP's default `auto_globals_jit=1` it is not reset, so it is worker state rather than request state — a value written there during one request is read by every later request that worker serves. See [Superglobals](../php/superglobals.md#_env).
+**Worker mode** keeps PHP workers alive across requests. Your application bootstraps once — loading the autoloader, configuration, and establishing database connections — and then enters a request loop. Between requests, OxPHP automatically resets superglobals, output buffers, and response headers while preserving the bootstrapped state. `$_ENV` is the deliberate exception: with PHP's default `auto_globals_jit=1` it is not reset, so it is worker state rather than request state — a value written there during one request is read by every later request that worker serves. See [Superglobals](../php/superglobals.md#_env).
 
 Worker mode eliminates per-request startup overhead, which can reduce response times significantly for framework-based applications (Laravel, Symfony, etc.) where bootstrapping is expensive.
 
@@ -15686,15 +15693,15 @@ For details, see [Internal Server](../features/internal-server.md).
 
 OxPHP provides several guarantees to keep your application running reliably in production:
 
-- **Request isolation** — if a PHP script crashes or triggers a fatal error, only that single request is affected. The server continues handling all other requests normally. The crashed worker is automatically replaced with a fresh one.
-- **Automatic worker respawn** — OxPHP monitors the health of all PHP workers. If a worker dies unexpectedly, a new worker is started in its place without manual intervention.
+- **Request isolation** — if a PHP script crashes or triggers a fatal error, only that single request is affected. The server continues handling all other requests normally, and the crashed worker is brought back as described below.
+- **Automatic worker respawn** — OxPHP monitors the health of all PHP workers and replaces one that dies unexpectedly, without manual intervention. A static pool refills to its configured count, so the replacement is one-for-one; a dynamic pool refills only to its minimum, and a worker lost above that is regained by ordinary scale-up.
 - **Backpressure protection** — the bounded request queue prevents overload. When the server is at capacity, new requests receive a 529 response with a `Retry-After` header rather than queueing indefinitely and causing cascading timeouts.
 - **Path traversal protection** — all URL paths are sanitized before filesystem access. Percent-encoded traversal attempts, `..` segments, and paths that escape the document root are blocked.
 - **Graceful shutdown** — on SIGTERM or SIGINT (Ctrl+C), OxPHP stops accepting new connections and waits for in-flight requests to complete (up to a configurable drain timeout) before exiting.
 
 ## See Also
 
-- [Worker Mode](../features/worker-mode.md) — persistent PHP processes and the `oxphp_worker()` API
+- [Worker Mode](../features/worker-mode.md) — persistent PHP workers and the `oxphp_worker()` API
 - [Fiber Multiplexing](../features/fiber-multiplexing.md) — hundreds of concurrent requests on a single worker
 - [SSE Streaming](../features/sse.md) — streaming events from PHP
 - [Early Response](../features/early-response.md) — `oxphp_finish_request()` and background processing

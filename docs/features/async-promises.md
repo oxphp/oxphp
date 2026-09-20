@@ -310,7 +310,7 @@ In traditional mode, `oxphp_async_await()` blocks the worker thread. If all PHP 
 
 ## See Also
 
-- [Worker Mode](worker-mode.md) -- persistent PHP processes with fiber-based concurrency
+- [Worker Mode](worker-mode.md) -- persistent PHP workers with fiber-based concurrency
 - [PHP Functions](../php/functions.md) -- `oxphp_async()`, `oxphp_async_await()`, and related function reference
 - [Metrics](../operations/metrics.md) -- async pool Prometheus metrics
 - [Configuration Reference](../operations/configuration.md) -- `ASYNC_WORKERS` and `ASYNC_QUEUE_CAPACITY`

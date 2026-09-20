@@ -407,7 +407,7 @@ The `/health` endpoint returns `200` when the server is healthy and `503` when d
 
 - [Configuration](../operations/configuration.md) — full environment variable reference
 - [Routing](../features/routing.md) — Traditional, Framework, SPA, and Worker routing modes
-- [Worker Mode](../features/worker-mode.md) — persistent PHP processes for framework applications
+- [Worker Mode](../features/worker-mode.md) — persistent PHP workers for framework applications
 - [TLS](../features/tls.md) — HTTPS with built-in TLS termination
 - [Health Checks](../operations/health-checks.md) — health endpoint details and Kubernetes integration
 - [Graceful Shutdown](../operations/graceful-shutdown.md) — drain behavior and shutdown sequence

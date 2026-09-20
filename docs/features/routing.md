@@ -242,5 +242,5 @@ services:
 ## See Also
 
 - [Static Files](static-files.md) — MIME detection, caching, and streaming for served files
-- [Worker Mode](worker-mode.md) — persistent PHP processes and worker mode routing
+- [Worker Mode](worker-mode.md) — persistent PHP workers and worker mode routing
 - [Configuration Reference](../operations/configuration.md) — full list of environment variables

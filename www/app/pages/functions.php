@@ -51,7 +51,7 @@ header("X-Worker: " . $info["worker_id"]);',
         'sig'     => 'oxphp_is_worker(): bool',
         'params'  => [],
         'return'  => 'bool — <code>true</code> if running in worker mode, <code>false</code> in traditional mode.',
-        'desc'    => 'Checks whether the server is running in worker mode. In worker mode, PHP boots once and handles multiple requests via <code>oxphp_worker()</code>. In traditional mode, each request spawns a fresh PHP process. Use this to conditionally enable worker-specific logic such as connection pooling or static caches.',
+        'desc'    => 'Checks whether the server is running in worker mode. In worker mode, PHP boots once and handles multiple requests via <code>oxphp_worker()</code>. In traditional mode the same pooled worker threads serve every request, but each one is wrapped in a full PHP request startup and shutdown, so no userland state — superglobals, globals, statics — survives between them. Persistent resources are the exception: a <code>PDO::ATTR_PERSISTENT</code> handle or a <code>pconnect()</code> connection lives in PHP\'s per-thread persistent list and is reused by later requests on that thread. Use this to conditionally enable worker-specific logic such as connection pooling or static caches.',
         'example' => 'if (oxphp_is_worker()) {
     // Worker mode: reuse persistent DB connection
     $db = $GLOBALS["db"] ?? ($GLOBALS["db"] = new PDO($dsn));
@@ -149,8 +149,8 @@ oxphp_worker(function () {
         'params'  => [
             ['name' => '$handler', 'type' => 'callable', 'desc' => 'Callback invoked once per HTTP request. Receives no arguments.'],
         ],
-        'return'  => 'bool — <code>true</code> on graceful shutdown, <code>false</code> if worker mode is not enabled.',
-        'desc'    => 'Enters the persistent worker mode loop. Calls the handler for each HTTP request. Between requests, a soft reset cleans per-request state (superglobals, output buffers) without destroying the PHP heap, so bootstrap state (autoloaders, DB connections) persists. <code>$_ENV</code> is excluded on purpose: with PHP\'s default <code>auto_globals_jit=1</code> it is not reset, so a value written there during a request is read by every later request on that worker. Workers are recycled when they exceed <code>WORKER_MAX_MEMORY_MIB</code>, or on demand via <code>Worker::scheduleExit()</code>. Only available when <code>WORKER_MODE_ENABLED=true</code> with <code>ENTRY_FILE</code> set.',
+        'return'  => 'bool — <code>true</code> once the loop has ended, whichever exit ended it; <code>false</code> if worker mode is not enabled.',
+        'desc'    => 'Enters the persistent worker mode loop. Calls the handler for each HTTP request. Between requests, a soft reset cleans per-request state (superglobals, output buffers) without destroying the PHP heap, so bootstrap state (autoloaders, DB connections) persists. <code>$_ENV</code> is excluded on purpose: with PHP\'s default <code>auto_globals_jit=1</code> it is not reset, so a value written there during a request is read by every later request on that worker. Workers are recycled when they exceed <code>WORKER_MAX_MEMORY_MIB</code>, after three consecutive requests that came apart, or on demand via <code>Worker::scheduleExit()</code>; on a dynamic pool (<code>PHP_WORKERS=MIN:MAX</code>) an idle worker is also retired, which ends the loop while the server keeps serving. Only available when <code>WORKER_MODE_ENABLED=true</code> with <code>ENTRY_FILE</code> set.',
         'example' => '// worker.php — persistent worker entry point
 require __DIR__ . "/vendor/autoload.php";
 $db = new PDO("mysql:host=localhost;dbname=app", "root", "");

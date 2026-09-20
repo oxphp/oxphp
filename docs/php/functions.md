@@ -258,13 +258,16 @@ Enters the persistent worker mode loop. OxPHP calls `$handler` once for each inc
 **Parameters:**
 - `$handler` — Called once per request. The handler receives no arguments. Use superglobals (`$_SERVER`, `$_GET`, `$_POST`, etc.) or `oxphp_http_request()` inside the handler to access request data.
 
-**Returns:** `true` on graceful shutdown, `false` if not in worker mode.
+**Returns:** `true` once the loop has ended, `false` if not in worker mode. Every exit below returns `true`, so the value says nothing about why the loop ended.
 
 The worker loop exits when any of the following conditions are met:
 - The server shuts down gracefully
 - The handler hits 3 consecutive fatal errors (an uncaught exception is answered and does not count, and neither does a request the server cancelled unless a fatal was reported on it as well — see [Worker mode → Recycling](../features/worker-mode.md#recycling))
 - The worker exceeds `WORKER_MAX_MEMORY_MIB`
 - The application calls [`Worker::scheduleExit()`](worker-class.md#scheduleexit)
+- A dynamic pool (`PHP_WORKERS=MIN:MAX`) retires this worker for being idle longer than `PHP_WORKERS_IDLE_SECONDS` (default 30) while holding nothing. The server keeps serving; the pool is scaling down — see [Dynamic Pool](../architecture/overview.md#dynamic-pool)
+
+Code after `oxphp_worker()` runs on every one of those, not only on the first. On a dynamic pool that makes it a recurring event on a healthy server: an idle worker retires, its teardown runs, and the rest of the pool serves on. Write that block as worker teardown rather than as server shutdown — a line logging "server stopping" there is wrong every time but the last, and a resource shared beyond the worker is torn down underneath a running server.
 
 > **Note:** `oxphp_worker()` only works in worker mode (`WORKER_MODE_ENABLED=true`). In traditional mode it logs a warning and returns `false`.
 
@@ -272,7 +275,7 @@ The worker loop exits when any of the following conditions are met:
 
 ```php
 <?php
-// worker.php — runs once per worker process lifetime
+// worker.php — runs once per worker lifetime
 
 // Bootstrap: executed once on startup
 require __DIR__ . '/vendor/autoload.php';
@@ -283,7 +286,8 @@ oxphp_worker(function () use ($app) {
     $app->handle();
 });
 
-// Code after oxphp_worker() runs during shutdown
+// Reached when this worker's loop ends: server shutdown, recycling,
+// or a dynamic pool retiring this worker while the server keeps running
 $app->terminate();
 ```
 

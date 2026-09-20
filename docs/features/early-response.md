@@ -149,6 +149,6 @@ If you call `oxphp_finish_request()` before any `echo` output, the client receiv
 
 ## See Also
 
-- [Worker Mode](worker-mode.md) -- persistent PHP processes and how early response interacts with the request loop
+- [Worker Mode](worker-mode.md) -- persistent PHP workers and how early response interacts with the request loop
 - [Timeouts](timeouts.md) -- how the request timeout applies to background work
 - [PHP Functions](../php/functions.md) -- full reference for `oxphp_finish_request()` and other built-in functions

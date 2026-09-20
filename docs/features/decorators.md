@@ -224,7 +224,7 @@ class RequireRole implements AttributeInterface
 
 ## Worker Mode Behavior
 
-In worker mode the PHP process persists across requests, but **decorator instances do not**: the per-worker instance cache is cleared at the end of every request. This means:
+In worker mode PHP state persists across requests, but **decorator instances do not**: the per-worker instance cache is cleared at the end of every request. This means:
 
 - Constructor logic runs once per request per decorated function — at that function's first call within the request — not once for the worker's lifetime
 - Instance state in properties is shared by every call to a decorated function within a single request, but does **not** carry over to the next request

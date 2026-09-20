@@ -127,14 +127,16 @@ function oxphp_finish_request(): bool {}
  * Checks whether the server is running in worker mode.
  *
  * In worker mode, PHP boots once and handles multiple requests via
- * oxphp_worker(). In traditional mode, each request spawns a fresh
- * PHP process. Use this to conditionally enable worker-specific logic.
+ * oxphp_worker(). In traditional mode the same pooled worker threads serve
+ * every request, but each one is wrapped in a full PHP request startup and
+ * shutdown, so no userland state survives between them. Use this to
+ * conditionally enable worker-specific logic.
  *
  * @return bool true if running in worker mode
  *
  * @example
  * if (oxphp_is_worker()) {
- *     // persistent connections, shared state, etc.
+ *     // bootstrap state held across requests: DI container, route cache, etc.
  * }
  *
  * @see \OxPHP\Server\Worker::isWorkerMode() Object-oriented equivalent; both
@@ -262,7 +264,7 @@ function oxphp_usleep(int $microseconds): void {}
  * oxphp_worker(function () use ($app) {
  *     $app->handle();  // called per request
  * });
- * $app->terminate();  // graceful shutdown
+ * $app->terminate();  // worker teardown, on any of the exits above
  *
  * @see \OxPHP\Server\Worker::serve() Object-oriented equivalent. Both share
  *      the same dispatch loop and per-thread re-entry guard, but differ at
@@ -2539,7 +2541,7 @@ namespace OxPHP\Server {
         /**
          * Whether this thread is running in worker mode.
          *
-         * true  — long-lived PHP process, one bootstrap, many requests
+         * true  — long-lived worker thread, one bootstrap, many requests
          *         dispatched through serve().
          * false — traditional per-request lifecycle (php_request_startup /
          *         shutdown around each request).
@@ -2618,8 +2620,10 @@ namespace OxPHP\Server {
 
         /**
          * Mark this worker for graceful exit after the current request
-         * completes. The supervisor respawns a fresh worker, re-running
-         * the outer scope of the entry script.
+         * completes. The supervisor brings a fresh worker up in its place,
+         * re-running the outer scope of the entry script — on the pool's next
+         * scan for a static pool, and on a dynamic one only while the pool
+         * is at or below its minimum.
          *
          * Idempotent: subsequent calls are no-ops; the first call wins
          * and exitReason() reports 'scheduled'.
@@ -2674,7 +2678,7 @@ namespace OxPHP\Server\Exception {
     /**
      * Thrown when Worker::serve() is called outside worker mode.
      *
-     * In traditional mode there is no persistent process to host a loop —
+     * In traditional mode there is no persistent PHP state to host a loop —
      * each request runs the script once and exits. The application should
      * either enable worker mode (WORKER_MODE_ENABLED=true) or stop calling
      * serve() in traditional contexts.
