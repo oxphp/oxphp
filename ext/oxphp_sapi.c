@@ -1080,7 +1080,8 @@ ZEND_METHOD(OxPHP_Http_UploadedFile, moveTo) {
  * ═══════════════════════════════════════════════════════════════ */
 
 /* {{{ oxphp_http_request(): OxPHP\Http\Request
- * Returns the HTTP Request object for the current request context.
+ * Returns an HTTP Request object for the current request context — a new one
+ * on every call, each with caches and an attributes container of its own.
  * Throws OxPHP\Http\Exception\* if no active request. */
 PHP_FUNCTION(oxphp_http_request)
 {

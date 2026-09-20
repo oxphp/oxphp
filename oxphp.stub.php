@@ -22,7 +22,8 @@
 // ═══════════════════════════════════════════════════════════════
 
 /**
- * Returns the HTTP Request object for the current request context.
+ * Returns an HTTP Request object for the current request context — a new one
+ * on every call, each with caches and an attributes container of its own.
  *
  * The object is a lightweight proxy — data is fetched lazily from Rust
  * thread-local storage via FFI only when a method is called. No allocation
@@ -512,7 +513,9 @@ namespace OxPHP\Http {
          * - other Content-Type → null
          *
          * Not tied to HTTP method — works with POST, PUT, PATCH, etc.
-         * Parsed result is cached per request. Parsing happens in Rust.
+         * Parsed result is cached on the Request object it was called on; a
+         * second oxphp_http_request() has a cache of its own. Parsing happens
+         * in Rust.
          *
          * @param string|null $key Specific key, or null for full body
          * @param mixed $default Returned when key is absent
@@ -604,8 +607,10 @@ namespace OxPHP\Http {
         /**
          * Mutable key-value container for middleware enrichment.
          *
-         * Per-request, shared between Fibers on the same thread.
-         * The Attributes object is created on first call and cached.
+         * Created on first call and cached on THIS object. oxphp_http_request()
+         * returns a new Request every call, each with a container of its own,
+         * so the container is shared exactly as far as this object is passed —
+         * a Fiber handed it included.
          */
         public function attributes(): AttributesInterface;
 
@@ -703,7 +708,9 @@ namespace OxPHP\Http {
      * Mutable key-value container for request attributes.
      *
      * Used by middleware to attach data to the request (auth user, locale,
-     * route parameters, etc.). Per-request, shared between Fibers.
+     * route parameters, etc.). Lives on the Request object it was taken from,
+     * and reaches as far as that object is passed — see
+     * RequestInterface::attributes().
      */
     interface AttributesInterface
     {

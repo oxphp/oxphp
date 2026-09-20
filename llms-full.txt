@@ -11573,7 +11573,7 @@ OxPHP provides an object-oriented API for accessing HTTP request data. Instead o
 
 ## Overview
 
-`oxphp_http_request()` returns a read-only proxy to the HTTP request data stored in the current worker thread. Data is fetched lazily — a single method call like `$request->header('Accept')` goes directly to the Rust-side data structure and returns just that value. Full-array calls like `$request->headers()` build the array once and cache it in the PHP object for the duration of the request.
+`oxphp_http_request()` returns a read-only proxy to the HTTP request data stored in the current worker thread. Data is fetched lazily — a single method call like `$request->header('Accept')` goes directly to the Rust-side data structure and returns just that value. Of the full-array calls, `query()` and `payload()` keep their parsed result on the object they were called on; `headers()`, `cookies()` and `files()` build theirs afresh every time. Nothing is kept for the request: each call to `oxphp_http_request()` returns a new object, with a new set of those caches.
 
 **Why use it instead of superglobals?**
 
@@ -11748,7 +11748,7 @@ Returns the parsed request body. The body is parsed according to the `Content-Ty
 | `application/json` | Decoded array or scalar; `null` for invalid JSON |
 | Any other value | `null` |
 
-`payload()` is not limited to POST requests — it works with PUT, PATCH, and any other method that sends a body. The parsed result is cached on the first call and reused for the lifetime of the request.
+`payload()` is not limited to POST requests — it works with PUT, PATCH, and any other method that sends a body. The parsed result is cached on the first call and reused by later calls on the same object. A second `oxphp_http_request()` is a second object, with a cache of its own — it builds the result again.
 
 | Call | Returns |
 |------|---------|
@@ -11945,7 +11945,7 @@ error_log(sprintf("Request took %.3fs so far", $elapsed));
 $request->attributes(): AttributesInterface
 ```
 
-Returns the mutable attributes container for the current request. Use attributes to share data between middleware, route handlers, and other code in the same request without using global variables.
+Returns the mutable attributes container held by this `Request` object. Use attributes to hand data from middleware to route handlers and to whatever else receives the same object, instead of reaching for a global variable.
 
 ```php
 <?php
@@ -11956,7 +11956,17 @@ $request->attributes()->set('user', $authenticatedUser);
 $user = $request->attributes()->get('user');
 ```
 
-Attributes are per-request and are reset with each new request in worker mode. When using Fibers, attributes are shared across all Fibers running on the same worker thread for the same request — but because PHP Fibers are cooperative, concurrent access is not possible.
+The container belongs to the object, not to the request. `oxphp_http_request()` returns a new `Request` on every call, and the container you take from it is a new, empty one, so a write made through one call is not readable through another — the default comes back instead, with no warning and no log line:
+
+```php
+<?php
+oxphp_http_request()->attributes()->set('tenant_id', $id);
+oxphp_http_request()->attributes()->get('tenant_id');   // null — a second Request, a second container
+```
+
+Pass the object along, as `$request` is in the first of the two examples above, and everything that holds it reads and writes the one container — including a Fiber you hand it to. A Fiber that calls `oxphp_http_request()` for itself gets a container of its own, like any other caller. Because PHP Fibers are cooperative, no two of them are ever inside a container at the same moment.
+
+Nothing is reset between requests, because there is nothing to reset: the container goes when the object holding it does, and the next request's handler calls `oxphp_http_request()` and gets one of its own.
 
 ---
 
@@ -12070,7 +12080,7 @@ $file->moveTo('/var/uploads/' . bin2hex(random_bytes(8)) . '.pdf');
 
 ## AttributesInterface
 
-`AttributesInterface` is the only mutable part of the request object. It is intended for storing per-request metadata — authenticated user, resolved route parameters, locale, feature flags — that multiple parts of the application need to access.
+`AttributesInterface` is the only mutable part of the request object. It is intended for metadata your own code derives — authenticated user, resolved route parameters, locale, feature flags — and reads again further along the same call chain. How far it reaches is how far the `Request` object holding it is passed; see [Attributes](#attributes).
 
 ```php
 namespace OxPHP\Http;
@@ -12167,7 +12177,7 @@ if (!oxphp_superglobals_enabled()) {
 
 ## Worker Mode
 
-In worker mode, a new Request object is created for each incoming request. The previous request's object becomes invalid once the request completes — do not store a reference to it between requests.
+In worker mode, `oxphp_http_request()` builds a new `Request` every time it is called — once per call, not once per request. Call it inside the handler and pass the object where it is needed, as the example below does.
 
 ```php
 <?php
@@ -12182,7 +12192,7 @@ oxphp_worker(function () use ($app) {
 });
 ```
 
-All caches on the Request object (parsed headers, cookies, query parameters, payload) are cleared automatically when the next request begins.
+Do not keep an object past the handler that built it. One held across requests is not invalidated, and nothing reports it as stale: `method()`, `path()`, `header()` and the other uncached readers go on answering out of whatever request the worker thread is serving at the moment you call them, while what the object cached — the `query()` array, the parsed `payload()`, the attributes container — is whatever each of them took on its own first call, which for one never made before is this request's. Nothing on a `Request` is cleared when the next request begins — what the soft reset between requests does cover is listed under [What Gets Reset Between Requests](../features/worker-mode.md#what-gets-reset-between-requests).
 
 ---
 
@@ -12603,7 +12613,7 @@ OxPHP registers its functions through the `oxphp_sapi` extension, which loads au
 oxphp_http_request(): \OxPHP\Http\Request
 ```
 
-Returns the request object for the current HTTP request. The object provides typed access to the HTTP method, URI, query parameters, parsed body, headers, cookies, uploaded files, client IP, and request timing.
+Returns a request object for the current HTTP request — a new one on every call. The object provides typed access to the HTTP method, URI, query parameters, parsed body, headers, cookies, uploaded files, client IP, and request timing.
 
 **Returns:** An `\OxPHP\Http\Request` instance backed by the request data in the current PHP worker thread.
 
