@@ -1,0 +1,30 @@
+# Superglobal population switched off at the master switch.
+#
+# The only HTTP profile that runs with SUPERGLOBALS_ENABLED=false. What the
+# flag actually suppresses is narrower than its name suggests, and the object
+# API is documented to work regardless — both are what these tests pin.
+#
+# Standalone usage:
+#   docker compose -f compose.yml -f compose.superglobals_off.yml up
+services:
+  oxphp-superglobals_off:
+    build:
+      context: ..
+      dockerfile: docker/dev/Dockerfile
+    ports:
+      - "80"
+    networks: [test-net]
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    environment:
+      LOG_LEVEL: error
+      INTERNAL_ADDR: 0.0.0.0:9090
+      SUPERGLOBALS_ENABLED: "false"
+    volumes:
+      - ../www:/var/www/html
+      - ./php:/var/www/html/public/tests

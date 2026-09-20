@@ -41,7 +41,7 @@ OxPHP provides an object-oriented API for accessing HTTP request data. Instead o
 
 **Why use it instead of superglobals?**
 
-- **JSON body parsing is built in.** `$request->payload()` parses `application/json`, `application/x-www-form-urlencoded`, and `multipart/form-data` without extra code.
+- **JSON body parsing is built in.** `$request->payload()` hands back a decoded `application/json` body whatever the request method is, and the fields of a `POST` form body — `application/x-www-form-urlencoded` or `multipart/form-data` — without extra code. The exact returns are in [Parsed Body](#parsed-body).
 - **No array key typos.** `$request->method()` is harder to mistype than `$_SERVER['REQUEST_METHOD']`.
 - **Type-detected file uploads.** `$request->file('avatar')->type()` returns the MIME type determined from the file's actual contents, not the client-supplied value.
 - **Testable.** Because behavior is defined by interfaces, you can inject mock implementations in unit tests.
@@ -207,18 +207,23 @@ Returns the parsed request body. The body is parsed according to the `Content-Ty
 
 | Content-Type | Returns |
 |---|---|
-| `application/x-www-form-urlencoded` | Associative array of field values |
-| `multipart/form-data` | Associative array of text field values |
-| `application/json` | Decoded array or scalar; `null` for invalid JSON |
-| Any other value | `null` |
+| `application/x-www-form-urlencoded` | Associative array of field values, on a POST request; an empty array on any other method |
+| `multipart/form-data` | Associative array of text field values, on a POST request; an empty array on any other method |
+| `application/json` | The decoded value — an array for an object or an array, otherwise the scalar itself (`string`, `int`, `float`, `bool`); `null` for invalid JSON and for a literal `null` body |
+| Any other value | `null`. Matching is by prefix, so anything beginning `application/json` — `application/json-patch+json`, for one — takes the JSON row above, while `text/json` and `application/vnd.api+json` land here |
 
-`payload()` is not limited to POST requests — it works with PUT, PATCH, and any other method that sends a body. The parsed result is cached on the first call and reused by later calls on the same object. A second `oxphp_http_request()` is a second object, with a cache of its own — it builds the result again.
+A JSON body is decoded whatever the request method is. A form body is not: the two form rows read what PHP parsed the body into, and PHP does that for POST alone, so `payload()` on a `PUT` or `PATCH` carrying form fields returns an empty array. Send such bodies as JSON, or read them from [`body()`](#raw-body) and parse them yourself. Both form rows also give you the body as it arrived rather than as your code left it: writing to `$_POST` later separates a copy for the script, and `payload()` goes on reading the array PHP parsed out of the body.
+
+The parsed result is cached on the first call and reused by later calls on the same object. A second `oxphp_http_request()` is a second object, with a cache of its own — it builds the result again.
 
 | Call | Returns |
 |------|---------|
 | `$request->payload()` | The entire parsed body |
+| `$request->payload(null, [])` | The entire parsed body, or `[]` when there is none — an empty body, a `Content-Type` from the last row above, invalid JSON, or a literal JSON `null` |
 | `$request->payload('email')` | A single field value, or `null` if absent |
 | `$request->payload('email', '')` | A single field value, or `''` if absent |
+
+A key lookup only reaches into an array payload. On a JSON body that decoded to a scalar there are no keys, so `payload('anything')` returns the default. A body of `false` or `0` is a value the default does not stand in for.
 
 ```php
 <?php
@@ -610,21 +615,28 @@ In normal request-handling code, you do not need this try/catch. The exception g
 
 ```bash
 SUPERGLOBALS_ENABLED=true    # default — full backward compatibility
-SUPERGLOBALS_ENABLED=false   # superglobals are empty arrays
+SUPERGLOBALS_ENABLED=false   # the $_SERVER request keys and $_GET are not built
 ```
 
 By default, OxPHP populates `$_GET`, `$_POST`, `$_COOKIE`, `$_FILES`, and `$_SERVER` as usual. The HTTP Object API is available alongside superglobals in this mode.
 
-Setting `SUPERGLOBALS_ENABLED=false` makes those arrays empty, which eliminates the cost of building them for every request. The following still work regardless of this setting:
+Setting `SUPERGLOBALS_ENABLED=false` skips the work of describing the request to PHP: the CGI and `HTTP_*` variables are not registered, and the query string is not handed over for PHP to parse. What that leaves is narrower than the name suggests — the request body and the `Cookie` header reach PHP either way, and PHP builds the arrays it makes out of them regardless of this setting:
 
 | Feature | Behavior with `SUPERGLOBALS_ENABLED=false` |
 |---------|-------------------------------------------|
-| `oxphp_http_request()` | Always available |
+| `oxphp_http_request()` | Available — every method answers, including `query()` and `payload()` |
 | `php://input` | Available (it is a stream, not a superglobal) |
 | `$_SESSION` | Available (managed by PHP's session module) |
 | `header()`, `headers_list()` | Available (SAPI output functions) |
 | `session_start()`, `session_*()` | Available (native PHP functions) |
-| `$_GET`, `$_POST`, `$_COOKIE`, `$_FILES`, `$_SERVER` | Empty arrays |
+| `$_POST`, `$_FILES`, `$_COOKIE` | **Populated as usual** — they are built from the body and the `Cookie` header, which this setting does not touch |
+| `$_REQUEST` | Populated — PHP merges it per `request_order` as always; only its `$_GET` half is missing |
+| `$_GET` | Empty |
+| `$_SERVER` | During a request, four keys and no more: `REQUEST_TIME`, `REQUEST_TIME_FLOAT`, `argc` and `argv`, every one of them registered by PHP itself rather than by the server. No `REQUEST_METHOD`, no `REQUEST_URI`, no `HTTP_*`, no process environment. **Worker mode bootstraps differently:** the code above `oxphp_worker()` runs before any request and sees a `$_SERVER` built as though the setting were on — the whole process environment included, plus a placeholder `REQUEST_URI` of `/` |
+
+So this setting is not a way to keep request data out of PHP's globals, and it is not a way to stop a form body being parsed. The work it skips is the per-request `$_SERVER` fold — the CGI and `HTTP_*` variables plus the process environment — and PHP's parse of the query string into `$_GET`.
+
+Code that routes on `$_SERVER['REQUEST_URI']` finds nothing there under this setting and has to read `oxphp_http_request()->path()` instead. In a worker entry script that applies to the handler; the bootstrap above it sees the placeholder `/` described in the table, which is not a route either.
 
 Use `oxphp_superglobals_enabled()` to check the current setting at runtime:
 

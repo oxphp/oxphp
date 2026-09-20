@@ -128,7 +128,7 @@ If both old and new are set, `ENTRY_FILE` / `WORKER_MODE_ENABLED` win. Migrate a
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SUPERGLOBALS_ENABLED` | `true` | Populate PHP superglobals (`$_GET`, `$_POST`, `$_COOKIE`, `$_FILES`, `$_SERVER`, `php://input`) before script execution. Set to a [falsy value](#boolean-values) to skip population — request data is then only available through the object API (`oxphp_http_request()`). Useful for applications that consume the object API directly and want to avoid the cost of building superglobals on every request |
+| `SUPERGLOBALS_ENABLED` | `true` | Describe the request to PHP so it builds `$_SERVER` and `$_GET` before script execution. Set to a [falsy value](#boolean-values) to skip that work in an application that reads neither. It reaches those two only: `$_POST`, `$_FILES` and `$_COOKIE` are built from the request body and the `Cookie` header, which are handed to PHP either way, and `php://input` is a stream rather than a superglobal. See [SUPERGLOBALS_ENABLED](../php/request-api.md#superglobals_enabled) for the full table |
 
 ## Timeouts
 

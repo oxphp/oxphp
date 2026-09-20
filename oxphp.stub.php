@@ -45,15 +45,22 @@ function oxphp_http_request(): \OxPHP\Http\RequestInterface {}
 /**
  * Check if PHP superglobals ($_GET, $_POST, etc.) are populated.
  *
- * When SUPERGLOBALS_ENABLED=false, the object API via oxphp_http_request()
- * is the only way to access request data.
+ * When SUPERGLOBALS_ENABLED=false, a request runs with $_GET empty and with
+ * $_SERVER holding only the four keys PHP registers itself (REQUEST_TIME,
+ * REQUEST_TIME_FLOAT, argc, argv). $_POST, $_FILES and $_COOKIE are built as
+ * usual, and so are php://input and the object API via oxphp_http_request():
+ * the setting only suppresses the two the server fills itself. It applies to
+ * requests; a worker's bootstrap and the `oxphp run` CLI role keep the
+ * $_SERVER they would have had without it.
  *
  * @return bool true if superglobals are enabled (default)
  *
  * @example
  * if (!oxphp_superglobals_enabled()) {
- *     // must use oxphp_http_request() for all request data
+ *     // query parameters and the request keys of $_SERVER live here instead
  *     $request = oxphp_http_request();
+ *     $page = $request->query('page', 1);
+ *     $uri  = $request->path();
  * }
  */
 function oxphp_superglobals_enabled(): bool {}
@@ -514,16 +521,29 @@ namespace OxPHP\Http {
          *
          * - application/x-www-form-urlencoded → array
          * - multipart/form-data → array
-         * - application/json → decoded array/object (null on invalid JSON)
-         * - other Content-Type → null
+         * - application/json → whatever the body decodes to: an array for a
+         *   JSON object or list, and a string, int, float or bool for a
+         *   top-level scalar. Objects decode to arrays, never to stdClass.
+         * - invalid JSON, a JSON null body, an empty body, any other
+         *   Content-Type → null
          *
-         * Not tied to HTTP method — works with POST, PUT, PATCH, etc.
+         * A JSON body is decoded whatever the method is. A form body is not
+         * decoded here at all: it is $_POST as PHP built it, name mangling,
+         * max_input_vars and all, and PHP builds $_POST for the POST method
+         * only (and only with 'P' in variables_order, the default) — so a
+         * form body sent with PUT or PATCH arrives here as an empty array.
+         *
+         * $default stands in for null, the one result that means "nothing to
+         * return"; a body of false is a value and comes back as false. With a
+         * $key on a body that decoded to a scalar there is nothing to look up,
+         * so $default comes back.
+         *
          * Parsed result is cached on the Request object it was called on; a
-         * second oxphp_http_request() has a cache of its own. Parsing happens
-         * in Rust.
+         * second oxphp_http_request() has a cache of its own.
          *
          * @param string|null $key Specific key, or null for full body
-         * @param mixed $default Returned when key is absent
+         * @param mixed $default Returned when the key is absent, or when the
+         *                       body parsed to null
          * @return mixed Parsed body or single value or $default
          */
         public function payload(?string $key = null, mixed $default = null): mixed;

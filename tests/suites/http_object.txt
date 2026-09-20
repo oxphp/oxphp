@@ -26,6 +26,12 @@ http_object/test_binary_values >> ?bin=%FF%00%FE%80&empty= | GET | -b "bin=%FF%0
 http_object/test_body | POST | -H "Content-Type: text/plain" -d "request body content" | |
 http_object/test_content_type_method | POST | -H "Content-Type: application/json" -d '{}' | |
 http_object/test_payload_json | POST | -H "Content-Type: application/json" -d '{"key":"value","num":42}' | |
+http_object/test_payload_json_string | POST | -H "Content-Type: application/json" -d '"hello"' | |
+http_object/test_payload_json_int | POST | -H "Content-Type: application/json" -d '42' | |
+http_object/test_payload_json_true | POST | -H "Content-Type: application/json" -d 'true' | |
+http_object/test_payload_json_false | POST | -H "Content-Type: application/json" -d 'false' | |
+http_object/test_payload_json_null | POST | -H "Content-Type: application/json" -d 'null' | |
+http_object/test_payload_json_invalid | POST | -H "Content-Type: application/json" -d '{bad' | |
 http_object/test_payload_form | POST | -H "Content-Type: application/x-www-form-urlencoded" -d "key=value&num=42" | |
 http_object/test_ip
 http_object/test_start_time
