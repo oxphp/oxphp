@@ -5,6 +5,9 @@
  * This file is loaded as the entry script when WORKER_MODE_ENABLED=true. The
  * application boots once, then oxphp_worker() loops internally — the handler
  * is called for each HTTP request with fresh $_GET, $_POST, $_SERVER, etc.
+ * $_ENV is the exception: with PHP's default auto_globals_jit=1 it is not
+ * reset, so it is worker state, and a write made in the handler is read by
+ * every later request this worker serves.
  *
  * Usage: WORKER_MODE_ENABLED=true ENTRY_FILE=/var/www/html/worker.php
  */

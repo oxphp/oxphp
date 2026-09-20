@@ -240,6 +240,10 @@ function oxphp_usleep(int $microseconds): void {}
  * Between requests, a soft reset cleans per-request state (output buffers,
  * headers, superglobals) without destroying the PHP heap. Bootstrap state
  * (autoloader, DI container, routes, variables in the outer scope) persists.
+ * $_ENV is excluded from that reset: with PHP's default auto_globals_jit=1 it
+ * holds for the life of the worker, so a value written there during a request
+ * is read by every later request on that worker and by any request
+ * multiplexed alongside it.
  *
  * Only available in worker mode (WORKER_MODE_ENABLED=true with ENTRY_FILE).
  * The loop exits when the server shuts down, when a dynamic pool
@@ -249,7 +253,8 @@ function oxphp_usleep(int $microseconds): void {}
  * Code after oxphp_worker() runs once the loop has exited, for any of those
  * reasons and not only on shutdown.
  *
- * @param callable $handler Called for each request with fresh superglobals
+ * @param callable $handler Called for each request with fresh superglobals —
+ *                          $_ENV excepted, as above
  * @return bool true once the loop exits, false if not in worker mode
  *
  * @example

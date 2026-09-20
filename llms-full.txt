@@ -12814,7 +12814,7 @@ if (oxphp_is_worker()) {
 oxphp_worker(callable $handler): bool
 ```
 
-Enters the persistent worker mode loop. OxPHP calls `$handler` once for each incoming HTTP request. Between requests, a soft reset clears per-request state — output buffers, headers, and superglobals — without destroying the PHP heap, so any variables declared outside the handler persist across requests.
+Enters the persistent worker mode loop. OxPHP calls `$handler` once for each incoming HTTP request. Between requests, a soft reset clears per-request state — output buffers, headers, and superglobals — without destroying the PHP heap, so any variables declared outside the handler persist across requests. `$_ENV` is excluded from that reset on purpose: with PHP's default `auto_globals_jit=1` it holds for the life of the worker, so a value the handler writes there is read by every later request on that worker and by any request multiplexed alongside it — see [Superglobals](superglobals.md#_env).
 
 **Parameters:**
 - `$handler` — Called once per request. The handler receives no arguments. Use superglobals (`$_SERVER`, `$_GET`, `$_POST`, etc.) or `oxphp_http_request()` inside the handler to access request data.
@@ -15650,7 +15650,7 @@ OxPHP supports two PHP execution models:
 
 **Standard mode** (default) creates a fresh PHP environment for every request. Autoloaders, configuration, and database connections are initialized on each request and torn down afterward. This model is compatible with all PHP applications out of the box.
 
-**Worker mode** keeps PHP processes alive across requests. Your application bootstraps once — loading the autoloader, configuration, and establishing database connections — and then enters a request loop. Between requests, OxPHP automatically resets superglobals, output buffers, and response headers while preserving the bootstrapped state.
+**Worker mode** keeps PHP processes alive across requests. Your application bootstraps once — loading the autoloader, configuration, and establishing database connections — and then enters a request loop. Between requests, OxPHP automatically resets superglobals, output buffers, and response headers while preserving the bootstrapped state. `$_ENV` is the deliberate exception: with PHP's default `auto_globals_jit=1` it is not reset, so it is worker state rather than request state — a value written there during one request is read by every later request that worker serves. See [Superglobals](../php/superglobals.md#_env).
 
 Worker mode eliminates per-request startup overhead, which can reduce response times significantly for framework-based applications (Laravel, Symfony, etc.) where bootstrapping is expensive.
 

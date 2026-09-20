@@ -253,7 +253,7 @@ if (oxphp_is_worker()) {
 oxphp_worker(callable $handler): bool
 ```
 
-Enters the persistent worker mode loop. OxPHP calls `$handler` once for each incoming HTTP request. Between requests, a soft reset clears per-request state — output buffers, headers, and superglobals — without destroying the PHP heap, so any variables declared outside the handler persist across requests.
+Enters the persistent worker mode loop. OxPHP calls `$handler` once for each incoming HTTP request. Between requests, a soft reset clears per-request state — output buffers, headers, and superglobals — without destroying the PHP heap, so any variables declared outside the handler persist across requests. `$_ENV` is excluded from that reset on purpose: with PHP's default `auto_globals_jit=1` it holds for the life of the worker, so a value the handler writes there is read by every later request on that worker and by any request multiplexed alongside it — see [Superglobals](superglobals.md#_env).
 
 **Parameters:**
 - `$handler` — Called once per request. The handler receives no arguments. Use superglobals (`$_SERVER`, `$_GET`, `$_POST`, etc.) or `oxphp_http_request()` inside the handler to access request data.
