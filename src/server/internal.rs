@@ -581,4 +581,167 @@ mod tests {
         );
         assert_eq!(body["runtime_hooks"], serde_json::json!([]));
     }
+
+    // ── Documented response samples vs. what the endpoints serve ──
+
+    /// Every unindented ```` ```json ```` block of a markdown page, in document
+    /// order, with the fences stripped. A fence that is indented or carries
+    /// anything after the language tag is not one of these and is skipped.
+    fn json_blocks(markdown: &str) -> Vec<String> {
+        let mut blocks = Vec::new();
+        let mut current: Option<String> = None;
+        for line in markdown.lines() {
+            match current {
+                None if line.trim_end() == "```json" => current = Some(String::new()),
+                None => {}
+                Some(_) if line.trim_end() == "```" => {
+                    blocks.push(current.take().expect("inside a block"));
+                }
+                Some(ref mut buf) => {
+                    buf.push_str(line);
+                    buf.push('\n');
+                }
+            }
+        }
+        blocks
+    }
+
+    /// `(indent, key)` for every line of a pretty-printed JSON block that opens
+    /// with an object key. Only the first key of a line is taken, so an object
+    /// written inline contributes its own key and none of its members.
+    fn key_lines(block: &str) -> Vec<(usize, String)> {
+        block
+            .lines()
+            .filter_map(|line| {
+                let indent = line.len() - line.trim_start().len();
+                let rest = line.trim_start().strip_prefix('"')?;
+                let (key, after) = rest.split_once('"')?;
+                after.trim_start().strip_prefix(':')?;
+                Some((indent, key.to_string()))
+            })
+            .collect()
+    }
+
+    /// Keys of the outermost object, in the order the text lists them. Assumes
+    /// the two-space indentation these samples are written with — what `jq .`
+    /// prints, the command each of them is shown under — and the outer braces
+    /// in column 0. The endpoints themselves emit no whitespace at all.
+    fn top_level_keys(block: &str) -> Vec<String> {
+        key_lines(block)
+            .into_iter()
+            .filter(|(indent, _)| *indent == 2)
+            .map(|(_, key)| key)
+            .collect()
+    }
+
+    /// Each object's own keys, grouped: a run collects the keys sharing one
+    /// indent and closes as soon as a shallower key line appears, which is the
+    /// point the enclosing object moves on to its next member. Objects listed
+    /// as elements of one array have no such line between them, so their keys
+    /// merge into one run: a repeated schema then reads as out of order and
+    /// fails, but two elements whose keys happen to ascend across the join
+    /// pass unchecked. Neither of these two bodies holds an array of objects;
+    /// one arriving later needs this to learn about arrays.
+    fn sibling_runs(block: &str) -> Vec<Vec<String>> {
+        let mut runs: Vec<Vec<String>> = Vec::new();
+        let mut open: Vec<(usize, Vec<String>)> = Vec::new();
+        for (indent, key) in key_lines(block) {
+            while open.last().is_some_and(|(i, _)| *i > indent) {
+                runs.push(open.pop().expect("non-empty").1);
+            }
+            match open.last_mut() {
+                Some((i, keys)) if *i == indent => keys.push(key),
+                _ => open.push((indent, vec![key])),
+            }
+        }
+        runs.extend(open.into_iter().rev().map(|(_, keys)| keys));
+        runs
+    }
+
+    fn doc_page(relative: &str) -> String {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(relative);
+        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {relative}: {e}"))
+    }
+
+    fn served_keys(body: &serde_json::Value) -> Vec<String> {
+        body.as_object()
+            .expect("response body is an object")
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn documented_samples_list_keys_in_served_order() {
+        // `serde_json` is built without `preserve_order`, so `Map` is a
+        // `BTreeMap` and every object these endpoints return goes out with its
+        // keys ascending — the reading order of the `json!` literals that build
+        // them is not what reaches the wire. A sample written in that literal
+        // order carries the right keys in a place they never appear, which
+        // costs a reader both a `diff` against a live response and the guess
+        // about where in the list to look.
+        //
+        // Two halves, and one alone is not enough: the key *list* is compared
+        // against the body the handler actually builds, so a sample that drops
+        // or invents a key fails here rather than passing a sort check; and the
+        // nested objects are checked for ascending keys on their own, which is
+        // the only reach this test has into a `plugins` block no empty
+        // `PluginManager` can produce.
+        let executor = StubExecutor::new();
+        let pm = PluginManager::new();
+        let config_keys = served_keys(&build_config_json(&Config::test_minimal(), &pm));
+        let (_, health_body) = build_health_json(&Metrics::new(), &executor, &pm);
+        let health_keys = served_keys(&health_body);
+
+        // page, `/config` samples, `/health` samples
+        let pages = [
+            ("docs/features/internal-server.md", 1, 2),
+            ("docs/operations/health-checks.md", 1, 2),
+            ("docs/operations/configuration.md", 1, 0),
+        ];
+
+        for (page, want_config, want_health) in pages {
+            let text = doc_page(page);
+            let blocks = json_blocks(&text);
+            let config: Vec<&String> = blocks
+                .iter()
+                .filter(|b| b.contains("\"listen_addr\""))
+                .collect();
+            let health: Vec<&String> = blocks
+                .iter()
+                .filter(|b| b.contains("\"uptime_secs\""))
+                .collect();
+            assert_eq!(
+                config.len(),
+                want_config,
+                "{page}: expected {want_config} /config sample(s); a new one needs a row here"
+            );
+            assert_eq!(
+                health.len(),
+                want_health,
+                "{page}: expected {want_health} /health sample(s); a new one needs a row here"
+            );
+
+            for (label, samples, served) in [
+                ("/config", &config, &config_keys),
+                ("/health", &health, &health_keys),
+            ] {
+                for block in samples {
+                    assert_eq!(
+                        &top_level_keys(block),
+                        served,
+                        "{page}: the {label} sample does not list the keys {label} serves, in order"
+                    );
+                    for run in sibling_runs(block) {
+                        let mut sorted = run.clone();
+                        sorted.sort();
+                        assert_eq!(
+                            run, sorted,
+                            "{page}: a nested object in the {label} sample lists its keys out of order"
+                        );
+                    }
+                }
+            }
+        }
+    }
 }
