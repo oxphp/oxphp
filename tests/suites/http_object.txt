@@ -30,3 +30,4 @@ http_object/test_payload_form | POST | -H "Content-Type: application/x-www-form-
 http_object/test_ip
 http_object/test_start_time
 http_object/test_attributes
+http_object/test_attributes_live_on_the_object

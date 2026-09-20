@@ -55,7 +55,7 @@ OxPHP registers its functions through the `oxphp_sapi` extension, which loads au
 oxphp_http_request(): \OxPHP\Http\Request
 ```
 
-Returns the request object for the current HTTP request. The object provides typed access to the HTTP method, URI, query parameters, parsed body, headers, cookies, uploaded files, client IP, and request timing.
+Returns a request object for the current HTTP request — a new one on every call. The object provides typed access to the HTTP method, URI, query parameters, parsed body, headers, cookies, uploaded files, client IP, and request timing.
 
 **Returns:** An `\OxPHP\Http\Request` instance backed by the request data in the current PHP worker thread.
 
