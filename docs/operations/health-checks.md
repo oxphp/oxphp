@@ -76,13 +76,13 @@ curl http://localhost:9090/health
 
 ```json
 {
-  "status": "ok",
-  "uptime_secs": 3612,
-  "total_requests": 48203,
   "active_connections": 7,
   "executor_healthy": true,
+  "plugins": {},
   "pool_stalled": false,
-  "plugins": {}
+  "status": "ok",
+  "total_requests": 48203,
+  "uptime_secs": 3612
 }
 ```
 
@@ -90,13 +90,13 @@ curl http://localhost:9090/health
 
 ```json
 {
-  "status": "degraded",
-  "uptime_secs": 3612,
-  "total_requests": 48203,
   "active_connections": 7,
   "executor_healthy": false,
+  "plugins": {},
   "pool_stalled": false,
-  "plugins": {}
+  "status": "degraded",
+  "total_requests": 48203,
+  "uptime_secs": 3612
 }
 ```
 
@@ -128,42 +128,42 @@ curl -s http://localhost:9090/config | jq .
 
 ```json
 {
-  "listen_addr": "0.0.0.0:80",
+  "access_log": "all",
+  "async_in_flight_cap": 0,
+  "async_max_fibers": 256,
+  "async_queue_capacity": 0,
+  "async_workers": 0,
+  "brotli_level": 5,
   "document_root": "/var/www/html/public",
+  "drain_timeout_seconds": 30,
   "entry_file": "/var/www/html/public/index.php",
-  "log_level": "info",
   "executor_type": "sapi",
+  "gzip_level": 6,
+  "header_timeout_seconds": 5,
+  "listen_addr": "0.0.0.0:80",
+  "log_level": "info",
+  "max_connections": 10000,
+  "max_query_body": 524288,
   "php_workers": "8",
-  "tokio_workers": 4,
+  "plugins": {},
   "queue_capacity": 1024,
-  "queue_wait_timeout_ms": 1000,
   "queue_max_waiting": 1024,
   "queue_max_waiting_bytes": 67108864,
-  "max_connections": 10000,
-  "drain_timeout_seconds": 30,
-  "header_timeout_seconds": 5,
+  "queue_wait_timeout_ms": 1000,
   "rate_limit": 100,
   "rate_window_seconds": 60,
-  "tls_enabled": true,
-  "tls_min_version": "1.2",
-  "brotli_level": 5,
-  "gzip_level": 6,
-  "zstd_level": 6,
-  "access_log": "all",
-  "max_query_body": 524288,
-  "worker_mode_enabled": false,
-  "worker_max_memory_mib": 0,
+  "runtime_hooks": [],
   "static_max_age": 2592000,
   "static_revalidate": false,
-  "async_workers": 0,
-  "async_queue_capacity": 0,
-  "async_max_fibers": 256,
-  "async_in_flight_cap": 0,
-  "trace_context": false,
   "superglobals_enabled": true,
+  "tls_enabled": true,
+  "tls_min_version": "1.2",
+  "tokio_workers": 4,
+  "trace_context": false,
   "trusted_proxies": false,
-  "runtime_hooks": [],
-  "plugins": {}
+  "worker_max_memory_mib": 0,
+  "worker_mode_enabled": false,
+  "zstd_level": 6
 }
 ```
 
