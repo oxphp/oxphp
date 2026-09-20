@@ -435,6 +435,22 @@ mod tests {
         assert_eq!(d.source, ActivationSource::SampleRate);
     }
 
+    /// `PROFILER_AUTH_TOKEN` gates the three explicit triggers, not
+    /// `PROFILER_SAMPLE_RATE` — a request carrying no trigger at all is still
+    /// sampled while a token is configured. Pins the documented contract; it
+    /// holds today, and this is what would break if the token check ever moved
+    /// ahead of the sampling draw.
+    #[test]
+    fn test_sample_rate_ignores_a_configured_token() {
+        let mut cfg = base_config(true);
+        cfg.auth_token = Some(Arc::<str>::from("secret-123"));
+        cfg.sample_rate = 1.0;
+        let mut rng = StdRng::seed_from_u64(0);
+        let fx = ViewFixture::new("/", HeaderMap::new(), "");
+        let d = should_profile(&fx.view(), &cfg, &mut rng).unwrap();
+        assert_eq!(d.source, ActivationSource::SampleRate);
+    }
+
     #[test]
     fn test_sample_rate_zero_means_off() {
         let mut cfg = base_config(true);
