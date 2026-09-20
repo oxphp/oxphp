@@ -1,0 +1,9 @@
+# profile: superglobals_off
+# description: SUPERGLOBALS_ENABLED=false — what it takes away and what it does not
+
+superglobals_off/test_payload_form | POST | -H "Content-Type: application/x-www-form-urlencoded" -d "a=1&b=two" | |
+superglobals_off/test_payload_multipart | POST | -F "field=fieldval" -F "doc=@$FIXTURES_DIR/small.txt" | |
+superglobals_off/test_payload_json | POST | -H "Content-Type: application/json" -d '{"key":"value","num":42}' | |
+superglobals_off/test_payload_json_scalar | POST | -H "Content-Type: application/json" -d '"hello"' | |
+superglobals_off/test_body_superglobals | POST | -H "Content-Type: application/x-www-form-urlencoded" -d "a=1&b=two" -b "c=cookieval" | |
+superglobals_off/test_suppressed_superglobals >> ?q=val | GET | | |

@@ -5,7 +5,7 @@ description: How OxPHP populates $_SERVER, $_GET, $_POST, $_COOKIE, $_FILES, and
 
 # Superglobals
 
-OxPHP populates all standard PHP superglobals before your script executes, matching the behavior PHP developers expect from traditional server setups. Every value is available from the first line of your code — no initialization required.
+OxPHP populates all standard PHP superglobals before your script executes, matching the behavior PHP developers expect from traditional server setups. Every value is available from the first line of your code — no initialization required. One setting narrows that, and only that one: see [Disabling Superglobals](#disabling-superglobals).
 
 ## $_SERVER
 
@@ -314,21 +314,27 @@ $data = json_decode($body, true);
 
 ## Disabling Superglobals
 
-Set `SUPERGLOBALS_ENABLED=false` to disable population of `$_GET`, `$_POST`, `$_COOKIE`, `$_FILES`, and `$_SERVER`. When disabled, these arrays are empty. Use the [HTTP Request API](request-api.md) (`oxphp_http_request()`) to access request data instead.
+Set `SUPERGLOBALS_ENABLED=false` to stop OxPHP describing the request to PHP: the CGI and `HTTP_*` variables are not registered, and the query string is not handed over to be parsed. Use the [HTTP Request API](request-api.md) (`oxphp_http_request()`) to access request data instead.
 
 ```bash
-SUPERGLOBALS_ENABLED=false   # superglobals are empty arrays
+SUPERGLOBALS_ENABLED=false   # the $_SERVER request keys and $_GET are not built
 ```
 
-The following remain available regardless of this setting:
+It reaches fewer of these arrays than the name suggests. The request body and the `Cookie` header are handed to PHP either way, so everything PHP builds out of them is there as usual:
 
-| What | Why |
+| What | With `SUPERGLOBALS_ENABLED=false` |
 |------|-----|
+| `$_GET` | Empty |
+| `$_SERVER` | During a request, four keys and no more: `REQUEST_TIME`, `REQUEST_TIME_FLOAT`, `argc` and `argv`, every one of them registered by PHP itself rather than by the server. No `REQUEST_METHOD`, no `REQUEST_URI`, no `HTTP_*`, no process environment. **Worker mode bootstraps differently:** the code above `oxphp_worker()` runs before any request and sees a `$_SERVER` built as though the setting were on — the whole process environment included, plus a placeholder `REQUEST_URI` of `/` |
+| `$_POST`, `$_FILES`, `$_COOKIE` | Populated as usual |
+| `$_REQUEST` | Populated — merged per `request_order` as always; only its `$_GET` half is missing |
 | `$_SESSION` | Filled by PHP's session module when a request starts a session, not by the SAPI |
-| `php://input` | A stream, not a superglobal |
+| `php://input` | A stream, not a superglobal — readable as usual |
 | `header()`, `headers_list()`, etc. | SAPI functions, not superglobals |
 | `session_start()` and other `session_*()` functions | Native PHP functions |
-| `oxphp_http_request()` | Always available — the recommended alternative |
+| `oxphp_http_request()` | Available — every method answers, including `query()` and `payload()` |
+
+Code that routes on `$_SERVER['REQUEST_URI']` finds nothing there under this setting and has to read `oxphp_http_request()->path()` instead. In a worker entry script that applies to the handler; the bootstrap above it sees the placeholder `/` described in the table, which is not a route either.
 
 You can check the current setting at runtime:
 

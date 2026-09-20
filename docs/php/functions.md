@@ -94,7 +94,7 @@ oxphp_superglobals_enabled(): bool
 
 Returns whether superglobal population is enabled for this server instance. The value reflects the `SUPERGLOBALS_ENABLED` environment variable and does not change during the server's lifetime.
 
-When `false`, `$_GET`, `$_POST`, `$_COOKIE`, `$_FILES`, and `$_SERVER` are empty arrays. The HTTP Object API (`oxphp_http_request()`), `php://input`, and PHP session functions are unaffected.
+When `false`, a request runs with `$_GET` empty and with `$_SERVER` holding only the four keys PHP registers itself — `REQUEST_TIME`, `REQUEST_TIME_FLOAT`, `argc` and `argv`. `$_POST`, `$_FILES` and `$_COOKIE` are built as usual — they come from the request body and the `Cookie` header, which the setting does not touch. The HTTP Object API (`oxphp_http_request()`), `php://input`, and PHP session functions are unaffected. See [SUPERGLOBALS_ENABLED](request-api.md#superglobals_enabled) for the full table.
 
 **Returns:** `true` when `SUPERGLOBALS_ENABLED` is `true` (the default), `false` otherwise.
 

@@ -1,0 +1,38 @@
+# Superglobal population switched off, in worker mode.
+#
+# A second profile rather than a second service on the first one, because the
+# two modes build $_POST and $_FILES from the body through different code: the
+# classic path gets them from php_request_startup() once per request, worker
+# mode from its own per-request reset. The flag is read on both, so both need
+# a profile of their own to be covered at all.
+#
+# Standalone usage:
+#   docker compose -f compose.yml -f compose.superglobals_off_worker.yml up
+services:
+  oxphp-superglobals_off_worker:
+    build:
+      context: ..
+      dockerfile: docker/dev/Dockerfile
+    ports:
+      - "80"
+    networks: [test-net]
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    environment:
+      LOG_LEVEL: error
+      INTERNAL_ADDR: 0.0.0.0:9090
+      SUPERGLOBALS_ENABLED: "false"
+      WORKER_FILE: /var/www/html/worker/worker_entry.php
+    volumes:
+      - ../www:/var/www/html
+      - ./php:/var/www/html/public/tests
+      # Its own entry rather than fixtures/worker: that one routes on
+      # $_SERVER['REQUEST_URI'], which is one of the keys this setting takes
+      # away, so it would dispatch every request to its fallback branch and
+      # reach no test file at all.
+      - ./fixtures/worker_sgoff:/var/www/html/worker
