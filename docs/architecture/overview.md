@@ -125,7 +125,7 @@ OxPHP supports two PHP execution models:
 
 **Standard mode** (default) creates a fresh PHP environment for every request. Autoloaders, configuration, and database connections are initialized on each request and torn down afterward. This model is compatible with all PHP applications out of the box.
 
-**Worker mode** keeps PHP processes alive across requests. Your application bootstraps once — loading the autoloader, configuration, and establishing database connections — and then enters a request loop. Between requests, OxPHP automatically resets superglobals, output buffers, and response headers while preserving the bootstrapped state. `$_ENV` is the deliberate exception: with PHP's default `auto_globals_jit=1` it is not reset, so it is worker state rather than request state — a value written there during one request is read by every later request that worker serves. See [Superglobals](../php/superglobals.md#_env).
+**Worker mode** keeps PHP workers alive across requests. Your application bootstraps once — loading the autoloader, configuration, and establishing database connections — and then enters a request loop. Between requests, OxPHP automatically resets superglobals, output buffers, and response headers while preserving the bootstrapped state. `$_ENV` is the deliberate exception: with PHP's default `auto_globals_jit=1` it is not reset, so it is worker state rather than request state — a value written there during one request is read by every later request that worker serves. See [Superglobals](../php/superglobals.md#_env).
 
 Worker mode eliminates per-request startup overhead, which can reduce response times significantly for framework-based applications (Laravel, Symfony, etc.) where bootstrapping is expensive.
 
@@ -161,15 +161,15 @@ For details, see [Internal Server](../features/internal-server.md).
 
 OxPHP provides several guarantees to keep your application running reliably in production:
 
-- **Request isolation** — if a PHP script crashes or triggers a fatal error, only that single request is affected. The server continues handling all other requests normally. The crashed worker is automatically replaced with a fresh one.
-- **Automatic worker respawn** — OxPHP monitors the health of all PHP workers. If a worker dies unexpectedly, a new worker is started in its place without manual intervention.
+- **Request isolation** — if a PHP script crashes or triggers a fatal error, only that single request is affected. The server continues handling all other requests normally, and the crashed worker is brought back as described below.
+- **Automatic worker respawn** — OxPHP monitors the health of all PHP workers and replaces one that dies unexpectedly, without manual intervention. A static pool refills to its configured count, so the replacement is one-for-one; a dynamic pool refills only to its minimum, and a worker lost above that is regained by ordinary scale-up.
 - **Backpressure protection** — the bounded request queue prevents overload. When the server is at capacity, new requests receive a 529 response with a `Retry-After` header rather than queueing indefinitely and causing cascading timeouts.
 - **Path traversal protection** — all URL paths are sanitized before filesystem access. Percent-encoded traversal attempts, `..` segments, and paths that escape the document root are blocked.
 - **Graceful shutdown** — on SIGTERM or SIGINT (Ctrl+C), OxPHP stops accepting new connections and waits for in-flight requests to complete (up to a configurable drain timeout) before exiting.
 
 ## See Also
 
-- [Worker Mode](../features/worker-mode.md) — persistent PHP processes and the `oxphp_worker()` API
+- [Worker Mode](../features/worker-mode.md) — persistent PHP workers and the `oxphp_worker()` API
 - [Fiber Multiplexing](../features/fiber-multiplexing.md) — hundreds of concurrent requests on a single worker
 - [SSE Streaming](../features/sse.md) — streaming events from PHP
 - [Early Response](../features/early-response.md) — `oxphp_finish_request()` and background processing

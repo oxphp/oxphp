@@ -141,5 +141,5 @@ Because `ACCESS_LOG=all` is set, every request appears as a structured JSON log 
 - [Docker Guide](docker.md) — development and production Dockerfiles, Compose configuration, PHP ini mounts, and health check setup
 - [Configuration](../operations/configuration.md) — full environment variable reference
 - [Routing](../features/routing.md) — Traditional, Framework, SPA, and Worker routing modes
-- [Worker Mode](../features/worker-mode.md) — persistent PHP processes that bootstrap once and handle multiple requests
+- [Worker Mode](../features/worker-mode.md) — persistent PHP workers that bootstrap once and handle multiple requests
 - [PHP Functions](../php/functions.md) — all OxPHP built-in PHP functions

@@ -78,7 +78,7 @@ typedef struct {
 
     /* ── Cold: worker mode config (set once per thread) ──── */
 
-    /** Whether this thread is in worker mode (persistent PHP process). */
+    /** Whether this thread is in worker mode (persistent PHP worker). */
     int worker_mode;
 
     /** Number of requests completed by this worker (worker mode). */

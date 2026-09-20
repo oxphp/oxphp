@@ -832,5 +832,5 @@ oxphp_worker(function () {
 
 - [Superglobals](superglobals.md) — how OxPHP populates `$_SERVER`, `$_GET`, `$_POST`, `$_COOKIE`, and `$_FILES`
 - [PHP Functions](functions.md) — full reference for `oxphp_http_request()`, `oxphp_superglobals_enabled()`, and all other built-in functions
-- [Worker Mode](../features/worker-mode.md) — persistent PHP processes and the request lifecycle
+- [Worker Mode](../features/worker-mode.md) — persistent PHP workers and the request lifecycle
 - [Configuration Reference](../operations/configuration.md) — `SUPERGLOBALS_ENABLED` and other environment variables

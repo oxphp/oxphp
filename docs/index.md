@@ -21,14 +21,14 @@ On a dedicated [internal port](features/internal-server.md), [health checks](ope
 
 [Logs](features/access-logging.md) are structured JSON: method, path, status, response time, and [request ID](features/request-ids.md) in every line. They are easy to parse in Loki, Elasticsearch, or any other tool without additional grok patterns.
 
-If you want to try [worker mode](features/worker-mode.md), where the PHP process is not recreated on every request, setting `WORKER_MODE_ENABLED=true` and `ENTRY_FILE=worker.php` is all it takes. The framework initializes once and then handles thousands of requests without reloading. To switch back to classic mode, just remove the variable.
+If you want to try [worker mode](features/worker-mode.md), where PHP state is not rebuilt on every request, setting `WORKER_MODE_ENABLED=true` and `ENTRY_FILE=worker.php` is all it takes. The framework initializes once and then handles thousands of requests without reloading. To switch back to classic mode, just remove the variable.
 
 OxPHP also includes capabilities that typically require separate tools or third-party libraries:
 
 - **[Static file serving](features/static-files.md)** — in-memory caching, ETag/Last-Modified, automatic MIME types
 - **[Three routing modes](features/routing.md)** — file-based, framework, and SPA (each combinable with persistent [worker mode](features/worker-mode.md))
 - **[Early response](features/early-response.md)** — send the response immediately and continue background processing
-- **[Worker mode](features/worker-mode.md)** — persistent PHP processes with [fiber multiplexing](features/fiber-multiplexing.md)
+- **[Worker mode](features/worker-mode.md)** — persistent PHP workers with [fiber multiplexing](features/fiber-multiplexing.md)
 - **[SSE streaming](features/sse.md)** — real-time Server-Sent Events from PHP
 - **[Async promises](features/async-promises.md)** — background execution of PHP closures without blocking the worker
 - **[Shared state](shared-state/shared-state.md)** — process-wide concurrent primitives (Counter, Flag, Once, Mutex, Channel, Map, Pool) so workers can coordinate without Redis or APCu
@@ -57,7 +57,7 @@ End-to-end recipes for running popular PHP applications on OxPHP — each a comp
 
 - [Routing](features/routing.md) — three routing modes: traditional file mapping, framework front-controller, and SPA fallback. Worker mode is an orthogonal execution-model toggle and applies on top of any routing mode
 - [Static Files](features/static-files.md) — file cache, MIME detection, ETag/Last-Modified headers, and streaming
-- [Worker Mode](features/worker-mode.md) — persistent PHP processes with automatic soft reset between requests
+- [Worker Mode](features/worker-mode.md) — persistent PHP workers with automatic soft reset between requests
 - [Fiber Multiplexing](features/fiber-multiplexing.md) — handle hundreds of concurrent requests per worker thread with cooperative multitasking
 - [Compression](features/compression.md) — Brotli, Zstandard and gzip for text-based responses, negotiated per client
 - [TLS](features/tls.md) — built-in TLS termination with certificate and key configuration
