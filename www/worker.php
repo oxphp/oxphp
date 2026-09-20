@@ -51,5 +51,6 @@ oxphp_worker(function () use (&$counter, $boot_time) {
 
 // Reached on server shutdown, when a dynamic pool (PHP_WORKERS=MIN:MAX)
 // retires this idle worker, on Worker::scheduleExit(), on the
-// WORKER_MAX_MEMORY_MIB ceiling, and after three consecutive fatal errors.
+// WORKER_MAX_MEMORY_MIB ceiling, and after three consecutive requests come
+// apart — a fatal error in the handler being the usual one.
 // Use this for cleanup: close persistent connections, flush caches, etc.

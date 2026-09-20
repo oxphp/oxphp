@@ -331,9 +331,12 @@ typedef struct _oxphp_request_fiber {
      * consecutive-error breaker counts one of them and not the other:
      *
      * handler_failed — the request came apart: a zend_bailout (uncaught fatal,
-     *   OOM, stack overflow) or a fiber that could not be started at all. The
-     *   engine state it leaves behind is what the breaker exists to retire a
-     *   worker over.
+     *   OOM, stack overflow), a fiber that could not be started at all, or one
+     *   the request would not stop suspending from userland, which the server
+     *   ends. What they share is that the request did not finish its own work
+     *   and the server was not the one cutting it short; a bailout also leaves
+     *   engine state the next request on this worker inherits. That is what the
+     *   breaker exists to retire a worker over.
      * handler_threw — an uncaught exception unwound cleanly to the top. The
      *   request gets its 500 and the worker is intact, so it says nothing about
      *   the worker's health. Also the arm an exception raised while building the

@@ -1,5 +1,5 @@
 # profile: breaker
-# description: Worker-mode consecutive-error breaker — a handler that fatals on every request retires its worker, and only a real fatal counts
+# description: Worker-mode consecutive-error breaker — a handler that fatals on every request retires its worker, and an uncaught exception does not count
 
 # Order is the test. Each line is one request to a single worker, so the number
 # of consecutive fatals ahead of a probe is exactly the number of lines above

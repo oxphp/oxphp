@@ -258,7 +258,8 @@ function oxphp_usleep(int $microseconds): void {}
  * The loop exits when the server shuts down, when a dynamic pool
  * (PHP_WORKERS=MIN:MAX) retires this worker after it has sat idle, when the
  * application calls Worker::scheduleExit(), when the worker passes
- * WORKER_MAX_MEMORY_MIB, or after three consecutive fatal errors.
+ * WORKER_MAX_MEMORY_MIB, or after three consecutive requests come apart — a
+ * fatal error in the handler being the usual one.
  * Code after oxphp_worker() runs once the loop has exited, for any of those
  * reasons and not only on shutdown.
  *
