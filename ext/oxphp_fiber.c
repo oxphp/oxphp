@@ -3443,8 +3443,10 @@ void oxphp_scheduler_finalize_fiber(oxphp_fiber_scheduler *sched, oxphp_request_
      * that exception reaches the same arm, ahead of the handler call.
      *
      * What is left is what the breaker is for: a request that came apart
-     * (bailout, OOM, a fiber that would not start) leaves engine state the next
-     * request on this worker inherits. */
+     * (bailout, OOM, a fiber that would not start, a fiber the request would not
+     * stop suspending) did not finish its own work, and the server was not the
+     * one cutting it short — and a bailout leaves engine state the next request
+     * on this worker inherits besides. */
     if (fiber->drain_kill || fiber->cancelled) {
         /* neutral */
     } else if (fiber->handler_failed) {
