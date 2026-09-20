@@ -125,7 +125,7 @@ OxPHP supports two PHP execution models:
 
 **Standard mode** (default) creates a fresh PHP environment for every request. Autoloaders, configuration, and database connections are initialized on each request and torn down afterward. This model is compatible with all PHP applications out of the box.
 
-**Worker mode** keeps PHP processes alive across requests. Your application bootstraps once — loading the autoloader, configuration, and establishing database connections — and then enters a request loop. Between requests, OxPHP automatically resets superglobals, output buffers, and response headers while preserving the bootstrapped state.
+**Worker mode** keeps PHP processes alive across requests. Your application bootstraps once — loading the autoloader, configuration, and establishing database connections — and then enters a request loop. Between requests, OxPHP automatically resets superglobals, output buffers, and response headers while preserving the bootstrapped state. `$_ENV` is the deliberate exception: with PHP's default `auto_globals_jit=1` it is not reset, so it is worker state rather than request state — a value written there during one request is read by every later request that worker serves. See [Superglobals](../php/superglobals.md#_env).
 
 Worker mode eliminates per-request startup overhead, which can reduce response times significantly for framework-based applications (Laravel, Symfony, etc.) where bootstrapping is expensive.
 
