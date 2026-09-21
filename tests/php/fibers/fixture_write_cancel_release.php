@@ -6,14 +6,16 @@ declare(strict_types=1);
 //
 // Parks while holding an object in a local variable. The test closes this
 // request's connection during the park; when the request resumes, the first
-// thing it does is write, and a write to a request whose client has gone ends
-// the request there. That ending raises no error — nothing is reported, nothing
-// is logged — which is what separates it from a cancellation delivered by
-// interrupting the script, and what this fixture exists to exercise.
+// thing it does is write. A write belonging to a request whose client has gone
+// used to end the request there; on a non-streaming worker-mode request it no
+// longer does, and the script runs on to the end of its handler so that its own
+// cleanup gets to run. Either way the write raises no error — nothing is
+// reported, nothing is logged — which is what separates this from a
+// cancellation delivered by interrupting the script.
 //
-// Everything the request was holding at that point is the worker's to give
-// back: the worker keeps serving, and what it does not release stays allocated
-// for the rest of its life.
+// Everything the request was holding is the worker's to give back if the
+// request does not give it back itself: the worker keeps serving, and what
+// nobody releases stays allocated for the rest of its life.
 //
 // ?in=shutdown does the same from a shutdown function of a request that has
 // already had a fatal. The engine runs shutdown functions under a guard of its
@@ -22,11 +24,14 @@ declare(strict_types=1);
 // is one whose cancellation the worker files differently, which must not change
 // what it gives back.
 //
-// ?in=destructor holds an object with a destructor instead. This ending marks no
-// object destructed — a fatal does, but only once its message has been
-// displayed, and not at all when that display is itself a write to a cancelled
-// request — so the destructor runs inside the worker's cleanup. It sleeps there,
-// which under the runtime hooks is a point a request can park at.
+// ?in=destructor holds an object with a destructor instead. The destructor now
+// runs at the function's own return, as part of the request, because the
+// request gets to reach that return. It sleeps there, which under the runtime
+// hooks is a point a request can park at. It used to run inside the worker's
+// cleanup instead: the ending marked no object destructed — a fatal does, but
+// only once its message has been displayed, and not at all when that display is
+// itself a write to a cancelled request — so the abandoned frame's locals were
+// released by the frame walk afterwards, which ran it there.
 
 require_once __DIR__ . '/write_cancel_probe.php';
 

@@ -7,8 +7,8 @@ require_once __DIR__ . '/breaker_probe.php';
 
 // A fatal raised after the client left still counts.
 //
-// The three requests before this one were each ended by their client and then
-// fataled in a shutdown function. Neither half is in doubt on its own: a client
+// The three requests before this one each lost their client and then fataled in
+// a shutdown function. Neither half is in doubt on its own: a client
 // leaving is neutral, a fatal counts. What is in doubt is which of the two the
 // request is filed as when both happen, and the answer has to be the fatal —
 // the cancellation says the client stopped waiting, while the fatal says this

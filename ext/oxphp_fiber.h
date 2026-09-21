@@ -395,11 +395,16 @@ typedef struct _oxphp_request_fiber {
      * The third is not a fallback for the first. A request cancelled while its
      * fiber was suspended reaches it when it resumes and writes, because its
      * interrupt was raised against a worker that was not running it or never
-     * raised at all — the request was still queued. But so does a running
-     * request whose handler called ignore_user_abort(): the interrupt handler
-     * records the disconnect for that one and returns without unwinding, and
-     * what ends it is its next write. What ends a suspended request that never
-     * writes again is the drain sweep, which sets drain_kill.
+     * raised at all — the request was still queued. So does a request the
+     * interrupt handler saw and declined to unwind: a streaming one whose
+     * ignore_user_abort() was up, which the write path ends anyway because it
+     * does not read that flag, and in traditional mode any request holding it.
+     * What ends a suspended request that never writes again is the drain sweep,
+     * which sets drain_kill.
+     *
+     * A client that hangs up on a non-streaming worker-mode request reaches
+     * neither writer now: both arms return without unwinding so the script can
+     * run its own cleanup. See oxphp_mark_cancelled_bailout.
      * A supervisor giving up on a stuck request is deliberately not marked — see
      * the interrupt handler for why that one still counts. The write path has
      * one rule of its own on top of that, which the interrupt handler does not
