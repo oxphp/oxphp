@@ -5,7 +5,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/../test_helper.php';
 require_once __DIR__ . '/breaker_probe.php';
 
-// ignore_user_abort(true) is honoured, and the write is what ends the request.
+// ignore_user_abort(true) is honoured, and so is the write that follows it.
 //
 // The three aborts earlier in this suite establish that none of this counts
 // against the worker. Whether each of them was already running when its client
@@ -15,7 +15,8 @@ require_once __DIR__ . '/breaker_probe.php';
 // So: a single abort, against a worker that is free to take it. It is dispatched
 // straight away, the disconnect raises an interrupt against a running request,
 // and the setting is the only thing standing between that interrupt and an
-// unwind. The past-sleep marker is on the far side of it.
+// unwind. The past-sleep marker is on the far side of it, and the past-echo
+// marker on the far side of the write after that.
 
 $test = new TestCase('breaker_abort_ignored_honoured', 'breaker');
 
@@ -27,10 +28,13 @@ $test->assertTrue(
     is_file('/tmp/oxphp-breaker-abort-ignored-past-sleep')
 );
 
-// And then the write ended it anyway, which is the arm under test: the SAPI's
-// output path reads the cancel cell the interrupt handler declined to act on.
-$test->assertFalse(
-    'the write is where it ended',
+// And then the write let it through as well, which is the arm under test: the
+// SAPI's output path reads the same cancel cell the interrupt handler declined
+// to act on, and in worker mode it declines too. Absent means the write ended
+// the request where it stood — the outcome this setting asks for on one path
+// and used to get on neither.
+$test->assertTrue(
+    'the write is not where it ended either',
     is_file('/tmp/oxphp-breaker-abort-ignored-past-echo')
 );
 

@@ -2040,10 +2040,16 @@ docker rm -f "$SRV" >/dev/null 2>&1
 wait
 
 # ── Q: O and P again, through the worker-mode receive loop ───────────
-# Worker mode takes requests off the same channel from a different place and
-# unwinds an interrupted handler through the fiber scheduler instead of
-# straight out of the worker thread. Both halves of the accounting live on
-# those paths, so neither is covered by the traditional runs above.
+# Worker mode takes requests off the same channel from a different place, so
+# the accounting O and P check lives on paths the traditional runs above do
+# not reach.
+#
+# P's half reads differently here, and deliberately. A client leaving does not
+# unwind a worker-mode handler at all: neither the opcode boundary nor the
+# write that follows ends it, so the script runs to the end of its own work
+# with nobody reading what it writes. The two log checks below therefore ask
+# something weaker than P's — there is no ending to mis-report — and what is
+# still worth asking is the one after them: the worker has to come back.
 #
 # LOG_LEVEL=warn for the same reason as P: one of the two routes the fatal
 # takes to the log was a WARN, and a quieter container would hide it.
@@ -2088,7 +2094,7 @@ else
 	bad "Q: oxphp_admission_refused_total{reason=\"wait_timeout\"} reads ${Q_WAIT_TIMEOUT}, expected 0 — the worker-mode pickup still bills departed clients"
 fi
 
-# P's half, on the same container: a handler interrupted mid-run.
+# P's half, on the same container: a client leaving mid-handler.
 curl -s -o /dev/null --max-time 0.5 "http://localhost:${PORT}/?spin=1&ms=4000" \
 	>/dev/null 2>&1 &
 Q_PID=$!
@@ -2115,12 +2121,30 @@ else
 	bad "Q: ${Q_CANCEL_LINES} line(s) naming the cancellation at warn or above in worker mode"
 fi
 
-Q_AFTER="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 \
-	"http://localhost:${PORT}/?ms=10")"
+# Asked until the worker is free, rather than once. The handler is not cut
+# short by its client leaving any more, so it holds its worker for the whole
+# 4000 ms it was asked for, and a single probe fired into that window is
+# refused for finding the pool busy (529) rather than answered for finding it
+# alive. Busy is not the question here, and curl's own patience does not
+# answer it either: the 529 comes from the server's 1.5 s admission budget
+# expiring, not from the client giving up, so a longer --max-time changes
+# nothing. Bounded, so a build that never frees the worker fails here rather
+# than hanging.
+#
+# Deliberately not a wait on oxphp_pending_requests: that gauge counts
+# requests waiting for a worker, and reads 0 throughout one that already has
+# it — measured at 0 for every sample across a 4 s spin.
+for _ in $(seq 1 40); do
+	Q_AFTER="$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 \
+		"http://localhost:${PORT}/?ms=10")"
+	[ "$Q_AFTER" = "529" ] || break
+	sleep 0.25
+done
+
 if [ "$Q_AFTER" = "200" ]; then
-	ok "Q: the worker served the next request normally (200)"
+	ok "Q: the worker came back and served the next request normally (200)"
 else
-	bad "Q: the next request got $Q_AFTER — the interrupted one took the worker with it"
+	bad "Q: the next request got $Q_AFTER — the abandoned one took the worker with it"
 fi
 docker rm -f "$SRV" >/dev/null 2>&1
 wait

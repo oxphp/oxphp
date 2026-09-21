@@ -6,15 +6,16 @@ declare(strict_types=1);
 // test_breaker_abort_ignored, while the handler holds an object whose destructor
 // throws.
 //
-// The write ends the request with a bare bailout, and the worker's cleanup then
-// gives back what the handler's frame was holding. Nothing marked that object
-// destructed on the way — a bare bailout never does, and a fatal does only once
-// its message is out — so its destructor runs inside the cleanup, with no frame
-// beneath it, and the engine reports the throw as an uncaught exception: an
-// E_ERROR. That report is not the request failing. The
-// request was already a cancellation when the destructor ran, and a destructor
-// that throws is an application outcome anywhere else; filed as a failure, three
-// clients hanging up on such a handler retire the worker.
+// In worker mode the write does not end the request, so the handler reaches its
+// own return and the object is given back there, by the request rather than by
+// the worker cleaning up after it. The destructor runs at that return and its
+// throw leaves the request as an uncaught exception, which the engine reports as
+// an E_ERROR. That report is not the request failing: a destructor that throws
+// is an application outcome anywhere else, and filed as a failure, three clients
+// hanging up on such a handler retire the worker.
+//
+// The same has to hold whichever half of the mechanism the client's departure
+// reaches, because neither ends the request any more.
 //
 // Markers, cleared on the way in, so the probe reads this request and not an
 // earlier one:
@@ -22,9 +23,10 @@ declare(strict_types=1);
 //  - the destructor marker says the destructor ran at all. Without it the
 //    neutrality the probe reports is that of a handler whose object was never
 //    destroyed;
-//  - the past-echo marker must be ABSENT: written after the echo, it exists only
-//    if the write did not end the request, and then the destructor ran at the
-//    function's own return, as an ordinary throw in the handler.
+//  - the past-echo marker must be PRESENT: written after the echo, it exists
+//    only because the write did not end the request, which is also what puts
+//    the destructor at the function's own return rather than in the worker's
+//    cleanup.
 //
 // Files rather than statics, for the reason test_breaker_abort_ignored gives.
 
@@ -62,7 +64,7 @@ if (!function_exists('oxphp_breaker_hold_through_the_write')) {
         // --max-time, so the client is gone by the write.
         usleep(2_000_000);
 
-        echo "the client is gone; this write is where the request unwinds\n";
+        echo "the client is gone; nobody reads this write\n";
 
         @file_put_contents('/tmp/oxphp-breaker-dtor-throw-past-echo', 'reached');
     }

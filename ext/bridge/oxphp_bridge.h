@@ -1178,7 +1178,10 @@ bool oxphp_bridge_set_cancel_reason_at(_Atomic(uint8_t)* ptr, oxphp_cancel_reaso
  * immediately before the bailout. Set once at MINIT, before any worker thread
  * exists; no-op while unregistered (unit tests, bare CLI without the
  * extension). */
-typedef void (*oxphp_cancel_mark_fn_t)(oxphp_cancel_reason_t reason);
+/* Marks a cancellation found on the write path and answers whether the write
+ * should end the request there. Nonzero to end it; zero to let the script
+ * carry on. The bridge holds no PHP semantics, so the SAPI decides. */
+typedef int (*oxphp_cancel_mark_fn_t)(oxphp_cancel_reason_t reason);
 void oxphp_bridge_set_cancel_mark_fn(oxphp_cancel_mark_fn_t fn);
 
 /* Process-global graceful-shutdown drain latch (NOT the per-request cancel

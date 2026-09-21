@@ -15,8 +15,8 @@ $test->assertTrue(
     is_file('/tmp/oxphp-breaker-dtor-throw-destructed')
 );
 
-$test->assertFalse(
-    'the request unwound on the write, not after it',
+$test->assertTrue(
+    'the request ran past the write to the end of its handler',
     is_file('/tmp/oxphp-breaker-dtor-throw-past-echo')
 );
 

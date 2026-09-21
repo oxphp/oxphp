@@ -6686,11 +6686,35 @@ static void oxphp_zend_interrupt_handler(zend_execute_data *execute_data)
 
     if (reason == OXPHP_CANCEL_CLIENT_ABORT) {
         PG(connection_status) |= PHP_CONNECTION_ABORTED;
-        /* ignore_user_abort() lets a script outlive its client — but not the
+        /* The other half of the rule oxphp_mark_cancelled_bailout() states, and
+         * the half a request meets first: this arm is reached at the next
+         * opcode boundary, the write path only at the next write. Unwinding
+         * here is a fatal rather than a bare bailout, and the fatal is the
+         * worse of the two. Neither runs `finally`, and both reach the
+         * registered shutdown functions, which run past the recovery either
+         * way — so the fatal buys nothing. What it costs is every destructor
+         * on the worker: the error callback marks the whole thread's object
+         * store as already destructed on its way to the bailout, so no object
+         * alive on that worker ever runs one again. Fixing only the write
+         * path would have left the heavier half of the defect in place.
+         *
+         * ignore_user_abort() lets a script outlive its client — but not the
          * server. Once the drain deadline has passed, the hard kick must be
          * able to unwind a request whose cell already holds CLIENT_ABORT
-         * (first-writer-wins), or it survives until the forced process exit. */
-        if (PG(ignore_user_abort) && !oxphp_bridge_is_drain_hard()) {
+         * (first-writer-wins), or it survives until the forced process exit.
+         *
+         * A stream is excluded from the implicit worker-mode grace for the
+         * reason given at the write path: the client it writes to is the only
+         * bound its loop has. The ignore_user_abort() beside it is read here
+         * for continuity with upstream and with every release before this one,
+         * but it is not load-bearing and must not be relied on: in worker mode
+         * the flag is thread state that outlives whoever set it, so a stream it
+         * waves through here is ended at its next write instead, where the flag
+         * is not consulted. */
+        if (!oxphp_bridge_is_drain_hard()
+            && (PG(ignore_user_abort)
+                || (oxphp_bridge_is_worker_mode()
+                    && !oxphp_bridge_is_streaming()))) {
             return;
         }
     } else if (reason == OXPHP_CANCEL_TIMEOUT) {
@@ -6791,7 +6815,77 @@ static void oxphp_zend_interrupt_handler(zend_execute_data *execute_data)
  * and has to keep clearing the consecutive-error run whether or not anyone was
  * left to read what it produced. The loop is the only place that knows which of
  * the two this is, so it decides; see cancel_bailout_pending. */
-static void oxphp_mark_cancelled_bailout(oxphp_cancel_reason_t reason) {
+static int oxphp_mark_cancelled_bailout(oxphp_cancel_reason_t reason) {
+    /* A client that leaves does not get to leave the worker inconsistent.
+     *
+     * Userland keeps state across a call the only way the language offers —
+     * a static — and puts the cleanup in `finally`, which is the construct
+     * that runs however the block is left. Every way but this one: ending the
+     * request from inside a write is a bailout, and a bailout is a longjmp.
+     * Under a SAPI that resets the request straight afterwards that costs
+     * nothing, which is why upstream ends it here too. A worker does not
+     * reset it, so the mark stays up for the rest of that worker's life and
+     * the code that reads it quietly stops doing its job.
+     *
+     * So the script finishes instead, with its output discarded — the same
+     * thing upstream does under ignore_user_abort, made the default here
+     * because the safety of the other default is a request teardown worker
+     * mode does not perform. A script that would rather stop early can see
+     * this through connection_aborted() and return, which is a return and
+     * therefore runs every `finally` on the way out.
+     *
+     * Upstream pairs its bailout with php_output_set_status(PHP_OUTPUT_DISABLED)
+     * so the writes that follow go nowhere. That step is not taken here, and
+     * cannot be: output status belongs to the thread, and a worker has other
+     * requests standing on the same one — disabling it for this request empties
+     * their responses. The writes are left to run and be dropped by the side
+     * that knows the connection is gone.
+     *
+     * Only for a client that left. A timeout, a drain or a supervisor giving
+     * up all mean the script must stop being run, and a hard drain kick has
+     * to be able to unwind a request whose cell already holds CLIENT_ABORT.
+     *
+     * And not for a request that is streaming. Letting a request finish is
+     * safe because it was going to finish anyway; a stream is the one shape
+     * that was not. Its loop is bounded by the client it is writing to and by
+     * nothing else — the reason that ends it is the only reason it ever ends,
+     * so declining to end it here pins the worker thread for the life of the
+     * process. A stream therefore keeps the ending it has always had, which
+     * is also what this project documents for it: check connection_aborted()
+     * and return, or accept that the ending will not run your `finally`.
+     *
+     * PG(ignore_user_abort) is deliberately not consulted here, although the
+     * interrupt arm consults it and upstream consults it. It is a thread field
+     * with no per-request save or restore of its own — ini state is rolled back
+     * in oxphp_soft_reset() and the event-loop admission path does not roll it
+     * back at all — so in worker mode it does not answer "did this request ask
+     * to outlive its client", it answers "did anything on this worker ever ask".
+     * Read as the first half of an `or` it would cancel the exemption above:
+     * one ignore_user_abort(true) anywhere on the worker would leave every
+     * later stream unstoppable. This arm is therefore the backstop that cannot
+     * be disarmed from userland, and a stream whose interrupt the leaked flag
+     * waved through still ends at its next write. */
+    if (reason == OXPHP_CANCEL_CLIENT_ABORT) {
+        /* Before the verdict, not after it, which is also the order upstream
+         * takes: connection_aborted() has to answer truthfully whichever way
+         * the verdict goes, and the whole point of letting the script finish
+         * is that it can ask. The interrupt arm sets the same bit, but a
+         * request that was parked when its client left reaches this arm
+         * without ever passing through that one — the interrupt is a single
+         * thread-wide byte, and whichever request runs an opcode first spends
+         * it. Unlike the output status above, this field is the request's own:
+         * it is saved and restored across a fiber switch and cleared when a
+         * request starts, so writing it here cannot reach a neighbour. */
+        PG(connection_status) |= PHP_CONNECTION_ABORTED;
+    }
+
+    if (reason == OXPHP_CANCEL_CLIENT_ABORT
+        && oxphp_bridge_is_worker_mode()
+        && !oxphp_bridge_is_streaming()
+        && !oxphp_bridge_is_drain_hard()) {
+        return 0;
+    }
+
     /* Whatever the verdict below: the frames are left behind either way. */
     oxphp_fiber_record_cancel_bailout_frame();
 
@@ -6800,6 +6894,8 @@ static void oxphp_mark_cancelled_bailout(oxphp_cancel_reason_t reason) {
         && !oxphp_current_fiber->fatal_reported) {
         oxphp_current_fiber->cancel_bailout_pending = true;
     }
+
+    return 1;
 }
 
 /* Own the max_execution_time ini handler so future revisions can

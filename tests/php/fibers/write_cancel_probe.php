@@ -30,12 +30,20 @@ if (!class_exists('OxphpWriteCancelProbe', false)) {
         /** How far the fixture had got when the object it held was destroyed. */
         public static ?string $stageAtDestruct = null;
 
+        /**
+         * What connection_aborted() answered the fixture after the write whose
+         * client had gone — the question a script has to be able to ask, now
+         * that the answer is what it stops on instead of being stopped.
+         */
+        public static ?int $abortedAfterWrite = null;
+
         public static function reset(): void
         {
             self::$stage = null;
             self::$weak = null;
             self::$report = null;
             self::$stageAtDestruct = null;
+            self::$abortedAfterWrite = null;
         }
 
         /** Whether what the fixture's frame was holding is gone. */
@@ -82,9 +90,17 @@ if (!function_exists('write_cancel_active_connections')) {
      * Sends the fixture a request, takes its client away while it is parked, and
      * waits until the server has seen the client go. Returns whether all of that
      * happened; each step is asserted as it is taken.
+     *
+     * $fixture names the inner request's script. Several tests stage a client
+     * that leaves mid-request and differ only in what the request was doing at
+     * the time, so the staging is written once here and the fixture is theirs.
      */
-    function write_cancel_stage(TestCase $t, string $label, string $query): bool
-    {
+    function write_cancel_stage(
+        TestCase $t,
+        string $label,
+        string $query,
+        string $fixture = 'fixture_write_cancel_release.php'
+    ): bool {
         OxphpWriteCancelProbe::reset();
 
         $before = write_cancel_active_connections();
@@ -98,7 +114,7 @@ if (!function_exists('write_cancel_active_connections')) {
 
         // No body, so the server keeps reading the connection while the request
         // runs and sees the close as soon as it happens.
-        fwrite($sock, "GET /tests/fibers/fixture_write_cancel_release.php$query HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
+        fwrite($sock, "GET /tests/fibers/$fixture$query HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n");
 
         // Closed only once the inner request is running: a request whose client
         // leaves while it is still queued is dropped before it starts, and would

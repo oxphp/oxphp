@@ -8,11 +8,11 @@ declare(strict_types=1);
 // suite. Where that one is unwound by the interrupt handler, this one is not:
 // the handler honours the setting and returns, so nothing marks the request as
 // one the server ended. The first write after that goes through the SAPI's
-// output path, which reads the same cancel cell and unwinds the request there
-// instead — a bailout with no message and no mark on it. That is the arm the
-// consecutive-error breaker counts, and counting it means a client hanging up
-// three times retires a worker, which is precisely what a cancellation must not
-// do.
+// output path, which reads the same cancel cell — and in worker mode declines
+// to end the request on it, so the handler runs to its own end with nobody
+// reading what it writes. Neither half may reach the arm the consecutive-error
+// breaker counts: counting one would mean a client hanging up three times
+// retires a worker, which is precisely what a cancellation must not do.
 //
 // The markers are what make this test mean anything. Nobody is left to read the
 // response, so the suite line can only assert that curl gave up — which it does
@@ -22,9 +22,11 @@ declare(strict_types=1);
 //
 //  - the shutdown marker says this request reached the end of its request, and
 //    carries connection_status() for diagnosis only;
-//  - the past-echo marker must be ABSENT. It is written after the echo, so it is
-//    reached only if that write did not unwind the request — and a run where it
-//    exists is a run that never entered the path under test;
+//  - the past-echo marker must be PRESENT. It is written after the echo, so it
+//    is reached only if that write did not end the request — which in worker
+//    mode is the whole point: the handler gets to finish and run its own
+//    cleanup. A run where it is missing is a run in which the write ended the
+//    request where it stood;
 //  - the past-sleep marker says ignore_user_abort() was honoured, and is the
 //    only thing here that does. It sits between the sleep and the echo, so a
 //    request whose interrupt handler unwound it on the client's departure —
@@ -69,6 +71,6 @@ usleep(2_000_000);
 // client go and honoured the setting instead of unwinding here.
 @file_put_contents('/tmp/oxphp-breaker-abort-ignored-past-sleep', 'reached');
 
-echo "the client is gone; this write is where the request unwinds\n";
+echo "the client is gone; nobody reads this write\n";
 
 @file_put_contents('/tmp/oxphp-breaker-abort-ignored-past-echo', 'reached');
