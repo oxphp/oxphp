@@ -2610,15 +2610,19 @@ static inline void check_cancelled_c(void) {
      * of those. The SAPI's marker is what keeps a request the server ended
      * from being read as a handler that failed. */
     /* And ask whether this write should end the request. A client that has
-     * gone is the one cancellation that must not: ending a request here is a
-     * longjmp, and a longjmp never re-enters the VM, so no `finally` on the
-     * way out is ever reached. In worker mode the thread outlives the
+     * gone is the one cancellation that often must not: ending a request here
+     * is a longjmp, and a longjmp never re-enters the VM, so no `finally` on
+     * the way out is ever reached. In worker mode the thread outlives the
      * request, so anything the script had marked on it would stay marked for
      * every request after this one. Destructors are not the gap — the frames
      * this bailout abandons are walked afterwards and their locals released,
      * which runs them, late and by the worker rather than by the request.
-     * `finally` has nothing that does the same for it. With no callback
-     * registered the old answer stands. */
+     * `finally` has nothing that does the same for it. The SAPI's answer: a
+     * request that called ignore_user_abort(true) writes on, and so does any
+     * worker-mode request that is not streaming; a worker-mode stream, or a
+     * request outside worker mode, that did not make that call is still ended
+     * here, as PHP ends it. With no callback registered the old answer
+     * stands. */
     if (sapi_cancel_mark != NULL && sapi_cancel_mark(reason) == 0) {
         return;
     }

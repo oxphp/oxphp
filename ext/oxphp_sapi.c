@@ -1296,8 +1296,9 @@ static int oxphp_fiber_sleep_us(uint64_t duration_us)
      * engine is in the middle of running on someone else's behalf. Returning 0
      * rather than throwing keeps the program's meaning, since every suspend
      * point already has a correct non-suspending fallback. The other three
-     * suspend points carry the same guard. */
-    if (zend_fiber_switch_blocked()) return 0;
+     * suspend points carry the same guard, and oxphp_park_blocked beside it:
+     * the server's own "do not park here", which leaves userland fibers alone. */
+    if (zend_fiber_switch_blocked() || oxphp_park_blocked) return 0;
 
     uint64_t duration_ms = (duration_us + 999) / 1000; /* round up */
     if (duration_ms == 0) duration_ms = 1;
@@ -1357,7 +1358,7 @@ static int oxphp_fiber_io_wait(struct pollfd *fds, struct oxphp_io_owner *owners
     if (oxphp_current_fiber == NULL) return 0;
     if (!oxphp_fiber_owns_current_context(oxphp_current_fiber)) return 0;
     /* Switching blocked — see oxphp_fiber_sleep_us. */
-    if (zend_fiber_switch_blocked()) return 0;
+    if (zend_fiber_switch_blocked() || oxphp_park_blocked) return 0;
     if (fds == NULL || owners == NULL || nfds == 0 || nfds > OXPHP_MAX_WAIT_FDS) return 0;
 
     oxphp_request_fiber *self = oxphp_current_fiber;
@@ -5808,7 +5809,7 @@ int oxphp_fiber_suspend_for_await(int64_t promise_id, double timeout, void *retv
     }
     /* Switching blocked — see oxphp_fiber_sleep_us. Returns this function's own
      * "not suspendable" code, not 0, which here means "done via fiber". */
-    if (zend_fiber_switch_blocked()) return 1;
+    if (zend_fiber_switch_blocked() || oxphp_park_blocked) return 1;
 
     oxphp_request_fiber *self = oxphp_current_fiber;
     self->suspend_reason = OXPHP_SUSPEND_AWAIT;
@@ -5869,7 +5870,7 @@ int oxphp_fiber_suspend_for_yield(void) {
         return 0; /* not on a suspendable fiber — caller falls back to blocking */
     }
     /* Switching blocked — see oxphp_fiber_sleep_us. */
-    if (zend_fiber_switch_blocked()) return 0;
+    if (zend_fiber_switch_blocked() || oxphp_park_blocked) return 0;
 
     oxphp_request_fiber *self = oxphp_current_fiber;
     uint64_t timer_id = oxphp_bridge_timer_register(1); /* ~1ms; resumed by tick */
@@ -6705,16 +6706,19 @@ static void oxphp_zend_interrupt_handler(zend_execute_data *execute_data)
          *
          * A stream is excluded from the implicit worker-mode grace for the
          * reason given at the write path: the client it writes to is the only
-         * bound its loop has. The ignore_user_abort() beside it is read here
-         * for continuity with upstream and with every release before this one,
-         * but it is not load-bearing and must not be relied on: in worker mode
-         * the flag is thread state that outlives whoever set it, so a stream it
-         * waves through here is ended at its next write instead, where the flag
-         * is not consulted. */
+         * bound its loop has. ignore_user_abort() is honoured for it, here and
+         * at the write path alike — the flag is the running request's own. */
         if (!oxphp_bridge_is_drain_hard()
             && (PG(ignore_user_abort)
                 || (oxphp_bridge_is_worker_mode()
                     && !oxphp_bridge_is_streaming()))) {
+            /* The request goes on, so the interrupt is passed on as it is
+             * when there is no cancellation: the reason stays set for the rest
+             * of the request, and every later interrupt comes through here —
+             * pcntl's async signals included. */
+            if (orig_zend_interrupt_function) {
+                orig_zend_interrupt_function(execute_data);
+            }
             return;
         }
     } else if (reason == OXPHP_CANCEL_TIMEOUT) {
@@ -6778,9 +6782,8 @@ static void oxphp_zend_interrupt_handler(zend_execute_data *execute_data)
  * above. The SAPI's write and flush wrappers read the request's cancel cell
  * themselves and end the request there, with a bare bailout: a request whose
  * client hung up while the worker was inside a call the interrupt cannot
- * preempt reaches its next write before the next opcode, and one that called
- * ignore_user_abort() is sent back by the handler above and reaches that write
- * too. Either way the coroutine catches a bailout carrying nothing, files it as
+ * preempt reaches its next write before the next opcode. The coroutine then
+ * catches a bailout carrying nothing, files it as
  * handler_failed, and three of them retire the worker — for a client going
  * away, which the consecutive-error breaker is not meant to count.
  *
@@ -6834,12 +6837,20 @@ static int oxphp_mark_cancelled_bailout(oxphp_cancel_reason_t reason) {
      * this through connection_aborted() and return, which is a return and
      * therefore runs every `finally` on the way out.
      *
+     * Outside worker mode every request gets that teardown, so the rule there
+     * is upstream's: the request is ended unless it called
+     * ignore_user_abort(true), and one that did runs on.
+     *
      * Upstream pairs its bailout with php_output_set_status(PHP_OUTPUT_DISABLED)
-     * so the writes that follow go nowhere. That step is not taken here, and
-     * cannot be: output status belongs to the thread, and a worker has other
-     * requests standing on the same one — disabling it for this request empties
-     * their responses. The writes are left to run and be dropped by the side
-     * that knows the connection is gone.
+     * so the writes that follow go nowhere. That step is not taken here, in
+     * either mode. In worker mode it cannot be: output status belongs to the
+     * thread, and a worker has other requests standing on the same one —
+     * disabling it for this request empties their responses. The writes are
+     * left to run, in either mode: a stream's are dropped at the flush by the
+     * side that knows the connection is gone, and anything else is held with
+     * the response like any other output and dropped when the response finds
+     * no one to take it — so what a request writes after its client left is
+     * held in memory until the request ends.
      *
      * Only for a client that left. A timeout, a drain or a supervisor giving
      * up all mean the script must stop being run, and a hard drain kick has
@@ -6854,17 +6865,15 @@ static int oxphp_mark_cancelled_bailout(oxphp_cancel_reason_t reason) {
      * is also what this project documents for it: check connection_aborted()
      * and return, or accept that the ending will not run your `finally`.
      *
-     * PG(ignore_user_abort) is deliberately not consulted here, although the
-     * interrupt arm consults it and upstream consults it. It is a thread field
-     * with no per-request save or restore of its own — ini state is rolled back
-     * in oxphp_soft_reset() and the event-loop admission path does not roll it
-     * back at all — so in worker mode it does not answer "did this request ask
-     * to outlive its client", it answers "did anything on this worker ever ask".
-     * Read as the first half of an `or` it would cancel the exemption above:
-     * one ignore_user_abort(true) anywhere on the worker would leave every
-     * later stream unstoppable. This arm is therefore the backstop that cannot
-     * be disarmed from userland, and a stream whose interrupt the leaked flag
-     * waved through still ends at its next write. */
+     * Unless the stream asked otherwise. ignore_user_abort(true) is how a script
+     * says it has a bound of its own and means to outlive its client, in every
+     * mode and under every SAPI, so a request that made the call is let through
+     * here as the interrupt arm lets it through. PG(ignore_user_abort) answers
+     * for the running request alone: an ini directive a request changes is
+     * taken off the thread while it is parked and put back when it finishes
+     * (see oxphp_fiber_park_ini), so a call made by one request is never read
+     * as another's. What still bounds such a stream is the hard phase of a
+     * drain, which ends it whatever it asked. */
     if (reason == OXPHP_CANCEL_CLIENT_ABORT) {
         /* Before the verdict, not after it, which is also the order upstream
          * takes: connection_aborted() has to answer truthfully whichever way
@@ -6880,9 +6889,10 @@ static int oxphp_mark_cancelled_bailout(oxphp_cancel_reason_t reason) {
     }
 
     if (reason == OXPHP_CANCEL_CLIENT_ABORT
-        && oxphp_bridge_is_worker_mode()
-        && !oxphp_bridge_is_streaming()
-        && !oxphp_bridge_is_drain_hard()) {
+        && !oxphp_bridge_is_drain_hard()
+        && (PG(ignore_user_abort)
+            || (oxphp_bridge_is_worker_mode()
+                && !oxphp_bridge_is_streaming()))) {
         return 0;
     }
 

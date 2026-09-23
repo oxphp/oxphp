@@ -5,34 +5,34 @@ declare(strict_types=1);
 require_once __DIR__ . '/../test_helper.php';
 require_once __DIR__ . '/breaker_probe.php';
 
-// ignore_user_abort(true) is honoured, and so is the write that follows it.
+// A client leaving does not unwind a worker-mode request that is not streaming,
+// at the interrupt or at the write after it.
 //
 // The three aborts earlier in this suite establish that none of this counts
 // against the worker. Whether each of them was already running when its client
 // left rests on the timing of the suite lines, though, and their probe does not
-// read the marker that would say the interrupt was declined.
+// read the marker that would say the interrupt let the request go on.
 //
 // So: a single abort, against a worker that is free to take it. It is dispatched
-// straight away, the disconnect raises an interrupt against a running request,
-// and the setting is the only thing standing between that interrupt and an
-// unwind. The past-sleep marker is on the far side of it, and the past-echo
-// marker on the far side of the write after that.
+// straight away and the disconnect raises an interrupt against a running
+// request. The past-sleep marker is on the far side of that interrupt, and the
+// past-echo marker on the far side of the write after it. The handler calls
+// ignore_user_abort(true), but in worker mode a request that is not streaming
+// is let through either way; what that setting decides is tested on a stream,
+// in the fibers suite.
 
 $test = new TestCase('breaker_abort_ignored_honoured', 'breaker');
 
 // The request ran on past the point where its client left. Absent means the
-// interrupt handler unwound it there — which is the one thing
-// ignore_user_abort(true) asks it not to do.
+// interrupt handler unwound it there.
 $test->assertTrue(
     'the handler outlived its client',
     is_file('/tmp/oxphp-breaker-abort-ignored-past-sleep')
 );
 
-// And then the write let it through as well, which is the arm under test: the
-// SAPI's output path reads the same cancel cell the interrupt handler declined
-// to act on, and in worker mode it declines too. Absent means the write ended
-// the request where it stood — the outcome this setting asks for on one path
-// and used to get on neither.
+// And then the write let it through as well: the SAPI's output path reads the
+// same cancel cell the interrupt handler let pass, and makes the same decision.
+// Absent means the write ended the request where it stood.
 $test->assertTrue(
     'the write is not where it ended either',
     is_file('/tmp/oxphp-breaker-abort-ignored-past-echo')

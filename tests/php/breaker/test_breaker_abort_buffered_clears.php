@@ -15,9 +15,9 @@ require_once __DIR__ . '/breaker_probe.php';
 // the worker.
 //
 // The distinction is the whole of it. Nothing in that third request failed —
-// the handler ran to its end and its response was complete. What ended it was
-// the server's own flush of that response onto a connection whose client had
-// left, which is a fact about the client. Reading it as neutral lets the count
+// the handler ran to its end and its response was complete. All that went wrong
+// was the server's own flush of that response onto a connection whose client
+// had left, which is a fact about the client. Reading it as neutral lets the count
 // carry across arbitrarily many healthy requests: a worker that fataled twice
 // an hour ago would be retired by a single fatal now, provided the requests in
 // between had all been served to clients who hung up. Under the abort storm

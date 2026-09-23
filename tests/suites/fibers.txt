@@ -23,5 +23,27 @@ fibers/test_session_fastpath_leaves_nothing
 fibers/test_session_does_not_outlive_its_request
 fibers/test_session_survives_its_own_suspension
 fibers/test_session_is_not_released_under_a_live_neighbour
-fibers/test_cancel_skips_userland_cleanup
+fibers/test_cancel_runs_userland_cleanup
 fibers/test_stream_cancel_still_ends_the_request
+fibers/test_ini_is_the_requests_own
+fibers/test_ini_the_worker_keeps_goes_back_with_the_last_request
+fibers/test_error_reporting_is_not_inherited
+fibers/test_stream_that_asked_outlives_its_client
+fibers/test_stream_session_write_after_client_left
+fibers/test_session_written_after_flush_throw | GET | | 500 |
+fibers/test_session_written_after_flush_throw_probe
+fibers/test_time_limit_is_not_restarted_by_a_park
+fibers/test_ini_moves_report_nothing_to_the_request
+fibers/test_user_save_handler_survives_a_park
+fibers/test_compression_removed_in_code_stays_removed | GET | --compressed | |
+fibers/test_session_is_written_under_its_requests_ini
+fibers/test_session_write_keeps_the_worker
+fibers/test_session_write_may_run_a_fiber
+fibers/test_ini_put_back_does_not_park | GET | | 200 |
+fibers/test_ini_put_back_does_not_park_probe
+fibers/test_ini_put_back_reports_a_throw | GET | | 500 |
+fibers/test_ini_put_back_reports_a_throw_probe
+fibers/test_ini_put_back_fatal_retires_the_worker | GET | | 500 |
+fibers/test_ini_put_back_fatal_retires_the_worker_probe
+fibers/test_ini_put_back_survives_a_growing_set | GET | | 200 |
+fibers/test_ini_put_back_survives_a_growing_set_probe

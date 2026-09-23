@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-// The guarded render staged by fibers/test_cancel_skips_userland_cleanup, and
+// The guarded render staged by fibers/test_cancel_runs_userland_cleanup, and
 // the reader its test looks at it through.
 //
 // Declared in a file of its own so both requests have it: the test reads the
@@ -31,9 +31,10 @@ if (!function_exists('oxphp_cancel_guarded_render')) {
      * Marks the worker, parks, writes, and unmarks in `finally`.
      *
      * The write is the point of it. A write belonging to a request whose client
-     * has gone is where the worker ends that request, and this one is placed
-     * inside the guarded window on purpose: it is the ending that `finally` has
-     * to survive for the mark not to be left standing on the worker.
+     * has gone is where such a request used to be ended, and this one is
+     * placed inside the guarded window on purpose: were it ended there,
+     * `finally` would not run and the mark would be left standing on the
+     * worker.
      */
     function oxphp_cancel_guarded_render(string $key): void
     {

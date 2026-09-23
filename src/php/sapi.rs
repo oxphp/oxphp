@@ -3477,14 +3477,15 @@ fn setup_request_tls(req: WorkerIncomingRequest) {
     // cell; a request whose client left before that never reaches here. Ship
     // 499 directly via the still-owned response_tx and bail before any further
     // setup (no early_tx stash). The C serve loop still creates a fiber and
-    // enters the handler. If the client left after `begin_request` above,
-    // `cancel_request` found this worker and raised an interrupt, and the
-    // handler unwinds at the first interrupt check it reaches while that is
-    // still raised. Otherwise the handler runs until its first write, where the
-    // output path reads the cancel cell and bails: the client left before
-    // `begin_request`, so there was no worker to interrupt; the handler
-    // suspended before any check and another fiber on this worker took the
-    // interrupt; or it had called `ignore_user_abort()` by its check.
+    // enters the handler. A client that left does not end a worker-mode
+    // handler on its own: it runs to the end with nobody reading what it
+    // writes. The exception is a handler that has started streaming and has
+    // not called `ignore_user_abort(true)` — that one is ended at the first
+    // interrupt check it reaches while `cancel_request` still has it raised,
+    // or failing that at its next write, where the output path reads the
+    // cancel cell (the client left before `begin_request`, so there was no
+    // worker to interrupt, or another fiber on this worker took the
+    // interrupt). See `oxphp_mark_cancelled_bailout` in ext/oxphp_sapi.c.
     if req.script.cancel_state.get() != crate::bridge::cancel::CancelReason::None {
         let _ = req.response_tx.send(ScriptResponse::client_closed());
         return;

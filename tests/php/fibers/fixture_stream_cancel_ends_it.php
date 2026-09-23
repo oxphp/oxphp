@@ -13,15 +13,24 @@ declare(strict_types=1);
 //
 // The write after the park is therefore the last thing this fixture is expected
 // to reach. Anything after it says the exemption is gone.
+//
+// ?open=1 sends the headers before the park, as a real event stream does.
+// That changes the path out: once its headers are sent a stream is no longer
+// watched for its client leaving, so the park ends unnoticed, and it is the next
+// flush that finds the client gone and interrupts the request. Without it the
+// headers are still unsent at the park, the leaving marks the request cancelled
+// there, and it is the write that has to end it.
 
 require_once __DIR__ . '/write_cancel_probe.php';
 
+// The header alone makes the request a stream, which is what the exemption keys
+// on, so it is set before the client is taken away.
 header('Content-Type: text/event-stream');
 
-// Entering streaming mode is what the exemption keys on, so it has to have
-// happened before the client is taken away.
-echo ": open\n\n";
-oxphp_stream_flush();
+if (($_GET['open'] ?? '') === '1') {
+    echo ": open\n\n";
+    oxphp_stream_flush();
+}
 
 OxphpWriteCancelProbe::$stage = 'parked';
 sleep(2);

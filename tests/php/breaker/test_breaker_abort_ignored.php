@@ -4,15 +4,14 @@ declare(strict_types=1);
 
 // A request whose client hangs up on a handler that asked to outlive it.
 //
-// ignore_user_abort(true) is what separates this from the abort earlier in the
-// suite. Where that one is unwound by the interrupt handler, this one is not:
-// the handler honours the setting and returns, so nothing marks the request as
-// one the server ended. The first write after that goes through the SAPI's
-// output path, which reads the same cancel cell — and in worker mode declines
-// to end the request on it, so the handler runs to its own end with nobody
-// reading what it writes. Neither half may reach the arm the consecutive-error
-// breaker counts: counting one would mean a client hanging up three times
-// retires a worker, which is precisely what a cancellation must not do.
+// In worker mode a request that is not streaming is not ended by its client
+// leaving whether or not it calls ignore_user_abort(true), so this runs the
+// same way as the abort earlier in the suite: the interrupt handler records the
+// disconnect and returns, the first write after that goes through the SAPI's
+// output path, which reads the same cancel cell and lets the request go on too,
+// and the handler runs to its own end with nobody reading what it writes. It
+// completes, and the breaker reads it so: counting it would mean a client
+// hanging up three times retires a worker.
 //
 // The markers are what make this test mean anything. Nobody is left to read the
 // response, so the suite line can only assert that curl gave up — which it does
@@ -27,13 +26,11 @@ declare(strict_types=1);
 //    mode is the whole point: the handler gets to finish and run its own
 //    cleanup. A run where it is missing is a run in which the write ended the
 //    request where it stood;
-//  - the past-sleep marker says ignore_user_abort() was honoured, and is the
-//    only thing here that does. It sits between the sleep and the echo, so a
-//    request whose interrupt handler unwound it on the client's departure —
-//    which is what this setting is asking it not to do — stops at the first
-//    opcode after the sleep and never writes it. Only the probe that follows a
-//    single abort asserts it, for the reason given beside that line in the
-//    suite.
+//  - the past-sleep marker says the interrupt handler let the request go on. It
+//    sits between the sleep and the echo, so a request unwound on the client's
+//    departure stops at the first opcode after the sleep and never writes it.
+//    Only the probe that follows a single abort asserts it, for the reason
+//    given beside that line in the suite.
 //
 // Files rather than statics: the retires this suite performs replace the
 // worker, and worker-scope state does not survive that. /tmp is inside the
@@ -68,7 +65,7 @@ ignore_user_abort(true);
 usleep(2_000_000);
 
 // Past the sleep with the request still running: the interrupt handler saw the
-// client go and honoured the setting instead of unwinding here.
+// client go and let the request go on instead of unwinding here.
 @file_put_contents('/tmp/oxphp-breaker-abort-ignored-past-sleep', 'reached');
 
 echo "the client is gone; nobody reads this write\n";

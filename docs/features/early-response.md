@@ -133,7 +133,7 @@ oxphp_finish_request();     // Send response
 // ... work that no longer has a session ...
 ```
 
-In worker mode this is worth doing whether or not the request finishes early. A worker has no end-of-request at which to close a session, so one left open is closed only when that worker next has an idle moment to give it back — and until then the save handler is still holding whatever it locked, which for the default handler is an exclusive lock that blocks anyone else reading that session. See [Worker Mode](worker-mode.md#what-gets-reset-between-requests) for the full boundary, including why `session_write_close()` is not a separation between requests that overlap on a worker.
+In worker mode this is worth doing whether or not the request finishes early. A worker closes a session at the end of the request only when no other request it is carrying is in that session; one that is shared is closed only when that worker next has an idle moment to give it back — and until then the save handler is still holding whatever it locked, which for the default handler is an exclusive lock that blocks anyone else reading that session. See [Worker Mode](worker-mode.md#what-gets-reset-between-requests) for the full boundary, including why `session_write_close()` is not a separation between requests that overlap on a worker.
 
 ### Response body is empty after calling `oxphp_finish_request()`
 

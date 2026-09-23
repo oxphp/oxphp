@@ -4,12 +4,11 @@ declare(strict_types=1);
 
 // A request the client left, whose shutdown function then fatals.
 //
-// The client goes first, so the request is on its way out as a cancellation
-// before anything has failed: ignore_user_abort(true) keeps the interrupt
-// handler from unwinding it, and in worker mode the echo below does not end it
-// either, so it reaches the end of its own handler. Up to that point this is
-// the fixture beside it, and up to that point the answer is the same — a client
-// leaving is not a worker to replace.
+// The client goes first, before anything has failed. In worker mode a request
+// that is not streaming is not ended by that — not at the interrupt and not at
+// the echo below — so it reaches the end of its own handler. Up to that point
+// this is the fixture beside it, and up to that point the answer is the same —
+// a client leaving is not a worker to replace.
 //
 // Then the shutdown function fatals. That is not the client's doing and it is
 // not undone by the client having left first: the engine state it leaves is

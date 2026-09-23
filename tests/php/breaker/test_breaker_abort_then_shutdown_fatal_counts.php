@@ -15,10 +15,13 @@ require_once __DIR__ . '/breaker_probe.php';
 // worker's engine state is wreckage, and only one of those is a statement about
 // the worker.
 //
-// Read the other way it is a lever: if the earlier cancellation won, an
-// application whose handler fatals on every request would keep its worker for
-// as long as clients kept hanging up on it. That is not a corner — it is the
-// abort storm this whole suite is about, with a fatal underneath it.
+// In worker mode a request that is not streaming is not ended by its client
+// leaving, so nothing is filed for the departure itself; the request runs on to
+// the shutdown function, and the fatal there is what it is filed as. Read the
+// other way it would be a lever: an application whose handler fatals on every
+// request would keep its worker for as long as clients kept hanging up on it.
+// That is not a corner — it is the abort storm this whole suite is about, with
+// a fatal underneath it.
 
 $test = new TestCase('breaker_abort_then_shutdown_fatal_counts', 'breaker');
 
@@ -32,7 +35,7 @@ $test->assertTrue(
 $worker = OxPHP\Server\Worker::current();
 
 // A fresh worker: this request is the first it has served. Anything else means
-// the three fatals above were filed as the cancellations that preceded them.
+// the three fatals above were filed as neutral, for the client that left first.
 $test->assertSame('the three retired the worker', $worker->requestCount(), 1);
 
 $recycles = breaker_recycles();

@@ -19,10 +19,17 @@ declare(strict_types=1);
 //
 // ?in=shutdown does the same from a shutdown function of a request that has
 // already had a fatal. The engine runs shutdown functions under a guard of its
-// own, so the write ends the shutdown function rather than the handler, and the
-// worker has to recognise that separately; and a request that has had a fatal
-// is one whose cancellation the worker files differently, which must not change
+// own, so a write that ended the request there would end the shutdown function
+// rather than the handler; it does not, and the function runs past it. A request
+// that has had a fatal is filed differently by the worker, which must not change
 // what it gives back.
+//
+// ?in=stream and ?in=stream-throw make the request a stream first. A stream is
+// still ended at the write once its client has gone — its loop has no other
+// bound — so these are the requests that take the path where the worker gives
+// back what the abandoned frames were holding. stream-throw holds an object
+// whose destructor throws: it runs during that give-back, and the throw must end
+// nothing but itself.
 //
 // ?in=destructor holds an object with a destructor instead. The destructor now
 // runs at the function's own return, as part of the request, because the
@@ -50,13 +57,26 @@ if (!class_exists('OxphpWriteCancelDestructs', false)) {
     }
 }
 
+if (!class_exists('OxphpWriteCancelThrows', false)) {
+    final class OxphpWriteCancelThrows
+    {
+        public function __destruct()
+        {
+            OxphpWriteCancelProbe::$stageAtDestruct = OxphpWriteCancelProbe::$stage;
+            throw new \RuntimeException('thrown from a destructor during the give-back');
+        }
+    }
+}
+
 if (!function_exists('oxphp_write_after_client_left')) {
-    function oxphp_write_after_client_left(bool $destructs = false): void
+    function oxphp_write_after_client_left(string $holding = 'plain', bool $stream = false): void
     {
         // Held by this frame's variable and nothing else.
-        $held = $destructs
-            ? new OxphpWriteCancelDestructs()
-            : new \ArrayObject([str_repeat('x', 1 << 16)]);
+        $held = match ($holding) {
+            'destructs' => new OxphpWriteCancelDestructs(),
+            'throws' => new OxphpWriteCancelThrows(),
+            default => new \ArrayObject([str_repeat('x', 1 << 16)]),
+        };
         OxphpWriteCancelProbe::$weak = \WeakReference::create($held);
 
         OxphpWriteCancelProbe::$stage = 'parked';
@@ -65,6 +85,9 @@ if (!function_exists('oxphp_write_after_client_left')) {
 
         OxphpWriteCancelProbe::$stage = 'before-write';
         echo "nobody is left to read this\n";
+        if ($stream) {
+            oxphp_stream_flush();
+        }
         OxphpWriteCancelProbe::$stage = 'after-write';
     }
 }
@@ -81,7 +104,7 @@ if (($_GET['in'] ?? '') === 'shutdown') {
 }
 
 // Runs after the worker has dealt with the abandoned frames. Writes nothing:
-// the client is gone, so a write here would end this function too.
+// the client is gone and nobody would read it.
 register_shutdown_function(static function (): void {
     OxphpWriteCancelProbe::$report = [
         'stage' => OxphpWriteCancelProbe::$stage,
@@ -90,4 +113,21 @@ register_shutdown_function(static function (): void {
     ];
 });
 
-oxphp_write_after_client_left(($_GET['in'] ?? '') === 'destructor');
+$in = $_GET['in'] ?? '';
+$stream = $in === 'stream' || $in === 'stream-throw';
+if ($stream) {
+    // The header alone is what makes the request a stream. Nothing is sent
+    // before the park: a stream that has already sent its headers is no longer
+    // watched for its client leaving until its next flush, which is a
+    // different path out (see the test).
+    header('Content-Type: text/event-stream');
+}
+
+oxphp_write_after_client_left(
+    match ($in) {
+        'destructor' => 'destructs',
+        'stream-throw' => 'throws',
+        default => 'plain',
+    },
+    $stream
+);

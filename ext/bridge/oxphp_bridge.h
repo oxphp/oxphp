@@ -1168,19 +1168,20 @@ bool oxphp_bridge_set_cancel_reason(oxphp_cancel_reason_t reason);
  * the fiber scheduler's drain sweep to mark each suspended fiber's own cell. */
 bool oxphp_bridge_set_cancel_reason_at(_Atomic(uint8_t)* ptr, oxphp_cancel_reason_t reason);
 
-/* Register the SAPI's "the server ended this request" marker.
+/* Register the SAPI's say on a cancellation found on the write path.
  *
- * The write and flush wrappers below read the cancel cell themselves and end a
- * cancelled request with a bare zend_bailout(), which at the catch site is
- * indistinguishable from a fatal — and three of those in a row retire a worker.
- * Only the SAPI can tell them apart: the mark lives on its per-fiber state,
- * which the bridge has no way to reach. Called with the reason that was read,
- * immediately before the bailout. Set once at MINIT, before any worker thread
- * exists; no-op while unregistered (unit tests, bare CLI without the
- * extension). */
-/* Marks a cancellation found on the write path and answers whether the write
- * should end the request there. Nonzero to end it; zero to let the script
- * carry on. The bridge holds no PHP semantics, so the SAPI decides. */
+ * The write and flush wrappers below read the cancel cell themselves, and when
+ * they end a request they do it with a bare zend_bailout(), which at the catch
+ * site is indistinguishable from a fatal — and three of those in a row retire a
+ * worker. Only the SAPI can tell them apart, and only it knows whether the
+ * request should be ended at all (ignore_user_abort(true), a worker-mode request
+ * that is not streaming, the hard phase of a drain): all of it lives on its
+ * per-fiber and PHP state, which the bridge has no way to reach. So it is
+ * called with the reason that was read, marks the request if it is to be ended,
+ * and answers nonzero to end it — the wrapper then bails out — or zero to let
+ * the script carry on. Set once at MINIT, before any worker thread exists;
+ * while unregistered (unit tests, bare CLI without the extension) the wrappers
+ * end the request unmarked. */
 typedef int (*oxphp_cancel_mark_fn_t)(oxphp_cancel_reason_t reason);
 void oxphp_bridge_set_cancel_mark_fn(oxphp_cancel_mark_fn_t fn);
 

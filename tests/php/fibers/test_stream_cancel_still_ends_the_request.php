@@ -7,9 +7,10 @@ declare(strict_types=1);
 require_once __DIR__ . '/../test_helper.php';
 require_once __DIR__ . '/write_cancel_probe.php';
 
-// A streaming request whose client leaves is still ended at its next write.
+// A streaming request whose client leaves is still ended at its next write or
+// flush.
 //
-// Its neighbour, fibers/test_cancel_skips_userland_cleanup, pins the opposite
+// Its neighbour, fibers/test_cancel_runs_userland_cleanup, pins the opposite
 // rule for an ordinary request: a client that goes away no longer ends it,
 // because ending it is a longjmp that leaves userland's `finally` unrun on a
 // worker that outlives the request. Letting the request finish is safe there
@@ -22,6 +23,12 @@ require_once __DIR__ . '/write_cancel_probe.php';
 // always had, which is also the contract the streaming documentation states:
 // check connection_aborted() and return, or accept an ending that will not run
 // your `finally`.
+//
+// Two ways there, one per stage. A stream whose headers are still unsent at the
+// park is marked cancelled as its client leaves, and it is the write it resumes
+// into that ends it. One that has sent them — every real event stream — is no
+// longer watched for its client leaving, and it is the flush that finds the
+// client gone and interrupts it.
 //
 // Both edges are read. The request has to reach the write, or a run in which it
 // never resumed out of its park would pass without testing anything; and it
@@ -41,6 +48,16 @@ if (write_cancel_stage($t, 'stream', '', 'fixture_stream_cancel_ends_it.php')) {
 
     $t->assertFalse('stream: the write it resumed into ended the request', $ranPast);
     $t->assertSame('stream: which is as far as it got', OxphpWriteCancelProbe::$stage, 'before-write');
+}
+
+if (write_cancel_stage($t, 'stream after headers', '?open=1', 'fixture_stream_cancel_ends_it.php')) {
+    $ranPast = write_cancel_wait(
+        static fn (): bool => OxphpWriteCancelProbe::$stage === 'after-write',
+        4.0
+    );
+
+    $t->assertFalse('stream after headers: the flush it resumed into ended the request', $ranPast);
+    $t->assertSame('stream after headers: which is as far as it got', OxphpWriteCancelProbe::$stage, 'before-write');
 }
 
 $t->done();

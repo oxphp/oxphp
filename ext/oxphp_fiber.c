@@ -128,9 +128,12 @@ static void oxphp_bailout_frame_cb(int type, zend_string *file, const uint32_t l
  * reported ahead of it. Left unrecorded, the release walk has no frame to start
  * from and gives back nothing, so everything the request was holding at that
  * write stays allocated for the life of the worker, per request, with nothing in
- * the log. The usual way to get here is a request that was parked when its
- * client left: it can resume straight into a write without being interrupted
- * first.
+ * the log. Reached by a write that comes before the interrupt: a request
+ * cancelled while it was parked, whose interrupt was raised against a worker
+ * that was not running it, resuming into a write; or a stream writing after its
+ * client left and before the interrupt reaches it. Not by a stream whose client
+ * left after it had sent its headers: nothing notices that until its next flush,
+ * and the flush interrupts it instead.
  *
  * A write is made from inside an opcode or an internal call, which leaves the
  * chain in the states the walk already handles for a fatal raised there — an
@@ -435,6 +438,22 @@ static inline void oxphp_vm_stack_rewind(const oxphp_vm_stack_mark *mark) {
     EG(current_execute_data) = mark->execute_data;
 }
 
+/* Put the collector's guard back to `protect` after a bailout raised it, or
+ * retire the worker when the bailout interrupted a collection — see the second
+ * flag in the comment below. */
+static void oxphp_gc_unprotect_after_bailout(bool protect) {
+    zend_gc_status gc_status;
+    zend_gc_get_status(&gc_status);
+    if (gc_status.active) {
+        php_log_err("oxphp: a fatal interrupted a cycle collection — the "
+                    "collector cannot be restarted in this process, so this "
+                    "worker is retiring and the pool will replace it");
+        oxphp_bridge_schedule_exit();
+    } else {
+        gc_protect(protect);
+    }
+}
+
 /* Everything a worker has to undo after a bailout before it can serve anything
  * else: give back what the abandoned frames were holding, rewind the VM stack to
  * the mark, and lower the two flags the engine raised over the whole of it.
@@ -676,17 +695,7 @@ static void oxphp_recover_from_bailout(const oxphp_vm_stack_mark *mark) {
 
     oxphp_vm_stack_rewind(mark);
     CG(unclean_shutdown) = 0;
-
-    zend_gc_status gc_status;
-    zend_gc_get_status(&gc_status);
-    if (gc_status.active) {
-        php_log_err("oxphp: a fatal interrupted a cycle collection — the "
-                    "collector cannot be restarted in this process, so this "
-                    "worker is retiring and the pool will replace it");
-        oxphp_bridge_schedule_exit();
-    } else {
-        gc_protect(false);
-    }
+    oxphp_gc_unprotect_after_bailout(false);
 }
 
 /* ─── Pending-exception discard ────────────────────────── */
@@ -1428,6 +1437,13 @@ static void oxphp_fiber_free_task_payload(oxphp_request_fiber *fiber) {
         FREE_HASHTABLE(fiber->php_state.shutdown_functions);
         fiber->php_state.shutdown_functions = NULL;
     }
+    /* And the ini values it parked. Nothing to put back: parking already put
+     * every entry back, so only the kept values are left to release. */
+    if (fiber->php_state.ini_parked) {
+        zend_hash_destroy(fiber->php_state.ini_parked);
+        FREE_HASHTABLE(fiber->php_state.ini_parked);
+        fiber->php_state.ini_parked = NULL;
+    }
     /* And the body it parked, with the temp files of its uploads. A fiber torn
      * down while parked never reaches the end of a request that would have
      * released them, and the worker's resource list — the only other thing that
@@ -1640,6 +1656,622 @@ static void oxphp_capture_unhandled(zend_object *ex) {
     free(trace);
 }
 
+/* ─── Per-request ini ──────────────────────────────────── */
+
+/* The directives that stay the worker's rather than travelling with a request.
+ *
+ * max_execution_time is a timer, and there is one per thread: its handler stops
+ * the timer whenever the value moves and starts it again unless the move is a
+ * restore, so putting it back on every park would stop the running deadline and
+ * applying it again on every resume would restart it, each time any request
+ * suspends. memory_limit is the ceiling of the thread's one heap, and
+ * lowering it is refused outright while more than the new value is mapped — as
+ * it is whenever a neighbour holds memory. opcache.enable has a rule of its own,
+ * see oxphp_ini_keep_opcache_disabled().
+ *
+ * session.* settings are the configuration of the session module, whose state
+ * is one per thread and shared by the requests that overlap on it (see
+ * oxphp_session_note_use()), so they go where the session goes. They could not
+ * travel with a request anyway: session_set_save_handler() sets
+ * session.save_handler to "user" under a flag only it raises, and the handler
+ * refuses that value from anyone else, so a request that registered its own
+ * handler and then parked would resume on the default one; and every session.*
+ * setting refuses to move while a session is active, so a request's changes
+ * would come and go with whether a neighbour happened to have one open.
+ *
+ * All of these are left in the modified set and rolled back where they always
+ * were, in the reset a worker runs between requests with nothing else in
+ * flight — which gives the session back before it restores the directives, so
+ * nothing is left active to refuse them.
+ *
+ * SYNC: php-src/ext/session/session.c OnUpdateSaveHandler() /
+ *       PHP_FUNCTION(session_set_save_handler) */
+static bool oxphp_ini_is_worker_scoped(const zend_ini_entry *entry) {
+    return zend_string_equals_literal(entry->name, "max_execution_time")
+        || zend_string_equals_literal(entry->name, "memory_limit")
+        || zend_string_equals_literal(entry->name, "opcache.enable")
+        || zend_string_starts_with_literal(entry->name, "session.");
+}
+
+/* The directives that travel with a request across its parks: those whose
+ * handler does nothing but store the value where the engine or an extension
+ * reads it, so that moving one on every park and resume changes the value and
+ * nothing else.
+ *
+ * The test is the handler itself, not what it does: every other handler is
+ * treated as one that acts on the thread as it stores, because some do, and
+ * upstream runs a handler only when a script sets the value and once when the
+ * request ends. That leaves a few that only validate on the thread as well —
+ * error_log, date.timezone, default_mimetype, and include_path while OPcache is
+ * enabled, since it replaces that handler with its own (with OPcache off it is
+ * the standard setter, and travels). Run on every park, the ones that act would
+ * undo what the request did since: the charset and
+ * encoding handlers reset mbstring's live encodings, which
+ * mb_internal_encoding() sets as well; zlib.output_compression starts an output
+ * handler the script may have removed; assert.* and a few others raise a
+ * deprecation each time; open_basedir resolves a relative path against
+ * whatever directory the thread is in at that moment. So those stay on the
+ * thread while their request is parked — seen by the requests the worker runs
+ * in the meantime, as every directive was before any of them travelled — and
+ * are put back when the last request in flight ends (see
+ * oxphp_fiber_end_request_ini()).
+ *
+ * The standard setters are compared by address. The four named are the core's
+ * own handlers that store and validate and nothing else; they are static
+ * there, so they are known by name.
+ *
+ * SYNC: php-src/Zend/zend_ini.h OnUpdate*;
+ *       php-src/main/main.c OnSetPrecision() / OnSetSerializePrecision() /
+ *       OnUpdateDisplayErrors(); php-src/Zend/zend.c OnUpdateErrorReporting() */
+static bool oxphp_ini_travels(const zend_ini_entry *entry) {
+    if (oxphp_ini_is_worker_scoped(entry)) {
+        return false;
+    }
+    ZEND_INI_MH((*handler)) = entry->on_modify;
+    if (handler == NULL
+        || handler == OnUpdateBool
+        || handler == OnUpdateLong
+        || handler == OnUpdateLongGEZero
+        || handler == OnUpdateReal
+        || handler == OnUpdateString
+        || handler == OnUpdateStringUnempty
+        || handler == OnUpdateStr
+        || handler == OnUpdateStrNotEmpty) {
+        return true;
+    }
+    return zend_string_equals_literal(entry->name, "precision")
+        || zend_string_equals_literal(entry->name, "serialize_precision")
+        || zend_string_equals_literal(entry->name, "display_errors")
+        || zend_string_equals_literal(entry->name, "error_reporting");
+}
+
+/* What a directive's handler may report while its value is being moved, kept
+ * out of every request.
+ *
+ * A handler is allowed to diagnose — session.sid_length deprecates any value
+ * but its own, every quantity directive warns on a malformed one — and moving a
+ * value runs the handler. The moves happen on the scheduler's side of a switch,
+ * or after a request has finished, where no request is running to be told: an
+ * error handler the application installed would be called outside any request,
+ * an EH_THROW left standing would turn the report into an exception nobody can
+ * catch, and the report itself would become the last error of whichever request
+ * reads error_get_last() next. So for the length of a move there is no user
+ * handler, no reporting level, no throwing, and the last error is put back the
+ * way it was. What that leaves is the server's own log: the SAPI's error
+ * callback is handed every report before PHP filters it by level, and logs each
+ * one at its own severity. PHP's error_log is filtered by the level and gets
+ * none of them but an E_CORE_* report, which PHP passes whatever the level —
+ * and a handler that refuses a value without saying why reports
+ * nothing to anyone, which is why a refusal is logged by the mover itself (see
+ * oxphp_ini_log_refusal()).
+ *
+ * The level needs holding down, not just lowering once: the error_reporting
+ * directive's own handler writes EG(error_reporting), so a move of that entry
+ * raises the level for every move after it. oxphp_ini_quiet_hold() is called
+ * after each one.
+ *
+ * And no parking, for as long as all that is held. Moving a value can run user
+ * code — a handler that drops the value it had can take the last reference to
+ * an object with it, and run its destructor — and code that sleeps or reads a
+ * socket parks. Parked here, the request would leave the worker to its
+ * neighbours with the application's error handler held in this frame, and come
+ * back to put back its own over whatever they had installed; and the pass it
+ * was in would come back to a set of modified directives that they had changed
+ * under it. Blocked, our suspend points take their blocking path.
+ *
+ * SYNC: php-src/Zend/zend.c OnUpdateErrorReporting();
+ *       php-src/ext/standard/assert.c OnChangeCallback() */
+typedef struct {
+    zval user_error_handler;
+    int error_reporting;
+    zend_error_handling_t error_handling;
+    int last_error_type;
+    int last_error_lineno;
+    zend_string *last_error_message;
+    zend_string *last_error_file;
+} oxphp_ini_quiet;
+
+static void oxphp_ini_quiet_begin(oxphp_ini_quiet *q) {
+    oxphp_park_blocked++;
+    ZVAL_COPY_VALUE(&q->user_error_handler, &EG(user_error_handler));
+    ZVAL_UNDEF(&EG(user_error_handler));
+    q->error_reporting = EG(error_reporting);
+    EG(error_reporting) = 0;
+    q->error_handling = EG(error_handling);
+    EG(error_handling) = EH_NORMAL;
+
+    q->last_error_type = PG(last_error_type);
+    q->last_error_lineno = PG(last_error_lineno);
+    q->last_error_message = PG(last_error_message);
+    q->last_error_file = PG(last_error_file);
+    PG(last_error_type) = 0;
+    PG(last_error_lineno) = 0;
+    PG(last_error_message) = NULL;
+    PG(last_error_file) = NULL;
+}
+
+/* Say that a directive would not move, where an operator will look: the
+ * documented consequence of a refusal is a value in the wrong place, and the
+ * handler that refused may have said nothing. Through PHP's error log rather
+ * than as a report, so the level held down above does not swallow it.
+ *
+ * SYNC: php-src/main/main.c php_log_err_with_severity() */
+static void oxphp_ini_log_refusal(const zend_string *name, const char *what) {
+    char *line;
+    zend_spprintf(&line, 0, "oxphp: ini directive %s %s", ZSTR_VAL(name), what);
+    php_log_err(line);
+    efree(line);
+}
+
+static inline void oxphp_ini_quiet_hold(void) {
+    EG(error_reporting) = 0;
+}
+
+static void oxphp_ini_quiet_end(oxphp_ini_quiet *q) {
+    if (PG(last_error_message)) {
+        zend_string_release(PG(last_error_message));
+    }
+    if (PG(last_error_file)) {
+        zend_string_release(PG(last_error_file));
+    }
+    PG(last_error_type) = q->last_error_type;
+    PG(last_error_lineno) = q->last_error_lineno;
+    PG(last_error_message) = q->last_error_message;
+    PG(last_error_file) = q->last_error_file;
+
+    ZVAL_COPY_VALUE(&EG(user_error_handler), &q->user_error_handler);
+    EG(error_reporting) = q->error_reporting;
+    EG(error_handling) = q->error_handling;
+    oxphp_park_blocked--;
+}
+
+/* What a bailout raised inside a handler leaves on the thread, taken before the
+ * call so it can be put back after one. _zend_bailout raises the unclean-shutdown
+ * flag and the collector's guard and clears the frame pointer on its way out.
+ * The engine can leave all three when a restore bails, because it is shutting
+ * the request down and the rest of that shutdown resets them; a move here is on
+ * a worker that goes on serving, where the flag would be read as the next
+ * request's own fatal, the guard would stop every later request's cycles from
+ * being collected, and the frame pointer is the one the scheduler or the
+ * resuming request stands on.
+ *
+ * SYNC: php-src/Zend/zend.c _zend_bailout() */
+typedef struct {
+    zend_execute_data *frame;
+    bool unclean_shutdown;
+    bool gc_protected;
+} oxphp_ini_engine_state;
+
+static void oxphp_ini_engine_save(oxphp_ini_engine_state *e) {
+    e->frame = EG(current_execute_data);
+    e->unclean_shutdown = CG(unclean_shutdown);
+    e->gc_protected = gc_protected();
+}
+
+static void oxphp_ini_engine_restore(const oxphp_ini_engine_state *e) {
+    EG(current_execute_data) = e->frame;
+    CG(unclean_shutdown) = e->unclean_shutdown;
+    oxphp_gc_unprotect_after_bailout(e->gc_protected);
+}
+
+/* Put an entry back to the value it had before the request changed it, at the
+ * stage the engine itself uses for that — the deactivate stage its request
+ * shutdown restores every changed directive at. Handlers are written to accept a
+ * restore there that they refuse from a script: open_basedir can only be
+ * tightened at the runtime stage, and zlib.output_compression refuses once
+ * headers are out, which by the end of a request they are. Asked at the runtime
+ * stage instead, a request that tightened open_basedir would have tightened it
+ * for every request after it.
+ *
+ * One difference from the engine: a handler that still refuses leaves the entry
+ * as it is, in the set, holding the request's value. The engine overrides the
+ * refusal at this stage, which is safe at the end of a request because the state
+ * the handler was protecting ends with it. Here that state goes on — once
+ * opcache.jit has been set to disable, for one, the JIT refuses every later
+ * value — so overriding it would leave ini_get() naming one value while the
+ * extension goes on using another.
+ *
+ * SYNC: php-src/Zend/zend_ini.c zend_restore_ini_entry_cb();
+ *       php-src/main/fopen_wrappers.c OnUpdateBaseDir();
+ *       php-src/ext/zlib/zlib.c OnUpdate_zlib_output_compression() */
+static zend_result oxphp_ini_put_back(zend_ini_entry *entry, bool *bailed) {
+    if (entry->on_modify) {
+        volatile zend_result result = FAILURE;
+        oxphp_ini_engine_state engine;
+        oxphp_ini_engine_save(&engine);
+        zend_try {
+            result = entry->on_modify(entry, entry->orig_value, entry->mh_arg1,
+                                      entry->mh_arg2, entry->mh_arg3,
+                                      ZEND_INI_STAGE_DEACTIVATE);
+        } zend_catch {
+            oxphp_ini_engine_restore(&engine);
+            *bailed = true;
+        } zend_end_try();
+        if (result == FAILURE) {
+            return FAILURE;
+        }
+        /* The handler can run user code, and user code can ini_restore() this
+         * very directive, which puts the entry back itself and clears what the
+         * lines below would read: going on would release the baseline value and
+         * leave the entry with neither. */
+        if (!entry->modified) {
+            return SUCCESS;
+        }
+    }
+    if (entry->value != entry->orig_value) {
+        zend_string_release(entry->value);
+    }
+    entry->value = entry->orig_value;
+    entry->modifiable = entry->orig_modifiable;
+    entry->modified = 0;
+    entry->orig_value = NULL;
+    entry->orig_modifiable = 0;
+    return SUCCESS;
+}
+
+/* Which entries a pass over the modified set moves, and where the values go. */
+typedef struct {
+    /* Keep each value moved, for the request to take with it. */
+    bool keeping;
+    /* Move only the directives that travel (oxphp_ini_travels()); otherwise
+     * every one the worker does not keep. */
+    bool travelling_only;
+    /* These two change under the pass's zend_try and are read after its
+     * catch, which is only defined for a volatile object. */
+    HashTable *volatile kept;
+    /* A handler bailed out: see oxphp_fiber_end_request_ini(). */
+    volatile bool bailed;
+} oxphp_ini_pass;
+
+/* Put one entry of the modified set back and, for a pass that is keeping, keep
+ * the value the request had given it. True when the entry is to leave the set.
+ *
+ * An entry whose live value is still the one it started with carries nothing
+ * to keep. That is what `@` leaves — it marks the error_reporting entry modified
+ * without giving it a new value, and lowers the level through the engine's own
+ * per-fiber copy instead, which the switch carries by itself. */
+static bool oxphp_ini_take_entry(zend_ini_entry *entry, oxphp_ini_pass *pass) {
+    if (oxphp_ini_is_worker_scoped(entry)
+        || (pass->travelling_only && !oxphp_ini_travels(entry))) {
+        return false;
+    }
+
+    /* Kept before the entry is put back, not after: keeping allocates, and an
+     * allocation that runs into memory_limit once the entry is back would lose
+     * the request's value with nothing left standing to show it. */
+    bool held = false;
+    if (pass->keeping && entry->value != entry->orig_value) {
+        if (pass->kept == NULL) {
+            ALLOC_HASHTABLE(pass->kept);
+            zend_hash_init(pass->kept, 8, NULL, ZVAL_PTR_DTOR, 0);
+        }
+        zval value;
+        ZVAL_STR_COPY(&value, entry->value);
+        zend_hash_update(pass->kept, entry->name, &value);
+        held = true;
+    }
+
+    bool bailed = false;
+    zend_result put_back = oxphp_ini_put_back(entry, &bailed);
+    oxphp_ini_quiet_hold();
+    if (put_back == FAILURE) {
+        if (bailed) {
+            pass->bailed = true;
+        } else {
+            oxphp_ini_log_refusal(entry->name,
+                                  "refused to be put back; it keeps the value its request gave it");
+        }
+        if (held) {
+            zend_hash_del(pass->kept, entry->name);
+        }
+        return false;
+    }
+
+    return true;
+}
+
+/* A pass over the ini that bailed out, for whatever reason, stopped part-way:
+ * the directives on the thread are no longer any one request's, and where a
+ * handler was what bailed out, its extension was left part-way through the
+ * change — assert.callback's still points at the closure it was freeing, for
+ * the next failed assert() to call. Nothing short of a fresh thread puts that
+ * right, so the worker retires, as it does when a fatal interrupts the cycle
+ * collector: the loop ends on its next turn, and the requests still in flight
+ * on the worker are ended as on any other scheduled exit. */
+static void oxphp_ini_retire_after_bailout(void) {
+    php_log_err("oxphp: a bailout interrupted moving a request's ini directives — "
+                "this worker is retiring and the pool will replace it");
+    oxphp_bridge_schedule_exit();
+}
+
+/* One pass over the modified set.
+ *
+ * Through an iterator of the engine's, not a bucket held across the move:
+ * putting an entry back runs its handler, a handler can run user code (a
+ * destructor), and user code can call ini_set() — which adds to the set, and
+ * can grow or compact it under a walk holding a bucket of it. The engine keeps
+ * an iterator's position right through both, and an entry the user code added
+ * is reached like any other; one it has put back in the meantime has left the
+ * set, and the iterator steps over the hole.
+ *
+ * Under a guard of its own: what the pass allocates for itself can run into
+ * memory_limit, and a bailout from there past the end of the quiet window would
+ * leave the application's error handler in this frame, the reporting level at
+ * zero and parking blocked on this worker for good. Stops at the first bailout,
+ * wherever it came from: user code that runs after one, before the request's
+ * abandoned frames are given back, runs on top of them, and a second bailout
+ * would take the place of the first as the frame the give-back starts from.
+ *
+ * SYNC: php-src/Zend/zend_ini.c zend_alter_ini_entry_ex();
+ *       php-src/Zend/zend_hash.c zend_hash_iterator_add(), zend_hash_rehash() */
+static HashTable *oxphp_ini_run_pass(bool keeping, bool travelling_only, bool *bailed) {
+    oxphp_ini_pass pass = { keeping, travelling_only, NULL, false };
+    HashTable *set = EG(modified_ini_directives);
+    if (!set || zend_hash_num_elements(set) == 0) {
+        return NULL;
+    }
+
+    oxphp_ini_quiet q;
+    oxphp_ini_engine_state engine;
+    volatile uint32_t iter = (uint32_t) -1;
+    oxphp_ini_quiet_begin(&q);
+    oxphp_ini_engine_save(&engine);
+    zend_try {
+        iter = zend_hash_iterator_add(set, 0);
+        while (!pass.bailed) {
+            HashPosition pos = zend_hash_iterator_pos(iter, set);
+            zend_ini_entry *entry = zend_hash_get_current_data_ptr_ex(set, &pos);
+            if (entry == NULL) {
+                break;
+            }
+            zend_hash_move_forward_ex(set, &pos);
+            EG(ht_iterators)[iter].pos = pos;
+            /* The set owns neither its keys nor its values and has no
+             * destructor, so deleting drops the bucket and nothing else. */
+            if (entry->modified && oxphp_ini_take_entry(entry, &pass)) {
+                zend_hash_del(set, entry->name);
+            }
+        }
+    } zend_catch {
+        oxphp_ini_engine_restore(&engine);
+        pass.bailed = true;
+    } zend_end_try();
+    if (iter != (uint32_t) -1) {
+        zend_hash_iterator_del(iter);
+    }
+    oxphp_ini_quiet_end(&q);
+
+    if (pass.bailed) {
+        oxphp_ini_retire_after_bailout();
+    }
+    if (bailed) {
+        *bailed = pass.bailed;
+    }
+    return pass.kept;
+}
+
+/* Take the ini directives that travel off the thread while their request is
+ * parked.
+ *
+ * The engine keeps every directive's live value on the thread and one set of
+ * what has been changed since startup, and a worker runs every request it
+ * multiplexes on that one thread. Left standing, a parked request's changes are
+ * the settings of whatever the worker runs in the window — its
+ * ignore_user_abort decides whether that request is ended when its own client
+ * leaves — and whatever that request changes is waiting for this one when it
+ * resumes. So the changes travel with the request, the way its output buffers
+ * and shutdown functions do: each value is kept here, each entry is put back to
+ * what it was before, and oxphp_fiber_unpark_ini() applies them again on resume.
+ *
+ * Only the directives oxphp_ini_travels() names move; the rest stay on the
+ * thread, and so does the worker-scoped set.
+ *
+ * Runs on the scheduler's side of the switch. The error_reporting entry's
+ * handler writes EG(error_reporting), but the level a suspended request runs at
+ * is carried by the engine across the switch, not read back from here — which
+ * is why a request parked inside `@` resumes still silenced. */
+static void oxphp_fiber_park_ini(oxphp_request_fiber *fiber) {
+    ZEND_ASSERT(fiber->php_state.ini_parked == NULL);
+    fiber->php_state.ini_parked = oxphp_ini_run_pass(true, true, NULL);
+}
+
+/* Put back whatever travelling directive is standing on the thread as a request
+ * is entered — a request, not an oxphp_async() task, whose scheduler parks no
+ * ini. None of them is that request's: its own are in its parked table,
+ * and every other request's are in theirs or were put back when it ended. What
+ * is left was set outside any request — by a save handler the scheduler closed
+ * a session through, or a destructor it ran — and would otherwise be taken for
+ * the next request that parks, and carried by it from then on. */
+static void oxphp_ini_sweep(void) {
+    oxphp_ini_run_pass(false, true, NULL);
+}
+
+/* True when the handler bailed out. */
+static bool oxphp_ini_apply_parked(zend_string *name, zval *value) {
+    volatile zend_result result = FAILURE;
+    volatile bool bailed = false;
+    oxphp_ini_engine_state engine;
+    oxphp_ini_engine_save(&engine);
+    zend_try {
+        result = zend_alter_ini_entry_ex(name, Z_STR_P(value), ZEND_INI_USER,
+                                         ZEND_INI_STAGE_RUNTIME, 1);
+    } zend_catch {
+        oxphp_ini_engine_restore(&engine);
+        bailed = true;
+    } zend_end_try();
+    oxphp_ini_quiet_hold();
+    if (result == FAILURE && !bailed) {
+        oxphp_ini_log_refusal(name,
+                              "refused its request's value on resume; the request continues without it");
+    }
+    return bailed;
+}
+
+/* Apply again what oxphp_fiber_park_ini() took off the thread, as ini_set()
+ * would: the entry joins the modified set with the value it was put back to as
+ * the one to restore, which is the baseline. After a sweep, so the thread holds
+ * nothing of anyone else's before this request's values go back on. */
+static void oxphp_fiber_unpark_ini(oxphp_request_fiber *fiber) {
+    oxphp_ini_sweep();
+
+    HashTable *parked = fiber->php_state.ini_parked;
+    if (parked == NULL) {
+        return;
+    }
+    fiber->php_state.ini_parked = NULL;
+
+    /* Guarded, stopped and retired from as a pass is (see
+     * oxphp_ini_run_pass()): a refusal is logged through an allocation of its
+     * own, which can run into memory_limit, and a handler can bail out. */
+    oxphp_ini_quiet q;
+    oxphp_ini_engine_state engine;
+    volatile bool bailed = false;
+    oxphp_ini_quiet_begin(&q);
+    oxphp_ini_engine_save(&engine);
+    zend_try {
+        zend_string *name;
+        zval *value;
+        ZEND_HASH_MAP_FOREACH_STR_KEY_VAL(parked, name, value) {
+            if (oxphp_ini_apply_parked(name, value)) {
+                bailed = true;
+                break;
+            }
+        } ZEND_HASH_FOREACH_END();
+    } zend_catch {
+        oxphp_ini_engine_restore(&engine);
+        bailed = true;
+    } zend_end_try();
+    oxphp_ini_quiet_end(&q);
+    if (bailed) {
+        oxphp_ini_retire_after_bailout();
+    }
+
+    zend_hash_destroy(parked);
+    FREE_HASHTABLE(parked);
+}
+
+/* Is any request on this worker but `except` still in flight — and, with
+ * `in_session`, in the session?
+ *
+ * A fiber already flagged completed is one whose request is over and whose
+ * finalize has not run yet, so it is not in anything. Its flags go with the
+ * struct to the free list and are cleared when the struct is handed to the next
+ * request. */
+static bool oxphp_request_in_flight_besides(const oxphp_fiber_scheduler *sched,
+                                            const oxphp_request_fiber *except,
+                                            bool in_session) {
+    for (const oxphp_request_fiber *fiber = sched->fibers_head; fiber; fiber = fiber->next) {
+        if (fiber != except && !fiber->completed && (!in_session || fiber->session_touched)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* End the ini changes of a request that has finished, as the engine does at
+ * request shutdown, which a worker does not run per request. Without it the
+ * next request on this worker would start with them — on the event loop there
+ * is nothing else between two requests that would roll them back.
+ *
+ * The travelling directives are this request's alone and are always put back.
+ * The others were on the thread for every request in flight beside it, which
+ * may have changed them too or be relying on what this one set, so they are put
+ * back by whichever request is the last one out. The worker-scoped set stays,
+ * for the reasons given at oxphp_ini_is_worker_scoped(); so does an entry whose
+ * handler refuses.
+ *
+ * True when the pass bailed out on the way: the engine state is put back and
+ * the worker is retiring (see oxphp_ini_retire_after_bailout()), but the frames
+ * user code had on the VM stack are the caller's to give back.
+ *
+ * SYNC: php-src/Zend/zend_ini.c zend_ini_deactivate() */
+static bool oxphp_fiber_end_request_ini(const oxphp_request_fiber *fiber) {
+    bool bailed = false;
+    oxphp_ini_run_pass(false,
+                       oxphp_request_in_flight_besides(fiber->owner_sched, fiber, false),
+                       &bailed);
+    return bailed;
+}
+
+/* Defined with the rest of the session bookkeeping below. */
+static bool oxphp_session_is_only_in(const oxphp_request_fiber *self);
+
+/* File a bailout from a window past the handler's own that runs user code on
+ * the loop's frame — a save handler as the session is written, a destructor an
+ * ini handler drops as the request's ini is put back — and give back what it
+ * abandoned. One place, so the windows cannot file the same ending differently.
+ *
+ * Filed as the shutdown windows file theirs. A fatal there is the request coming
+ * apart, and one that does it every time is what the breaker is for. A deadline
+ * that ran out is a cancellation. So is the write path's own claim: a stream
+ * whose client left is ended by a warning or an echo the window produces, which
+ * is the client leaving and not the handler failing — filed as the claim above
+ * the final flush files it.
+ *
+ * CG(unclean_shutdown) is raised again because the window may have lowered it
+ * on its way out, and the recovery gives the abandoned frames back the safe way
+ * only while it is up. */
+static void oxphp_file_late_bailout(oxphp_request_fiber *fiber,
+                                    const oxphp_vm_stack_mark *mark,
+                                    const char *source) {
+    bool came_apart = fiber->handler_failed;
+    if (!came_apart && (PG(connection_status) & PHP_CONNECTION_TIMEOUT)) {
+        fiber->cancelled = true;
+    }
+    if (fiber->cancel_bailout_pending) {
+        fiber->cancel_bailout_pending = false;
+        if (!fiber->fatal_reported) {
+            fiber->cancelled = true;
+        }
+    }
+    fiber->handler_failed = true;
+    if (!came_apart) {
+        fiber->failure_source = source;
+    }
+    CG(unclean_shutdown) = 1;
+    oxphp_recover_from_bailout(mark);
+}
+
+/* Report an exception left standing once the handler has returned — by a
+ * shutdown function, or by a save handler as the session is written — the way
+ * the loop's shutdown window explains below, and mark the request as one that
+ * threw. */
+static void oxphp_report_late_exception(oxphp_request_fiber *fiber,
+                                        const oxphp_vm_stack_mark *mark) {
+    if (!EG(exception)) {
+        return;
+    }
+    if (!zend_is_unwind_exit(EG(exception)) && !zend_is_graceful_exit(EG(exception))) {
+        fiber->handler_threw = true;
+    }
+    zend_try {
+        zend_exception_error(EG(exception), E_ERROR);
+    } zend_catch {
+        oxphp_recover_from_bailout(mark);
+    } zend_end_try();
+    oxphp_discard_pending_exception();
+}
+
 /* Defined with the rest of the task scheduler; used by the task arm of the loop
  * below, which is the one place the two halves of this file meet. */
 static void task_capture_exception(oxphp_request_fiber *fiber);
@@ -1686,6 +2318,30 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
          * flight by the previous one on this fiber. zend_fiber_execute does this
          * once on entry; the loop needs it per iteration. */
         EG(jit_trace_num) = 0;
+
+        /* With nothing of anyone else's in the travelling directives. A resume
+         * sweeps on its way in (see oxphp_fiber_unpark_ini()); a fiber's first
+         * request is not entered through one. Not for a task: the task
+         * scheduler parks no ini, so what stands on a task thread belongs to
+         * the tasks suspended on it, and sweeping would take a suspended
+         * task's settings from under it. */
+        if (!fiber->task_mode) {
+            oxphp_ini_sweep();
+        }
+
+        /* And at the reporting level the directive gives, rather than the one
+         * the previous request on this fiber left. The engine carries the live
+         * level with each fiber across a switch, so a fiber that parks at the
+         * end of one request and is resumed for the next comes back at whatever
+         * error_reporting() last set on it. zend_fiber_execute seeds it from the
+         * directive once on entry, for the same reason; this repeats that. */
+        {
+            zend_long error_reporting = INI_INT("error_reporting");
+            if (!error_reporting && !INI_STR("error_reporting")) {
+                error_reporting = E_ALL;
+            }
+            EG(error_reporting) = (int) error_reporting;
+        }
 
         /* Where the VM stack stands before this iteration runs any PHP. A
          * normal return unwinds to here by itself, but a bailout does not: it
@@ -2052,17 +2708,7 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
          * one between two fatals must not wipe their count either. Unwind and
          * graceful exit are excluded, as they are in the handler: exit() from a
          * shutdown function lands here too and is a request that finished. */
-        if (EG(exception)) {
-            if (!zend_is_unwind_exit(EG(exception)) && !zend_is_graceful_exit(EG(exception))) {
-                fiber->handler_threw = true;
-            }
-            zend_try {
-                zend_exception_error(EG(exception), E_ERROR);
-            } zend_catch {
-                oxphp_recover_from_bailout(&mark);
-            } zend_end_try();
-            oxphp_discard_pending_exception();
-        }
+        oxphp_report_late_exception(fiber, &mark);
 
         /* Everything the request itself had to do is done, so a cancellation
          * the write path claimed up to here ended a request that still had work
@@ -2128,12 +2774,91 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
          * being served. Drop the claim rather than file it. */
         fiber->cancel_bailout_pending = false;
 
+        /* An output callback or a header callback can throw in the flush, and
+         * under the loop's frame the engine neither reports nor rethrows it.
+         * Reported now, as the engine reports it at this step of its own
+         * request shutdown, and not after the session write below: with an
+         * exception pending, every call into userland returns at once without
+         * running, so a user save handler would be neither written nor closed —
+         * the data lost and the store's lock held until it expires.
+         *
+         * SYNC: php-src/Zend/zend_execute_API.c zend_call_function() */
+        oxphp_report_late_exception(fiber, &mark);
+
+        /* Give back the session, when it is this request's alone to give, the
+         * way php_request_shutdown gives it back: the session module's own
+         * shutdown writes it, and only after that are the ini directives put
+         * back. So the write runs under the request's settings — the
+         * serialize_precision its floats are written with, the socket timeouts a
+         * save handler that talks to a database or a cache relies on, the
+         * error_log a failed write is reported to — and as part of the request,
+         * which is where a user save handler's errors belong. Before the claims
+         * are released, too, so a handler writing over a connection this request
+         * holds still holds it.
+         *
+         * A session another request on this worker is still in is left where it
+         * is, for the scheduler to give back once nobody is (see
+         * oxphp_session_release_if_idle()); its write then runs under whatever
+         * the thread's settings are at that point.
+         *
+         * The release guards each step that runs user code on its own, so a
+         * fatal inside a save handler comes back here rather than past this
+         * frame — but with the VM left where the fatal left it, which is the
+         * state every other window in this loop recovers from. zend_bailout()
+         * clears EG(current_execute_data) on its way, and nothing else here
+         * does, so that is how one is told apart.
+         *
+         * SYNC: php-src/main/main.c php_request_shutdown() steps 5 and 9;
+         *       php-src/Zend/zend.c _zend_bailout() */
+        if (oxphp_session_is_only_in(fiber)) {
+            zend_execute_data *frame = EG(current_execute_data);
+            /* Parking blocked for the whole release: the session is on the
+             * thread until the release ends, and a save handler that talks to
+             * a store sleeps or reads inside its write. Parking there would
+             * admit the next request into this client's session and then
+             * clear it from under that request on waking. Blocked, our suspend
+             * points take their blocking path. Ours only, not the engine's
+             * switch block, which would make a handler's own Fiber::start()
+             * throw. Guarded as a whole, not only where it runs user code:
+             * what the release allocates for itself can run into memory_limit,
+             * and a bailout from there past the lowering would leave parking
+             * blocked on this worker for good. */
+            oxphp_park_blocked++;
+            zend_try {
+                oxphp_session_release_request_state();
+            } zend_end_try();
+            oxphp_park_blocked--;
+            if (EG(current_execute_data) != frame) {
+                oxphp_file_late_bailout(fiber, &mark, "bailout writing the session");
+            }
+            /* A save handler that throws leaves the exception here, where a
+             * shutdown function's would be, and it is reported the same way. */
+            oxphp_report_late_exception(fiber, &mark);
+        }
+
         /* The request is over, so any socket stream this fiber claimed is free
          * for the next fiber that wants it. Here rather than in finalize because
          * this point is past every zend_try above and inside none of them: it is
          * reached on every outcome, an uncaught exception and a bailout
          * included, and it is the one place both request dispatch paths share. */
         oxphp_claim_release_fiber(fiber);
+
+        /* And its ini changes end with it, at the point the engine ends them
+         * in any other SAPI — after the shutdown functions, the final flush and
+         * the session write, which all still run under the request's own
+         * settings.
+         *
+         * A handler can run user code — assert.callback's drops the callback
+         * it holds, and with it the last reference to an object with a
+         * destructor — so a bailout there is filed as one in a save handler
+         * is — and retires the worker, for the reason given at
+         * oxphp_ini_retire_after_bailout() — and an exception that destructor
+         * throws is reported as a save handler's is: under the loop's frame the
+         * engine neither reports nor rethrows it. */
+        if (oxphp_fiber_end_request_ini(fiber)) {
+            oxphp_file_late_bailout(fiber, &mark, "bailout putting back ini");
+        }
+        oxphp_report_late_exception(fiber, &mark);
 
         oxphp_current_fiber = NULL;
 
@@ -2308,6 +3033,8 @@ static __thread uint64_t oxphp_filter_storage_gen = 0;
  * resets on that same thread. */
 __thread uint32_t oxphp_filter_storage_readers = 0;
 
+__thread uint32_t oxphp_park_blocked = 0;
+
 static void oxphp_reset_filter_input_storage(void) {
     static __thread zend_module_entry *filter_module = NULL;
     static __thread bool filter_module_resolved = false;
@@ -2413,6 +3140,10 @@ void oxphp_fiber_save_php_state(oxphp_request_fiber *fiber) {
      * this one back is unaffected. */
     fiber->php_state.shutdown_functions = BG(user_shutdown_function_names);
     BG(user_shutdown_function_names) = NULL;
+
+    /* Step 1e: and the ini directives it changed. Ahead of step 2, so that
+     * anything a handler reports on the way is logged against this request. */
+    oxphp_fiber_park_ini(fiber);
 
     /* Step 1d: and the profiler observer's share of the request, by the same
      * move as the three above. Ahead of step 2 rather than after it, because
@@ -2730,6 +3461,10 @@ void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber) {
      * per-thread pointer last. Without this, cancellation under fiber
      * multiplexing targets the wrong request. */
     oxphp_bridge_set_cancel_ptr(fiber->request_cancel_ptr);
+
+    /* And its ini directives, last: the Rust ctx restored above is what a
+     * handler's report is logged against. */
+    oxphp_fiber_unpark_ini(fiber);
 }
 
 /* ─── Shared per-request superglobal rebuild ───────────── */
@@ -3088,13 +3823,17 @@ void oxphp_session_release_request_state(void) {
             php_session_flush(1);
         } zend_end_try();
     }
-    /* Unguarded, as upstream leaves it: whatever objects the request left in
-     * $_SESSION have had their destructors run by the time a release gets here,
-     * so this drop frees memory and runs no PHP. The step below is the one
-     * upstream does guard, and for the opposite reason.
+    /* Guarded, where upstream leaves it bare. Upstream reaches this after the
+     * request's destructors have run, so the drop only frees memory; a worker
+     * runs no such step per request, and a script that unset($_SESSION) leaves
+     * this the last reference to what was in it, so the drop can run a
+     * __destruct — and a bailout out of one must not jump past the caller's
+     * lowering of oxphp_park_blocked.
      * SYNC: php-src/ext/session/session.c php_rshutdown_session_globals() */
     if (!Z_ISUNDEF(PS(http_session_vars))) {
-        zval_ptr_dtor(&PS(http_session_vars));
+        zend_try {
+            zval_ptr_dtor(&PS(http_session_vars));
+        } zend_end_try();
         ZVAL_UNDEF(&PS(http_session_vars));
     }
 
@@ -3177,8 +3916,10 @@ void oxphp_session_release_request_state(void) {
      * The name is built outside the zend_try and released after it, where a
      * bailout lands, so neither outcome leaks it.
      *
-     * What a save handler leaves in EG(exception) and PG(last_error_*) is
-     * cleared by the step that follows this call in either caller.
+     * What a save handler leaves in EG(exception) is reported by the fiber
+     * loop when it is the caller, and cleared by the step that follows the
+     * call in the other two; PG(last_error_*) is reset for each request as it
+     * starts.
      * SYNC: php-src/Zend/zend_hash.c zend_hash_del_ind() vs zend_hash_str_del_ind() */
     zend_string *session_var_name = ZSTR_INIT_LITERAL("_SESSION", 0);
     zend_try {
@@ -3226,23 +3967,19 @@ static void oxphp_session_note_use(oxphp_request_fiber *fiber, bool present_at_e
     }
 }
 
-/* Is any request this worker is carrying still in the session?
+/* Is there a session standing on this thread that no request but `self` is in?
  *
- * A fiber already flagged completed is one whose request is over and whose
- * finalize has not run yet, so it is not in anything. Its flag goes with the
- * struct to the free list and is cleared when the struct is handed to the next
- * request. */
-static bool oxphp_session_in_use(const oxphp_fiber_scheduler *sched) {
-    for (const oxphp_request_fiber *fiber = sched->fibers_head; fiber; fiber = fiber->next) {
-        if (!fiber->completed && fiber->session_touched) {
-            return true;
-        }
-    }
-    return false;
+ * `self` is the request that is finishing, so its own flag is not consulted: it
+ * may be in the session without having been noted yet — the flag is brought up
+ * to date between slices, and this is asked at the end of one. */
+static bool oxphp_session_is_only_in(const oxphp_request_fiber *self) {
+    return oxphp_session_state_present()
+        && !oxphp_request_in_flight_besides(self->owner_sched, self, true);
 }
 
 static void oxphp_session_release_if_idle(const oxphp_fiber_scheduler *sched) {
-    if (oxphp_session_state_present() && !oxphp_session_in_use(sched)) {
+    if (oxphp_session_state_present()
+        && !oxphp_request_in_flight_besides(sched, NULL, true)) {
         oxphp_session_release_request_state();
     }
 }

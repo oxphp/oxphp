@@ -244,6 +244,16 @@ typedef struct {
      * Owned while parked; NULL when the request registered none, which is what
      * the engine's own empty state is. */
     HashTable *shutdown_functions;
+
+    /* The ini directives this request changed, name to value, taken off the
+     * thread while it is parked. The engine keeps every directive's live value
+     * on the thread, and ignore_user_abort, error_reporting, precision and the
+     * rest are read by whichever request is running — so a change left standing
+     * here would be the neighbour's setting in the window and whatever the
+     * neighbour set would be this request's on resume. See
+     * oxphp_fiber_park_ini. Owned while parked; NULL when the request changed
+     * nothing that travels with it, which is the common case. */
+    HashTable *ini_parked;
 } oxphp_fiber_php_state;
 
 /* ─── Request Fiber ────────────────────────────────────── */
@@ -395,16 +405,15 @@ typedef struct _oxphp_request_fiber {
      * The third is not a fallback for the first. A request cancelled while its
      * fiber was suspended reaches it when it resumes and writes, because its
      * interrupt was raised against a worker that was not running it or never
-     * raised at all — the request was still queued. So does a request the
-     * interrupt handler saw and declined to unwind: a streaming one whose
-     * ignore_user_abort() was up, which the write path ends anyway because it
-     * does not read that flag, and in traditional mode any request holding it.
-     * What ends a suspended request that never writes again is the drain sweep,
-     * which sets drain_kill.
+     * raised at all — the request was still queued. What ends a suspended
+     * request that never writes again is the drain sweep, which sets
+     * drain_kill.
      *
      * A client that hangs up on a non-streaming worker-mode request reaches
      * neither writer now: both arms return without unwinding so the script can
-     * run its own cleanup. See oxphp_mark_cancelled_bailout.
+     * run its own cleanup. Neither does one on a request that called
+     * ignore_user_abort(true), in any mode, until a drain turns hard. See
+     * oxphp_mark_cancelled_bailout.
      * A supervisor giving up on a stuck request is deliberately not marked — see
      * the interrupt handler for why that one still counts. The write path has
      * one rule of its own on top of that, which the interrupt handler does not
@@ -544,6 +553,14 @@ extern __thread oxphp_request_fiber *oxphp_current_fiber;
  * under such a frame instead of freeing what it is holding. Raised and lowered by
  * the filter_input_array() guard in oxphp_sapi.c; read by the reset. */
 extern __thread uint32_t oxphp_filter_storage_readers;
+
+/* Raised while the server runs user code on a request fiber that must not park —
+ * the session write at the end of a request, and the moves of its ini
+ * directives, whose handlers can run a destructor. Every suspend point of ours takes
+ * its blocking path while it is up, as it does under zend_fiber_switch_blocked().
+ * Not the engine's switch block: that one also makes Fiber::start() and the rest
+ * throw, and a save handler is free to run its store client on userland fibers. */
+extern __thread uint32_t oxphp_park_blocked;
 
 /* fiber_id of the currently executing request fiber, 0 outside fiber context.
  * Registered into the bridge at MINIT (oxphp_bridge_set_current_fiber_id_fn)
