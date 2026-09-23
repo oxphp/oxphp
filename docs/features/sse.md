@@ -13,7 +13,7 @@ OxPHP streams real-time data to clients using the Server-Sent Events protocol wi
 2. The first call to `oxphp_stream_flush()` sends the HTTP headers to the client and enters streaming mode. The client connection remains open.
 3. Each subsequent call to `oxphp_stream_flush()` flushes buffered output as a new chunk, delivering it to the client immediately.
 4. OxPHP maintains an internal buffer of up to 64 chunks between the PHP worker and the client. When the buffer is full — because a slow client has not consumed earlier chunks — `oxphp_stream_flush()` blocks until space becomes available. This prevents unbounded memory growth.
-5. When the PHP script finishes, OxPHP closes the connection gracefully. If the client disconnects mid-stream, OxPHP detects the closed channel on the next flush, sets PHP's `connection_aborted()` flag to `true`, and arms a graceful bailout — portable loops that check `connection_aborted()` exit cleanly through their normal termination path, while loops that don't check it are still terminated by an implicit bailout on the following flush.
+5. When the PHP script finishes, OxPHP closes the connection gracefully. If the client disconnects mid-stream, OxPHP detects the closed channel on the next flush, sets PHP's `connection_aborted()` flag to `true`, and arms a graceful bailout — portable loops that check `connection_aborted()` exit cleanly through their normal termination path, while loops that don't check it are still terminated by an implicit bailout on the following flush — unless the script has called `ignore_user_abort(true)`, in which case it keeps running and the check is the only thing that ends the loop (see below).
 
 > **Note:** Keep event payloads small to maintain smooth throughput. Large payloads can fill the 64-chunk buffer quickly, causing PHP to block on each flush.
 
@@ -82,6 +82,8 @@ try {
 ```
 
 If the script never checks `connection_aborted()`, OxPHP still terminates it via an implicit bailout on the next flush after the client disconnects — but `finally` blocks following code paths that bypass the flush call may not run. Prefer the explicit check for code that holds external resources.
+
+A script that calls `ignore_user_abort(true)` is not terminated this way: it keeps running after the client disconnects, what it writes is discarded, and `connection_aborted()` still reports the disconnect. That is the same contract as under any other SAPI, and it means the loop needs a bound of its own — a stream that has asked to outlive its client and neither checks `connection_aborted()` nor ends by itself holds its worker until the server shuts down. The call applies to the request that makes it and to no other request on the same worker. The value a request *starts* with counts the same way, though: `ignore_user_abort = On` in `php.ini`, or an `ignore_user_abort(true)` in a worker script's bootstrap — the code before its request loop, which some worker examples begin with — is the baseline every request starts from, so every stream served there behaves as if it had made the call and needs its `connection_aborted()` check.
 
 ### Using native flush()
 
@@ -195,7 +197,7 @@ services:
       PHP_WORKERS: "32"
 ```
 
-Each streaming script should call `set_time_limit(0)` at the top so the per-request timer does not fire mid-stream. This keeps the global `max_execution_time` in effect for non-SSE requests.
+Each streaming script should call `set_time_limit(0)` at the top so the per-request timer does not fire mid-stream. This keeps the global `max_execution_time` in effect for non-SSE requests — except in worker mode, where the limit belongs to the worker thread while it has other requests in flight, as it does for as long as a stream is open (see [Worker Mode](worker-mode.md#what-gets-reset-between-requests)).
 
 ## Best Practices
 

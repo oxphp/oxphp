@@ -8,13 +8,11 @@ require_once __DIR__ . '/breaker_probe.php';
 // Three fatals raised on requests whose clients had already gone: the worker is
 // retired and this request is answered by its replacement.
 //
-// The counterpart of the probe above, and the reason the mark on the write path
-// asks whether a fatal was reported rather than whether the request had been
-// flagged as failed. Nothing flags it until the bailout is caught, which is
-// after the write that carries the fatal's message — so the flag would answer
-// only for a fatal from an earlier window of the same request, and every fatal
-// dying at its own error output would be laundered into a cancellation. A worker
-// running an application that fatals on every request would then never be
+// The counterpart of the probe above. The fatal's message is written while the
+// cancel cell holds the client's departure, and in worker mode that write lets a
+// request that is not streaming go on — so the fatal runs its course and is
+// filed as what it is. Filed as a cancellation instead, it would be neutral, and
+// a worker running an application that fatals on every request would never be
 // retired for as long as clients kept giving up on it, which is a load shape
 // that produces cancellations by the hundred.
 

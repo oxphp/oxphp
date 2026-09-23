@@ -30,19 +30,22 @@ breaker/test_breaker_throw | GET | | 500 |
 breaker/test_breaker_throw | GET | | 500 |
 breaker/test_breaker_throws_do_not_retire
 
-# Nor is a request the server ended itself. Two deadlines and a client that hung
-# up: each unwinds as a bailout, the same as a fatal, and each must be neutral —
-# a slow dependency makes every request one of these. A deadline is answered
-# 504, not 500. The abort line expects 0 because curl is the one that gives up:
-# --max-time is shorter than the fixture's sleep, so there is no response to
-# read and the runner records no status at all.
+# Nor is a request the server ended itself. Two deadlines: each unwinds as a
+# bailout, the same as a fatal, and each must be neutral — a slow dependency
+# makes every request one of these. A deadline is answered 504, not 500. Then a
+# client that hung up, which in worker mode does not end a request that is not
+# streaming: that one runs to its own end and is read as a request that
+# completed, so it cannot retire anything either. The abort line expects 0
+# because curl is the one that gives up: --max-time is shorter than the
+# fixture's sleep, so there is no response to read and the runner records no
+# status at all.
 breaker/test_breaker_timeout | GET | | 504 |
 breaker/test_breaker_timeout | GET | | 504 |
 breaker/test_breaker_abort | GET | --max-time 1 | 0 |
 breaker/test_breaker_cancels_do_not_retire
 
 # Neutral is neither of the two things it could be confused with. A cancellation
-# between fatals must not clear the run — otherwise one disconnect every other
+# between fatals must not clear the run — otherwise one deadline every other
 # request keeps a worker that fatals on every one of them alive indefinitely.
 # Two fatals, a deadline, a third fatal: the worker goes.
 breaker/test_breaker_fatal | GET | | 500 |
@@ -146,43 +149,48 @@ breaker/test_breaker_abort_ignored | GET | --max-time 1.5 | 0 |
 breaker/test_breaker_abort_ignored_neutral
 
 # The same three hang-ups, on a handler holding an object whose destructor
-# throws. Each request now reaches its own return, which is where what the
-# handler held is given back and the destructor runs: the engine reports its
-# throw as an uncaught exception, and that report must not turn a cancellation
-# into a failure.
+# throws. Each request reaches its own return, which is where what the handler
+# held is given back and the destructor runs: the engine reports its throw as an
+# uncaught exception, and the request is filed as that — neutral, as the throws
+# block above files it — not as a failure. None of the three is a cancellation
+# any more; the stream that still is one, and the give-back its destructor runs
+# in, is covered by fibers/test_write_cancel_releases_frames.
 breaker/test_breaker_abort_ignored_dtor_throw | GET | --max-time 1.5 | 0 |
 breaker/test_breaker_abort_ignored_dtor_throw | GET | --max-time 1.5 | 0 |
 breaker/test_breaker_abort_ignored_dtor_throw | GET | --max-time 1.5 | 0 |
 breaker/test_breaker_abort_ignored_dtor_throw_neutral
 
-# And the boundary of that case. A fatal raised on a request whose client has
-# already gone displays its message through the same write path, which is
-# reading a cancel cell that already holds the client's departure. It must still
-# count: the engine
-# state a fatal leaves is not put back by the client leaving afterwards, and
-# reading it as a cancellation would keep a worker that fatals on every request
-# in the pool for as long as clients kept hanging up. No status expected, for
-# the same reason as the aborts above: the client is gone before the response.
+# And a fatal on a request whose client has already gone. It must count: the
+# engine state a fatal leaves is not put back by the client leaving first, and
+# excusing it would keep a worker that fatals on every request in the pool for as
+# long as clients kept hanging up. In worker mode a client leaving does not make
+# a request that is not streaming a cancellation at all, so nothing here stands
+# between the fatal and the count; what this pins is that nothing starts to. No
+# status expected, for the same reason as the aborts above: the client is gone
+# before the response.
 breaker/test_breaker_abort_ignored_fatal | GET | --max-time 1.5 | 0 |
 breaker/test_breaker_abort_ignored_fatal | GET | --max-time 1.5 | 0 |
 breaker/test_breaker_abort_ignored_fatal | GET | --max-time 1.5 | 0 |
 breaker/test_breaker_abort_ignored_fatal_counts
 
 # One abort on its own, against a worker free to take it, so the interrupt
-# handler is reached with a running request and asked to leave it alone. This
-# one's probe reads a marker on the far side of the sleep, which only a request
-# whose interrupt handler honoured the setting ever writes, and a second on the
-# far side of the write after it. It stands apart from
-# the three above because it rests on nothing but its own request: that each of
-# those is still waited for when the worker reaches it is a matter of timing.
+# handler is reached with a running request. This one's probe reads a marker on
+# the far side of the sleep and a second on the far side of the write after it:
+# in worker mode a request that is not streaming is not ended by its client
+# leaving, at the interrupt or at the write, whatever ignore_user_abort() says.
+# What that setting decides is tested on a stream, in the fibers suite. It
+# stands apart from the three above because it rests on nothing but its own
+# request: that each of those is still waited for when the worker reaches it is
+# a matter of timing.
 breaker/test_breaker_abort_ignored | GET | --max-time 1 | 0 |
 breaker/test_breaker_abort_ignored_honoured
 
 # And the other side of that write: a request that got all the way to its own
 # end, whose response the server then could not deliver. It buffers its output,
 # so the first write of the whole request is the flush the server does after the
-# handler is through — and that flush meets the same departed client. It has to
-# clear the run all the same, which only the arrangement below can show: two
+# handler is through — and that flush meets the same departed client, which does
+# not end a request that is not streaming. It has to clear the run all the same,
+# which only the arrangement below can show: two
 # fatals, this, then a third fatal. Cleared, the third fatal stands alone and the
 # worker serves on; carried, three failures stand in a row and the worker goes.
 breaker/test_breaker_fatal | GET | | 500 |
@@ -192,15 +200,23 @@ breaker/test_breaker_fatal | GET | | 500 |
 breaker/test_breaker_abort_buffered_clears
 
 # And the same client leaving, followed by a fatal rather than by nothing. The
-# cancellation is established first — the echo meets the departed client, as in
-# the block above — and only then does the shutdown function fatal. Which of the
-# two the request is filed as is the whole question, and it has to be the fatal:
+# client is gone first — the echo goes to nobody, as in the block above — and
+# only then does the shutdown function fatal. The request is filed as the fatal:
 # the client stopping its wait says nothing about the engine state the next
 # request on this worker would inherit. Three of them retire it.
 breaker/test_breaker_abort_then_shutdown_fatal | GET | --max-time 1.5 | 0 |
 breaker/test_breaker_abort_then_shutdown_fatal | GET | --max-time 1.5 | 0 |
 breaker/test_breaker_abort_then_shutdown_fatal | GET | --max-time 1.5 | 0 |
 breaker/test_breaker_abort_then_shutdown_fatal_counts
+
+# A fatal as the session is written, after the request has returned and its
+# shutdown functions have run. It is the request coming apart all the same, and
+# three in a row retire the worker. The probe above this block completed, so the
+# run starts from zero.
+breaker/test_breaker_session_write_fatal | GET | | 500 |
+breaker/test_breaker_session_write_fatal | GET | | 500 |
+breaker/test_breaker_session_write_fatal | GET | | 500 |
+breaker/test_breaker_session_write_retires
 
 # Requests whose clients leave while they are still waiting in the queue. Nobody
 # is left to read what they would produce, so the worker that reaches them

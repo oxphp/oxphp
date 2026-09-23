@@ -2,10 +2,13 @@
 # Abort-storm rig: does the pool still serve after rounds of clients hanging up
 # mid-request, with a worker whose functions are observed?
 #
-# Each hangup ends its request in a fatal, and a fatal returns from nothing —
+# A hangup used to end its request in a fatal, and a fatal returns from nothing —
 # every observed call it abandons is left open on the chain the engine keeps per
 # fiber. What that costs, and why the profiler has to be on for the rig to mean
-# anything, is in the worker's own bailout recovery.
+# anything, is in the worker's own bailout recovery. A worker-mode request that
+# is not streaming, as this rig's is not, now runs to its own end when its
+# client leaves, so a storm no longer reaches that path; the rig still says
+# whether the pool drains after one.
 #
 # Not part of ./tests/run_all.sh: a round is ten seconds and the pool does not
 # fail on every run, so this is a rig to reach for when the pool stops draining

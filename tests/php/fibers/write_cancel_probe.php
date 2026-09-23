@@ -123,18 +123,21 @@ if (!function_exists('write_cancel_active_connections')) {
         fclose($sock);
         $t->assertTrue("$label: the inner request was parked when its client left", $parked);
 
-        // The count drops once the connection's request has been dropped with it,
-        // which is what marks that request cancelled. Still parked at that reading
-        // means the cancellation reached it during the park, not after it had
-        // moved on.
+        // The count drops once the connection's request has been dropped with it.
+        // For a request that has not sent its headers that is what marks it
+        // cancelled, and still parked at that reading means the cancellation
+        // reached it during the park, not after it had moved on. A stream that
+        // has sent them is not marked: its client leaving is found by its next
+        // flush.
         $gone = write_cancel_wait(
             static fn (): bool => write_cancel_active_connections() === $before
                 && OxphpWriteCancelProbe::$stage === 'parked'
         );
         $t->assertTrue("$label: the server saw the client leave while the inner request was parked", $gone);
 
-        // Marking the request cancelled also raises the worker's interrupt flag,
-        // and the flag is acted on by whichever request runs PHP next. The reading
+        // Marking the request cancelled, where it was marked, also raises the
+        // worker's interrupt flag, and the flag is acted on by whichever request
+        // runs PHP next. The reading
         // above already returned from calls in this request after it was raised;
         // this is one more, so the flag is spent here rather than in the inner
         // request when it resumes — there it would end the request with an error

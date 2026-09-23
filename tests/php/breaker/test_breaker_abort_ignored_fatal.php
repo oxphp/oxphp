@@ -4,24 +4,23 @@ declare(strict_types=1);
 
 // A fatal on a request whose client has already gone.
 //
-// This is the boundary of the case above it. What ends a request cancelled on
-// the write path is a bailout carrying no message, and the mark that keeps such
-// a request neutral for the breaker sits immediately in front of that bailout —
-// but the message a fatal displays on its way out is a write like any other, so
-// a fatal raised while the cancel cell is set reaches that mark first, before
-// anything on the request says it is dying. Taking it for a cancellation would
-// file the request as one the server ended, and an application fataling on every
-// request would then keep its worker for as long as clients kept hanging up. A
-// fatal is not put right by the client leaving afterwards: the engine has
-// abandoned frames on the VM stack either way, and the next request on this
-// worker inherits them.
+// This is the boundary of the case above it. The message a fatal displays on
+// its way out is a write like any other, and it reaches the write path's
+// cancellation check while the cancel cell holds the client's departure. In
+// worker mode that check lets a request that is not streaming go on, so the
+// fatal runs its course and is filed as a fatal; this pins that it stays so.
+// Taking it for a cancellation would file the request as one the server ended,
+// and an application fataling on every request would then keep its worker for
+// as long as clients kept hanging up. A fatal is not put right by the client
+// leaving first: the engine has abandoned frames on the VM stack either way,
+// and the next request on this worker inherits them.
 //
-// ignore_user_abort(true) plus a sleep longer than the suite line's --max-time
-// is the deterministic way to reach the fatal with the cell already set: the
-// interrupt handler records the disconnect for such a request and returns
-// without unwinding it. Nothing may write between the sleep and the fatal — an
-// echo there would be ended by the cancellation check itself, and the fatal
-// would never be raised at all.
+// A sleep longer than the suite line's --max-time is the deterministic way to
+// reach the fatal with the cell already set: the interrupt handler records the
+// disconnect and returns without unwinding the request. The
+// ignore_user_abort(true) call is kept from when the setting was what let the
+// request through; in worker mode, outside a stream, it no longer changes the
+// outcome.
 //
 // The fatal is a class declared twice, bound at runtime so both declarations are
 // executed rather than the file being rejected while it compiles — the same

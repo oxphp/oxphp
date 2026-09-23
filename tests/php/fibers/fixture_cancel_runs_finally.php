@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-// Inner request for fibers/test_cancel_skips_userland_cleanup.
+// Inner request for fibers/test_cancel_runs_userland_cleanup.
 //
 // Calls the guarded render with the key its test gave it, and does nothing
 // else. The key comes from the request rather than being fixed here because

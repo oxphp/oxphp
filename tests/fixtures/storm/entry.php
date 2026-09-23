@@ -2,8 +2,8 @@
 
 // Worker entry for the abort-storm rig. One route, and a body big enough that
 // a client which hangs up mid-request usually does so while the response is
-// being built — which is the point of the rig: each of those hangups ends the
-// request in a fatal, and it is fatals under an observer that the rig is about.
+// being built. Each of those hangups used to end the request in a fatal; the
+// request now runs to its own end, and the rig reads whether the pool drains.
 
 oxphp_worker(function () {
     header('Content-Type: application/json');

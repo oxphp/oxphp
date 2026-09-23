@@ -21,13 +21,13 @@ require_once __DIR__ . '/write_cancel_probe.php';
 // because ending it there is a longjmp, a longjmp never re-enters the engine,
 // and a `finally` is reached only from inside it — so userland's own cleanup
 // was skipped on a worker that outlives the request it belonged to. See
-// fibers/test_cancel_skips_userland_cleanup for what that stranded. The
+// fibers/test_cancel_runs_userland_cleanup for what that stranded. The
 // destructor below was never the gap: it ran either way, and what moved is who
 // runs it. The reasons that still end a request where it stands — timeout,
 // drain, a supervisor giving up — still take the unwinding path, as does a
 // client leaving a request that is streaming, whose loop has no other bound.
-// The worker still has to give its frames back on that path; nothing in this
-// file reaches it any more.
+// The worker still has to give its frames back on that path, and the two stream
+// cases at the end of this file are what reach it.
 
 $t = new TestCase('write_cancel_releases_frames', 'fibers');
 
@@ -47,9 +47,9 @@ if (write_cancel_stage($t, 'handler', '')) {
     $t->assertTrue('handler: what the abandoned frame was holding did not outlive its request', $report['freed']);
 }
 
-// From a shutdown function, after the handler had a fatal. The write ends the
-// shutdown machinery and no later shutdown function runs, so the release is
-// read directly, for as long as the request could take to get there.
+// From a shutdown function, after the handler had a fatal. The fatal stops the
+// script before the reporting shutdown function is registered, so the release
+// is read directly, for as long as the request could take to get there.
 if (write_cancel_stage($t, 'shutdown', '?in=shutdown')) {
     $freed = write_cancel_wait(static fn (): bool => OxphpWriteCancelProbe::freed(), 6.0);
 
@@ -76,6 +76,40 @@ if (write_cancel_stage($t, 'destructor', '?in=destructor')) {
     // frame — not by the worker's cleanup afterwards, which would see
     // 'before-write'.
     $t->assertSame('destructor: by the request, at the return that dropped it', OxphpWriteCancelProbe::$stageAtDestruct, 'after-write');
+}
+
+// A stream, which is still ended at the write it resumes into. The request does
+// not get to its return, so what its frame held is given back by the worker.
+if (write_cancel_stage($t, 'stream', '?in=stream')) {
+    $freed = write_cancel_wait(static fn (): bool => OxphpWriteCancelProbe::freed(), 6.0);
+
+    $t->assertSame('stream: the write it resumed into ended it', OxphpWriteCancelProbe::$stage, 'before-write');
+    $t->assertTrue('stream: what the abandoned frame was holding did not outlive its request', $freed);
+    // Which path it took. A stream is also ended when an interrupt finds its
+    // client gone, and that path gives the frames back too, so the two above
+    // pass on it as well; it is told apart by the fatal it reports, which the
+    // write does not.
+    $reported = write_cancel_wait(static fn (): bool => OxphpWriteCancelProbe::$report !== null, 6.0);
+    $t->assertTrue('stream: the inner request reported from its shutdown function', $reported);
+    $t->assertNull(
+        'stream: ended by the write, not by an interrupt',
+        (OxphpWriteCancelProbe::$report ?? ['last_error' => 'no report'])['last_error']
+    );
+}
+
+// The same, holding an object whose destructor throws. The destructor runs
+// during the give-back, and its throw ends that give-back where it stands — what
+// is left stays allocated, as the changelog says — but nothing more: this
+// request, on the same worker, is still here to read it, and so is the worker.
+if (write_cancel_stage($t, 'stream-throw', '?in=stream-throw')) {
+    $ran = write_cancel_wait(static fn (): bool => OxphpWriteCancelProbe::$stageAtDestruct !== null, 6.0);
+
+    $t->assertTrue('stream-throw: its destructor ran', $ran);
+    $t->assertSame(
+        'stream-throw: after the write had ended the request',
+        OxphpWriteCancelProbe::$stageAtDestruct,
+        'before-write'
+    );
 }
 
 $t->done();
