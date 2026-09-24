@@ -6604,9 +6604,11 @@ static zend_object *oxphp_worker_clone_object(zend_object *object) {
  * Centralised cancellation bailout. When a CancelReason is set on
  * the active request and EG(vm_interrupt) becomes 1, Zend calls
  * this handler at the next opcode boundary. We mirror to
- * PG(connection_status), respect ignore_user_abort for ClientAbort,
- * then bail through zend_error_noreturn — the same path as a
- * regular PHP fatal error, so registered shutdown handlers run. */
+ * PG(connection_status) and bail through zend_error_noreturn — the same
+ * path as a regular PHP fatal error, so registered shutdown handlers run.
+ * A client leaving is the exception: until the drain deadline has passed it
+ * is only recorded here, and the request is ended, if at all, at its next
+ * write. */
 
 static void (*orig_zend_interrupt_function)(zend_execute_data*) = NULL;
 
@@ -6687,31 +6689,39 @@ static void oxphp_zend_interrupt_handler(zend_execute_data *execute_data)
 
     if (reason == OXPHP_CANCEL_CLIENT_ABORT) {
         PG(connection_status) |= PHP_CONNECTION_ABORTED;
-        /* The other half of the rule oxphp_mark_cancelled_bailout() states, and
-         * the half a request meets first: this arm is reached at the next
-         * opcode boundary, the write path only at the next write. Unwinding
-         * here is a fatal rather than a bare bailout, and the fatal is the
-         * worse of the two. Neither runs `finally`, and both reach the
-         * registered shutdown functions, which run past the recovery either
-         * way — so the fatal buys nothing. What it costs is every destructor
-         * on the worker: the error callback marks the whole thread's object
-         * store as already destructed on its way to the bailout, so no object
-         * alive on that worker ever runs one again. Fixing only the write
-         * path would have left the heavier half of the defect in place.
+        /* A client leaving never ends a request here, in any mode and for any
+         * response shape. Whether it ends the request at all is decided at the
+         * request's next write, by oxphp_mark_cancelled_bailout() — which is
+         * also where PHP's own SAPIs find out: they call
+         * php_handle_aborted_connection() only when a write to the client
+         * fails, never from the middle of execution.
          *
-         * ignore_user_abort() lets a script outlive its client — but not the
-         * server. Once the drain deadline has passed, the hard kick must be
-         * able to unwind a request whose cell already holds CLIENT_ABORT
-         * (first-writer-wins), or it survives until the forced process exit.
+         * Here is the middle of execution: whatever opcode the request happens
+         * to be at, including the one between sending a command over a
+         * persistent connection (pfsockopen, a persistent Redis client)
+         * and reading its reply. Persistent resources outlive the request in
+         * every mode, so a request ended there leaves the reply in the socket,
+         * and every later request on this thread reads the reply meant for the
+         * one before it — for good. A write is the point PHP-FPM ends such a
+         * request at too, so it is the one point code written for PHP already
+         * has to live with.
          *
-         * A stream is excluded from the implicit worker-mode grace for the
-         * reason given at the write path: the client it writes to is the only
-         * bound its loop has. ignore_user_abort() is honoured for it, here and
-         * at the write path alike — the flag is the running request's own. */
-        if (!oxphp_bridge_is_drain_hard()
-            && (PG(ignore_user_abort)
-                || (oxphp_bridge_is_worker_mode()
-                    && !oxphp_bridge_is_streaming()))) {
+         * What waiting for the write costs is the rest of the request. A
+         * stream's loop is bounded by its writes, so unless it called
+         * ignore_user_abort(true) it still ends at the next one; a request
+         * that does not write again runs to its end, as it would under
+         * PHP-FPM, and can stop early through connection_aborted(), which the
+         * bit set above answers once the interrupt has reached this request
+         * (a parked one gets the bit at its next write instead). Unwinding
+         * here was also the heavier of the two endings: a fatal rather than a
+         * bare bailout, whose error callback marks every object on the thread
+         * as already destructed.
+         *
+         * A client leaving does not let a request outlive the server, though.
+         * Once the drain deadline has passed, the hard kick must be able to
+         * unwind a request whose cell already holds CLIENT_ABORT
+         * (first-writer-wins), or it survives until the forced process exit. */
+        if (!oxphp_bridge_is_drain_hard()) {
             /* The request goes on, so the interrupt is passed on as it is
              * when there is no cancellation: the reason stays set for the rest
              * of the request, and every later interrupt comes through here —
@@ -6749,8 +6759,7 @@ static void oxphp_zend_interrupt_handler(zend_execute_data *execute_data)
      * handler failed, and the unwind below is a bailout — which is what the
      * consecutive-error breaker counts. Mark it so the breaker stays neutral,
      * the way the drain already is above: a dependency gone slow makes every
-     * request run into max_execution_time, and a proxy with a short read timeout
-     * makes every request a client abort, and neither is a worker that needs
+     * request run into max_execution_time, and that is not a worker that needs
      * replacing. Three in a row would otherwise retire it and re-run the whole
      * bootstrap, over and over, for as long as the incident lasted.
      *
@@ -6761,13 +6770,16 @@ static void oxphp_zend_interrupt_handler(zend_execute_data *execute_data)
      * classifies and exports metrics), so this decides what happens when
      * something does, rather than changing anything now.
      *
-     * This is the only place a RUNNING request is unwound by a cancellation, and
-     * a worker serving requests one at a time has nothing but running requests.
+     * Every request unwound here is a RUNNING one (a write that ends a request
+     * marks it on its own path), and a worker serving requests one at a time
+     * has nothing but running requests.
      * A suspended fiber is not reached from here at all: the drain sweeps mark
      * the ones they force-resume themselves, and no other cancellation reaches a
-     * suspended fiber in the first place — client abort and the deadline are
-     * delivered by vm_interrupt, which needs an opcode boundary the fiber is not
-     * at. That gap is a known one and is not this flag's to close. */
+     * suspended fiber in the first place — the deadline is delivered by
+     * vm_interrupt, which needs an opcode boundary the fiber is not at, and
+     * what a client leaving does to a request is decided at its next write
+     * rather than here. That gap is a known one and is not this flag's to
+     * close. */
     if (oxphp_current_fiber != NULL && reason != OXPHP_CANCEL_STUCK) {
         oxphp_current_fiber->cancelled = true;
     }

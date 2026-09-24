@@ -716,8 +716,9 @@ pub fn send_streaming_headers() -> bool {
 
 /// Drain the output buffer and send it as a chunk via STREAM_TX.
 /// If `blocking_send` errors (receiver dropped → client disconnected),
-/// mark cancellation + `PG(connection_status) |= PHP_CONNECTION_ABORTED`
-/// so the next deadline check bails out and `connection_aborted()` returns true.
+/// mark the request's cancel cell and raise the interrupt, so the flush that
+/// called this asks again on its way out and, where the request is ended when
+/// its client leaves, ends it there.
 fn flush_stream_chunk() {
     STREAM_TX.with(|slot| {
         if let Some(tx) = slot.borrow().as_ref() {
@@ -1837,7 +1838,11 @@ unsafe extern "C" fn oxphp_send_headers(_sapi_headers: *mut sapi_headers_struct)
 ///
 /// Raised as `Request cancelled (<reason>)` by the interrupt handler this
 /// server installs on the engine, so the wording is ours, and this is the
-/// whole of it for the one reason that matters here.
+/// whole of it for the one reason that matters here. A client leaving does not
+/// raise it by itself — what that does to a request is decided at the
+/// request's next write, and a request ended there goes with no message — so
+/// for this reason it is reached once the drain deadline has passed with the
+/// client's departure already recorded on the request.
 const CLIENT_ABORT_FATAL: &str = "Request cancelled (client_abort)";
 
 /// Whether `msg` is that fatal, on a request that really was aborted.
