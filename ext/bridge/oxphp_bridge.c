@@ -2641,6 +2641,21 @@ void oxphp_bridge_flush(void *server_context) {
     check_cancelled_c();
     if (rust_flush) {
         rust_flush(server_context);
+        /* A flush is also where a client leaving is found out: sending to a
+         * stream whose client has gone, or probing a request that has not sent
+         * its headers yet, records CLIENT_ABORT on the way through — after the
+         * check above. The interrupt it raises does not end the request (a
+         * client leaving is acted on only at a write), so this flush is asked
+         * again rather than leaving it to the next one: the write that failed
+         * is where PHP's own SAPIs end the request, and a stream would
+         * otherwise run one more pass of its loop for nobody. Only for this
+         * reason — a drain's self-cancel on this path is ended by the
+         * interrupt, which marks it for what it is. */
+        if (ctx.cancel_ptr != NULL
+            && atomic_load_explicit(ctx.cancel_ptr, memory_order_relaxed)
+                   == OXPHP_CANCEL_CLIENT_ABORT) {
+            check_cancelled_c();
+        }
     }
 }
 
