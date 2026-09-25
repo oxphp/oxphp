@@ -12,6 +12,11 @@ declare(strict_types=1);
 set_error_handler(null);
 set_exception_handler(null);
 
+// PHP 8.6 turns session.use_strict_mode on by default, and strict mode swaps an
+// id the store has never seen for a fresh one. The id here is the client's
+// cookie, and the test reads it back, so it has to be kept.
+ini_set('session.use_strict_mode', '0');
+
 session_start();
 $_SESSION['who'] = 'the request that opened it';
 

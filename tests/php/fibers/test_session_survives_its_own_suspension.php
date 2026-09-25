@@ -24,6 +24,11 @@ require_once __DIR__ . '/session_inner_request.php';
 
 $mine = str_repeat('e5', 16);
 
+// PHP 8.6 turns session.use_strict_mode on by default, and strict mode swaps an
+// id the store has never seen for a fresh one. The id here is named by the test
+// itself, which reads it back, so it has to be kept.
+ini_set('session.use_strict_mode', '0');
+
 session_id($mine);
 session_start();
 $_SESSION['who'] = 'OUTER';

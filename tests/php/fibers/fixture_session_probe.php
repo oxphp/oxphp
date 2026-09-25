@@ -29,6 +29,11 @@ set_error_handler(static function (int $errno, string $message) use (&$notice): 
 
     return true;
 });
+// PHP 8.6 turns session.use_strict_mode on by default, and strict mode swaps an
+// id the store has never seen for a fresh one. The id here is the client's
+// cookie, and the test reads it back, so it has to be kept. Set under the handler
+// above: on a build that leaks an active session this warns too.
+ini_set('session.use_strict_mode', '0');
 $started = session_start();
 restore_error_handler();
 
