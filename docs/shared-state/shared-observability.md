@@ -50,8 +50,7 @@ Top-level snapshot: aggregate counts per type, memory, op rate, and saturation a
   "saturation": { "entries": 0.00127, "bytes": 0.00231 },
   "diagnostics": {
     "lock_diagnostics_level": "warn",
-    "cycle_detect_depth": 16,
-    "poison_strict": false
+    "cycle_detect_depth": 16
   }
 }
 ```

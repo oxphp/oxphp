@@ -365,7 +365,7 @@ In-process concurrency primitives (`OxPHP\Shared\Counter`, `Map`, `Channel`, `Mu
 | `SHARED_CYCLE_DETECT_EDGES` | `10000` | Edges walked during cycle check. Raise for dense legitimate graphs |
 | `SHARED_MAX_VALUE_SIZE` | `1048576` (1 MiB) | Per-value size cap. Inserting a larger value fails fast |
 | `SHARED_MAX_CHANNEL_BYTES` | `67108864` (64 MiB) | Per-channel total payload cap |
-| `SHARED_POISON_STRICT` | `false` | Boolean. When truthy, a panic inside a Mutex/Once closure poisons the primitive permanently instead of best-effort recovery |
+| `SHARED_POISON_STRICT` | — | Deprecated and ignored; setting it logs a startup `WARN`. It never had an effect, and there is no global poisoning policy for it to set: an exception thrown inside a `Shared\Mutex` closure never poisons the mutex, and whether a failed `Shared\Once` factory disables the cell for good is chosen per instance — pass `Once\FailureMode::Poison` to the constructor (see [Shared\Once](../shared-state/shared-once.md)) |
 | `SHARED_LOCK_DIAGNOSTICS` | `warn` (`strict` in a debug build of the binary) | Cross-thread deadlock detector for `Shared\Mutex`: `off`, `warn` (log and count cycles) or `strict` (also break them with `DeadlockException`). Lowercase only; any other value silently gives the default. See [Deadlock detector](../shared-state/shared-observability.md#deadlock-detector) |
 | `SHARED_LOCK_POLL_INTERVAL_MS` | `100` | How often the deadlock detector scans, in milliseconds. Unused when `SHARED_LOCK_DIAGNOSTICS=off` |
 | `SHARED_PREVIEW_STRING_LIMIT` | `256` | Per-string truncation in `/__ox_shared/preview` previews, in bytes (cut at a char boundary) |
