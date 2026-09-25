@@ -126,6 +126,9 @@ extern "C" {
 
     // Thread-local storage init (each worker thread must call this)
     pub fn ts_resource_ex(id: c_int, th_id: *mut c_void) -> *mut c_void;
+    // Release the calling thread's TSRM resources (each worker thread must
+    // call this before it ends)
+    pub fn ts_free_thread();
 
     // SAPI lifecycle
     pub fn sapi_startup(module: *mut sapi_module_struct);
