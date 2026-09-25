@@ -335,7 +335,7 @@ All env vars are read at startup. Defaults are sized for hundreds of entries on 
 | `SHARED_ENABLED`                | true    | Master switch. `false` registers none of the `OxPHP\Shared\*` classes. |
 | `SHARED_MAX_ENTRIES`            | 100 000 | Global cap on all Shared entries combined. Insert past this fails.    |
 | `SHARED_MAX_BYTES`              | 1 GiB   | Global cap on estimated memory across all Shared entries.             |
-| `SHARED_SOFT_LIMIT_RATIO`       | 0.7     | Start shedding lowest-priority work when usage crosses this fraction. |
+| `SHARED_SOFT_LIMIT_RATIO`       | —       | Deprecated and ignored; setting it logs a startup `WARN`. It never had an effect. For early warning, alert on `oxphp_shared_capacity_saturation` (needs `SHARED_METRICS_ENABLED`). |
 | `SHARED_CYCLE_DETECT_DEPTH`     | 16      | BFS depth during cycle check. Raise for deep legitimate graphs.       |
 | `SHARED_CYCLE_DETECT_EDGES`     | 10 000  | Edges walked during cycle check. Raise for dense legitimate graphs.   |
 | `SHARED_PREVIEW_ARRAY_LIMIT`    | 20      | Entries sampled in `/entry?id=…` previews.                            |

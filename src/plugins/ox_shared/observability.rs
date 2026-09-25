@@ -73,7 +73,6 @@ fn handle_summary(_req: &PluginInternalRequest) -> Response<ResponseBody> {
         "limits": {
             "max_entries": cfg.max_entries,
             "max_bytes": cfg.max_bytes,
-            "soft_ratio": cfg.soft_limit_ratio,
         },
         "saturation": {
             "entries": saturation_entries,
@@ -743,7 +742,6 @@ mod tests {
             enabled: true,
             max_entries: 10_000,
             max_bytes: 1 << 30,
-            soft_limit_ratio: 0.7,
             metrics_enabled: true,
             introspection_enabled: true,
             introspection_preview_enabled: true,
@@ -813,6 +811,34 @@ mod tests {
             .expect("Channel entry");
         assert_eq!(ch["tag"], 31);
         assert_eq!(ch["php_class"], "OxPHP\\Shared\\Channel");
+    }
+
+    /// `limits` reports the caps that are enforced and nothing else: a
+    /// threshold listed beside them reads as one the server acts on.
+    #[tokio::test]
+    async fn summary_limits_list_only_enforced_caps() {
+        ensure_test_registry();
+        let method = Method::GET;
+        let headers = HeaderMap::new();
+        let req = PluginInternalRequest {
+            method: &method,
+            path: "/__ox_shared/summary",
+            headers: &headers,
+            query: None,
+        };
+        let resp = handle_summary(&req);
+        assert_eq!(resp.status().as_u16(), 200);
+        let bytes = resp
+            .into_body()
+            .collect()
+            .await
+            .expect("collect body")
+            .to_bytes();
+        let v: Value = serde_json::from_slice(&bytes).expect("json");
+        let limits = v["limits"].as_object().expect("limits object");
+        let mut keys: Vec<&str> = limits.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["max_bytes", "max_entries"]);
     }
 
     #[test]

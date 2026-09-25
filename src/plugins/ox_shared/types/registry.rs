@@ -1021,7 +1021,6 @@ mod tests {
             enabled: true,
             max_entries: 100,
             max_bytes: 4096,
-            soft_limit_ratio: 0.7,
             metrics_enabled: true,
             introspection_enabled: true,
             introspection_preview_enabled: true,
