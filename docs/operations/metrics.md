@@ -147,8 +147,8 @@ Per-worker observability emitted by the worker supervisor. Each series carries a
 | Metric | Type | Description |
 |--------|------|-------------|
 | `oxphp_worker_request_age_seconds` | gauge | Age of the in-flight request on each worker, in seconds. Label: `worker_id` |
-| `oxphp_worker_long_running_total` | counter | Supervisor scans that observed a request older than the stuck threshold. Label: `worker_id` |
-| `oxphp_worker_stuck_total` | counter | Stuck-classification counter per worker. Labels: `worker_id`, `kind` (`io`, `c_call`, `cpu`) |
+| `oxphp_worker_long_running_total` | counter | Supervisor scans that observed a request older than the stuck threshold (60 seconds, fixed). Label: `worker_id` |
+| `oxphp_worker_stuck_total` | counter | Stuck-classification counter per worker. Labels: `worker_id`, `kind` (`io`, `c_call`, `cpu`). Reporting only: a request classified as stuck is not cancelled and its worker is not recycled — nothing in the server acts on it, so alert on this series |
 
 ## Queue Wait Histogram
 

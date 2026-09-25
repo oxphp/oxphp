@@ -165,7 +165,7 @@ OxPHP provides several guarantees to keep your application running reliably in p
 - **Automatic worker respawn** — OxPHP monitors the health of all PHP workers and replaces one that dies unexpectedly, without manual intervention. A static pool refills to its configured count, so the replacement is one-for-one; a dynamic pool refills only to its minimum, and a worker lost above that is regained by ordinary scale-up.
 - **Backpressure protection** — the bounded request queue prevents overload. When the server is at capacity, new requests receive a 529 response with a `Retry-After` header rather than queueing indefinitely and causing cascading timeouts.
 - **Path traversal protection** — all URL paths are sanitized before filesystem access. Percent-encoded traversal attempts, `..` segments, and paths that escape the document root are blocked.
-- **Graceful shutdown** — on SIGTERM or SIGINT (Ctrl+C), OxPHP stops accepting new connections and waits for in-flight requests to complete (up to a configurable drain timeout) before exiting.
+- **Graceful shutdown** — on SIGTERM or SIGINT (Ctrl+C), OxPHP stops taking new connections (the listening socket stays open until the process exits — see [Graceful Shutdown](../operations/graceful-shutdown.md)) and waits for in-flight requests to complete (up to a configurable drain timeout) before exiting.
 
 ## See Also
 

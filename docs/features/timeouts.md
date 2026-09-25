@@ -13,7 +13,7 @@ Each request passes through these phases:
 
 1. **Connection accepted** — the header timeout starts. OxPHP waits for the client to send a complete set of HTTP headers.
 2. **Headers received** — the header timeout ends. The request is dispatched to a PHP worker.
-3. **PHP processes the request** — application code runs under PHP's own `max_execution_time`, armed as a per-thread POSIX timer. When the limit is reached, the request is cancelled and the unified `Request cancelled (timeout)` fatal fires.
+3. **PHP processes the request** — application code runs under PHP's own `max_execution_time`, armed as a per-thread POSIX timer. When the limit is reached, the request is cancelled and the unified `Request cancelled (timeout)` fatal fires. In worker mode the timer belongs to the worker thread rather than to each request, so a worker carrying several requests at once does not bound each of them — see [Worker Mode → Request Deadlines](worker-mode.md#request-deadlines).
 4. **Response sent** — on keep-alive connections, the cycle repeats from step 1.
 
 ```text
@@ -62,8 +62,8 @@ OxPHP cancels a request for several distinct reasons. Each maps to a wire status
 | `max_execution_time` / `set_time_limit()` exceeded | `504 Gateway Timeout` | Server-side execution-time exhaustion. |
 | Server graceful shutdown drained the request | `503 Service Unavailable` | Adds `Retry-After: 5` so clients retry against a recovered or replacement instance. |
 | Client closed the connection mid-request | `499` | nginx-style "Client Closed Request". The connection is already gone, so this status only ever appears in access logs and metrics — it is never written to the wire. Surfaces client-driven aborts as non-`5xx` so they don't pollute server-error alerts. |
-| Worker pronounced stuck by supervisor | `500 Internal Server Error` | Generic server error — cause (deadlock, blocked syscall, …) is unknown. |
-| Userland-initiated cancellation | `500 Internal Server Error` | Userland may set its own status with `http_response_code()` before triggering the cancel; that explicit status is preserved. |
+
+There is no fourth cause. A request the supervisor observes running past its threshold is reported through `oxphp_worker_stuck_total` and `oxphp_worker_long_running_total` and left running — the server never cancels it.
 
 If your `ERROR_PAGES_DIR` only ships a `500.html`, add `504.html`, `503.html`, and (optionally) `499.html` to keep the styled pages consistent across cancellation causes.
 

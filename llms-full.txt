@@ -7118,7 +7118,7 @@ When the server receives SIGTERM (a rolling deploy, a `docker stop`, a Kubernete
 - HTTP/2 clients receive a `GOAWAY` frame; HTTP/1.1 keep-alive connections are closed. The browser's `EventSource` reconnects automatically — to a healthy instance when a load balancer fronts the fleet.
 - The stream does **not** receive a 503: its `200` headers were already sent, so the status cannot be rewritten. Design clients to resume from the last event id (send `id:` with each event; on reconnect the browser sends it back as the `Last-Event-ID` request header, available in PHP as `$_SERVER['HTTP_LAST_EVENT_ID']`).
 
-Ordinary (non-streaming) requests in flight at SIGTERM are not interrupted: they get the whole drain window to finish normally, and only requests still running when `DRAIN_TIMEOUT_SECONDS` (default 25) expires are cancelled, with ~2 more seconds to unwind. Set the orchestrator's termination grace period above `DRAIN_TIMEOUT_SECONDS` + 2.
+Ordinary (non-streaming) requests in flight at SIGTERM are not interrupted: they get the whole drain window to finish normally, and only requests still running when `DRAIN_TIMEOUT_SECONDS` (default 25) expires are cancelled, with ~2 more seconds to unwind. Set the orchestrator's termination grace period above `DRAIN_TIMEOUT_SECONDS` + 2, plus the longest blocking call a request can be in at the deadline — see [Graceful Shutdown](../operations/graceful-shutdown.md#shutdown-sequence).
 
 "Streaming" here means any response that has already flushed chunked output — the server cannot tell a finite streaming download from an infinite event stream, so a large flushed download in flight at SIGTERM is ended early too, not just SSE. A request that called `oxphp_finish_request()` before SIGTERM counts as ordinary: its response is complete, and its remaining background work gets the drain window.
 
@@ -7319,7 +7319,7 @@ Each request passes through these phases:
 
 1. **Connection accepted** — the header timeout starts. OxPHP waits for the client to send a complete set of HTTP headers.
 2. **Headers received** — the header timeout ends. The request is dispatched to a PHP worker.
-3. **PHP processes the request** — application code runs under PHP's own `max_execution_time`, armed as a per-thread POSIX timer. When the limit is reached, the request is cancelled and the unified `Request cancelled (timeout)` fatal fires.
+3. **PHP processes the request** — application code runs under PHP's own `max_execution_time`, armed as a per-thread POSIX timer. When the limit is reached, the request is cancelled and the unified `Request cancelled (timeout)` fatal fires. In worker mode the timer belongs to the worker thread rather than to each request, so a worker carrying several requests at once does not bound each of them — see [Worker Mode → Request Deadlines](worker-mode.md#request-deadlines).
 4. **Response sent** — on keep-alive connections, the cycle repeats from step 1.
 
 ```text
@@ -7368,8 +7368,8 @@ OxPHP cancels a request for several distinct reasons. Each maps to a wire status
 | `max_execution_time` / `set_time_limit()` exceeded | `504 Gateway Timeout` | Server-side execution-time exhaustion. |
 | Server graceful shutdown drained the request | `503 Service Unavailable` | Adds `Retry-After: 5` so clients retry against a recovered or replacement instance. |
 | Client closed the connection mid-request | `499` | nginx-style "Client Closed Request". The connection is already gone, so this status only ever appears in access logs and metrics — it is never written to the wire. Surfaces client-driven aborts as non-`5xx` so they don't pollute server-error alerts. |
-| Worker pronounced stuck by supervisor | `500 Internal Server Error` | Generic server error — cause (deadlock, blocked syscall, …) is unknown. |
-| Userland-initiated cancellation | `500 Internal Server Error` | Userland may set its own status with `http_response_code()` before triggering the cancel; that explicit status is preserved. |
+
+There is no fourth cause. A request the supervisor observes running past its threshold is reported through `oxphp_worker_stuck_total` and `oxphp_worker_long_running_total` and left running — the server never cancels it.
 
 If your `ERROR_PAGES_DIR` only ships a `500.html`, add `504.html`, `503.html`, and (optionally) `499.html` to keep the styled pages consistent across cancellation causes.
 
@@ -7812,13 +7812,23 @@ Not every failed request counts, because not every failure says the worker is un
 
 The last two rows are about the fiber a request runs in rather than the code inside it, and they count for the reason a fatal does: the request did not reach the end of its own work, and it was not the server cutting it short on a client's or a deadline's behalf. A fiber does not start when the engine cannot allocate the C stack it runs on — `fiber.stack_size` set below the platform minimum of two memory pages, or the process unable to map more memory — and the handler is never reached at all. The other is the application's own doing and leaves the response looking ordinary: the server drives a request's fiber itself, so a userland `Fiber::suspend()` on it is refused with a `FiberError`, and a handler that catches that and retries in a loop is ended rather than argued with indefinitely — an ending userland cannot catch, which still runs the request's `finally` blocks, destructors and shutdown functions, and still sends what the request had produced under the status the handler had set. The `WARN` line for a counted failure names which of the two it was, as `fiber would not start` or `fiber refused to park`.
 
-What none of this does is diagnose a worker that has wedged rather than failed: a request stuck in a syscall is reported through `oxphp_worker_stuck_total` for an operator to act on, not cancelled and not counted.
+What none of this does is diagnose a worker that has wedged rather than failed: a request stuck in a syscall is reported through `oxphp_worker_stuck_total` for an operator to act on, not cancelled and not counted. Nothing in the server ends such a request automatically — no recycle, no cancellation — so a wedged worker stays wedged until the call returns or the process is restarted. `max_execution_time` is not a backstop for it either, for the reasons in [Request Deadlines](#request-deadlines).
 
 When a worker is recycled, that worker's loop ends and its replacement re-executes the outer scope of the worker script. Workers are OS threads inside the single OxPHP process rather than separate processes, so nothing the operating system sees restarts and `getmypid()` returns the same value in every worker, before and after. Whether a replacement arrives at once depends on the pool: a static pool (`PHP_WORKERS=N`) refills to `N` on its next scan, so the replacement is one-for-one, while a dynamic pool (`PHP_WORKERS=MIN:MAX`) refills only to `MIN` — a worker recycled above the minimum leaves the pool one smaller until ordinary scale-up grows it again. For memory-based and scheduled exit, the current request completes normally before the worker exits. For error-based recycling, the worker exits after the failed request.
 
 Retirement is not recycling and is not counted as such. A dynamic pool retiring an idle worker (see [Dynamic Pool](../architecture/overview.md#dynamic-pool)) also ends that worker's loop and also runs the code after `oxphp_worker()`, but it is scaling down rather than replacing: nothing is spawned to replace it, neither `oxphp_worker_recycles_total` nor `oxphp_worker_recycles_by_reason_total` moves, and it is `oxphp_workers_retired_total` that counts it instead. Application teardown placed after `oxphp_worker()` therefore runs on a healthy, serving pool as well — see [`oxphp_worker()`](../php/functions.md#oxphp_worker).
 
 Other requests the same worker was serving concurrently — suspended in `oxphp_async_await()`, `oxphp_sleep()`, or a socket read under `RUNTIME_HOOKS` — do not get to finish: each is cancelled where it is suspended and answered with `503 Service Unavailable` and a `Retry-After`, after running its own shutdown functions. Recycling is therefore visible to clients whose requests happen to be in flight, which is worth knowing when choosing `WORKER_MAX_MEMORY_MIB` or calling `scheduleExit()` on a worker that serves concurrent requests. A full server shutdown is different: there, in-flight requests get the drain window to finish normally.
+
+## Request Deadlines
+
+`max_execution_time` bounds a worker-mode request reliably only while that request is the only one its worker is carrying. The limit is a timer of the worker thread, not of each request, and with [fiber multiplexing](fiber-multiplexing.md) several requests share it:
+
+- **A suspended request is not ended by its deadline.** A request waiting in `oxphp_async_await()`, `oxphp_sleep()`/`oxphp_usleep()`, or a `sleep()` or socket read taken over by `RUNTIME_HOOKS` runs no PHP code, and the timer can only end code that is running. The request resumes when what it waits for arrives — the promise settles, the sleep elapses, the socket becomes readable or reaches the stream's own timeout (`default_socket_timeout` unless `stream_set_timeout()` set another) — or when a server shutdown passes its drain deadline.
+- **A request taken while others are in flight gets no deadline of its own.** The timer is started when the worker picks up a request with nothing else running on it. A request taken while another is suspended runs on whatever is left of that timer, and once the timer has fired it is not started again until the worker next has nothing in flight. A `set_time_limit()` call does restart it, but for the worker rather than for the caller: every request on that worker then runs against the new limit, counted from the call. On a worker that always has a request suspended — one serving long-lived streams, for example — the limit stops applying.
+- **When the timer fires, it ends the request that happens to be running** — not necessarily the one that has been alive longest — and that request is read as having run out of time: a `504`, neutral for the recycle count.
+
+Nothing else ends such a request for you. A client disconnecting does not end a non-streaming request, which runs to its end by design (see [Recycling](#recycling)), and a request running longer than the supervisor's threshold is reported through `oxphp_worker_stuck_total`, not cancelled. Put the limit on the wait itself: pass a timeout to `oxphp_async_await()` and its variants, and set timeouts on sockets and database clients.
 
 ## Development Reloading
 
@@ -14875,14 +14885,16 @@ Both signals trigger the same shutdown sequence. Only the first signal is needed
 
 When a shutdown signal is received, OxPHP follows this sequence:
 
-1. **Stop accepting new connections** — the server stops accepting new TCP connections on the main port. PHP workers continue running to process in-flight requests.
+1. **Stop taking new connections** — the server stops accepting connections on the main port, but the listening socket itself stays open until the process exits. A client that connects during the drain therefore completes the TCP handshake and is never answered: it waits until its own timeout, or until the process exits and resets the connection; only connections made after the exit are refused outright. Take the instance out of rotation before the signal reaches it — see [Kubernetes](#kubernetes). PHP workers continue running to process in-flight requests.
 2. **Wind down live connections** — HTTP/2 clients receive a `GOAWAY` frame and idle HTTP/1.1 keep-alive connections are closed, so clients move to a healthy instance instead of multiplexing new requests into the dying one. Open streams are ended promptly and cleanly — any response that has started flushing chunked output counts, finite downloads as well as SSE — see [Server-Sent Events](../features/sse.md#behaviour-on-shutdown).
 3. **Drain in-flight requests** — ordinary active requests are left alone to finish with their full responses. The server checks for completion every 100ms. The internal health/metrics server remains available throughout the drain, so readiness probes continue to work. Work that a request keeps doing after `oxphp_finish_request()` counts as in-flight too, even though its connection is already gone.
-4. **Enforce the drain deadline** — requests still running after `DRAIN_TIMEOUT_SECONDS` are cancelled (their `register_shutdown_function()` callbacks still run) and given ~2 seconds to unwind before the server proceeds.
+4. **Enforce the drain deadline** — requests still running after `DRAIN_TIMEOUT_SECONDS` are cancelled (their `register_shutdown_function()` callbacks still run) and given ~2 seconds to unwind before the server proceeds. A request inside a blocking call — `sleep()`, a database query, a socket read — cannot be interrupted there, in traditional mode always and in worker mode unless `RUNTIME_HOOKS` turned that call into a fiber suspension: its connection is closed on schedule, but its worker thread, and with it the process, exits only once the call returns. The ~2 seconds is therefore not a bound on when the process exits.
 5. **Flush plugins** — access-log entries and APM spans buffered during the drain window are flushed.
 6. **Shut down async pool** — the background async task pool is stopped.
 7. **Abort the internal server** — the health/metrics server is stopped after the drain completes.
 8. **Exit** — the process exits with status code 0.
+
+> **Note:** Steps 1 and 2 begin the moment the signal arrives; the drain deadline starts counting only once the accept loop has stopped. If every connection allowed by `MAX_CONNECTIONS` is in use when the signal arrives, the loop is waiting for one to close and stops only then — until a connection closes, no deadline is counting and nothing still running is cancelled at step 4. Where idle keep-alive connections hold the budget, step 2 closes them and this passes within moments; where long requests or slow clients hold it, it lasts as long as they do, and can use up the orchestrator's whole grace period.
 
 > **Note:** PHP worker threads are not stopped at the start of the sequence — they are signalled to exit and joined at the very end, once the drain has finished and the process is on its way out. That is why the drain has to account for work still running on a worker even when no client connection is left.
 
@@ -14890,7 +14902,7 @@ When a shutdown signal is received, OxPHP follows this sequence:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DRAIN_TIMEOUT_SECONDS` | `25` | Maximum seconds in-flight requests get to complete before being cancelled; the process exits within ~2 seconds after the deadline. The default leaves headroom for the post-deadline unwind and telemetry flush inside Kubernetes' default 30-second termination grace period |
+| `DRAIN_TIMEOUT_SECONDS` | `25` | Maximum seconds in-flight requests get to complete before being cancelled; the server stops serving about 2 seconds after the deadline, and the process exits then unless a request is inside a blocking call (see step 4 above). The default leaves headroom for the post-deadline unwind and telemetry flush inside Kubernetes' default 30-second termination grace period |
 
 Set `DRAIN_TIMEOUT_SECONDS` to accommodate your slowest expected request:
 
@@ -14904,10 +14916,10 @@ In Kubernetes, the shutdown flow during a rolling update is:
 
 1. Kubernetes sends `SIGTERM` to the pod.
 2. The pod is removed from the Service endpoint list.
-3. OxPHP drains in-flight connections within `DRAIN_TIMEOUT_SECONDS`, then cancels stragglers and exits within ~2 more seconds.
+3. OxPHP drains in-flight connections within `DRAIN_TIMEOUT_SECONDS`, then cancels stragglers and stops serving about 2 seconds later. The process exits then, or once the last blocking call on a worker returns.
 4. If the pod is still running after `terminationGracePeriodSeconds`, Kubernetes sends `SIGKILL`.
 
-Set `terminationGracePeriodSeconds` above `DRAIN_TIMEOUT_SECONDS` + 2 so the drain — including the post-deadline unwind and telemetry flush — completes before the forced kill:
+Set `terminationGracePeriodSeconds` above `DRAIN_TIMEOUT_SECONDS` + 2, plus the longest blocking call a request can be in when the deadline passes — the longest query or socket timeout the application allows — so the drain, including the post-deadline unwind and telemetry flush, completes before the forced kill. With only `+ 2`, a request sitting in a long query at the deadline gets the pod killed with `SIGKILL` (exit code 137) instead of exiting with 0:
 
 ```yaml
 apiVersion: apps/v1
@@ -14935,7 +14947,7 @@ lifecycle:
       command: ["sleep", "5"]
 ```
 
-This gives the load balancer time to remove the pod from its target list before OxPHP stops accepting connections.
+This gives the load balancer time to remove the pod from its target list before OxPHP stops accepting connections. It matters more than it looks: a connection routed to the pod after the signal is not refused but left unanswered for the rest of the drain (see step 1 of the [shutdown sequence](#shutdown-sequence)).
 
 ## Docker
 
@@ -15380,8 +15392,8 @@ Per-worker observability emitted by the worker supervisor. Each series carries a
 | Metric | Type | Description |
 |--------|------|-------------|
 | `oxphp_worker_request_age_seconds` | gauge | Age of the in-flight request on each worker, in seconds. Label: `worker_id` |
-| `oxphp_worker_long_running_total` | counter | Supervisor scans that observed a request older than the stuck threshold. Label: `worker_id` |
-| `oxphp_worker_stuck_total` | counter | Stuck-classification counter per worker. Labels: `worker_id`, `kind` (`io`, `c_call`, `cpu`) |
+| `oxphp_worker_long_running_total` | counter | Supervisor scans that observed a request older than the stuck threshold (60 seconds, fixed). Label: `worker_id` |
+| `oxphp_worker_stuck_total` | counter | Stuck-classification counter per worker. Labels: `worker_id`, `kind` (`io`, `c_call`, `cpu`). Reporting only: a request classified as stuck is not cancelled and its worker is not recycled — nothing in the server acts on it, so alert on this series |
 
 ## Queue Wait Histogram
 
@@ -15746,7 +15758,7 @@ OxPHP provides several guarantees to keep your application running reliably in p
 - **Automatic worker respawn** — OxPHP monitors the health of all PHP workers and replaces one that dies unexpectedly, without manual intervention. A static pool refills to its configured count, so the replacement is one-for-one; a dynamic pool refills only to its minimum, and a worker lost above that is regained by ordinary scale-up.
 - **Backpressure protection** — the bounded request queue prevents overload. When the server is at capacity, new requests receive a 529 response with a `Retry-After` header rather than queueing indefinitely and causing cascading timeouts.
 - **Path traversal protection** — all URL paths are sanitized before filesystem access. Percent-encoded traversal attempts, `..` segments, and paths that escape the document root are blocked.
-- **Graceful shutdown** — on SIGTERM or SIGINT (Ctrl+C), OxPHP stops accepting new connections and waits for in-flight requests to complete (up to a configurable drain timeout) before exiting.
+- **Graceful shutdown** — on SIGTERM or SIGINT (Ctrl+C), OxPHP stops taking new connections (the listening socket stays open until the process exits — see [Graceful Shutdown](../operations/graceful-shutdown.md)) and waits for in-flight requests to complete (up to a configurable drain timeout) before exiting.
 
 ## See Also
 
