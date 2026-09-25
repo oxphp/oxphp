@@ -62,6 +62,7 @@ worker/test_worker_status_explicit_no_throw | GET | | 201
 get_post_request/test_post_urlencoded | POST | -H "Content-Type: application/x-www-form-urlencoded" -d "name=dio&lang=php" | |
 get_post_request/test_post_multipart | POST | -F "name=dio" -F "lang=php" | |
 get_post_request/test_request_merge >> ?get_key=get_val | POST | -H "Content-Type: application/x-www-form-urlencoded" -d "post_key=post_val" | |
+get_post_request/test_request_cookie_order >> ?k=get | POST | -H "Content-Type: application/x-www-form-urlencoded" -d "k=body" -b "k=cookie" | |
 files/test_upload_single | POST | -F "file=@$FIXTURES_DIR/small.txt" | |
 files/test_upload_content | POST | -F "file=@$FIXTURES_DIR/small.txt" | |
 files/test_upload_array | POST | -F "files[]=@$FIXTURES_DIR/small.txt" -F "files[]=@$FIXTURES_DIR/small.txt" | |

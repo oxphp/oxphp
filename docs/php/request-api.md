@@ -630,7 +630,7 @@ Setting `SUPERGLOBALS_ENABLED=false` skips the work of describing the request to
 | `header()`, `headers_list()` | Available (SAPI output functions) |
 | `session_start()`, `session_*()` | Available (native PHP functions) |
 | `$_POST`, `$_FILES`, `$_COOKIE` | **Populated as usual** — they are built from the body and the `Cookie` header, which this setting does not touch |
-| `$_REQUEST` | Populated — PHP merges it per `request_order` as always; only its `$_GET` half is missing |
+| `$_REQUEST` | Populated — PHP merges it as always (see [Superglobals](superglobals.md#_request)); only what `$_GET` would have contributed is missing |
 | `$_GET` | Empty |
 | `$_SERVER` | During a request, four keys and no more: `REQUEST_TIME`, `REQUEST_TIME_FLOAT`, `argc` and `argv`, every one of them registered by PHP itself rather than by the server. No `REQUEST_METHOD`, no `REQUEST_URI`, no `HTTP_*`, no process environment. **Worker mode bootstraps differently:** the code above `oxphp_worker()` runs before any request and sees a `$_SERVER` built as though the setting were on — the whole process environment included, plus a placeholder `REQUEST_URI` of `/` |
 
