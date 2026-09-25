@@ -23,10 +23,11 @@ pub struct WorkerSlot {
     /// the counter still positive — an abnormal exit tears down its scheduler
     /// without running each fiber's terminal cleanup — and `clear_worker_slot`
     /// only zeroes it once the health monitor observes the dead thread. What
-    /// keeps the raw write to `interrupt_flag_ptr` sound is that the address
-    /// stays mapped for the process lifetime: it points into the worker's TSRM
-    /// interpreter block, which is released only by `ts_free_thread()`, and
-    /// nothing in PHP or OxPHP ever calls it.
+    /// keeps the raw write to `interrupt_flag_ptr` sound is `kick` and
+    /// `retire_interrupt`: the address points into the worker's TSRM
+    /// interpreter block, which the worker releases with `ts_free_thread()`
+    /// as it ends, and it does so only after unpublishing the address and
+    /// waiting out every kick that may still hold it.
     ///
     /// A second consumer is far less tolerant of staleness: `total_in_flight`
     /// sums this field across slots to decide when the graceful drain may
@@ -39,6 +40,10 @@ pub struct WorkerSlot {
     /// Weigh all three readers before changing how this counter is maintained.
     pub active_requests: AtomicUsize,
     pub heartbeat: crate::php::heartbeat::WorkerHeartbeat,
+    /// Kicks between loading `interrupt_flag_ptr` and finishing the write
+    /// through it. `retire_interrupt` waits for this to reach zero before the
+    /// worker frees the memory the pointer names.
+    kicks_in_progress: AtomicUsize,
 }
 
 impl WorkerSlot {
@@ -48,6 +53,30 @@ impl WorkerSlot {
             interrupt_flag_ptr: AtomicPtr::new(std::ptr::null_mut()),
             active_requests: AtomicUsize::new(0),
             heartbeat: crate::php::heartbeat::WorkerHeartbeat::new(),
+            kicks_in_progress: AtomicUsize::new(0),
+        }
+    }
+
+    /// Raise vm_interrupt on this slot's worker, if it has published an
+    /// address. The count brackets both the load and the write, so a worker
+    /// in `retire_interrupt` either sees this kick in progress and waits for
+    /// it, or has already unpublished the address and this kick loads null.
+    /// Both sides use SeqCst: the argument needs the store of null and the
+    /// increment ordered against each other's loads.
+    fn kick(&self) {
+        self.kicks_in_progress.fetch_add(1, Ordering::SeqCst);
+        raise_interrupt(self.interrupt_flag_ptr.load(Ordering::SeqCst));
+        self.kicks_in_progress.fetch_sub(1, Ordering::Release);
+    }
+
+    /// Unpublish this slot's interrupt address and wait until no kick can
+    /// still write through it. Called by the worker itself as its thread
+    /// ends, before `ts_free_thread()` releases the memory the address names.
+    pub fn retire_interrupt(&self) {
+        self.interrupt_flag_ptr
+            .store(std::ptr::null_mut(), Ordering::SeqCst);
+        while self.kicks_in_progress.load(Ordering::SeqCst) != 0 {
+            std::hint::spin_loop();
         }
     }
 }
@@ -84,17 +113,18 @@ pub fn cancel_request(state: &std::sync::Arc<CancellationState>, reason: CancelR
         // disconnect path if the worker panics and poisons it; the
         // Mutex's job is only to keep the Weak<>→Arc<> upgrade
         // race-free, not to serialise the interrupt write itself.
-        let interrupt_addr = {
+        let matches = {
             let guard = slot.cancel_state.lock().unwrap();
-            match guard.as_ref().and_then(Weak::upgrade) {
-                Some(active) if std::sync::Arc::ptr_eq(&active, state) => {
-                    slot.interrupt_flag_ptr.load(Ordering::Acquire)
-                }
-                _ => continue,
-            }
+            matches!(
+                guard.as_ref().and_then(Weak::upgrade),
+                Some(active) if std::sync::Arc::ptr_eq(&active, state)
+            )
             // guard dropped here at end of scope
         };
-        raise_interrupt(interrupt_addr);
+        if !matches {
+            continue;
+        }
+        slot.kick();
         return;
     }
 }
@@ -186,8 +216,8 @@ fn raise_interrupt(interrupt_addr: *mut u8) {
     // SAFETY: cross-thread Zend interrupt pattern. Routed through the bridge
     // so the underlying `zend_atomic_bool` is mutated via
     // `zend_atomic_bool_store_ex`, not aliased as a plain `uint8_t*`. The
-    // TLS byte lives for the worker thread's lifetime; callers only pass
-    // addresses of workers known to be alive.
+    // byte lives until its worker calls `ts_free_thread()`, which it does
+    // only after `WorkerSlot::retire_interrupt` has waited out every kick.
     unsafe {
         crate::bridge::ffi::oxphp_bridge_request_interrupt_at(
             interrupt_addr as *mut std::os::raw::c_void,
@@ -238,10 +268,10 @@ fn cancel_all_in(workers: &[WorkerSlot], reason: CancelReason) {
         // Kick every worker with work in flight, whether or not its slot
         // still names a live request: the interrupt handler reads the
         // per-fiber cell (or self-cancels in the hard-drain phase), not the
-        // registry. Gating on active_requests keeps the raw write sound —
-        // see the field's doc comment.
+        // registry. `kick` keeps the raw write sound — see the field's doc
+        // comment.
         if slot.active_requests.load(Ordering::Acquire) > 0 {
-            raise_interrupt(slot.interrupt_flag_ptr.load(Ordering::Acquire));
+            slot.kick();
         }
     }
 }
@@ -371,5 +401,36 @@ mod tests {
         // Must not panic, and must still cancel the healthy request.
         cancel_all_in(&workers, CancelReason::Shutdown);
         assert_eq!(state.get(), CancelReason::Shutdown);
+    }
+
+    #[test]
+    fn retire_interrupt_waits_out_a_kick_in_progress() {
+        // The worker frees the memory its published address names right after
+        // retire_interrupt returns, so a kick that loaded the address before it
+        // was withdrawn must be allowed to finish first. The kick is held open
+        // here by its counter alone: a real one would write through a live
+        // `EG(vm_interrupt)`, which this binary does not have.
+        let slot = Arc::new(WorkerSlot::new());
+        let mut flag = 0u8;
+        slot.interrupt_flag_ptr
+            .store(&mut flag as *mut u8, Ordering::SeqCst);
+        slot.kicks_in_progress.fetch_add(1, Ordering::SeqCst);
+
+        let retiring = {
+            let slot = Arc::clone(&slot);
+            std::thread::spawn(move || slot.retire_interrupt())
+        };
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(
+            !retiring.is_finished(),
+            "retire_interrupt returned with a kick still in progress"
+        );
+        assert!(
+            slot.interrupt_flag_ptr.load(Ordering::SeqCst).is_null(),
+            "the address must be withdrawn before the wait, so no new kick can load it"
+        );
+
+        slot.kicks_in_progress.fetch_sub(1, Ordering::SeqCst);
+        retiring.join().unwrap();
     }
 }

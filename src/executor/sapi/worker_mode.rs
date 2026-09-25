@@ -46,6 +46,7 @@ pub(super) fn spawn_worker_mode(
         .name(format!("php-worker-{id}"))
         .spawn(move || {
             worker_mode_thread(id, rx, shutdown, last_active, loop_mode, config, metrics);
+            super::pool::release_worker_thread(id);
         })
         .expect("failed to spawn PHP worker mode thread")
 }

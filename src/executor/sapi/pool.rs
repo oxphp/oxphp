@@ -59,6 +59,28 @@ fn worker_busy(id: usize) -> bool {
         .is_some_and(|slot| slot.active_requests.load(Ordering::Relaxed) > 0)
 }
 
+/// Last step of every PHP worker thread, after its loop has returned and its
+/// final request is shut down: unpublish the slot's `EG(vm_interrupt)`
+/// address, wait out any cross-thread kick still writing through it, then
+/// release the thread's TSRM resources with `ts_free_thread()`.
+///
+/// Without the release, the next worker spawned in this slot can be handed a
+/// recycled thread id (musl reuses `pthread_t`), and TSRM then frees the dead
+/// thread's resources from the new thread. Since PHP 8.6 the allocator heap
+/// lives in native thread-local storage, so that cleanup runs with no heap
+/// and crashes the process.
+pub(super) fn release_worker_thread(id: usize) {
+    if let Some(slot) = crate::php::worker_registry::WORKERS
+        .get()
+        .and_then(|w| w.get(id))
+    {
+        slot.retire_interrupt();
+    }
+    // SAFETY: called on the worker thread itself, once, after its last PHP
+    // request has shut down; nothing on this thread touches PHP afterwards.
+    unsafe { crate::php::bindings::ts_free_thread() };
+}
+
 /// Best-effort wipe of a recycled WORKERS slot: drops the request's
 /// Weak<CancellationState> back-ref and nulls the interrupt-flag pointer
 /// so a `cancel_request()` for this slot's previous occupant can't write
