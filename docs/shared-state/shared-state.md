@@ -333,8 +333,8 @@ All env vars are read at startup. Defaults are sized for hundreds of entries on 
 | Env var                         | Default | Effect                                                                |
 |---------------------------------|---------|-----------------------------------------------------------------------|
 | `SHARED_ENABLED`                | true    | Master switch. `false` registers none of the `OxPHP\Shared\*` classes. |
-| `SHARED_MAX_ENTRIES`            | 100 000 | Global cap on all Shared entries combined. Insert past this fails.    |
-| `SHARED_MAX_BYTES`              | 1 GiB   | Global cap on estimated memory across all Shared entries.             |
+| `SHARED_MAX_ENTRIES`            | 100 000 | Global cap on the number of live Shared objects (each `Counter`, `Map`, `Channel`, … counts as one). Creating an object past it fails with `CapacityException`. Keys inside a `Map` do not count toward it — bound a `Map` with `maxEntries`. |
+| `SHARED_MAX_BYTES`              | 1 GiB   | Global cap on estimated memory across all Shared objects, checked only when an object is created (`CapacityException`). Objects that already exist can keep growing past it, so the total can read above the cap. |
 | `SHARED_SOFT_LIMIT_RATIO`       | —       | Deprecated and ignored; setting it logs a startup `WARN`. It never had an effect. For early warning, alert on `oxphp_shared_capacity_saturation` (needs `SHARED_METRICS_ENABLED`). |
 | `SHARED_CYCLE_DETECT_DEPTH`     | 16      | BFS depth during cycle check. Raise for deep legitimate graphs.       |
 | `SHARED_CYCLE_DETECT_EDGES`     | 10 000  | Edges walked during cycle check. Raise for dense legitimate graphs.   |

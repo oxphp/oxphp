@@ -102,8 +102,8 @@ fn map_key_size(key: &MapKey) -> usize {
 /// Rust-side storage for one `Shared\Map` instance.
 pub struct MapInner {
     entries: DashMap<MapKey, SharedValue>,
-    /// Per-instance cap; `None` = unbounded (subject only to the global
-    /// `SHARED_MAX_ENTRIES`).
+    /// Per-instance cap; `None` = unbounded. The global caps apply only
+    /// when a Shared object is created, never to `set`.
     max_entries: Option<usize>,
     /// Striped per-stripe entry counters (LongAdder-style). `count()`
     /// sums them; `max_entries` checks the sum. No global hot atomic on

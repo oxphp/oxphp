@@ -298,8 +298,8 @@ Prometheus exposes per-Map gauges at `/metrics`:
 
 | Env var                         | Default | Effect                                                                |
 |---------------------------------|---------|-----------------------------------------------------------------------|
-| `SHARED_MAX_ENTRIES`            | 100 000 | Global cap on all Shared entries combined.                            |
-| `SHARED_MAX_BYTES`              | 1 GiB   | Global cap on estimated memory across all Shared entries.             |
+| `SHARED_MAX_ENTRIES`            | 100 000 | Global cap on the number of live Shared objects (each `Counter`, `Map`, `Channel`, … counts as one). Creating an object past it fails with `CapacityException`. Keys inside a `Map` do not count toward it — bound a `Map` with `maxEntries`. |
+| `SHARED_MAX_BYTES`              | 1 GiB   | Global cap on estimated memory across all Shared objects, checked only when an object is created (`CapacityException`). Objects that already exist can keep growing past it, so the total can read above the cap. |
 | `SHARED_MAX_VALUE_SIZE`         | 1 MiB   | Per-value serialised size cap; larger values throw `ValueTooLargeException`. |
 | `SHARED_CYCLE_DETECT_DEPTH`     | 16      | Max BFS depth during cycle check. Raise for deep legit graphs.        |
 | `SHARED_CYCLE_DETECT_EDGES`     | 10 000  | Max edges walked during cycle check. Raise for dense legit graphs.    |

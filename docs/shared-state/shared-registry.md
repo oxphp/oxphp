@@ -150,7 +150,7 @@ This is deliberate. The two numbers exist for capacity / OOM monitoring; that mo
 
 - Both numbers are **transient** — they rise and fall with in-flight requests and per-worker handles.
 - `Registry::count()` is **not** equal to `count(Registry::keys())`. `keys()` is the named namespace only.
-- `memoryUsage()` is a **static accounting estimate**, not actual RSS. It is the same number that `SHARED_MAX_BYTES` caps. For the real heap footprint, use a heap profiler (`heaptrack`, `jemalloc_stats_print`, `mi_stats_print`) or container memory metrics.
+- `memoryUsage()` is a **static accounting estimate**, not actual RSS. It is the same number that `SHARED_MAX_BYTES` is checked against when a Shared object is created, and it can read above that cap. For the real heap footprint, use a heap profiler (`heaptrack`, `jemalloc_stats_print`, `mi_stats_print`) or container memory metrics.
 
 Per-entry detail — id, type, refcount, byte cost — lives on the [internal introspection endpoint](../features/internal-server.md) at `/__ox_shared/entries`. There is intentionally no per-entry PHP API to avoid duplicating that surface.
 
