@@ -260,12 +260,17 @@ if ($_FILES['avatar']['error'] === UPLOAD_ERR_OK) {
 
 ## $_REQUEST
 
-`$_REQUEST` is a merged array of `$_GET`, `$_POST`, and optionally `$_COOKIE`, built by PHP according to the `request_order` INI directive (default: `"GP"` — GET, then POST). The merge itself follows PHP's rules unchanged.
+`$_REQUEST` is a merged array of `$_GET`, `$_POST` and `$_COOKIE`, built by PHP according to the `request_order` INI directive, or `variables_order` when `request_order` is not set. The merge itself follows PHP's rules unchanged: the sources are merged in the order the directive lists them, and a later source overwrites a key an earlier one set.
+
+**Cookies are included, and they win.** The OxPHP images load no `php.ini` — `php.ini-production` and `php.ini-development` sit in `/usr/local/etc/php` unused (see [Installation](../getting-started/installation.md)) — so `request_order` is unset and PHP falls back to its built-in `variables_order`, `"EGPCS"`: GET, then POST, then COOKIE. A cookie therefore replaces a query or body value of the same name; when both sides are arrays (`k[a]` in the body, `k[b]` in a cookie) they are merged key by key under the same rule. The `request_order = "GP"` you may know from PHP-FPM setups comes from the `php.ini-production` and `php.ini-development` samples, not from PHP itself. To leave cookies out, set it in an ini file loaded at startup, for example `/usr/local/etc/php/conf.d/zz-request-order.ini` containing `request_order = "GP"`. `ini_set()` cannot change this directive at runtime.
 
 ```php
 <?php
-// GET /form?action=preview with POST body: action=submit
-$action = $_REQUEST['action'];  // "submit" (POST overrides GET with default order)
+// POST /form?action=preview with body action=submit
+$action = $_REQUEST['action'];  // "submit" — POST overrides GET
+
+// Same request, also carrying the header "Cookie: action=delete"
+$action = $_REQUEST['action'];  // "delete" — the cookie overrides both
 ```
 
 > **Worker mode:** `$_REQUEST` is rebuilt for every request. PHP normally builds it lazily, once, when a script that mentions it is first loaded — which in a persistent worker would mean every later request reading the first one's parameters. OxPHP forces the rebuild instead, so the merged array always describes the request being served.
@@ -327,7 +332,7 @@ It reaches fewer of these arrays than the name suggests. The request body and th
 | `$_GET` | Empty |
 | `$_SERVER` | During a request, four keys and no more: `REQUEST_TIME`, `REQUEST_TIME_FLOAT`, `argc` and `argv`, every one of them registered by PHP itself rather than by the server. No `REQUEST_METHOD`, no `REQUEST_URI`, no `HTTP_*`, no process environment. **Worker mode bootstraps differently:** the code above `oxphp_worker()` runs before any request and sees a `$_SERVER` built as though the setting were on — the whole process environment included, plus a placeholder `REQUEST_URI` of `/` |
 | `$_POST`, `$_FILES`, `$_COOKIE` | Populated as usual |
-| `$_REQUEST` | Populated — merged per `request_order` as always; only its `$_GET` half is missing |
+| `$_REQUEST` | Populated — merged by PHP as always (see [`$_REQUEST`](#_request)); only what `$_GET` would have contributed is missing |
 | `$_SESSION` | Filled by PHP's session module when a request starts a session, not by the SAPI |
 | `php://input` | A stream, not a superglobal — readable as usual |
 | `header()`, `headers_list()`, etc. | SAPI functions, not superglobals |
