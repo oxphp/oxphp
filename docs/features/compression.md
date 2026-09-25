@@ -267,7 +267,7 @@ Skipping re-compression applies to responses that already carry a `Content-Encod
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.11.0
+    image: ghcr.io/oxphp/oxphp:0.12.0
     ports:
       - "8080:80"
     volumes:

@@ -22,7 +22,7 @@ optimization runs.
 # compose.yml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.11.0
+    image: ghcr.io/oxphp/oxphp:0.12.0
     environment:
       INTERNAL_ADDR: 0.0.0.0:9090
       PROFILER_ENABLED: "true"
@@ -595,7 +595,7 @@ back to the `gethostname(2)` syscall when that variable is not set.
   "error_count": 0,
   "leaked_count": 0,
   "truncated": false,                 // true — exceeded PROFILER_MAX_SPANS
-  "oxphp_version": "0.11.0",
+  "oxphp_version": "0.12.0",
   "formats": ["xhprof.json", "speedscope.json"]
 }
 ```
