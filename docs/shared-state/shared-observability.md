@@ -46,7 +46,7 @@ Top-level snapshot: aggregate counts per type, memory, op rate, and saturation a
     "Map":     { "count": 12, "bytes": 1_638_400, "ops":    48_201 },
     "Pool":    { "count":  4, "bytes":   16_384, "ops":    67_014 }
   },
-  "limits":   { "max_entries": 100_000, "max_bytes": 1073741824, "soft_ratio": 0.7 },
+  "limits":   { "max_entries": 100_000, "max_bytes": 1073741824 },
   "saturation": { "entries": 0.00127, "bytes": 0.00231 },
   "diagnostics": {
     "lock_diagnostics_level": "warn",
@@ -245,7 +245,7 @@ If `idle_by_thread` is balanced but everything is in `in_use`, raise `maxSize`.
 
 ### Memory saturation
 
-Check `oxphp_shared_total_bytes` and `oxphp_shared_capacity_saturation{kind="bytes"}`. If either is high:
+Check `oxphp_shared_total_bytes` and `oxphp_shared_capacity_saturation{kind="bytes"}`. Nothing is shed or degraded as usage climbs: the first thing the server does about it is refuse to create a new Shared object once `SHARED_MAX_BYTES` or `SHARED_MAX_ENTRIES` is reached — objects that already exist keep growing without that cap being checked again (a `Map` without limit, unless it was constructed with `maxEntries`), so the `bytes` gauge can read above `1.0`. The early warning is an alert rule, for example `oxphp_shared_capacity_saturation > 0.7`. If either is high:
 
 1. `curl /__ox_shared/entries?limit=500` and sort by `mem_bytes` to find the top contributors.
 2. `curl /__ox_shared/entry?id=<N>` on each to check the shape. For Map, look at `key_count` vs `max_entries`.

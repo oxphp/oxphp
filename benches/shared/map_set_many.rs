@@ -55,7 +55,6 @@ fn ensure_registry() {
         enabled: true,
         max_entries: 1_000_000,
         max_bytes: 1 << 30,
-        soft_limit_ratio: 0.7,
         metrics_enabled: false,
         introspection_enabled: false,
         introspection_preview_enabled: false,
