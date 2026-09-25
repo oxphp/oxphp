@@ -120,9 +120,6 @@ services:
       # Max seconds to receive HTTP headers after connection is accepted.
       - HEADER_TIMEOUT_SECONDS=5
 
-      # Max seconds for the entire request (including PHP execution). 0 = no limit.
-      - REQUEST_TIMEOUT_SECONDS=120
-
       # ── Rate Limiting ─────────────────────────────────────────────
 
       # Max requests per IP within the rate window. 0 = rate limiting disabled.
