@@ -446,13 +446,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             };
             let mut out_ptr: *const Entry = std::ptr::null();
             let rc = unsafe { oxphp_shared_atomic_create(initial, &mut out_ptr) };
-            if rc != 0 {
-                return Err(PhpError::Exception {
-                    class: "OxPHP\\Shared\\SharedException".to_string(),
-                    message: read_last_error_message(),
-                    code: 0,
-                });
-            }
+            atomic_rc_to_result(rc)?;
             let handle = call.storage_mut::<SharedHandle>()?;
             handle.entry_ptr = out_ptr;
             handle.type_tag = SharedType::Atomic as u8;

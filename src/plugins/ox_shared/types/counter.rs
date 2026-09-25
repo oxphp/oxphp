@@ -254,13 +254,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             };
             let mut out_ptr: *const Entry = std::ptr::null();
             let rc = unsafe { oxphp_shared_counter_create(initial, &mut out_ptr) };
-            if rc != 0 {
-                return Err(PhpError::Exception {
-                    class: "OxPHP\\Shared\\SharedException".to_string(),
-                    message: read_last_error_message(),
-                    code: 0,
-                });
-            }
+            counter_rc_to_result(rc)?;
             let handle = call.storage_mut::<SharedHandle>()?;
             handle.entry_ptr = out_ptr;
             handle.type_tag = SharedType::Counter as u8;

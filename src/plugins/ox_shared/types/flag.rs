@@ -7,9 +7,7 @@ use std::os::raw::c_int;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use crate::plugins::ox_shared::error::{
-    ffi_entry, read_last_error_message, set_last_error, SharedError,
-};
+use crate::plugins::ox_shared::error::{ffi_entry, set_last_error, SharedError};
 use crate::plugins::ox_shared::registry::{registry, Entry, SharedInner, SharedType, ENTRY_MAGIC};
 use crate::plugins::ox_shared::value::SharedValue;
 
@@ -256,13 +254,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             };
             let mut out_ptr: *const Entry = std::ptr::null();
             let rc = unsafe { oxphp_shared_flag_create(initial as c_int, &mut out_ptr) };
-            if rc != 0 {
-                return Err(PhpError::Exception {
-                    class: "OxPHP\\Shared\\SharedException".to_string(),
-                    message: read_last_error_message(),
-                    code: 0,
-                });
-            }
+            atomic_rc_to_result(rc)?;
             let handle = call.storage_mut::<SharedHandle>()?;
             handle.entry_ptr = out_ptr;
             handle.type_tag = SharedType::Flag as u8;
