@@ -176,7 +176,7 @@ try {
 |------------------------------|---------------------------------|----------------------------------------------------------------------|
 | `ContentionException`        | `Async\AsyncException`          | `tryWithLock` on a held lock.                                        |
 | `OperationTimeoutException`  | `Async\AsyncException`          | `withLockTimeout` deadline expired.                                  |
-| `DeadlockException`          | `Async\AsyncException`          | Same-thread re-entry or detected wait-for cycle.                     |
+| `DeadlockException`          | `Async\AsyncException`          | Same-thread re-entry, or a wait-for cycle broken under `SHARED_LOCK_DIAGNOSTICS=strict`. |
 | `CorruptedMutexException`    | `Shared\SharedException`        | A prior closure invocation crashed via Rust panic; mutex is unusable.|
 | `TypeException`              | `Shared\SharedException`        | Constructor or `$ms` argument violated its type contract.            |
 | `StaleHandleException`       | `Shared\SharedException`        | Method call on a handle whose registry entry was evicted.            |
