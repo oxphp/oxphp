@@ -69,9 +69,6 @@ oxphp_worker(function () {
             @file_put_contents('/tmp/a_parked', '1');
             oxphp_sleep(2.0);
         });
-        // A class distinct from every other scenario's (MANUAL uses
-        // LogicException) so the shared-collector grep for this capture cannot
-        // pass on another span's event.
         throw new UnderflowException('scenario-b: parked capture survived');
     }
 
