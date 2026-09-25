@@ -439,6 +439,10 @@ mod tests {
         });
     }
 
+    // Host build only: under `feature = "php"` the getter calls
+    // zend_memory_usage, which reads AG(mm_heap) through the calling thread's
+    // TSRM slot — one a test thread never gets, so the call faults.
+    #[cfg(not(feature = "php"))]
     #[test]
     fn memory_decorator_silent_when_no_php_runtime() {
         // Without `feature = "php"`, current_memory_usage_bytes() is
@@ -460,13 +464,8 @@ mod tests {
 
             let mut ctx = cell.borrow_mut();
             let span = ctx.get_mut(id).expect("open");
-            // In host build, delta is 0 < threshold → no event.
-            // Under PHP, would emit memory_spike with positive delta.
-            #[cfg(not(feature = "php"))]
+            // delta is 0 < threshold → no event.
             assert_eq!(span.events.len(), 0);
-            // Under PHP, value depends on runtime — don't assert.
-            #[cfg(feature = "php")]
-            let _ = span;
         });
     }
 

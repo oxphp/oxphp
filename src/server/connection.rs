@@ -1057,6 +1057,9 @@ mod tests {
     /// deadline is the only thing that can answer it.
     #[tokio::test(flavor = "current_thread")]
     async fn await_queued_refuses_a_request_no_worker_ever_takes() {
+        // A pickup elsewhere while this waits would make it a lost race, not
+        // a wasted wait.
+        let _tick = crate::metrics::POOL_STARTS_TEST_LOCK.lock().await;
         let (tx, queued, cancel, metrics) = queued_for(Some(std::time::Duration::from_millis(50)));
         let mut rejected = false;
         // Bounds the failure rather than the success: a build that arms no

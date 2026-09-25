@@ -777,6 +777,24 @@ fn close_stream() {
 /// Reuses the existing Vec capacity from previous requests.
 /// Must be called BEFORE php_request_startup().
 pub fn set_request_data(req: &ScriptRequest) {
+    fill_request_data(req);
+
+    // Set SG(request_info) so PHP parses $_GET, $_POST, $_FILES, $_COOKIE.
+    // This MUST happen before php_request_startup().
+    // When superglobals disabled, still set method/content-type for php://input.
+    //
+    // Projected under the borrow and handed on without it, as
+    // `restore_request_data` does: the pointers name strings the slot owns.
+    let (method_cstr, qs_ptr, ct_ptr, content_length) =
+        REQUEST_DATA.with(|rd| request_info_ptrs(&rd.borrow()));
+    unsafe {
+        bindings::oxphp_bridge_set_request_info(method_cstr, qs_ptr, ct_ptr, content_length);
+    }
+}
+
+/// Everything [`set_request_data`] does short of writing `SG(request_info)` —
+/// the one step that needs the engine started on the calling thread.
+fn fill_request_data(req: &ScriptRequest) {
     REQUEST_DATA.with(|rd| {
         let mut data = rd.borrow_mut();
 
@@ -1164,10 +1182,6 @@ pub fn set_request_data(req: &ScriptRequest) {
         }
         data.request_id_cstr = Some(rid_cstr);
 
-        // Set SG(request_info) so PHP parses $_GET, $_POST, $_FILES, $_COOKIE.
-        // This MUST happen before php_request_startup().
-        // When superglobals disabled, still set method/content-type for php://input.
-        //
         // The method string is owned by the slot rather than by this call: PHP
         // holds the pointer for the whole request, and a resumed fiber has to be
         // handed the same one again (see `restore_request_data`).
@@ -1178,11 +1192,6 @@ pub fn set_request_data(req: &ScriptRequest) {
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.parse::<i64>().ok())
             .unwrap_or(0);
-
-        let (method_cstr, qs_ptr, ct_ptr, content_length) = request_info_ptrs(&data);
-        unsafe {
-            bindings::oxphp_bridge_set_request_info(method_cstr, qs_ptr, ct_ptr, content_length);
-        }
     });
 }
 
@@ -5807,21 +5816,30 @@ mod tests {
     }
 
     #[test]
-    fn await_poll_returns_false_when_sender_dropped() {
+    fn await_poll_settles_a_rejection_when_sender_dropped() {
         let (tx, rx) = tokio::sync::oneshot::channel::<AsyncResult>();
         let cancelled = std::sync::Arc::new(CancelShared::new());
         let promise_id = 77777777u64;
 
         store_promise(promise_id, rx, cancelled);
 
-        // Drop the sender without sending
+        // Drop the sender without sending — an abandoned task fiber
         drop(tx);
 
-        // Should return false (channel closed)
-        assert!(!await_is_ready(promise_id));
+        // Ready, not pending: a promise that never settles livelocks the
+        // await_race / await_any poll loops.
+        assert!(await_is_ready(promise_id));
 
         // Promise should be removed from map (consumed by try_recv)
         assert!(take_promise(promise_id).is_none());
+
+        // ...and what it settled to is a rejection the awaiter throws.
+        let taken = take_ready_result(promise_id).expect("synthesized result");
+        assert!(!taken.success);
+        assert_eq!(
+            taken.exception_message.as_deref(),
+            Some("promise channel closed unexpectedly")
+        );
     }
 
     #[test]
@@ -5935,7 +5953,9 @@ mod tests {
             profiling_mode: crate::profiling::ProfilingMode::Off,
         };
 
-        set_request_data(&req);
+        // Not `set_request_data`: its `SG(request_info)` write needs a started
+        // engine, and the vars under test are all built before it.
+        fill_request_data(&req);
 
         let lookup = |key: &[u8]| -> Option<String> {
             REQUEST_DATA.with(|rd| {
@@ -5964,18 +5984,14 @@ mod tests {
             Some("uploads/**"),
             "OXPHP_DENIED_PATTERN is glob-normalized without a leading slash"
         );
-
-        clear_request_data();
+        // No `clear_request_data`: it writes `SG(request_info)` too. The slot
+        // is thread-local and the harness runs each test on its own thread.
     }
 
     /// `take_from_queue` moves a process-wide tick, so every test that reads it
     /// takes this lock rather than count another test's pickups as its own.
-    static PICKUP_TICK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
-    fn pickup_tick() -> std::sync::MutexGuard<'static, ()> {
-        PICKUP_TICK
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    fn pickup_tick() -> tokio::sync::MutexGuard<'static, ()> {
+        crate::metrics::POOL_STARTS_TEST_LOCK.blocking_lock()
     }
 
     fn queued_request(deadline: Option<Instant>) -> WorkerIncomingRequest {

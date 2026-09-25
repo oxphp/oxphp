@@ -1,8 +1,8 @@
 //! PHP 8.5 `SAPI_HEADER_DELETE_PREFIX` matcher.
 //!
 //! Lives outside `sapi.rs` (which is `#[cfg(feature = "php")]`) so the unit
-//! tests run in `cargo test --no-default-features` — the configuration PR
-//! CI uses, since the host runner has no `libphp.so`.
+//! tests also run in `cargo test --no-default-features` — the configuration
+//! every host test run uses, since a host has no `libphp.so`.
 
 /// Case-insensitive starts-with against the wire-form line `"{name}: {value}"`.
 /// PHP rebuilds the prefix into this form in `main/SAPI.c:617-635` of PHP-8.5.6

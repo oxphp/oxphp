@@ -49,6 +49,15 @@ pub(crate) fn pool_starts() -> u64 {
     POOL_STARTS.load(Ordering::Relaxed)
 }
 
+/// Held by every test that moves [`POOL_STARTS`] and by every test whose
+/// assertion needs it to stand still — a wait counted as wasted is one the
+/// tick did not move through, so a pickup from a test running alongside
+/// turns that count into a zero. Only the `php` build has code that moves
+/// it. A Tokio mutex, because the waiting tests hold it across `.await`;
+/// synchronous tests take it with `blocking_lock`.
+#[cfg(test)]
+pub(crate) static POOL_STARTS_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// Requests a worker answered whose client had already gone.
 ///
 /// The pair to [`POOL_STARTS`], though not over the same population: a start
@@ -1863,11 +1872,11 @@ mod tests {
         // one is a subset of the other. That every wasted wait is also a
         // refusal is a property of the two call sites, and it is pinned where
         // they run: `await_queued_refuses_a_request_no_worker_ever_takes` for
-        // the waiting side, and the overload script's self-call scenario for
-        // the gate — whose own unit test,
-        // `admission_wait_counts_a_shed_nothing_could_have_saved`, sits in a
-        // module that only compiles with a PHP library present and so runs
-        // nowhere automatically.
+        // the waiting side, and
+        // `admission_wait_counts_a_shed_nothing_could_have_saved` plus the
+        // overload script's self-call scenario for the gate. That unit test
+        // sits in a module that only compiles with a PHP library present, so
+        // only the CI job that runs the `php` feature executes it.
         m.request_admission_refused(crate::executor::admission::ShedReason::WaitTimeout);
         m.request_admission_refused(crate::executor::admission::ShedReason::WaitTimeout);
         m.admission_wait_wasted();
