@@ -211,6 +211,22 @@ Per-instance counters, flags, onces, and mutexes do not ship individual metric s
 
 > **Mutex metrics are a v1.x candidate.** Tracked as follow-up work; today's visibility is via `/__ox_shared/entry`.
 
+## Deadlock detector
+
+A background task looks for cross-thread wait-for cycles on `Shared\Mutex`: two or more threads each waiting on a mutex that another of them holds. Every `SHARED_LOCK_POLL_INTERVAL_MS` (default `100`) it scans the wait-for graph. `SHARED_LOCK_DIAGNOSTICS` sets what it does when a scan finds a cycle:
+
+| Value | Detector | On a cycle |
+|-------|----------|------------|
+| `off` | Not started. `SHARED_LOCK_POLL_INTERVAL_MS` is unused and `oxphp_shared_deadlock_detected_total` stays at 0. | Nothing. A `withLockTimeout()` on the cycle gives up with `OperationTimeoutException` when its timeout runs out; a cycle made only of `withLock()` calls has no timeout of its own to end it. |
+| `warn` — default in release builds | Runs. | Logs and counts (see below); the waits are left in place, with the same outcome as under `off`. |
+| `strict` — default in debug builds of the binary | Runs. | Logs and counts, and also signals the threads on the cycle: a `withLock()` on it throws `DeadlockException` within 100 ms of the scan, and a `withLockTimeout()` waits out its timeout and then throws `DeadlockException` in place of `OperationTimeoutException`. A waiter whose lock is released first — by another waiter's exception unwinding the closure that held it — acquires it and does not throw. |
+
+The value is matched lowercase only: any other value, `Strict` or `trace` included, silently gives the default.
+
+Each cycle a scan finds produces at least one `WARN` record with `event=shared.deadlock_detected`, each naming a thread on the cycle (`start_thread`, repeated as `holder_thread`); the record does not name the mutexes. `oxphp_shared_deadlock_detected_total` rises with each record.
+
+Same-thread re-entry is a separate check and does not depend on this setting: re-entering a mutex on the thread that already holds it throws `DeadlockException` at the call under every value, `off` included, and never becomes a cycle.
+
 ## Diagnostic playbooks
 
 ### Pool is saturated (429s with retries failing)
@@ -258,11 +274,10 @@ The result visualises the chain so you can see where the inadvertent back-refere
 
 ### Deadlock detector fired
 
-`oxphp_shared_deadlock_detected_total` is ticking. Check server logs — the detector emits a log record per cycle with the involved mutex IDs and the owning threads. Recover:
+`oxphp_shared_deadlock_detected_total` is ticking: the [deadlock detector](#deadlock-detector) saw two or more threads each waiting on a `Shared\Mutex` that another of them holds. Check server logs for `event=shared.deadlock_detected`; the records name threads, not mutexes. Recover:
 
-1. `curl /__ox_shared/entry?id=<mutex_id>` on each — confirm `poisoned=false`. If poisoned, the detector already aborted the cycle.
-2. If the cycle is a real reentry bug, refactor to use separate mutexes per lock scope.
-3. Raise `SHARED_LOCK_DIAGNOSTICS=strict` in staging to turn a future reentry into a fast-fail instead of a detected cycle.
+1. Find the code paths that take two mutexes one inside the other, and make them take them in the same order everywhere — or merge the pair into one mutex.
+2. Under `SHARED_LOCK_DIAGNOSTICS=warn`, the default in release builds, the cycle is only logged and counted. Set `SHARED_LOCK_DIAGNOSTICS=strict` in staging to have the detector break it instead — see [Deadlock detector](#deadlock-detector) for what each waiting call then does.
 
 ## Long-running soak harness
 
