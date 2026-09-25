@@ -44,7 +44,7 @@
 Two lines. That's it.
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:0.11.0
+FROM ghcr.io/oxphp/oxphp:0.12.0
 
 COPY --chown=www-data:www-data . /var/www/html/public
 ```
@@ -112,7 +112,8 @@ See the full [documentation](docs/index.md) for details.
 
 ### Worker Model
 - **Worker mode** — persistent PHP workers that stay alive across requests; autoloaders, service containers, and DB connections are initialized once and reused — see [Worker mode](docs/features/worker-mode.md)
-- **Fiber multiplexing** — each worker handles multiple concurrent requests via PHP 8.4 Fibers; `oxphp_sleep()` and `oxphp_async_await()` yield the current fiber instead of blocking the worker thread — see [Fiber multiplexing](docs/features/fiber-multiplexing.md)
+- **Fiber multiplexing** — each worker handles multiple concurrent requests via PHP Fibers; `oxphp_sleep()` and `oxphp_async_await()` yield the current fiber instead of blocking the worker thread — see [Fiber multiplexing](docs/features/fiber-multiplexing.md)
+- **Runtime hooks** — `RUNTIME_HOOKS=sleep,streams` makes native `sleep()`/`usleep()`, blocking TCP reads and `stream_select()` suspend the fiber instead of the worker thread, so unmodified PDO MySQL, mysqli and phpredis code benefits — see [Runtime hooks](docs/operations/configuration.md#runtime-hooks)
 - **Automatic recycling** — in worker mode a worker is recycled when it passes `WORKER_MAX_MEMORY_MIB`, when the application calls `Worker::scheduleExit()`, or after three consecutive requests come apart, a fatal error being the usual one — see [Recycling](docs/features/worker-mode.md#recycling)
 - **Worker health monitoring** — crashed workers are automatically detected and replaced; a static pool refills to its configured count, a dynamic one to its minimum
 - **Early response** via `oxphp_finish_request()` — send the response and keep running background work — see [Early response](docs/features/early-response.md)
@@ -122,7 +123,7 @@ See the full [Async promises guide](docs/features/async-promises.md).
 
 - **`oxphp_async()` / `oxphp_async_await()`** — dispatch closures to a dedicated thread pool for true parallel execution
 - **Portable serialization** for `use` variables, arguments, and return values — safe cross-thread binary transfer
-- Supported types: scalars, strings, arrays (nested). Resources and objects rejected with `E_WARNING`
+- Supported types: scalars, strings, arrays (nested), and `Shared\*` / `OxPHP\Shared\Shareable` objects. Resources and plain objects are rejected — see [Limitations](docs/features/async-promises.md#limitations)
 - **Exception & die() safety** — exceptions, `die()`, and `exit()` are caught and re-thrown as `OxPHP\Async\AsyncException`
 - **Timeout support** — per-task timeouts with `OxPHP\Async\TimeoutException`
 - **`oxphp_async_await_all()` / `oxphp_async_await_race()` / `oxphp_async_await_any()`** — batch, race (first settled), and any (first fulfilled, JS `Promise.any` style) primitives
@@ -136,7 +137,7 @@ Process-wide concurrent primitives that let PHP workers coordinate mutable state
 - **`Shared\Once`** — run-once container with reentrancy-safe factory — see [Once](docs/shared-state/shared-once.md)
 - **`Shared\Mutex`** — poisoning mutex over a stored value, with reentrancy and cross-thread deadlock detection — see [Mutex](docs/shared-state/shared-mutex.md)
 - **`Shared\Channel`** — bounded MPMC queue, fiber-aware (blocking recv yields the current fiber) — see [Channel](docs/shared-state/shared-channel.md)
-- **`Shared\Map`** — concurrent string-keyed store with batched `setMany`/`getMany` and cycle-checked nested values — see [Map](docs/shared-state/shared-map.md)
+- **`Shared\Map`** — concurrent `int|string`-keyed store with batched `setMany`/`getMany` and cycle-checked nested values — see [Map](docs/shared-state/shared-map.md)
 - **`Shared\Pool`** — bounded object pool with strict per-thread affinity, idle-timeout eviction, and chaos-reclaim on worker death — see [Pool](docs/shared-state/shared-pool.md)
 - **`Shared\Registry`** — name-keyed handles (`Registry::counter('hits', fn() => ...)`) so every worker and every request converges on the same entry without external stores — see [Registry](docs/shared-state/shared-registry.md)
 - **Built-in observability** — `oxphp_shared_*` Prometheus counters and `/__ox_shared/{summary,entries,entry,preview,types,graph}` JSON endpoints on the internal port
@@ -146,16 +147,16 @@ Process-wide concurrent primitives that let PHP workers coordinate mutable state
 ### HTTP & Networking
 - **HTTP/1.1 + HTTP/2 on one port** — the protocol is auto-detected per connection: prior-knowledge h2c over cleartext, or `h2` via ALPN under TLS, with transparent HTTP/1.1 fallback. Flow-control windows are tuned for typical PHP response sizes — see [HTTP/2](docs/features/tls.md#http2)
 - **TLS 1.3** with ALPN — both HTTP/2 and HTTP/1.1 over TLS — see [TLS](docs/features/tls.md)
-- **3 routing modes** — Traditional (file mapping + always-on PATH_INFO), Framework (`index.php` rewrite with `PATH_INFO=$request_uri`), SPA (`index.html` for no-extension paths, hard 404 for missing assets). Each mode mirrors a familiar nginx `try_files` configuration — see [Routing](docs/features/routing.md)
+- **4 routing modes** — Traditional (file mapping + always-on PATH_INFO), Framework (every request to `index.php`; the original path is in `REQUEST_URI`, `PATH_INFO` only for `/index.php/extra`), SPA (`index.html` for no-extension paths, hard 404 for missing assets), Worker (static assets from disk, everything else to the persistent worker entry). The first three mirror a familiar nginx `try_files` configuration — see [Routing](docs/features/routing.md)
 - **SSE streaming** via `Content-Type: text/event-stream` auto-detection or `oxphp_stream_flush()` — cooperative with fiber multiplexing — see [Server-Sent Events](docs/features/sse.md)
-- **Configurable timeouts** — header read, request, and keep-alive — see [Timeouts](docs/features/timeouts.md)
+- **Timeouts** — header read (`HEADER_TIMEOUT_SECONDS`, slowloris protection); script execution is bounded by PHP's own `max_execution_time` / `set_time_limit()`, answered with 504 — see [Timeouts](docs/features/timeouts.md)
 
 ### Performance
 - **LRU file cache** for static files (in-memory ≤1 MiB, streaming for larger) — see [Static files](docs/features/static-files.md)
 - **HTTP caching** with ETag, Last-Modified, and 304 Not Modified
 - **Compression** for text responses (256 B – 3 MiB range) — Brotli, Zstandard and gzip, negotiated per client — see [Compression](docs/features/compression.md)
 - **mimalloc** allocator for lower allocation latency under contention
-- **Configurable HTTP server threads** — multi-threaded by default (CPU/2), tunable via `TOKIO_WORKERS`
+- **Configurable HTTP server threads** — CPU/2 worker threads by default (single-threaded on hosts with fewer than 4 CPUs), tunable via `TOKIO_WORKERS`
 
 ### Observability
 Full guide: [Distributed tracing](docs/features/distributed-tracing.md).
@@ -184,17 +185,17 @@ Full guide: [Profiling](docs/features/profiling.md).
 - **In-memory LRU + disk retention** — last `PROFILER_RETENTION_COUNT` runs always retrievable, token-bucket rate-limited writes, 5 s atomic-rename background trimmer
 - **HTTP push** — ship profiles to xhgui or any collector; 3× exponential backoff (100/200/400 ms) with 5 s wallclock cap; xhgui envelope auto-detect
 - **Internal HTTP routes** at `/__profiler/` — 8 endpoints (list / metadata / raw / speedscope redirect / DELETE / config / stats / landing) with optional bearer-token auth and path-traversal validation
-- **Prometheus metrics** — 6 counters + 1 gauge (runs, spans, bytes, disk drops, push failures, truncated, in-memory runs) via `/metrics`
+- **Prometheus metrics** — 8 counters + 1 gauge (runs, spans, bytes, disk drops, disk/HTTP saturation drops, push failures, truncated, in-memory runs) via `/metrics`
 
 ### Reliability & Operations
-- **Bounded request queue** with 529 backpressure when full
+- **Admission control** — a request waits up to `QUEUE_WAIT_TIMEOUT_MS` for a PHP worker and is refused with `529` + `Retry-After` past it; the waiting set itself is bounded — see [Configuration](docs/operations/configuration.md)
 - **Per-IP rate limiting** with `X-RateLimit-*` headers and 429 responses — see [Rate limiting](docs/features/rate-limiting.md)
 - **Custom error pages** — pre-loaded at startup, zero I/O on the hot path — see [Error pages](docs/features/error-pages.md)
-- **Graceful shutdown** — in-flight requests drain within `DRAIN_TIMEOUT_SECONDS` on SIGTERM/SIGINT — see [Graceful shutdown](docs/operations/graceful-shutdown.md)
+- **Graceful shutdown** — on SIGTERM/SIGINT in-flight requests get up to `DRAIN_TIMEOUT_SECONDS` to finish, then are cancelled — see [Graceful shutdown](docs/operations/graceful-shutdown.md)
 - **Path traversal protection** — symlink escape detection — see [Symlink allow paths](docs/security/symlink-allow-paths.md)
 - **Trusted proxy support** — real client IP extraction from `Forwarded` (RFC 7239) and `X-Forwarded-*` headers with CIDR-based trust — see [Trusted proxies](docs/security/trusted-proxies.md)
 - **Dot-path blocking** — returns 404 for hidden files (`.env`, `.git/`) with `.well-known` exception (RFC 8615) — see [Dot-path blocking](docs/security/dot-path-blocking.md)
-- **Non-root container** execution as www-data (UID 82)
+- **Privilege drop** — the container starts as root so it can bind port 80, and `oxphp` drops to `www-data` (UID 82) before handling any request; `--user` overrides the target
 
 ---
 
@@ -206,7 +207,7 @@ flowchart TD
     HTTP["Async HTTP server<br/>single- or multi-threaded"]
     Route{Route dispatch}
     Static["Static file<br/>LRU cache"]
-    Queue[("Bounded queue<br/>529 when full")]
+    Queue[("Bounded queue<br/>529 on wait timeout")]
     NF["404 Not Found"]
     Pool["Async pool<br/>oxphp_async / oxphp_async_await"]
 
@@ -236,7 +237,7 @@ flowchart TD
 
 - **Async HTTP server** — multi-threaded by default, tunable via `TOKIO_WORKERS`
 - **PHP worker pool** — each worker is a dedicated OS thread; a crash in one worker does not affect the others
-- Requests wait in a bounded queue between the HTTP server and the PHP workers; the queue returns 529 when full
+- Requests wait in a bounded queue between the HTTP server and the PHP workers; a request that waits longer than `QUEUE_WAIT_TIMEOUT_MS` for a worker is refused with 529
 - **Async pool** — separate threads for `oxphp_async()` tasks, preventing slowdowns in the main worker pool
 - **Worker mode** — persistent PHP workers that stay alive between requests; autoloaders and DB connections are shared across all requests handled by that worker
 
@@ -246,7 +247,8 @@ When `INTERNAL_ADDR` is set, a lightweight HTTP server starts on a separate port
 
 | Endpoint | Description |
 |----------|-------------|
-| `GET /health` | JSON health status (uptime, requests, connections) |
+| `GET /health` | Aggregate JSON health status (uptime, requests, connections); `503` when a plugin fails, no worker thread is alive, or the pool is stalled |
+| `GET /health/liveness`, `/health/readiness`, `/health/startup` | Orchestrator probes (aliases `/healthz`, `/readyz`, `/startupz`) — see [Health checks](docs/operations/health-checks.md) |
 | `GET /metrics` | Prometheus text format metrics |
 | `GET /config` | JSON runtime configuration (TLS paths redacted; `internal_addr` and `error_pages_dir` omitted) |
 
@@ -254,7 +256,7 @@ A port-only `INTERNAL_ADDR` (e.g. `:9090`) binds loopback; bind `0.0.0.0:9090` o
 
 ### Tracing pipeline (`plugin-otel` + `plugin-apm`)
 
-APM depends on OTel and shares its `TracerProvider` via the plugin service registry. Span collection happens on the PHP worker thread; OTLP export runs off the hot path via `tokio::spawn`.
+APM depends on OTel and shares its `TracerProvider` via the plugin service registry. Span collection happens on the PHP worker thread; OTLP export runs off the hot path.
 
 ```mermaid
 flowchart LR
@@ -264,19 +266,19 @@ flowchart LR
     end
 
     subgraph PHP ["PHP worker thread"]
-        SDK["PHP tracing SDK<br/>oxphp_trace_*()"]
+        SDK["PHP tracing SDK<br/>oxphp_apm_*()"]
         DEC["#[OxPHP\\Apm\\Trace]<br/>decorator"]
-        HOOKS["APM hooks (≈33 fn)<br/>PDO · mysqli · cURL<br/>Redis · Memcached · file I/O"]
-        STACK[("SPAN_STACK<br/>thread-local")]
+        HOOKS["APM hooks (34 fn)<br/>PDO · mysqli · cURL<br/>Redis · Memcached · file I/O"]
+        STACK[("SpanTree<br/>per request")]
         PHPERR["PHP errors"]
     end
 
     subgraph Tokio2 ["Tokio thread — request end"]
         OTC["OtelCompleteHandler<br/>builds root server span"]
-        APC["ApmCompleteHandler (-70)<br/>parses child spans JSON,<br/>links to root span"]
+        APC["ApmCompleteHandler (-70)<br/>reads child spans,<br/>links to root span"]
     end
 
-    subgraph Export ["Background export (tokio::spawn)"]
+    subgraph Export ["Background export"]
         BATCH["BatchSpanProcessor<br/>(shared TracerProvider)"]
         OTLP["OTLP exporter<br/>gRPC :4317 / HTTP :4318"]
     end
@@ -297,9 +299,9 @@ flowchart LR
 ```
 
 - **Trace context** is generated first (priority `-95`) when `TRACE_CONTEXT=true` (auto-enabled by OTel). OTel's request handler at `-80` records `start_us`; APM's handler runs at `-70`.
-- **Span collection is thread-local** — each PHP worker has its own `SPAN_STACK`. APM hooks, the `#[Trace]` decorator, and the `oxphp_trace_*()` SDK all push onto the same stack; child spans serialize to JSON at request end.
+- **One span tree per request** — APM hooks, the `#[Trace]` decorator, and the `oxphp_apm_*()` SDK record into the same per-request span tree, handed to the complete handler as `Arc<SpanTree>`.
 - **Shared `TracerProvider`** — OTel registers `otel.provider` as a plugin service; APM fetches the same `Arc<OnceLock<TracerProvider>>` so both plugins export to the same batch processor.
-- **Off-hot-path export** — both complete handlers `tokio::spawn` OTLP export; the HTTP response is returned to the client before spans are sent.
+- **Off-hot-path export** — OTel enqueues the root span into the `BatchSpanProcessor`, which exports on its own thread, and APM exports child spans from a `tokio::spawn` task; the HTTP response is returned to the client before spans are sent.
 - **Provider lifecycle** — OTel initializes the `BatchSpanProcessor` in `on_ready()` (after the Tokio runtime starts). On shutdown, `force_flush()` + `shutdown()` drain pending spans.
 
 ---
@@ -340,8 +342,8 @@ Plugin-scoped env vars (the `OTEL_*`, `OTEL_APM_*`, and `SHARED_*` families) liv
 ## Build
 
 ```bash
-# Host (without PHP — all tests pass, no PHP execution)
-cargo build --release
+# Host (without PHP — stub executor, no PHP execution)
+cargo build --release --no-default-features
 
 # Docker (with PHP — full functionality)
 docker compose build
@@ -350,7 +352,7 @@ docker compose build
 ### Run locally (static files only)
 
 ```bash
-DOCUMENT_ROOT=./www/public ./target/release/oxphp
+LISTEN_ADDR=127.0.0.1:8080 DOCUMENT_ROOT=./www/public ./target/release/oxphp
 ```
 
 ## Roadmap
@@ -371,7 +373,7 @@ DOCUMENT_ROOT=./www/public ./target/release/oxphp
 | **Ecosystem Plugins** | Expanded plugin system: more lifecycle hooks, richer PHP API, and documentation for third-party plugin authors |
 | ~~**Shared Async Runtime**~~ | ✅ Implemented — the same async runtime powers both the HTTP server and `oxphp_async()` / `oxphp_async_await()` with timeouts, result delivery, and race coordination |
 | ~~**Promise API**~~ | ✅ Implemented — `oxphp_async()` / `oxphp_async_await()` with dedicated thread pool, portable serialization, and exception safety |
-| ~~**Fiber Multiplexing**~~ | ✅ Implemented — each worker handles multiple concurrent requests via PHP 8.4 Fibers; `oxphp_sleep()` / `oxphp_usleep()` and `oxphp_async_await()` yield the fiber cooperatively |
+| ~~**Fiber Multiplexing**~~ | ✅ Implemented — each worker handles multiple concurrent requests via PHP Fibers; `oxphp_sleep()` / `oxphp_usleep()` and `oxphp_async_await()` yield the fiber cooperatively |
 | **Diagnostics** | Production doctor: checks OS limits (ulimit, TCP backlog, epoll/kqueue, container settings), identifies performance bottlenecks (worker queue depth, lock contention, GC/alloc pressure, ZTS stats), and gives specific actionable recommendations |
 | **TLS hot-reload** | Reload TLS certificate and key without restart — compatible with cert-manager / SPIRE / istiod short-lived rotation, removes the rolling-restart-per-rotation workaround |
 | **SPIFFE Workload API** | Native client for SPIFFE/SPIRE workload identity: streaming SVIDs over Unix socket with cryptographic node attestation, as an opt-in alternative to file-mount cert distribution |
