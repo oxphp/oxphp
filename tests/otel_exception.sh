@@ -52,15 +52,22 @@
 #
 # Assertion is against an OpenTelemetry collector's debug exporter (stdout).
 #
-# NOT wired into run_all.sh or CI (like tests/graceful_drain.sh and
-# tests/cli_run.sh) — run manually after touching the exception-capture path
-# (ext/bridge/oxphp_bridge.c, ext/oxphp_fiber.c, ext/oxphp_sapi.c,
-# src/php/unhandled_exception.rs, src/plugins/ox_apm, src/plugins/ox_otel).
+# Not part of run_all.sh: CI runs it from .github/workflows/e2e.yml against a
+# dev image built for each supported PHP version. Run it locally after touching
+# the exception-capture path (ext/bridge/oxphp_bridge.c, ext/oxphp_fiber.c,
+# ext/oxphp_sapi.c, src/php/unhandled_exception.rs, src/plugins/ox_apm,
+# src/plugins/ox_otel) rather than waiting for that run.
+#
+# The collector image is pinned because the assertions grep its debug
+# exporter's text output, whose format is not a stable interface; curl is
+# pinned alongside it so a run is reproducible.
 #
 # Usage: tests/otel_exception.sh [IMAGE_REF]   (default: oxphp-oxphp:latest)
 set -u
 
 IMAGE="${1:-oxphp-oxphp:latest}"
+COLLECTOR_IMAGE="otel/opentelemetry-collector:0.161.0"
+CURL_IMAGE="curlimages/curl:8.22.0"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 FIX="$ROOT/tests/fixtures/otel_exception"
 # Suffixed with the PID so two runs on one Docker host (two checkouts, two
@@ -87,7 +94,7 @@ docker network create "$NET" >/dev/null
 
 docker run -d --name "$COL" --network "$NET" \
 	-v "$FIX/otelcol.yaml":/etc/otelcol/config.yaml:ro \
-	otel/opentelemetry-collector:latest --config /etc/otelcol/config.yaml >/dev/null
+	"$COLLECTOR_IMAGE" --config /etc/otelcol/config.yaml >/dev/null
 
 docker run -d --name "$SRV" --network "$NET" \
 	-v "$FIX/auto.php":/var/www/html/public/auto.php:ro \
@@ -175,49 +182,49 @@ T_BOK=00000000000000000000000000000014
 tp() { printf 'traceparent: 00-%s-0000000000000001-01' "$1"; }
 
 # Drive both endpoints.
-docker run --rm --network "$NET" curlimages/curl:latest -H "$(tp "$T_AUTO")" \
+docker run --rm --network "$NET" "$CURL_IMAGE" -H "$(tp "$T_AUTO")" \
 	-s -o /dev/null -w "auto  HTTP %{http_code}\n" "http://$SRV:80/auto.php"
-docker run --rm --network "$NET" curlimages/curl:latest -H "$(tp "$T_MANUAL")" \
+docker run --rm --network "$NET" "$CURL_IMAGE" -H "$(tp "$T_MANUAL")" \
 	-s -o /dev/null -w "manual HTTP %{http_code}\n" "http://$SRV:80/manual.php"
-docker run --rm --network "$NET" curlimages/curl:latest -H "$(tp "$T_LATIN1")" \
+docker run --rm --network "$NET" "$CURL_IMAGE" -H "$(tp "$T_LATIN1")" \
 	-s -o /dev/null -w "latin1 HTTP %{http_code}\n" "http://$SRV:80/latin1.php"
 # trace_cb's body carries the callback's return value and the re-thrown message,
 # neither of which reaches the collector — capture it rather than discarding it.
-TRACE_CB_BODY="$(docker run --rm --network "$NET" curlimages/curl:latest -H "$(tp "$T_TRACE_CB")" \
+TRACE_CB_BODY="$(docker run --rm --network "$NET" "$CURL_IMAGE" -H "$(tp "$T_TRACE_CB")" \
 	-s "http://$SRV:80/trace_cb.php")"
 echo "trace_cb body: $(echo "$TRACE_CB_BODY" | tr '\n' '|')"
-docker run --rm --network "$NET" curlimages/curl:latest -H "$(tp "$T_REASON")" \
+docker run --rm --network "$NET" "$CURL_IMAGE" -H "$(tp "$T_REASON")" \
 	-s -o /dev/null -w "reason HTTP %{http_code}\n" "http://$SRV:80/reason.php"
-docker run --rm --network "$NET" curlimages/curl:latest -H "$(tp "$T_ANON")" \
+docker run --rm --network "$NET" "$CURL_IMAGE" -H "$(tp "$T_ANON")" \
 	-s -o /dev/null -w "anon  HTTP %{http_code}\n" "http://$SRV:80/anon.php"
-docker run --rm --network "$NET" curlimages/curl:latest -H "$(tp "$T_REF")" \
+docker run --rm --network "$NET" "$CURL_IMAGE" -H "$(tp "$T_REF")" \
 	-s -o /dev/null -w "ref   HTTP %{http_code}\n" "http://$SRV:80/ref.php"
-docker run --rm --network "$NET" curlimages/curl:latest -H "$(tp "$T_UNCAUGHT")" \
+docker run --rm --network "$NET" "$CURL_IMAGE" -H "$(tp "$T_UNCAUGHT")" \
 	-s -o /dev/null -w "uncaught HTTP %{http_code}\n" "http://$SRV:80/uncaught.php"
-docker run --rm --network "$NET" curlimages/curl:latest -H "$(tp "$T_FATAL")" \
+docker run --rm --network "$NET" "$CURL_IMAGE" -H "$(tp "$T_FATAL")" \
 	-s -o /dev/null -w "fatal HTTP %{http_code}\n" "http://$SRV:80/fatal.php"
-docker run --rm --network "$NET" curlimages/curl:latest -H "$(tp "$T_CHAINED")" \
+docker run --rm --network "$NET" "$CURL_IMAGE" -H "$(tp "$T_CHAINED")" \
 	-s -o /dev/null -w "chained HTTP %{http_code}\n" "http://$SRV:80/chained.php"
-docker run --rm --network "$NET" curlimages/curl:latest -H "$(tp "$T_FORGE")" \
+docker run --rm --network "$NET" "$CURL_IMAGE" -H "$(tp "$T_FORGE")" \
 	-s -o /dev/null -w "forge HTTP %{http_code}\n" "http://$SRV:80/forge.php"
-docker run --rm --network "$NET" curlimages/curl:latest -H "$(tp "$T_STALE")" \
+docker run --rm --network "$NET" "$CURL_IMAGE" -H "$(tp "$T_STALE")" \
 	-s -o /dev/null -w "stale_class HTTP %{http_code}\n" "http://$SRV:80/stale_class.php"
-STREAM_CODE="$(docker run --rm --network "$NET" curlimages/curl:latest -H "$(tp "$T_STREAM")" \
+STREAM_CODE="$(docker run --rm --network "$NET" "$CURL_IMAGE" -H "$(tp "$T_STREAM")" \
 	-s -o /dev/null --max-time 30 -w "%{http_code}" "http://$SRV:80/stream_fatal.php")"
 echo "stream_fatal HTTP $STREAM_CODE"
 # Capture handled's body as a positive control — proves handled.php actually ran
 # (its set_exception_handler fired) so the "no event" assertion is meaningful and
 # not a false pass from a 404 / parse error.
-HANDLED_BODY="$(docker run --rm --network "$NET" curlimages/curl:latest -H "$(tp "$T_HANDLED")" \
+HANDLED_BODY="$(docker run --rm --network "$NET" "$CURL_IMAGE" -H "$(tp "$T_HANDLED")" \
 	-s "http://$SRV:80/handled.php")"
 # Capture the worker status codes: a handler-body throw and a streamed-then-thrown
 # fatal must both surface as 500. Asserting the status (not just grepping the
 # message) is what catches a silently-200 worker regression that the root-span
 # gate would then drop.
-WORKER_BOOM_CODE="$(docker run --rm --network "$NET" curlimages/curl:latest -H "$(tp "$T_WBOOM")" \
+WORKER_BOOM_CODE="$(docker run --rm --network "$NET" "$CURL_IMAGE" -H "$(tp "$T_WBOOM")" \
 	-s -o /dev/null -w "%{http_code}" "http://$WRK:80/boom")"
 echo "worker /boom HTTP $WORKER_BOOM_CODE"
-WORKER_STREAM_CODE="$(docker run --rm --network "$NET" curlimages/curl:latest -H "$(tp "$T_WSTREAM")" \
+WORKER_STREAM_CODE="$(docker run --rm --network "$NET" "$CURL_IMAGE" -H "$(tp "$T_WSTREAM")" \
 	-s -o /dev/null --max-time 30 -w "%{http_code}" "http://$WRK:80/stream-boom")"
 echo "worker /stream-boom HTTP $WORKER_STREAM_CODE"
 
@@ -229,7 +236,7 @@ echo "worker /stream-boom HTTP $WORKER_STREAM_CODE"
 # only a request that comes apart does — so nothing below depends on this any
 # more; it stays so the scenarios keep the request sequence they were written
 # against.
-docker run --rm --network "$NET" curlimages/curl:latest -H "$(tp "$T_WOK")" \
+docker run --rm --network "$NET" "$CURL_IMAGE" -H "$(tp "$T_WOK")" \
 	-s -o /dev/null -w "worker /ok HTTP %{http_code}\n" "http://$WRK:80/ok"
 
 # Scenario WORKER-SHADOW: the handler throws (the killer), then a shutdown
@@ -237,7 +244,7 @@ docker run --rm --network "$NET" curlimages/curl:latest -H "$(tp "$T_WOK")" \
 # into REQUEST_ERRORS first (during php_call_shutdown_functions), and the fiber
 # capture is pulled in only at send time — so without front-insertion the earliest
 # error-level entry would be the shutdown error, shadowing the killer on the span.
-WORKER_SHADOW_CODE="$(docker run --rm --network "$NET" curlimages/curl:latest -H "$(tp "$T_WSHADOW")" \
+WORKER_SHADOW_CODE="$(docker run --rm --network "$NET" "$CURL_IMAGE" -H "$(tp "$T_WSHADOW")" \
 	-s -o /dev/null --max-time 30 -w "%{http_code}" "http://$WRK:80/shadow")"
 echo "worker /shadow HTTP $WORKER_SHADOW_CODE"
 
@@ -247,9 +254,9 @@ echo "worker /shadow HTTP $WORKER_SHADOW_CODE"
 # the single worker thread — the parked capture must survive that overlap. No
 # fixed sleep: /b-ok's cooperative wait removes the timing race entirely. The
 # --max-time bounds the run if the marker never appears (a real regression).
-docker run --rm --network "$NET" curlimages/curl:latest -H "$(tp "$T_AFAIL")" \
+docker run --rm --network "$NET" "$CURL_IMAGE" -H "$(tp "$T_AFAIL")" \
 	-s -o /dev/null --max-time 30 "http://$WRK:80/a-fail" &
-BOK_BODY="$(docker run --rm --network "$NET" curlimages/curl:latest -H "$(tp "$T_BOK")" \
+BOK_BODY="$(docker run --rm --network "$NET" "$CURL_IMAGE" -H "$(tp "$T_BOK")" \
 	-s --max-time 30 "http://$WRK:80/b-ok")"
 echo "a-fail(bg)/b-ok body: $BOK_BODY"
 wait

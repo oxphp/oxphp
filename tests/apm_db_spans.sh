@@ -22,7 +22,7 @@
 #
 # Assertion is against an OpenTelemetry collector's debug exporter (stdout).
 #
-# NOT wired into run_all.sh or CI (like tests/otel_exception.sh) — run manually
+# NOT wired into run_all.sh or CI (like tests/graceful_drain.sh) — run manually
 # after touching the APM DB hook path (ext/bridge/oxphp_bridge.c,
 # src/plugins/ox_apm/hooks, src/plugins/ox_apm/{sql,connection_meta}.rs).
 #
