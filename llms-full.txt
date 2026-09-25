@@ -7761,7 +7761,7 @@ $app->terminate();
 
 OxPHP performs a soft reset between requests. The following state is cleaned automatically:
 
-- **Superglobals** — `$_GET`, `$_POST`, `$_SERVER`, `$_COOKIE`, `$_FILES`, and `php://input` are repopulated with the new request data
+- **Superglobals** — `$_GET`, `$_POST`, `$_SERVER`, `$_COOKIE`, `$_FILES`, `$_REQUEST`, and `php://input` are repopulated with the new request data
 - **Output buffers** — all output buffers are flushed and cleaned
 - **Response headers** — HTTP status code and headers are reset to defaults
 - **Error state** — last error information (message, file, line, type) and connection status are cleared. User-registered error handlers (`set_error_handler()`) and exception handlers (`set_exception_handler()`) persist across requests
