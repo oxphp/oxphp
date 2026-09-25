@@ -15,6 +15,12 @@ declare(strict_types=1);
 // rather than by the request's own return. What the destructor does in there is
 // the fixture's `dtor` parameter. The tests stage three, one after another.
 //
+// With `at=session` the fixture holds nothing in its own frame and returns
+// after the park without writing; it is its session save handler that holds
+// the object and writes, as the worker writes the session after the request.
+// That write ends it there, and the object is given back from the save
+// handler's frame.
+//
 // Each step is confirmed before the next one is taken, for the reason
 // queued_cancel.php gives: a run that skipped one would pass for the wrong
 // reason.
@@ -78,14 +84,17 @@ function stream_walk_wait(callable $until, float $seconds): bool
 }
 
 /**
- * Removes what an earlier run left for every fixture of the $dtor kind. Done up
- * front for all of them, not stream by stream: a block that stops early leaves
- * the later streams unstaged, and a marker an earlier run left for one of those
- * would answer its assertion instead.
+ * Removes what an earlier run left for the fixtures $ids of the $dtor kind —
+ * 1 to STREAM_WALK_COUNT unless given. Done up front for all of them, not
+ * stream by stream: a block that stops early leaves the later streams
+ * unstaged, and a marker an earlier run left for one of those would answer its
+ * assertion instead.
+ *
+ * @param list<int>|null $ids
  */
-function stream_walk_clear(string $dtor): void
+function stream_walk_clear(string $dtor, ?array $ids = null): void
 {
-    for ($id = 1; $id <= STREAM_WALK_COUNT; $id++) {
+    foreach ($ids ?? range(1, STREAM_WALK_COUNT) as $id) {
         foreach ([stream_walk_stage_file($dtor, $id), stream_walk_dtor_file($dtor, $id)] as $file) {
             if (is_file($file)) {
                 unlink($file);
@@ -115,7 +124,7 @@ function stream_walk_clear(string $dtor): void
  * would find the destructor's file, return, and finish its request cleanly —
  * which resets the count of consecutive failures before the worker checks it.
  */
-function stream_walk_stage(string $dtor, int $id, bool $parkThrough = false): ?string
+function stream_walk_stage(string $dtor, int $id, bool $parkThrough = false, string $at = 'handler'): ?string
 {
     $stageFile = stream_walk_stage_file($dtor, $id);
     $dtorFile = stream_walk_dtor_file($dtor, $id);
@@ -131,7 +140,7 @@ function stream_walk_stage(string $dtor, int $id, bool $parkThrough = false): ?s
     }
     // No body, so the server keeps reading the connection while the request runs
     // and sees the close as soon as it happens.
-    fwrite($sock, "GET /tests/breaker/fixture_stream_walk_dtor.php?id=$id&dtor=$dtor HTTP/1.1\r\n"
+    fwrite($sock, "GET /tests/breaker/fixture_stream_walk_dtor.php?id=$id&dtor=$dtor&at=$at HTTP/1.1\r\n"
         . "Host: 127.0.0.1\r\n\r\n");
 
     // Closed only once it is running: a request whose client leaves while it is
