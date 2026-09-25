@@ -7,6 +7,16 @@ set -euo pipefail
 TESTS_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PROJECT_DIR="$(cd "$TESTS_DIR/.." && pwd)"
 
+# Compose would name the project after this directory, `tests`, in every
+# checkout, so two worktrees on one Docker host would share containers and
+# image tags and tear down each other's profiles. Name it after the checkout
+# instead, folded to what compose accepts in a project name. A name set by the
+# caller wins.
+if [ -z "${COMPOSE_PROJECT_NAME:-}" ]; then
+    COMPOSE_PROJECT_NAME="tests-$(printf '%s' "$(basename "$PROJECT_DIR")" | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9_-' '-')"
+fi
+export COMPOSE_PROJECT_NAME
+
 # Exported so suite curl_args (evaluated in assertions.sh) can reference
 # fixtures via a portable host path, e.g. `-F "file=@$FIXTURES_DIR/small.txt"`.
 export FIXTURES_DIR="${TESTS_DIR}/fixtures/uploads"

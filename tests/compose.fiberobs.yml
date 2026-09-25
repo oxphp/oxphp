@@ -53,6 +53,3 @@ services:
       - ../www:/var/www/html
       - ./php:/var/www/html/public/tests
       - ./fixtures/worker:/var/www/html/worker
-networks:
-  test-net:
-    driver: bridge

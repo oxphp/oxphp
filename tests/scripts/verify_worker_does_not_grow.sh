@@ -64,6 +64,10 @@ SLACK_PER_FATAL=64
 SLACK_PER_REQUEST=8
 
 cd "$(dirname "$0")/.."
+# Same compose project as run_all.sh, so a check run by hand drives the
+# profile of this checkout rather than one shared with other checkouts.
+# shellcheck source=../lib/common.sh
+source lib/common.sh
 COMPOSE="docker compose -f compose.yml -f compose.fibers.yml"
 
 # One JSONL object per check, matching what run_profile.sh emits so the

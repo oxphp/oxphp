@@ -1,8 +1,10 @@
 # Base compose for PHP test suite.
 # Usage: docker compose -f compose.yml -f compose.<profile>.yml up
+# No fixed name: compose calls it <project>_test-net, so each compose project gets
+# its own network and projects running side by side on one Docker host cannot
+# block each other's `up`.
 networks:
   test-net:
-    name: oxphp-test-net
 
 # Reference template (YAML anchors don't cross files — each override is self-contained)
 x-oxphp-base: &oxphp-base
