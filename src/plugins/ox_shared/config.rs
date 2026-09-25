@@ -24,7 +24,6 @@ pub struct SharedConfig {
     /// budget is clamped up to at least one slot, so a zero or sub-slot
     /// value can never reject a minimal capacity-1 channel.
     pub max_channel_bytes: u64,
-    pub poison_strict: bool,
     pub lock_diagnostics: LockDiagnosticsLevel,
     pub lock_poll_interval_ms: u64,
     pub preview_string_limit: usize,
@@ -60,7 +59,6 @@ impl SharedConfig {
             cycle_detect_edges: parse_usize(shared_value(ctx, "CYCLE_DETECT_EDGES"), 10_000),
             max_value_size: parse_usize(shared_value(ctx, "MAX_VALUE_SIZE"), 1 << 20),
             max_channel_bytes: parse_u64(shared_value(ctx, "MAX_CHANNEL_BYTES"), 64 << 20),
-            poison_strict: shared_bool(ctx, "POISON_STRICT", false)?,
             lock_diagnostics: parse_lock_diag(shared_value(ctx, "LOCK_DIAGNOSTICS")),
             lock_poll_interval_ms: parse_u64(shared_value(ctx, "LOCK_POLL_INTERVAL_MS"), 100),
             preview_string_limit: parse_usize(shared_value(ctx, "PREVIEW_STRING_LIMIT"), 256),
@@ -77,7 +75,10 @@ impl SharedConfig {
 ///   `main.rs`.
 /// - `SOFT_LIMIT_RATIO`: nothing ever acted on the threshold; the saturation
 ///   gauge is where an alert on it belongs.
-const DEPRECATED_KEYS: [(&str, &str); 2] = [
+/// - `POISON_STRICT`: no primitive consulted it. An exception thrown inside a
+///   `Mutex` closure never poisons the mutex, and whether a throwing `Once`
+///   factory is terminal is chosen per instance by its constructor argument.
+const DEPRECATED_KEYS: [(&str, &str); 3] = [
     (
         "SHUTDOWN_TIMEOUT_SECONDS",
         "graceful shutdown is bounded by DRAIN_TIMEOUT_SECONDS",
@@ -85,6 +86,10 @@ const DEPRECATED_KEYS: [(&str, &str); 2] = [
     (
         "SOFT_LIMIT_RATIO",
         "alert on oxphp_shared_capacity_saturation instead",
+    ),
+    (
+        "POISON_STRICT",
+        "pass Once\\FailureMode::Poison to the Once constructor instead",
     ),
 ];
 
@@ -390,6 +395,7 @@ mod tests {
         for (key, value) in [
             ("SOFT_LIMIT_RATIO", "0.5"),
             ("SHUTDOWN_TIMEOUT_SECONDS", "5"),
+            ("POISON_STRICT", "true"),
         ] {
             for var in [format!("SHARED_{key}"), format!("OX_SHARED_{key}")] {
                 let log = from_ctx_log_with(key, &var, value);

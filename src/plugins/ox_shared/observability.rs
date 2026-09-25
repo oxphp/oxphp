@@ -81,7 +81,6 @@ fn handle_summary(_req: &PluginInternalRequest) -> Response<ResponseBody> {
         "diagnostics": {
             "lock_diagnostics_level": format!("{:?}", cfg.lock_diagnostics).to_lowercase(),
             "cycle_detect_depth": cfg.cycle_detect_depth,
-            "poison_strict": cfg.poison_strict,
         }
     });
     json_response(200, body)
@@ -749,7 +748,6 @@ mod tests {
             cycle_detect_edges: 10_000,
             max_value_size: 1 << 20,
             max_channel_bytes: 64 << 20,
-            poison_strict: false,
             lock_diagnostics: LockDiagnosticsLevel::Off,
             lock_poll_interval_ms: 100,
             preview_string_limit: 256,
@@ -839,6 +837,34 @@ mod tests {
         let mut keys: Vec<&str> = limits.keys().map(String::as_str).collect();
         keys.sort_unstable();
         assert_eq!(keys, ["max_bytes", "max_entries"]);
+    }
+
+    /// `diagnostics` echoes only settings something reads: a key listed
+    /// there reads as a policy the server applies.
+    #[tokio::test]
+    async fn summary_diagnostics_list_only_live_settings() {
+        ensure_test_registry();
+        let method = Method::GET;
+        let headers = HeaderMap::new();
+        let req = PluginInternalRequest {
+            method: &method,
+            path: "/__ox_shared/summary",
+            headers: &headers,
+            query: None,
+        };
+        let resp = handle_summary(&req);
+        assert_eq!(resp.status().as_u16(), 200);
+        let bytes = resp
+            .into_body()
+            .collect()
+            .await
+            .expect("collect body")
+            .to_bytes();
+        let v: Value = serde_json::from_slice(&bytes).expect("json");
+        let diagnostics = v["diagnostics"].as_object().expect("diagnostics object");
+        let mut keys: Vec<&str> = diagnostics.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(keys, ["cycle_detect_depth", "lock_diagnostics_level"]);
     }
 
     #[test]
