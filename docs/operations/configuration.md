@@ -355,8 +355,8 @@ In-process concurrency primitives (`OxPHP\Shared\Counter`, `Map`, `Channel`, `Mu
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SHARED_ENABLED` | `true` | Boolean — see [Boolean values](#boolean-values). Master switch for the entire `OxPHP\Shared\*` subsystem. Set to `false` and none of its classes are registered: `new OxPHP\Shared\Counter()` throws `Error: Class "OxPHP\Shared\Counter" not found`, and `/__ox_shared/*` and the `oxphp_shared_*` metrics are absent. Guard with `class_exists('OxPHP\Shared\Counter')` in code that must run either way — not with `interface_exists('OxPHP\Shared\Shareable')`, which stays true because the extension registers that interface either way |
-| `SHARED_MAX_ENTRIES` | `100000` | Global cap on all Shared entries combined. Insert past this fails with `CapacityException` |
-| `SHARED_MAX_BYTES` | `1073741824` (1 GiB) | Global cap on estimated memory across all Shared entries |
+| `SHARED_MAX_ENTRIES` | `100000` | Global cap on the number of live Shared objects (each `Counter`, `Map`, `Channel`, … counts as one). Creating an object past it fails with `CapacityException`. Keys inside a `Map` do not count toward it — bound a `Map` with `maxEntries` |
+| `SHARED_MAX_BYTES` | `1073741824` (1 GiB) | Global cap on estimated memory across all Shared objects, checked only when an object is created (`CapacityException`). Objects that already exist can keep growing past it, so the total can read above the cap |
 | `SHARED_SOFT_LIMIT_RATIO` | — | Deprecated and ignored; setting it logs a startup `WARN`. It never had an effect: nothing is shed or degraded as usage approaches `SHARED_MAX_BYTES` / `SHARED_MAX_ENTRIES`, which only refuse the creation of a new Shared object once reached. For early warning, alert on `oxphp_shared_capacity_saturation`, published while `SHARED_METRICS_ENABLED` is on (see [Shared State Observability](../shared-state/shared-observability.md)) |
 | `SHARED_METRICS_ENABLED` | `true` | Boolean. Toggles the `oxphp_shared_*` Prometheus exposition |
 | `SHARED_INTROSPECTION_ENABLED` | `true` | Boolean. Toggles the `/__ox_shared/*` introspection API on the internal server |
