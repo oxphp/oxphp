@@ -83,14 +83,12 @@ jobs:
   # fallback in src/server/connection.rs is compiled by the no-default clippy
   # row too, but nothing there runs.
   #
-  # Out of reach of both runs: src/php/{bindings,bootstrap,sapi} and
-  # executor::sapi — 26 tests, all of them in sapi.rs. The rest of src/php/
-  # (fiber, header_match, heartbeat, request_decode, supervisor,
-  # unhandled_exception, worker_registry) is NOT php-gated and already runs
-  # in both. Closing the remaining 26 needs libphp.so, i.e. a container job;
-  # the clippy matrix above type-checks that code in the meantime — though
-  # not the `cfg(not(feature = "plugin-*"))` arms nested inside it, which no
-  # buildable feature combination reaches at all.
+  # Out of reach of both runs: everything behind `feature = "php"` —
+  # src/php/sapi.rs, executor::sapi and the php-gated tests elsewhere. The
+  # `test-php` job below runs those. Neither job reaches the
+  # `cfg(not(feature = "plugin-*"))` arms nested inside php-gated code: `php`
+  # always enables all four plugins, so no buildable feature combination
+  # compiles them.
   #
   # decorator-test is not here either — it gates no Rust tests and is
   # deliberately not part of `php`, so it is type-checked by a clippy row
@@ -129,6 +127,39 @@ jobs:
             exit 1
           fi
           cargo test --no-default-features --features "$HOST_FEATURES"
+
+  # The default feature set, which is the only one that builds the php-gated
+  # code, links libphp.so and liboxphp_bridge.so. The job runs in the PHP ZTS
+  # base image the release image is built on, so libphp.so is already there;
+  # the script installs Rust from Alpine (the compiler rust-toolchain.toml
+  # pins) and builds the bridge. PHP 8.4 only: the clippy matrix type-checks
+  # the 8.5 bindings, and no test is version-gated.
+  test-php:
+    name: Test (php feature)
+    runs-on: ubuntu-latest
+    container: php:8.4-zts-alpine3.23
+    steps:
+      # The PHP base image has no git, without which actions/checkout
+      # downloads the files over the REST API instead of cloning, and no
+      # zstd, without which actions/cache falls back to gzip. It already
+      # ships GNU tar, which actions/cache needs. Rust is installed here
+      # rather than only by the script so its version can key the cache, as
+      # in the jobs above; the script's own apk add then finds it in place.
+      - name: Install checkout, cache and toolchain prerequisites
+        run: apk add --no-cache git zstd rust cargo
+      - name: Rust version
+        id: rust
+        run: echo "hash=$(rustc --version | sha256sum | cut -d' ' -f1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v5
+      - uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: test-php-8.4-${{ steps.rust.outputs.hash }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: test-php-8.4-${{ steps.rust.outputs.hash }}-
+      - run: scripts/test-php-feature.sh
 
   # Always runs so the required status check is always reported, but the
   # expensive steps are gated on changes to license-relevant files. PRs that

@@ -754,13 +754,20 @@ impl Drop for SapiExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::mem::ManuallyDrop;
 
     /// Executor whose queue holds `capacity` requests and whose admission gate
     /// waits `wait_timeout_ms` for a slot. No workers are spawned, so nothing
     /// ever drains the queue — capacity is exhausted by sending into it.
-    fn test_executor(capacity: usize, wait_timeout_ms: u64) -> SapiExecutor {
+    ///
+    /// PHP is never initialized in these tests, so the real `Drop` impl would
+    /// call `php_module_shutdown` / `sapi_shutdown` / `tsrm_shutdown` against
+    /// uninitialized state — it faults under the `php` feature. The executor
+    /// is therefore never dropped, including when a failed assertion unwinds
+    /// the test.
+    fn test_executor(capacity: usize, wait_timeout_ms: u64) -> ManuallyDrop<SapiExecutor> {
         let (tx, rx) = crossbeam_channel::bounded::<WorkerRequest>(capacity);
-        SapiExecutor {
+        ManuallyDrop::new(SapiExecutor {
             request_tx: Some(tx),
             request_rx: rx,
             admission: Arc::new(Admission::new(capacity, wait_timeout_ms, 64, usize::MAX)),
@@ -773,15 +780,7 @@ mod tests {
             global_shutdown: Arc::new(AtomicBool::new(false)),
             metrics: Arc::new(Metrics::new()),
             idle_timeout_seconds: 30,
-        }
-    }
-
-    /// PHP was never initialized in these tests, so the real `Drop` impl would
-    /// call `php_module_shutdown` / `sapi_shutdown` / `tsrm_shutdown` against
-    /// uninitialized state — undefined behaviour under the `php` feature.
-    /// Leak the executor; the test process exits immediately after.
-    fn forget_executor(executor: SapiExecutor) {
-        std::mem::forget(executor);
+        })
     }
 
     fn assert_overloaded(resp: &ScriptResponse) {
@@ -815,8 +814,6 @@ mod tests {
                 .contains("oxphp_admission_refused_total{reason=\"queue_full\"} 1"),
             "fail-fast shed must be counted, and counted as queue_full"
         );
-
-        forget_executor(executor);
     }
 
     #[tokio::test]
@@ -844,8 +841,6 @@ mod tests {
             "must wait the budget before shedding, waited {:?}",
             start.elapsed()
         );
-
-        forget_executor(executor);
     }
 
     #[tokio::test]
@@ -856,7 +851,8 @@ mod tests {
         // than what it answers. There are no workers here, so nothing began a
         // request while the second one waited — which is the whole of what
         // the wasted counter claims, and this pool satisfies it by having no
-        // way to start anything at all.
+        // way to start anything at all — nor may a test running alongside.
+        let _tick = crate::metrics::POOL_STARTS_TEST_LOCK.lock().await;
         let executor = test_executor(1, 150);
         assert!(
             matches!(executor.execute(make_request()), ExecuteResult::Deferred(_)),
@@ -886,11 +882,9 @@ mod tests {
 
         // The other arm — the pool did begin something, so do not count it —
         // is not reachable here: the tick only moves from `take_from_queue`,
-        // which is compiled under the `php` feature, so a host build has no
-        // way to advance it. It is pinned on the waiting side instead, by
+        // and this pool has no workers to call it, while the lock above keeps
+        // other tests' pickups out. It is pinned on the waiting side instead, by
         // `await_queued_does_not_call_a_lost_race_a_wasted_wait`.
-
-        forget_executor(executor);
     }
 
     #[tokio::test]
@@ -956,8 +950,6 @@ mod tests {
             out.contains("oxphp_admission_refused_total{reason=\"wait_timeout\"} 1"),
             "a cancellation a worker wrote leaves the refusal where it was: {out}"
         );
-
-        forget_executor(executor);
     }
 
     #[tokio::test]
@@ -985,8 +977,6 @@ mod tests {
             admitting.await.is_ok(),
             "a freed slot inside the budget must admit, not shed"
         );
-
-        forget_executor(executor);
     }
 
     /// A pool entry whose thread runs until `shutdown` is raised, or one whose
@@ -1053,7 +1043,6 @@ mod tests {
         for worker in executor.workers.lock().unwrap().drain(..) {
             let _ = worker.handle.join();
         }
-        forget_executor(executor);
     }
 
     #[test]
@@ -1095,7 +1084,6 @@ mod tests {
             let _ = worker.handle.join();
         }
         drop(workers);
-        forget_executor(executor);
     }
 
     fn make_request() -> ScriptRequest {

@@ -112,6 +112,10 @@ fn slow_decorator_emits_nothing_under_threshold() {
     });
 }
 
+// Host build only: under `feature = "php"` the getter calls
+// zend_memory_usage, which reads AG(mm_heap) through the calling thread's
+// TSRM slot — one a test thread never gets, so the call faults.
+#[cfg(not(feature = "php"))]
 #[test]
 fn memory_decorator_does_not_false_positive_in_host_build() {
     // Without `feature = "php"` the bridge memory getter returns 0 →
@@ -132,16 +136,10 @@ fn memory_decorator_does_not_false_positive_in_host_build() {
 
         let mut ctx = cell.borrow_mut();
         let span = ctx.get_mut(id).expect("open");
-        // In host build (no feature=php), the decorator must stay
-        // silent. Under PHP, this assertion would not hold and
-        // memory_spike would fire — covered separately by Docker.
-        #[cfg(not(feature = "php"))]
         assert!(
             span.events.is_empty(),
             "memory decorator must not emit without PHP runtime"
         );
-        #[cfg(feature = "php")]
-        let _ = span;
     });
 }
 

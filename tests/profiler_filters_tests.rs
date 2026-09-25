@@ -182,6 +182,11 @@ fn resolver_class_tag_appears_before_function_tag_via_apply_events() {
     assert!(get_spec(spec_id).is_some());
 }
 
+// Host build only: under `feature = "php"` the resolver reads the #[Tag]
+// arguments through the bridge, which dereferences the resolver context —
+// and there is no attribute table to pass here, only the null this test
+// hands it.
+#[cfg(not(feature = "php"))]
 #[test]
 fn apply_events_with_non_zero_spec_id_attaches_tags_from_registry() {
     // Use the resolver to get a real spec_id, then craft synthetic
