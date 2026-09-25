@@ -61,36 +61,64 @@ fresh_worker() {
 	base="http://127.0.0.1:${port}/tests/fibers"
 }
 
-count_content_type() { curl -s -D- -o /dev/null "$1" | tr -d '\r' | grep -ci '^content-type:' || true; }
+# Every request keeps what curl said about it under its own name. A count of
+# zero has two readings — a response without the header, or no response at all
+# — and only curl's own error tells them apart, so a failing check reports the
+# error of its own request next to what it measured.
+errdir="$(mktemp -d)"
+trap 'rm -rf "$errdir"' EXIT
+fetch() { local name="$1"; shift; curl -sS "$@" 2>"${errdir}/${name}"; }
+curl_error() { if [ -s "${errdir}/$1" ]; then printf ' (%s)' "$(head -1 "${errdir}/$1")"; fi; }
+
+count_content_type() { fetch "$1" -D- -o /dev/null "$2" | tr -d '\r' | grep -ci '^content-type:' || true; }
+
+# What the worker looked like when a request failed at the transport level,
+# taken before the teardown that would otherwise destroy it: a container that
+# has exited says the server went away; with a live one, curl's error says
+# whether the connection was refused or dropped.
+diagnose() {
+	echo "A request to ${base} failed. Requests in the order they were sent:"
+	local name err
+	for name in first second empty buffered next; do
+		err="$(head -1 "${errdir}/${name}" 2>/dev/null || true)"
+		printf '  %-8s %s\n' "$name" "${err:-(no curl error)}"
+	done
+	$COMPOSE ps -a
+	local id
+	id="$($COMPOSE ps -aq oxphp-fibers)"
+	if [ -n "$id" ]; then docker inspect -f '{{json .State}}' "$id"; fi
+	$COMPOSE logs --tail=50 oxphp-fibers
+}
 
 fail=0
 
 # 1. The worker's very first response.
 fresh_worker
-first="$(count_content_type "${base}/fixture_no_content_type.php")"
-second="$(count_content_type "${base}/fixture_no_content_type.php")"
+first="$(count_content_type first "${base}/fixture_no_content_type.php")"
+second="$(count_content_type second "${base}/fixture_no_content_type.php")"
 if [ "$first" = "1" ]; then
 	ok "the worker's first response carries one Content-Type"
 else
-	bad "the worker's first response carries one Content-Type" "carried ${first}"
+	bad "the worker's first response carries one Content-Type" "carried ${first}$(curl_error first)"
 fi
 if [ "$second" = "1" ]; then
 	ok "later responses carry one Content-Type"
 else
-	bad "later responses carry one Content-Type" "carried ${second}"
+	bad "later responses carry one Content-Type" "carried ${second}$(curl_error second)"
 fi
 
 # 2. A response that writes nothing.
-empty="$(count_content_type "${base}/fixture_header_no_body.php")"
+empty="$(count_content_type empty "${base}/fixture_header_no_body.php")"
 if [ "$empty" = "1" ]; then
 	ok "a response with no body still carries a Content-Type"
 else
-	bad "a response with no body still carries a Content-Type" "carried ${empty}"
+	bad "a response with no body still carries a Content-Type" "carried ${empty}$(curl_error empty)"
 fi
 
 # 3. An output buffer left open.
-buffered="$(curl -s "${base}/fixture_unclosed_buffer.php")"
-next="$(curl -s "${base}/fixture_no_content_type.php")"
+buffered="$(fetch buffered "${base}/fixture_unclosed_buffer.php" || true)"
+next="$(fetch next "${base}/fixture_no_content_type.php" || true)"
+if grep -qs . "$errdir"/*; then diagnose >&2 || true; fi
 $COMPOSE down -v > /dev/null 2>&1
 
 case "$buffered" in
@@ -98,15 +126,17 @@ case "$buffered" in
 		ok "an output buffer left open is delivered to the request that opened it" ;;
 	*)
 		bad "an output buffer left open is delivered to the request that opened it" \
-			"its own response was [${buffered}]" ;;
+			"its own response was [${buffered}]$(curl_error buffered)" ;;
 esac
 
+# The next response has to be its own fixture's output and nothing else: an
+# empty one carries no foreign buffer either, but only because nothing arrived.
 case "$next" in
-	*buffered-by-its-own-request*)
-		bad "the next response does not carry the previous request's buffer" \
-			"it was [${next}]" ;;
-	*)
+	ok)
 		ok "the next response does not carry the previous request's buffer" ;;
+	*)
+		bad "the next response does not carry the previous request's buffer" \
+			"it was [${next}]$(curl_error next)" ;;
 esac
 
 exit "$fail"
