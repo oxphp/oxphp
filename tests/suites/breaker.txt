@@ -244,3 +244,16 @@ breaker/test_breaker_queued_cancel_tick
 breaker/test_breaker_stream_walk_throw_neutral
 breaker/test_breaker_stream_walk_fatal | GET | | 503 |
 breaker/test_breaker_stream_walk_fatal_retires
+
+# A fatal, a throw and a fatal in the give-back, on one worker: the throw is
+# judged by what its own walk raised, not by what the fatal before it left
+# noted on the thread, so it stays a cancellation and the worker survives the
+# two fatals. The staging request lives to report it.
+breaker/test_breaker_stream_walk_stale_flag
+
+# The same fatal in the give-back, but of a stream ended by its session save
+# handler's write as the worker writes the session after the request. It stands
+# against the cancellation that write makes, and three retire the worker: the
+# staging request is answered 503, the probe runs on the replacement.
+breaker/test_breaker_stream_walk_session_fatal | GET | | 503 |
+breaker/test_breaker_stream_walk_session_fatal_retires
