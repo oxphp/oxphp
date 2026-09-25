@@ -5222,7 +5222,7 @@ to turn that into production insight.
 | Mode | When | What is captured |
 |------|------|------------------|
 | `Off` | Default. No plugin asked for profiling. | Nothing. Zero overhead. |
-| `ApmOnly` | `plugin-apm` is enabled but no profiler trigger matched. | Only APM's explicit hooks: `#[Trace]`, PDO/cURL emitters, `oxphp_trace_*()`. |
+| `ApmOnly` | `plugin-apm` is enabled but no profiler trigger matched. | Only APM's explicit hooks: `#[Trace]`, PDO/cURL emitters, `oxphp_apm_*()`. |
 | `ProfileAll` | A profiler trigger matched (or `OxPHP\Profile\start()` was called). | **Every** PHP function call via the Observer API plus everything APM collects. |
 
 `ProfileAll` supersedes `ApmOnly`: when both plugins are enabled and a
