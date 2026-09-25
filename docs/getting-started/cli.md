@@ -121,7 +121,7 @@ The `run` role applies CLI-oriented defaults before your `-d` overrides and `php
 | `implicit_flush` | `1` | Each write is flushed immediately. |
 | `register_argc_argv` | `1` | `$argv` / `$argc` are available. |
 
-[Superglobals](../php/superglobals.md) are always enabled for `run` — a one-shot script needs `$argv`, `$_SERVER`, and `$_ENV` — regardless of the `SUPERGLOBALS_ENABLED` toggle that applies to the HTTP server.
+`run` honours [`SUPERGLOBALS_ENABLED`](../php/request-api.md#superglobals_enabled). On this path its only effect on the superglobals is whether the process environment is folded into `$_SERVER`. With the default (`true`) the environment, secrets included, is copied there; with `false` it is not. Either way `$_SERVER` keeps the script's own keys — `PHP_SELF`, `SCRIPT_NAME`, `SCRIPT_FILENAME`, `PATH_TRANSLATED` and an empty `DOCUMENT_ROOT` — and `$argv` / `$argc` are unaffected. `oxphp_superglobals_enabled()` reports the setting here as it does under `serve`. `$_ENV` does not depend on this setting: PHP fills it from the environment when `variables_order` contains `E`, and leaves it empty otherwise.
 
 ### Exit codes
 
