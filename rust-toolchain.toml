@@ -1,0 +1,15 @@
+# The compiler CI checks against. It is the compiler that builds the
+# published image: the release Dockerfile installs Rust from Alpine's
+# package repository (Alpine 3.23 ships 1.91.1), where rustup is absent
+# and this file is ignored. It is also the MSRV (`rust-version` in
+# Cargo.toml). Without a pin, CI follows the runner's floating stable and
+# a new clippy lint turns every PR red regardless of what the PR changes.
+#
+# Move all three together: bump ALPINE_VERSION in the Dockerfiles, set
+# `channel` here and `rust-version` in Cargo.toml to the Rust that Alpine
+# release ships, and fix whatever new lints fire in the same PR. The
+# Format job fails if `channel` and `rust-version` disagree.
+[toolchain]
+channel = "1.91.1"
+components = ["clippy", "rustfmt"]
+profile = "minimal"
