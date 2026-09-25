@@ -107,8 +107,19 @@ static oxphp_error_cb_t oxphp_next_error_cb = NULL;
  * stale pointer for the next fatal to walk. */
 #define OXPHP_BAILOUT_ERROR_TYPES (E_ERROR | E_CORE_ERROR | E_COMPILE_ERROR | E_USER_ERROR | E_PARSE)
 
+/* A fatal of those types was reported without E_DONT_BAIL — one the engine
+ * answers with a bailout of its own, flagging every live object on the thread as
+ * destructed on the way unless displaying the message ends it first — rather
+ * than the report of an uncaught exception, which carries the flag and asks for
+ * neither. Read only across the frame walk in oxphp_recover_from_bailout, which
+ * clears it on the way in; see there. */
+static __thread bool oxphp_fatal_bailed = false;
+
 static void oxphp_bailout_frame_cb(int type, zend_string *file, const uint32_t line, zend_string *message) {
     if (type & OXPHP_BAILOUT_ERROR_TYPES) {
+        if (!(type & E_DONT_BAIL)) {
+            oxphp_fatal_bailed = true;
+        }
         oxphp_bailout_frame = EG(current_execute_data);
         /* And that this request had a fatal at all, which is the one thing the
          * cancellation mark on the write path cannot work out for itself: the
@@ -589,14 +600,22 @@ static void oxphp_recover_from_bailout(const oxphp_vm_stack_mark *mark) {
      * the request's: that request would read this one's unclean shutdown as a
      * bailout of its own and be recovered and counted for it.
      *
-     * And what the walk reports is not the request's. A destructor that throws
-     * here has no frame to throw into, and unless the application installed an
-     * exception handler the engine reports it as an uncaught exception, an
-     * E_ERROR — which raises fatal_reported, and that flag is what
-     * turns the claim a cancelled write leaves into a failure the breaker
-     * counts. The cancellation was decided before this ran; a destructor's
-     * throw is an application outcome wherever it happens, and the recovery
-     * carries on past a fatal in here either way.
+     * And a throw the walk reports is not the request's. A destructor that
+     * throws here has no frame to throw into, and unless the application
+     * installed an exception handler the engine reports it as an uncaught
+     * exception, an E_ERROR — which raises fatal_reported, and that flag is
+     * what turns the claim a cancelled write leaves into a failure the breaker
+     * counts. The cancellation was decided before this ran, and a destructor's
+     * throw is an application outcome wherever it happens, so the flag is put
+     * back. Not after a fatal, though: that report goes out without
+     * E_DONT_BAIL, and unless displaying it is the write that ends it first,
+     * the engine answers it by flagging every object alive on the thread as
+     * destructed — those of the requests multiplexed beside this one included,
+     * whose destructors then never run. That is the wreckage any fatal leaves
+     * the next request, and the client having left first does not put it back,
+     * so a fatal raised in here stands and the request is filed as one — even
+     * one whose display got no further, as a fatal after a cancelled write is
+     * everywhere else. The recovery carries on past it either way.
      *
      * The interrupted walk is not resumed. Its cursor is a local that the
      * longjmp took with it, and the frame it was in the middle of has had some
@@ -609,12 +628,13 @@ static void oxphp_recover_from_bailout(const oxphp_vm_stack_mark *mark) {
         zend_object *ex_on_entry = EG(exception);
         oxphp_request_fiber *fiber = oxphp_current_fiber;
         bool fatal_reported = fiber != NULL && fiber->fatal_reported;
+        oxphp_fatal_bailed = false;
         zend_fiber_switch_block();
         zend_try {
             oxphp_release_abandoned_frames(mark);
         } zend_end_try();
         zend_fiber_switch_unblock();
-        if (fiber != NULL) {
+        if (fiber != NULL && !oxphp_fatal_bailed) {
             fiber->fatal_reported = fatal_reported;
         }
         if (EG(exception) && EG(exception) != ex_on_entry) {
@@ -2226,7 +2246,9 @@ static bool oxphp_session_is_only_in(const oxphp_request_fiber *self);
  * that ran out is a cancellation. So is the write path's own claim: a stream
  * whose client left is ended by a warning or an echo the window produces, which
  * is the client leaving and not the handler failing — filed as the claim above
- * the final flush files it.
+ * the final flush files it. The claim is read after the recovery, as that one
+ * is: giving the frames back runs destructors, and a fatal one of them raises
+ * stands against the claim.
  *
  * CG(unclean_shutdown) is raised again because the window may have lowered it
  * on its way out, and the recovery gives the abandoned frames back the safe way
@@ -2238,18 +2260,18 @@ static void oxphp_file_late_bailout(oxphp_request_fiber *fiber,
     if (!came_apart && (PG(connection_status) & PHP_CONNECTION_TIMEOUT)) {
         fiber->cancelled = true;
     }
-    if (fiber->cancel_bailout_pending) {
-        fiber->cancel_bailout_pending = false;
-        if (!fiber->fatal_reported) {
-            fiber->cancelled = true;
-        }
-    }
     fiber->handler_failed = true;
     if (!came_apart) {
         fiber->failure_source = source;
     }
     CG(unclean_shutdown) = 1;
     oxphp_recover_from_bailout(mark);
+    if (fiber->cancel_bailout_pending) {
+        fiber->cancel_bailout_pending = false;
+        if (!fiber->fatal_reported) {
+            fiber->cancelled = true;
+        }
+    }
 }
 
 /* Report an exception left standing once the handler has returned — by a

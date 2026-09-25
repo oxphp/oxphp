@@ -231,3 +231,16 @@ breaker/test_breaker_session_write_retires
 breaker/test_breaker_queued_cancel_stage
 breaker/test_breaker_queued_cancel_skipped
 breaker/test_breaker_queued_cancel_tick
+
+# A stream whose client left while it was parked is still ended at the write it
+# resumes into, and what its frames were holding is given back by the worker —
+# destructors included. A destructor that throws there is an application
+# outcome, and the three streams that did it stay cancellations: the staging
+# request is parked while they run and lives to report it. A destructor that
+# raises a fatal there leaves the worker's engine state what any fatal leaves
+# it, and the three streams that did it retire the worker: the staging request
+# is ended with it, answered 503, and the probe after it runs on the
+# replacement. Last in the file, so no count above depends on these.
+breaker/test_breaker_stream_walk_throw_neutral
+breaker/test_breaker_stream_walk_fatal | GET | | 503 |
+breaker/test_breaker_stream_walk_fatal_retires
