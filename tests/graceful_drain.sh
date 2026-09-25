@@ -32,6 +32,13 @@ set -u
 IMAGE="${1:-oxphp-oxphp:latest}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 FIX="$ROOT/tests/fixtures/drain"
+# Container names carry the PID so two runs on one Docker host (two checkouts,
+# two sessions) do not remove each other's containers.
+DRAIN_A="drain_a_$$"
+DRAIN_B="drain_b_$$"
+DRAIN_C="drain_c_$$"
+DRAIN_D="drain_d_$$"
+DRAIN_E="drain_e_$$"
 # Ephemeral free port unless the caller pins one via PORT=.
 PORT="${PORT:-$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')}"
 PASS=0
@@ -42,7 +49,7 @@ ok()   { printf '  \033[32mPASS\033[0m %s\n' "$1"; PASS=$((PASS + 1)); }
 bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$1"; FAIL=$((FAIL + 1)); }
 
 cleanup() {
-	docker rm -f drain_a drain_b drain_c drain_d drain_e >/dev/null 2>&1
+	docker rm -f "$DRAIN_A" "$DRAIN_B" "$DRAIN_C" "$DRAIN_D" "$DRAIN_E" >/dev/null 2>&1
 	rm -rf "$TMP"
 }
 trap cleanup EXIT
@@ -94,10 +101,10 @@ wait_exit_seconds() {
 echo "== graceful drain ($IMAGE) =="
 
 # ── Scenario A: soft drain ───────────────────────────────────
-if start_container drain_a 30; then
+if start_container "$DRAIN_A" 30; then
 	ok "A: container up"
 else
-	bad "A: container failed to start"; docker logs drain_a 2>&1 | tail -5; exit 1
+	bad "A: container failed to start"; docker logs "$DRAIN_A" 2>&1 | tail -5; exit 1
 fi
 
 # Warm-up request: completes and parks its fiber on the free list, so the
@@ -131,8 +138,8 @@ curl -fsS --max-time 20 "http://localhost:${PORT}/pause?s=2"     > "$TMP/pause" 
 PAUSE_PID=$!
 sleep 1
 
-docker kill -s TERM drain_a >/dev/null
-ELAPSED=$(wait_exit_seconds drain_a 25)
+docker kill -s TERM "$DRAIN_A" >/dev/null
+ELAPSED=$(wait_exit_seconds "$DRAIN_A" 25)
 
 # Streams must be gone quickly — nowhere near the 30s drain timeout.
 [ "$ELAPSED" -le 12 ] \
@@ -149,7 +156,7 @@ grep -q "pause-done" "$TMP/pause" \
 	&& ok "A: cooperatively suspended request survived the soft sweep" \
 	|| bad "A: suspended non-streaming request was killed at t=0 (got: $(head -c 60 "$TMP/pause"))"
 
-LOGS_A="$(docker logs drain_a 2>&1)"
+LOGS_A="$(docker logs "$DRAIN_A" 2>&1)"
 CANCELLED=$(printf '%s' "$LOGS_A" | grep -c "Request cancelled (shutdown)")
 [ "$CANCELLED" -ge 5 ] \
 	&& ok "A: all 5 streams cancelled uncatchably ($CANCELLED)" \
@@ -174,10 +181,10 @@ printf '%s' "$LOGS_A" | grep -Eq '"exit_reason":3|exit_reason=3|Dead workers det
 	&& bad "A: drain kills tripped the consecutive-error breaker (worker error-exit mid-drain)" \
 	|| ok "A: no worker error-exit during the drain window"
 
-docker rm -f drain_a >/dev/null 2>&1
+docker rm -f "$DRAIN_A" >/dev/null 2>&1
 
 # ── Scenario B: hard cancel at the deadline ──────────────────
-if start_container drain_b 3; then
+if start_container "$DRAIN_B" 3; then
 	ok "B: container up"
 else
 	bad "B: container failed to start"; exit 1
@@ -191,15 +198,15 @@ sleep 0.5
 curl -N -s --max-time 30 "http://localhost:${PORT}/pause?s=60" > "$TMP/hang" 2>&1 &
 sleep 1
 
-docker kill -s TERM drain_b >/dev/null
-ELAPSED=$(wait_exit_seconds drain_b 20)
+docker kill -s TERM "$DRAIN_B" >/dev/null
+ELAPSED=$(wait_exit_seconds "$DRAIN_B" 20)
 
 # Deadline is 3s + 2s unwind beat; well under the CPU loop's natural end (never).
 [ "$ELAPSED" -le 10 ] \
 	&& ok "B: exited ${ELAPSED}s after SIGTERM (deadline kick worked)" \
 	|| bad "B: exit took ${ELAPSED}s — CPU-bound request not cancelled"
 
-LOGS_B="$(docker logs drain_b 2>&1)"
+LOGS_B="$(docker logs "$DRAIN_B" 2>&1)"
 printf '%s' "$LOGS_B" | grep -q "Drain timeout reached, cancelling in-flight requests" \
 	&& ok "B: hard-cancel phase entered" \
 	|| bad "B: hard-cancel log line missing"
@@ -213,10 +220,10 @@ printf '%s' "$LOGS_B" | grep -Eq '"exit_reason":3|exit_reason=3|Dead workers det
 	&& bad "B: deadline kills tripped the consecutive-error breaker" \
 	|| ok "B: no worker error-exit during the drain window"
 
-docker rm -f drain_b >/dev/null 2>&1
+docker rm -f "$DRAIN_B" >/dev/null 2>&1
 
 # ── Scenario C: flush-path kills don't trip the breaker ──────
-if start_container drain_c 30; then
+if start_container "$DRAIN_C" 30; then
 	ok "C: container up"
 else
 	bad "C: container failed to start"; exit 1
@@ -237,8 +244,8 @@ for i in 1 2 3; do
 done
 sleep 1
 
-docker kill -s TERM drain_c >/dev/null
-ELAPSED=$(wait_exit_seconds drain_c 25)
+docker kill -s TERM "$DRAIN_C" >/dev/null
+ELAPSED=$(wait_exit_seconds "$DRAIN_C" 25)
 
 [ "$ELAPSED" -le 12 ] \
 	&& ok "C: exited ${ELAPSED}s after SIGTERM (<=12s)" \
@@ -249,7 +256,7 @@ grep -q "pause-done" "$TMP/c_pause" \
 	&& ok "C: ordinary request survived three flush-path kills" \
 	|| bad "C: ordinary request lost — worker died mid-drain (got: $(head -c 60 "$TMP/c_pause"))"
 
-LOGS_C="$(docker logs drain_c 2>&1)"
+LOGS_C="$(docker logs "$DRAIN_C" 2>&1)"
 CANCELLED_C=$(printf '%s' "$LOGS_C" | grep -c "Request cancelled (shutdown)")
 [ "$CANCELLED_C" -ge 3 ] \
 	&& ok "C: all 3 tight-flush streams cancelled ($CANCELLED_C)" \
@@ -263,7 +270,7 @@ printf '%s' "$LOGS_C" | grep -q "Drain timeout reached" \
 	&& bad "C: drain hit its deadline — flush-path cancel failed" \
 	|| ok "C: deadline never reached"
 
-docker rm -f drain_c >/dev/null 2>&1
+docker rm -f "$DRAIN_C" >/dev/null 2>&1
 
 # ── Scenario D: post-finish_request work is deadline-bounded ─
 # A request that finishes its response and then works longer than the drain
@@ -273,10 +280,10 @@ docker rm -f drain_c >/dev/null 2>&1
 # Measured on a build without the in-flight gate: the process was gone one
 # second after SIGTERM with the work unfinished. The work must instead get the
 # window and be interrupted at the deadline.
-if start_container drain_d 5; then
+if start_container "$DRAIN_D" 5; then
 	ok "D: container up"
 else
-	bad "D: container failed to start"; docker logs drain_d 2>&1 | tail -5; exit 1
+	bad "D: container failed to start"; docker logs "$DRAIN_D" 2>&1 | tail -5; exit 1
 fi
 
 # Ordinary response finished early, then 30s of background work — six times the
@@ -287,8 +294,8 @@ curl -sS -H 'Connection: close' --max-time 10 \
 	"http://localhost:${PORT}/bgplain?post=30" > "$TMP/d_bg" 2>&1 &
 sleep 2 # response delivered, connection gone, background work still running
 
-docker kill -s TERM drain_d >/dev/null
-ELAPSED=$(wait_exit_seconds drain_d 45)
+docker kill -s TERM "$DRAIN_D" >/dev/null
+ELAPSED=$(wait_exit_seconds "$DRAIN_D" 45)
 
 # Deadline 5s + 2s unwind beat. Anything near 30s means the drain never applied
 # its deadline and the executor's join waited for the work to end on its own.
@@ -296,7 +303,7 @@ ELAPSED=$(wait_exit_seconds drain_d 45)
 	&& ok "D: exited ${ELAPSED}s after SIGTERM (post-finish work bounded)" \
 	|| bad "D: exit took ${ELAPSED}s — background work ran past the deadline unbounded"
 
-LOGS_D="$(docker logs drain_d 2>&1)"
+LOGS_D="$(docker logs "$DRAIN_D" 2>&1)"
 printf '%s' "$LOGS_D" | grep -q "Draining in-flight connections" \
 	&& ok "D: drain entered with no live connections, work still in flight" \
 	|| bad "D: drain skipped entirely — zero connections read as nothing to drain"
@@ -309,7 +316,7 @@ printf '%s' "$LOGS_D" | grep -q "bgplain-done" \
 	&& bad "D: background work ran to completion despite the deadline" \
 	|| ok "D: background work interrupted at the deadline"
 
-docker rm -f drain_d >/dev/null 2>&1
+docker rm -f "$DRAIN_D" >/dev/null 2>&1
 
 # ── Scenario E: post-finish_request work is granted the window ─
 # The other half of D's contract. Work that fits inside the drain window must
@@ -317,20 +324,20 @@ docker rm -f drain_d >/dev/null 2>&1
 # live truncates the work at SIGTERM instead of giving it the window the
 # early-response docs promise. Bounded (D) and granted (E) are different
 # claims — work killed on the spot satisfies the first and violates the second.
-if start_container drain_e 10; then
+if start_container "$DRAIN_E" 10; then
 	ok "E: container up"
 else
-	bad "E: container failed to start"; docker logs drain_e 2>&1 | tail -5; exit 1
+	bad "E: container failed to start"; docker logs "$DRAIN_E" 2>&1 | tail -5; exit 1
 fi
 
 curl -sS -H 'Connection: close' --max-time 10 \
 	"http://localhost:${PORT}/bgplain?post=6" > "$TMP/e_bg" 2>&1 &
 sleep 2 # response delivered, connection gone, 6s of work left in a 10s window
 
-docker kill -s TERM drain_e >/dev/null
-ELAPSED=$(wait_exit_seconds drain_e 25)
+docker kill -s TERM "$DRAIN_E" >/dev/null
+ELAPSED=$(wait_exit_seconds "$DRAIN_E" 25)
 
-LOGS_E="$(docker logs drain_e 2>&1)"
+LOGS_E="$(docker logs "$DRAIN_E" 2>&1)"
 printf '%s' "$LOGS_E" | grep -q "bgplain-done" \
 	&& ok "E: background work finished inside the drain window" \
 	|| bad "E: background work truncated at SIGTERM — it never got the window"
@@ -343,7 +350,7 @@ printf '%s' "$LOGS_E" | grep -q "Drain timeout reached" \
 	&& bad "E: deadline reached — work that fits the window was cut off" \
 	|| ok "E: deadline never reached, drain ended on completion"
 
-docker rm -f drain_e >/dev/null 2>&1
+docker rm -f "$DRAIN_E" >/dev/null 2>&1
 
 echo
 echo "== result: $PASS passed, $FAIL failed =="

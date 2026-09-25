@@ -32,6 +32,11 @@ set -u
 IMAGE="${1:-oxphp-oxphp:latest}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 FIX="$ROOT/tests/fixtures/scale_down"
+# Container names carry the PID so two runs on one Docker host (two checkouts,
+# two sessions) do not remove each other's containers.
+SCALE_A="scale_a_$$"
+SCALE_B="scale_b_$$"
+SCALE_C="scale_c_$$"
 PASS=0
 FAIL=0
 
@@ -40,7 +45,7 @@ bad() { printf '  \033[31mFAIL\033[0m %s\n' "$1"; FAIL=$((FAIL + 1)); }
 
 free_port() { python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()'; }
 
-cleanup() { docker rm -f scale_a scale_b scale_c >/dev/null 2>&1; }
+cleanup() { docker rm -f "$SCALE_A" "$SCALE_B" "$SCALE_C" >/dev/null 2>&1; }
 trap cleanup EXIT
 
 # start_pool <name> <port> — PHP_WORKERS=1:2 with a 1s idle threshold, so the
@@ -98,27 +103,27 @@ echo "== dynamic worker pool ($IMAGE) =="
 # cycle repeats for the life of the process, so counting spawns across a quiet
 # window separates it from a pool that has settled.
 PORT_A="${PORT:-$(free_port)}"
-start_pool scale_a "$PORT_A" \
+start_pool "$SCALE_A" "$PORT_A" \
 	&& ok "container up (quiet pool)" \
-	|| { bad "container never answered"; docker logs scale_a 2>&1 | tail -20; exit 1; }
+	|| { bad "container never answered"; docker logs "$SCALE_A" 2>&1 | tail -20; exit 1; }
 
 # Let the one request settle, then count spawns across a window wider than the
 # 5s scale-down cooldown the cycle turns on.
 sleep 4
-SPAWNS_BEFORE=$(docker logs scale_a 2>&1 | grep -c "Scale-up: spawned worker")
+SPAWNS_BEFORE=$(docker logs "$SCALE_A" 2>&1 | grep -c "Scale-up: spawned worker")
 sleep 12
-SPAWNS_AFTER=$(docker logs scale_a 2>&1 | grep -c "Scale-up: spawned worker")
+SPAWNS_AFTER=$(docker logs "$SCALE_A" 2>&1 | grep -c "Scale-up: spawned worker")
 [ "$SPAWNS_BEFORE" = "$SPAWNS_AFTER" ] \
 	&& ok "quiet pool stopped growing (spawns held at $SPAWNS_AFTER)" \
 	|| bad "quiet pool kept spawning ($SPAWNS_BEFORE then $SPAWNS_AFTER) — a served worker never looks idle"
 
-docker rm -f scale_a >/dev/null 2>&1
+docker rm -f "$SCALE_A" >/dev/null 2>&1
 
 # ── Part 2: a worker that has served gets retired ────────────────────────────
 PORT_B="${PORT2:-$(free_port)}"
-start_pool scale_b "$PORT_B" \
+start_pool "$SCALE_B" "$PORT_B" \
 	&& ok "container up (loaded pool)" \
-	|| { bad "container never answered"; docker logs scale_b 2>&1 | tail -20; exit 1; }
+	|| { bad "container never answered"; docker logs "$SCALE_B" 2>&1 | tail -20; exit 1; }
 
 # Drive traffic until every worker in the pool has an arrival inside the
 # manager's 200ms idle window — that, and only that, is what makes it grow.
@@ -134,17 +139,17 @@ while [ "$(date +%s)" -lt "$END" ]; do
 done
 [ -n "$SERVED" ] \
 	&& ok "traffic served by worker(s):$SERVED" \
-	|| { bad "no request was answered — the scenario proves nothing"; docker logs scale_b 2>&1 | tail -20; exit 1; }
+	|| { bad "no request was answered — the scenario proves nothing"; docker logs "$SCALE_B" 2>&1 | tail -20; exit 1; }
 
-docker logs scale_b 2>&1 | grep -q "Scale-up: spawned worker" \
+docker logs "$SCALE_B" 2>&1 | grep -q "Scale-up: spawned worker" \
 	&& ok "pool grew under load" \
-	|| { bad "pool never grew under load — recalibrate the scenario before reading anything below"; docker logs scale_b 2>&1 | tail -20; exit 1; }
+	|| { bad "pool never grew under load — recalibrate the scenario before reading anything below"; docker logs "$SCALE_B" 2>&1 | tail -20; exit 1; }
 
 # Traffic has stopped. Wait the manager out: the 1s idle threshold, its 5s
 # scale-down cooldown, and room for a slow host.
 sleep 15
 
-LOGS="$(docker logs scale_b 2>&1)"
+LOGS="$(docker logs "$SCALE_B" 2>&1)"
 
 # Anchored on the closing quote of the JSON message field: the unanchored form
 # is also a prefix of the "…thread stopped" line asserted below, which would let
@@ -192,13 +197,13 @@ printf '%s' "$BODY" | grep -q "^worker " \
 
 # A retired worker parked on a channel that only closes after drop(runtime)
 # keeps the runtime's blocking pool alive forever.
-docker kill -s TERM scale_b >/dev/null
-ELAPSED=$(wait_exit_seconds scale_b 30)
-docker ps --format '{{.Names}}' | grep -q '^scale_b$' \
+docker kill -s TERM "$SCALE_B" >/dev/null
+ELAPSED=$(wait_exit_seconds "$SCALE_B" 30)
+docker ps --format '{{.Names}}' | grep -q "^${SCALE_B}\$" \
 	&& bad "still running ${ELAPSED}s after SIGTERM — shutdown is wedged" \
 	|| ok "exited ${ELAPSED}s after SIGTERM"
 
-docker rm -f scale_b >/dev/null 2>&1
+docker rm -f "$SCALE_B" >/dev/null 2>&1
 
 # ── Part 3: a busy worker is not offered up ──────────────────────────────────
 #
@@ -213,7 +218,7 @@ docker rm -f scale_b >/dev/null 2>&1
 # an absence. Worker mode multiplexes, so a second request there can land on the
 # same thread and leave the other worker idle and retirable for honest reasons.
 PORT_C="${PORT3:-$(free_port)}"
-docker run -d --name scale_c \
+docker run -d --name "$SCALE_C" \
 	-e DOCUMENT_ROOT=/var/www/html \
 	-e PHP_WORKERS=1:2 \
 	-e PHP_WORKERS_IDLE_SECONDS=1 \
@@ -229,15 +234,15 @@ for _ in $(seq 1 30); do
 done
 [ "$up" = 1 ] \
 	&& ok "container up (traditional pool)" \
-	|| { bad "container never answered"; docker logs scale_c 2>&1 | tail -20; exit 1; }
+	|| { bad "container never answered"; docker logs "$SCALE_C" 2>&1 | tail -20; exit 1; }
 
 END=$(( $(date +%s) + 6 ))
 while [ "$(date +%s)" -lt "$END" ]; do
 	curl -fsS --max-time 10 "http://localhost:${PORT_C}/ping.php" >/dev/null 2>&1
 done
-docker logs scale_c 2>&1 | grep -q "Scale-up: spawned worker" \
+docker logs "$SCALE_C" 2>&1 | grep -q "Scale-up: spawned worker" \
 	&& ok "traditional pool grew under load" \
-	|| { bad "traditional pool never grew — recalibrate before reading anything below"; docker logs scale_c 2>&1 | tail -20; exit 1; }
+	|| { bad "traditional pool never grew — recalibrate before reading anything below"; docker logs "$SCALE_C" 2>&1 | tail -20; exit 1; }
 
 # Occupy both workers at once, then go quiet. Their stamps cross the 1s
 # threshold while the handlers are still running.
@@ -248,7 +253,7 @@ curl -fsS --max-time 30 "http://localhost:${PORT_C}/slow.php?s=10" >"$SLOW_OUT2"
 SLOW2=$!
 sleep 5
 
-docker logs scale_c 2>&1 | grep -q '"message":"Scale-down: retired worker"' \
+docker logs "$SCALE_C" 2>&1 | grep -q '"message":"Scale-down: retired worker"' \
 	&& bad "retired a worker that was still serving — the stamp says idle, the worker is not" \
 	|| ok "busy workers were not offered up"
 
@@ -263,12 +268,12 @@ rm -f "$SLOW_OUT1" "$SLOW_OUT2"
 
 retired=0
 for _ in $(seq 1 40); do
-	if docker logs scale_c 2>&1 | grep -q '"message":"Scale-down: retired worker"'; then retired=1; break; fi
+	if docker logs "$SCALE_C" 2>&1 | grep -q '"message":"Scale-down: retired worker"'; then retired=1; break; fi
 	sleep 1
 done
 [ "$retired" = 1 ] \
 	&& ok "pool shrank once the work was done" \
-	|| { bad "pool never shrank after the work finished — the guard withholds forever"; docker logs scale_c 2>&1 | tail -10; }
+	|| { bad "pool never shrank after the work finished — the guard withholds forever"; docker logs "$SCALE_C" 2>&1 | tail -10; }
 
 echo
 echo "== $PASS passed, $FAIL failed =="
