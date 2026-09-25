@@ -77,10 +77,10 @@
 #      cancellation, and as nothing else — no overload refusal is charged to
 #      it and no ERROR line is written for it.
 #   P: the same for a client that leaves while its request is running: the
-#      fatal this server raises to unwind the handler is not the application
-#      failing, and is not logged as one — while a handler that raises a fatal
-#      of its own carrying that same wording, on a request nobody cancelled,
-#      still is.
+#      handler runs on after its client left and then gives the worker back —
+#      and nothing on the way is logged as the application failing,
+#      while a handler that raises a fatal of its own carrying the wording of
+#      the server's cancellation, on a request nobody cancelled, still is.
 #   Q: O and P through the worker-mode receive loop, which takes requests off
 #      the queue from a different place and unwinds through the scheduler.
 #   R: clients less patient than the budget. Under sustained overload a FIFO
@@ -216,7 +216,10 @@ error_lines() {
 }
 
 # Log lines reporting the fatal this server raises to unwind a handler whose
-# client left, at whatever level they were written. Counted separately from
+# client left, at whatever level they were written. Outside the hard phase of a
+# drain no such fatal is raised any more — a client leaving ends a request at
+# its next write, or not at all — so on the scenarios here this counts a
+# regression, or a handler forging the wording. Counted separately from
 # error_lines because the fatal reaches the log by two routes with two levels —
 # the structured error callback and PHP's own error log through the SAPI hook —
 # and a container quiet enough to hide one of them would make a check about it
@@ -1934,16 +1937,21 @@ wait
 
 # ── P: an interrupted handler is a cancellation, not an error ────────
 # The other end of the same story: a client that leaves while its script is
-# actually running. The engine unwinds the handler with a fatal of this
-# server's own making, and a fatal is logged at ERROR — so a cancellation the
-# server itself initiated was reported as an application failure, twice, from
-# the PHP error handler and from the SAPI log hook.
+# actually running. Outside worker mode the departure only reaches the handler
+# as an interrupt that records it; the handler runs on to its next write and is
+# ended there, without a fatal. A cancellation the server initiated used to
+# unwind the handler at its next opcode with a fatal, and that fatal was
+# reported as an application failure, twice, from the PHP error handler and
+# from the SAPI log hook. The log checks below guard against any of that
+# coming back: they are read once the handler has actually ended, which here
+# is at the end of its loop, not at its client's departure.
 #
-# spin.php rather than pause.php: a cancellation is delivered at an opcode
-# boundary and usleep() has none, so a request aborted mid-sleep is not
-# interrupted at all and this scenario would be about nothing.
+# spin.php rather than pause.php: the interrupt is delivered at an opcode
+# boundary and usleep() has none, so a request aborted mid-sleep would take
+# the interrupt only after its sleep, and the path that used to raise the
+# fatal would not run while the handler was still working.
 #
-# LOG_LEVEL=warn, not the error the other scenarios run at: the fatal reaches
+# LOG_LEVEL=warn, not the error the other scenarios run at: a fatal reaches
 # the log twice, once through the structured error callback and once through
 # PHP's own error log, and the second of those was a WARN. At LOG_LEVEL=error
 # it is filtered out before it is written, and a check counting it would pass
@@ -1978,8 +1986,38 @@ else
 	bad "P: curl exited $P_RC, not 28 — it was answered rather than abandoned mid-handler"
 fi
 
-# The interrupt lands at the loop's next opcode, well inside a second.
-sleep 1
+# The handler outlives its client: it was not ended at an opcode, and runs on
+# to its own write. Read right after the departure, with the 4 s loop still
+# going — without this, the wait below could end at once and would say nothing
+# about when the worker was given back.
+P_BUSY_AFTER_ABORT="$(gauge oxphp_busy_workers)"
+if [ "$P_BUSY_AFTER_ABORT" = "1" ]; then
+	ok "P: the handler ran on after its client left"
+else
+	bad "P: busy_workers reads ${P_BUSY_AFTER_ABORT} right after the client left — the handler did not run on to its next write"
+fi
+
+# ... and gives the worker back once its loop is through. Whether the write
+# after the loop is what ended it is the cancel suite's question, not this
+# one's: here the ending and a plain return look alike. Each round is a scrape
+# plus 0.2 s, so forty of them are well past the 4 s the loop takes. The logs
+# are read only after this: before it the handler has not ended at all, and a
+# count of what its ending logged reads 0 on any build. The half second after
+# it is for the server's log writer, which is not the worker thread.
+P_RELEASED=0
+for _ in $(seq 1 40); do
+	if [ "$(gauge oxphp_busy_workers)" = "0" ]; then
+		P_RELEASED=1
+		break
+	fi
+	sleep 0.2
+done
+if [ "$P_RELEASED" = "1" ]; then
+	ok "P: the worker was given back once the handler's loop was through"
+else
+	bad "P: the worker was still busy well after the handler's own 4 s — the request was never ended"
+fi
+sleep 0.5
 P_ABORTS="$(gauge 'oxphp_request_cancelled_total{reason="client_abort"}')"
 P_ERRORS="$(error_lines)"
 P_CANCEL_LINES="$(cancel_lines)"
@@ -1997,9 +2035,9 @@ else
 fi
 
 if [ "$P_CANCEL_LINES" = "0" ]; then
-	ok "P: neither route the fatal takes reported it above debug"
+	ok "P: neither route a fatal takes reported the cancellation above debug"
 else
-	bad "P: ${P_CANCEL_LINES} line(s) naming the cancellation at warn or above — one of the two routes the fatal takes to the log still reports it"
+	bad "P: ${P_CANCEL_LINES} line(s) naming the cancellation at warn or above — one of the two routes a fatal takes to the log reports it"
 fi
 
 # And the worker is still usable: quietening the log must not have been done by
@@ -2045,13 +2083,13 @@ wait
 # not reach.
 #
 # P's half reads differently here, and deliberately. A client leaving does not
-# unwind a worker-mode handler at all: neither the opcode boundary nor the
-# write that follows ends it, so the script runs to the end of its own work
-# with nobody reading what it writes. The two log checks below therefore ask
-# something weaker than P's — there is no ending to mis-report — and what is
-# still worth asking is the one after them: the worker has to come back.
+# end a worker-mode handler at all: neither the opcode boundary nor the write
+# that follows ends it, so the script runs to the end of its own work with
+# nobody reading what it writes. The two log checks below therefore have no
+# ending to watch, only a handler finishing normally — and what is still worth
+# asking is the one after them: the worker has to come back.
 #
-# LOG_LEVEL=warn for the same reason as P: one of the two routes the fatal
+# LOG_LEVEL=warn for the same reason as P: one of the two routes a fatal
 # takes to the log was a WARN, and a quieter container would hide it.
 if start_worker_container 1500 4 warn; then
 	ok "Q: worker-mode container up (1.5 s budget, queue capacity 4)"
@@ -2099,26 +2137,11 @@ curl -s -o /dev/null --max-time 0.5 "http://localhost:${PORT}/?spin=1&ms=4000" \
 	>/dev/null 2>&1 &
 Q_PID=$!
 wait "$Q_PID"; Q_RC=$?
-sleep 1
-Q_ERRORS="$(error_lines)"
-Q_CANCEL_LINES="$(cancel_lines)"
 
 if [ "$Q_RC" -eq 28 ]; then
 	ok "Q: the client left mid-handler, unanswered (curl 28)"
 else
 	bad "Q: curl exited $Q_RC, not 28 — it was answered rather than abandoned mid-handler"
-fi
-
-if [ "$Q_ERRORS" = "0" ]; then
-	ok "Q: worker mode wrote no ERROR line for clients that stopped waiting"
-else
-	bad "Q: ${Q_ERRORS} ERROR line(s) in worker mode for clients that stopped waiting"
-fi
-
-if [ "$Q_CANCEL_LINES" = "0" ]; then
-	ok "Q: neither route the fatal takes reported it above debug in worker mode"
-else
-	bad "Q: ${Q_CANCEL_LINES} line(s) naming the cancellation at warn or above in worker mode"
 fi
 
 # Asked until the worker is free, rather than once. The handler is not cut
@@ -2145,6 +2168,25 @@ if [ "$Q_AFTER" = "200" ]; then
 	ok "Q: the worker came back and served the next request normally (200)"
 else
 	bad "Q: the next request got $Q_AFTER — the abandoned one took the worker with it"
+fi
+
+# Read only now, as in P: before the worker came back the handler was still in
+# its loop, and a count of what its finish logged reads 0 on any build. The
+# half second is for the server's log writer.
+sleep 0.5
+Q_ERRORS="$(error_lines)"
+Q_CANCEL_LINES="$(cancel_lines)"
+
+if [ "$Q_ERRORS" = "0" ]; then
+	ok "Q: worker mode wrote no ERROR line for clients that stopped waiting"
+else
+	bad "Q: ${Q_ERRORS} ERROR line(s) in worker mode for clients that stopped waiting"
+fi
+
+if [ "$Q_CANCEL_LINES" = "0" ]; then
+	ok "Q: neither route a fatal takes reported the cancellation above debug in worker mode"
+else
+	bad "Q: ${Q_CANCEL_LINES} line(s) naming the cancellation at warn or above in worker mode"
 fi
 docker rm -f "$SRV" >/dev/null 2>&1
 wait
