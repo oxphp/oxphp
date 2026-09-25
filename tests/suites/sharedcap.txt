@@ -1,0 +1,4 @@
+# profile: sharedcap
+# description: Shared state with a tiny global object cap — refusals carry CapacityException
+
+sharedcap/test_ctor_capacity_exception

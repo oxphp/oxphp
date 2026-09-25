@@ -1,0 +1,30 @@
+# Shared-state subsystem with a tiny global object cap.
+#
+# SHARED_MAX_ENTRIES is process-wide, so a test that runs the registry up to
+# it cannot share a profile with the shared suites: every object those create
+# while the cap is reached would be refused.
+#
+# Standalone usage:
+#   docker compose -f compose.yml -f compose.sharedcap.yml up
+services:
+  oxphp-sharedcap:
+    build:
+      context: ..
+      dockerfile: docker/dev/Dockerfile
+    ports:
+      - "80"
+    networks: [test-net]
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    environment:
+      LOG_LEVEL: error
+      INTERNAL_ADDR: 0.0.0.0:9090
+      SHARED_MAX_ENTRIES: "16"
+    volumes:
+      - ../www:/var/www/html
+      - ./php:/var/www/html/public/tests
