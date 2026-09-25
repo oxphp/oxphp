@@ -4,6 +4,8 @@ All notable changes to OxPHP are documented in this file.
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-09-25
+
 ### Migration from 0.11.0
 
 **`oxphp_queue_wait_us` reads lower; `oxphp_request_duration_us` does not change.** The histogram now ends at the moment a worker takes the request rather than when its response comes back; see Fixed. Each reading loses the time between those two moments, less the script — on average about a tenth of a millisecond per request in our worker-mode measurements (see Fixed) — so an alert threshold in the sub-millisecond range fires less readily, and one set in milliseconds barely moves. A "service time" derived as `oxphp_request_duration_us` minus this histogram grows by the same amount. The `oxphp.queue_wait_us` span attribute changes the same way.
@@ -1092,6 +1094,7 @@ and built-in observability.
 | `WORKER_MAX_MEMORY_MIB` | `0` (unlimited) | Max worker memory before restart |
 | `EXECUTOR` | `sapi` | Executor type: sapi/stub |
 
+[0.12.0]: https://github.com/oxphp/oxphp/releases/tag/v0.12.0
 [0.11.0]: https://github.com/oxphp/oxphp/releases/tag/v0.11.0
 [0.10.0]: https://github.com/oxphp/oxphp/releases/tag/v0.10.0
 [0.9.0]: https://github.com/oxphp/oxphp/releases/tag/v0.9.0
