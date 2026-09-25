@@ -16,6 +16,14 @@ shared/test_atomic_cas_loop_cross_thread
 shared/test_atomic_bitset_cross_thread
 shared/test_mutex_contention
 shared/test_mutex_with_lock_timeout
+# withLock waiting on a lock held by an async task: the trigger's 1s
+# max_execution_time must end it (504) long before the holder lets go.
+shared/test_mutex_with_lock_request_end >> ?action=trigger | GET | | 504
+shared/test_mutex_with_lock_request_end >> ?action=check
+# ...but a client hanging up does not end the wait: the request runs on and
+# acquires once the holder lets go. Status 0: curl gives up before a response.
+shared/test_mutex_with_lock_client_abort >> ?action=trigger | GET | --max-time 0.5 -o /dev/null | 0
+shared/test_mutex_with_lock_client_abort >> ?action=check
 shared/test_once_init_single_init
 shared/test_once_cross_thread
 shared/test_map_compare_and_set_concurrent

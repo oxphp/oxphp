@@ -1436,6 +1436,19 @@ void oxphp_bridge_set_in_fiber_check(oxphp_in_fiber_check_fn_t fn);
  * tests, bare CLI without the extension). */
 int oxphp_bridge_in_fiber(void);
 
+/** Register the SAPI predicate behind `oxphp_bridge_request_end_pending`.
+ *  Same reason as the in-fiber check: what it reads (EG(timed_out), the
+ *  current fiber's task cancel cell) lives on the SAPI side. */
+typedef int (*oxphp_request_end_check_fn_t)(void);
+void oxphp_bridge_set_request_end_check(oxphp_request_end_check_fn_t fn);
+
+/* Returns 1 if the request or async task running on this thread has an
+ * interrupt pending that the engine will end it with at its next opcode
+ * boundary, else 0. For native blocking waits, which are not an opcode
+ * boundary: one that polls this can step aside and let the engine act.
+ * Returns 0 when no SAPI callback is registered. */
+int oxphp_bridge_request_end_pending(void);
+
 /** Call Rust async dispatch. Returns promise_id (>= 0) or -1 on error. */
 int64_t oxphp_bridge_async_dispatch(
     void *op_array, void *static_vars, void *this_ptr,

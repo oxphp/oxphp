@@ -1386,8 +1386,8 @@ namespace OxPHP\Shared {
      *
      * Three method variants encode the wait policy explicitly:
      *
-     *   - {@see withLock()}        — block until acquired (forever, or
-     *     fiber cancellation).
+     *   - {@see withLock()}        — block until acquired; the wait ends
+     *     early only when the request or async task is being ended.
      *   - {@see tryWithLock()}     — non-blocking; throws
      *     {@see ContentionException} if the lock is held.
      *   - {@see withLockTimeout()} — bounded wait; throws
@@ -1411,10 +1411,13 @@ namespace OxPHP\Shared {
         public function __construct(mixed $initial = null) {}
 
         /**
-         * Acquire the lock (waiting forever, or until the request fiber
-         * is cancelled), invoke `$fn` with the stored value (mutable by
-         * reference), and release. Returns `$fn`'s return value.
+         * Acquire the lock (waiting with no bound of its own — the wait
+         * ends early only when the request or async task is being ended,
+         * e.g. by max_execution_time), invoke `$fn` with the stored value
+         * (mutable by reference), and release. Returns `$fn`'s return value.
          *
+         * @throws \OxPHP\Async\AsyncException If the async task the call
+         *         runs in is cancelled while it waits.
          * @throws CorruptedMutexException If a prior closure invocation
          *         crashed via Rust panic and left the mutex unusable.
          * @throws DeadlockException If a wait-for cycle is detected.

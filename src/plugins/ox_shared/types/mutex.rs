@@ -182,9 +182,9 @@ pub unsafe extern "C" fn oxphp_shared_mutex_with(
 
         let acquired = match parse_timeout(timeout_ms) {
             Wait::Forever => {
-                // Block until acquired, corrupted, or cycle-broken. Poll with a
-                // 100ms quantum so corruption + cycle-break signals can
-                // progress. The `waiter` guard is held alive across
+                // Block until acquired, corrupted, cycle-broken, or the request
+                // this runs in is being ended. Poll with a 100ms quantum so
+                // those signals can progress. The `waiter` guard is held alive across
                 // iterations — its Drop only fires on early-return error paths
                 // or when promoted via `promote_to_holder` after acquisition.
                 loop {
@@ -202,6 +202,18 @@ pub unsafe extern "C" fn oxphp_shared_mutex_with(
                         set_last_error("Mutex::with: wait-for cycle detected during forever wait");
                         drop(waiter);
                         return Err(SharedError::Deadlock);
+                    }
+                    // The engine only acts on max_execution_time, a hard drain
+                    // or a task cancel at an opcode boundary, and this loop is
+                    // not one: without this check such a request would sit here
+                    // until the holder let go, which in a lock-order cycle is
+                    // never. Leaving hands the pending interrupt back to the VM.
+                    if unsafe { ffi::oxphp_bridge_request_end_pending() } != 0 {
+                        set_last_error(
+                            "Mutex::withLock: wait abandoned, the request is being ended",
+                        );
+                        drop(waiter);
+                        return Err(SharedError::Cancelled);
                     }
                 }
             }
@@ -790,9 +802,10 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
             Ok(())
         })
         // ── withLock(callable $fn): mixed ───────────────────────────
-        //   Forever (or fiber-cancel). Throws on contention only if
-        //   the request fiber is cancelled (OperationTimeoutException
-        //   from the SAPI layer or AsyncException directly).
+        //   Waits until acquired. The wait is also left, with
+        //   AsyncException, when the request or async task is being
+        //   ended (max_execution_time, hard drain, task cancel); a
+        //   client leaving does not end it.
         .method("withLock")
         .param("fn", PhpType::Callable)
         .returns(PhpType::Mixed)
@@ -975,6 +988,8 @@ fn mutex_rc_to_phperr(rc: c_int) -> PhpError {
         -7 => "OxPHP\\Shared\\OperationTimeoutException",
         -8 => "OxPHP\\Shared\\DeadlockException",
         -10 => "OxPHP\\Shared\\UninitializedException",
+        // withLock's wait left because the request is being ended.
+        -12 => "OxPHP\\Async\\AsyncException",
         // -99 = Rust panic crossed FFI → corrupted mutex.
         -99 => "OxPHP\\Shared\\CorruptedMutexException",
         _ => "OxPHP\\Shared\\SharedException",
@@ -1045,6 +1060,100 @@ mod tests {
         m.mark_corrupted();
         assert!(m.is_corrupted());
         // No clear path — corruption is sticky by design.
+    }
+
+    #[cfg(not(feature = "php"))]
+    fn ensure_test_registry() {
+        use crate::plugins::ox_shared::config::{LockDiagnosticsLevel, SharedConfig};
+        use crate::plugins::ox_shared::registry::init_registry;
+        init_registry(SharedConfig {
+            enabled: true,
+            max_entries: 10_000,
+            max_bytes: 1 << 30,
+            soft_limit_ratio: 0.7,
+            metrics_enabled: true,
+            introspection_enabled: true,
+            introspection_preview_enabled: true,
+            cycle_detect_depth: 16,
+            cycle_detect_edges: 10_000,
+            max_value_size: 1 << 20,
+            max_channel_bytes: 64 << 20,
+            poison_strict: false,
+            lock_diagnostics: LockDiagnosticsLevel::Off,
+            lock_poll_interval_ms: 100,
+            preview_string_limit: 256,
+            preview_array_limit: 20,
+        });
+    }
+
+    #[cfg(not(feature = "php"))]
+    /// Runs `oxphp_shared_mutex_with(timeout_ms = -1)` on its own thread with
+    /// the request-end predicate answering `pending`, and hands back the
+    /// receiver for its return code.
+    fn spawn_forever_waiter(
+        entry_ptr: *const Entry,
+        pending: bool,
+    ) -> std::sync::mpsc::Receiver<c_int> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let addr = entry_ptr as usize;
+        std::thread::spawn(move || {
+            crate::bridge::mock::set_mock_request_end_pending(pending);
+            let mut ret_buf: *mut u8 = std::ptr::null_mut();
+            let mut ret_len: usize = 0;
+            let mut retained: *mut std::ffi::c_void = std::ptr::null_mut();
+            let rc = unsafe {
+                oxphp_shared_mutex_with(
+                    addr as *const Entry,
+                    std::ptr::null_mut(),
+                    -1,
+                    &mut ret_buf,
+                    &mut ret_len,
+                    &mut retained,
+                )
+            };
+            let _ = tx.send(rc);
+        });
+        rx
+    }
+
+    #[cfg(not(feature = "php"))]
+    #[test]
+    fn forever_wait_is_left_when_the_request_is_ending_and_kept_otherwise() {
+        ensure_test_registry();
+        let bytes = sv_to_portbuf(&SharedValue::Long(0));
+        let mut ptr: *const Entry = std::ptr::null();
+        let rc = unsafe { oxphp_shared_mutex_create(bytes.as_ptr(), bytes.len(), &mut ptr) };
+        assert_eq!(rc, 0, "create failed with rc={rc}");
+        let entry: &Entry = unsafe { &*ptr };
+        let inner = entry.inner.as_any_mutex().expect("mutex entry");
+
+        // Granted: with nothing ending the request, the wait outlives several
+        // poll quanta and is left only by acquiring.
+        let held = inner.state.lock();
+        let rx = spawn_forever_waiter(ptr, false);
+        assert!(
+            rx.recv_timeout(Duration::from_millis(400)).is_err(),
+            "a forever wait must not be left while the lock is held and nothing ends the request"
+        );
+        drop(held);
+        let rc = rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the waiter must acquire once the lock is released");
+        assert_ne!(rc, SharedError::Cancelled.code());
+
+        // Bounded: once the request is being ended, the wait is left within a
+        // poll quantum, with the lock still held elsewhere.
+        let held = inner.state.lock();
+        let rx = spawn_forever_waiter(ptr, true);
+        let rc = rx.recv_timeout(Duration::from_secs(2));
+        drop(held);
+        assert_eq!(
+            rc,
+            Ok(SharedError::Cancelled.code()),
+            "a forever wait must be left once the request it runs in is being ended"
+        );
+
+        unsafe { drop(Arc::from_raw(ptr)) };
     }
 
     #[test]

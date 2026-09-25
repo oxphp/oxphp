@@ -217,7 +217,7 @@ A background task looks for cross-thread wait-for cycles on `Shared\Mutex`: two 
 
 | Value | Detector | On a cycle |
 |-------|----------|------------|
-| `off` | Not started. `SHARED_LOCK_POLL_INTERVAL_MS` is unused and `oxphp_shared_deadlock_detected_total` stays at 0. | Nothing. A `withLockTimeout()` on the cycle gives up with `OperationTimeoutException` when its timeout runs out; a cycle made only of `withLock()` calls has no timeout of its own to end it. |
+| `off` | Not started. `SHARED_LOCK_POLL_INTERVAL_MS` is unused and `oxphp_shared_deadlock_detected_total` stays at 0. | Nothing. A `withLockTimeout()` on the cycle gives up with `OperationTimeoutException` when its timeout runs out; a cycle made only of `withLock()` calls has no timeout of its own to end it: each of its requests waits until it is ended, by `max_execution_time` if it has one, and the lock the ended request held stays locked (see [Shared\Mutex](shared-mutex.md)). |
 | `warn` — default in release builds | Runs. | Logs and counts (see below); the waits are left in place, with the same outcome as under `off`. |
 | `strict` — default in debug builds of the binary | Runs. | Logs and counts, and also signals the threads on the cycle: a `withLock()` on it throws `DeadlockException` within 100 ms of the scan, and a `withLockTimeout()` waits out its timeout and then throws `DeadlockException` in place of `OperationTimeoutException`. A waiter whose lock is released first — by another waiter's exception unwinding the closure that held it — acquires it and does not throw. |
 
