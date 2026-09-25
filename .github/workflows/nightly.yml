@@ -94,6 +94,15 @@ jobs:
           fi
           echo "patch=$PATCH" >> "$GITHUB_OUTPUT"
 
+      # Commit time, not build time: a rerun of the same SHA gets the same
+      # version and reuses the compiled layer. One numeric identifier —
+      # semver forbids leading zeros, so "0200" cannot stand alone.
+      - name: Compose nightly version
+        id: version
+        run: |
+          STAMP=$(TZ=UTC git log -1 --format=%cd --date=format-local:%Y%m%d%H%M)
+          echo "version=0.0.0-nightly.${STAMP}+${GITHUB_SHA::8}" >> "$GITHUB_OUTPUT"
+
       # Build and load locally first so the smoke gate runs before push.
       - name: Build (load locally, no push yet)
         uses: docker/build-push-action@v7
@@ -107,7 +116,7 @@ jobs:
           build-args: |
             PHP_VERSION=${{ matrix.php }}
             ALPINE_VERSION=3.23
-            OXPHP_VERSION=0.0.0-nightly-${{ github.sha }}
+            OXPHP_VERSION=${{ steps.version.outputs.version }}
           tags: oxphp:ci
           cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.CACHE_IMAGE }}:php${{ matrix.php }}-nightly-${{ matrix.arch }}
           cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.CACHE_IMAGE }}:php${{ matrix.php }}-nightly-${{ matrix.arch }},mode=max,image-manifest=true,oci-mediatypes=true
