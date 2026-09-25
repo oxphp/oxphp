@@ -33,7 +33,7 @@ pub fn register_plugin_artifacts(
     superglobals_enabled: bool,
 ) -> Arc<DecoratorRegistry> {
     // Set the superglobals flag before MINIT (read during MINIT and request
-    // handling). The CLI frontend forces `true`; serve passes its config value.
+    // handling). Both frontends pass the `SUPERGLOBALS_ENABLED` value they parsed.
     unsafe {
         bindings::oxphp_bridge_set_superglobals_enabled(superglobals_enabled);
     }
