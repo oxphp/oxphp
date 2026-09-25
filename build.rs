@@ -62,6 +62,8 @@ fn detect_and_emit_php_cfg() {
         // (min_vernum_inclusive, max_vernum_exclusive, mod_name)
         (80400, 80500, "v8_4"),
         (80500, 80600, "v8_5"),
+        // 8.6 is a pre-release target (upstream `8.6-rc` base images).
+        (80600, 80700, "v8_6"),
     ];
 
     // Always declare check-cfg so `cargo clippy --all-targets` doesn't warn.

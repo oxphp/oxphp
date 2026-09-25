@@ -1209,7 +1209,7 @@ typedef struct {
 } oxphp_custom_object;
 
 #define OXPHP_OBJ(zobj) \
-    ((oxphp_custom_object *)((char *)(zobj) - XtOffsetOf(oxphp_custom_object, std)))
+    ((oxphp_custom_object *)((char *)(zobj) - offsetof(oxphp_custom_object, std)))
 #endif /* OXPHP_CUSTOM_OBJECT_DEFINED */
 
 /* Define thread-local TSRM cache for this compilation unit.
@@ -2505,7 +2505,7 @@ void oxphp_plugin_init_custom_objects(int class_count) {
     /* Initialize all handler sets from std_object_handlers */
     for (int i = 0; i < class_count; i++) {
         memcpy(&oxphp_custom_handlers_arr[i], &std_object_handlers, sizeof(zend_object_handlers));
-        oxphp_custom_handlers_arr[i].offset = XtOffsetOf(oxphp_custom_object, std);
+        oxphp_custom_handlers_arr[i].offset = offsetof(oxphp_custom_object, std);
     }
 }
 
@@ -3739,20 +3739,32 @@ int oxphp_closure_get_static_vars(zval *closure, HashTable **out_ht) {
     return 0;
 }
 
+/* oxphp_bridge.h is included above php.h here, so its PHP_H-gated closure
+ * declarations never reach this file; repeat the ones used before definition. */
+#if PHP_VERSION_ID >= 80600
+typedef zend_object oxphp_closure_this;
+#else
+typedef zval oxphp_closure_this;
+#endif
+oxphp_closure_this *oxphp_closure_get_this(zval *closure);
+
 int oxphp_closure_has_this(zval *closure) {
     if (Z_TYPE_P(closure) != IS_OBJECT || !instanceof_function(Z_OBJCE_P(closure), zend_ce_closure)) {
         return 0;
     }
-    zval *this_ptr = zend_get_closure_this_ptr(closure);
-    return (this_ptr && Z_TYPE_P(this_ptr) != IS_UNDEF) ? 1 : 0;
+    return oxphp_closure_get_this(closure) ? 1 : 0;
 }
 
-zval *oxphp_closure_get_this(zval *closure) {
+oxphp_closure_this *oxphp_closure_get_this(zval *closure) {
     if (Z_TYPE_P(closure) != IS_OBJECT || !instanceof_function(Z_OBJCE_P(closure), zend_ce_closure)) {
         return NULL;
     }
+#if PHP_VERSION_ID >= 80600
+    return zend_get_closure_this_ptr(closure);
+#else
     zval *this_ptr = zend_get_closure_this_ptr(closure);
     return (this_ptr && Z_TYPE_P(this_ptr) != IS_UNDEF) ? this_ptr : NULL;
+#endif
 }
 
 /* ─── Async Exception Details ────────────────────────────── */
@@ -4333,7 +4345,7 @@ static void oxphp_fixup_run_time_cache(zend_op_array *op) {
 int oxphp_reconstruct_async_closure(
     zend_op_array *op_array,
     HashTable *static_vars,
-    zval *this_ptr,
+    oxphp_closure_this *this_ptr,
     zval *out_closure,
     zend_fcall_info *fci,
     zend_fcall_info_cache *fcc,

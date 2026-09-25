@@ -2358,8 +2358,23 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
          * error_reporting() last set on it. zend_fiber_execute seeds it from the
          * directive once on entry, for the same reason; this repeats that. */
         {
+#if PHP_VERSION_ID >= 80600
+            /* PHP 8.6 removed the INI_*() macros for these. Not
+             * zend_ini_str_literal(): it maps an unset value to an empty
+             * string rather than NULL, so the E_ALL default below would
+             * never apply and every request would start at level 0.
+             * zend_ini_str_ex() keeps the NULL that INI_STR() returned.
+             * PHP's own fiber start took that replacement and has the same
+             * defect: https://github.com/php/php-src/issues/23921 — so a
+             * userland `new Fiber` inside a request still starts at level 0
+             * until that is fixed upstream. */
+            zend_long error_reporting = zend_ini_long_literal("error_reporting");
+            if (!error_reporting
+                && !zend_ini_str_ex("error_reporting", sizeof("error_reporting") - 1, false, NULL)) {
+#else
             zend_long error_reporting = INI_INT("error_reporting");
             if (!error_reporting && !INI_STR("error_reporting")) {
+#endif
                 error_reporting = E_ALL;
             }
             EG(error_reporting) = (int) error_reporting;
@@ -3877,10 +3892,17 @@ void oxphp_session_release_request_state(void) {
 
     if (PS(id)) { zend_string_release(PS(id)); PS(id) = NULL; }
     if (PS(session_vars)) { zend_string_release(PS(session_vars)); PS(session_vars) = NULL; }
+#if PHP_VERSION_ID < 80600
     if (PS(mod_user_class_name)) {
         zend_string_release(PS(mod_user_class_name));
         PS(mod_user_class_name) = NULL;
     }
+#else
+    /* PHP 8.6 dropped the handler's class-name string in favour of a flag
+     * (ext/session/php_session.h). Reset it to the value a fresh request
+     * would start with, the same way the class name was released here. */
+    PS(mod_user_uses_object_methods_as_handlers) = false;
+#endif
 
     /* The script and line the already-active notice names. Kept because the
      * module only replaces it when a later session_start() gets as far as
@@ -5541,7 +5563,7 @@ int64_t oxphp_async_sched_spawn(void *op_array, void *static_vars,
     char *exc_class = NULL;
     char *exc_message = NULL;
     if (oxphp_reconstruct_async_closure(
-            (zend_op_array *)op_array, (HashTable *)static_vars, (zval *)this_ptr,
+            (zend_op_array *)op_array, (HashTable *)static_vars, (oxphp_closure_this *)this_ptr,
             &fiber->task_closure, &fiber->task_fci, &fiber->task_fcc,
             &exc_class, &exc_message) != 0) {
         /* Reconstruction failed — surface as a completed-with-exception

@@ -1656,10 +1656,22 @@ int oxphp_arr_push_portbuf(zval *arr, const unsigned char *buf, size_t len);
 void oxphp_portable_free_ht(HashTable *ht);
 
 /* Closure inspection */
+
+/* A closure's bound $this, as the engine hands it out: a zval up to PHP 8.5,
+ * the object itself from 8.6, where zend_get_closure_this_ptr() and
+ * zend_create_closure() switched to zend_object *. Callers on the Rust side
+ * only carry the pointer from oxphp_closure_get_this() to
+ * oxphp_reconstruct_async_closure(), so its type never leaves C. */
+#if PHP_VERSION_ID >= 80600
+typedef zend_object oxphp_closure_this;
+#else
+typedef zval oxphp_closure_this;
+#endif
+
 void *oxphp_closure_get_op_array(zval *closure);
 int oxphp_closure_get_static_vars(zval *closure, HashTable **out_ht);
 int oxphp_closure_has_this(zval *closure);
-zval *oxphp_closure_get_this(zval *closure);
+oxphp_closure_this *oxphp_closure_get_this(zval *closure);
 
 /* Borrow proxy */
 void oxphp_bridge_set_borrow_proxy_ce(zend_class_entry *ce);
@@ -1686,7 +1698,7 @@ void oxphp_arr_add_index_zval(zval *arr, zend_ulong idx, zval *val);
 int oxphp_reconstruct_async_closure(
     zend_op_array *op_array,
     HashTable *static_vars,
-    zval *this_ptr,
+    oxphp_closure_this *this_ptr,
     zval *out_closure,
     zend_fcall_info *fci,
     zend_fcall_info_cache *fcc,
@@ -1716,7 +1728,7 @@ typedef struct {
  * Convert from zend_object* to oxphp_custom_object* using offsetof arithmetic.
  */
 #define OXPHP_OBJ(zobj) \
-    ((oxphp_custom_object *)((char *)(zobj) - XtOffsetOf(oxphp_custom_object, std)))
+    ((oxphp_custom_object *)((char *)(zobj) - offsetof(oxphp_custom_object, std)))
 #endif /* OXPHP_CUSTOM_OBJECT_DEFINED */
 
 /**

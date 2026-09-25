@@ -5,7 +5,7 @@ use std::os::raw::{c_char, c_int, c_long, c_uint, c_void};
 // Diverging types live in per-version modules and are re-exported by
 // `super` (mod.rs). Importing here keeps the extern blocks below readable
 // and gives a single point of failure if the wiring breaks.
-#[cfg(any(php_v8_4, php_v8_5))]
+#[cfg(any(php_v8_4, php_v8_5, php_v8_6))]
 use super::sapi_module_struct;
 
 pub type zend_result = c_int;

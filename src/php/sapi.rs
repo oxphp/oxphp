@@ -1406,7 +1406,7 @@ pub fn build_sapi_module() -> sapi_module_struct {
 
         additional_functions: std::ptr::null(),
         input_filter_init: None,
-        #[cfg(php_v8_5)]
+        #[cfg(any(php_v8_5, php_v8_6))]
         pre_request_init: None,
     }
 }
@@ -1479,7 +1479,7 @@ pub fn build_cli_sapi_module(ini_entries: *const c_char) -> sapi_module_struct {
 
         additional_functions: std::ptr::null(),
         input_filter_init: None,
-        #[cfg(php_v8_5)]
+        #[cfg(any(php_v8_5, php_v8_6))]
         pre_request_init: None,
     }
 }
@@ -1817,7 +1817,7 @@ unsafe extern "C" fn oxphp_header_handler(
                 resp.headers.push((name, value));
                 SAPI_HEADER_ADD_TO_LIST
             }
-            #[cfg(php_v8_5)]
+            #[cfg(any(php_v8_5, php_v8_6))]
             sapi_header_op_enum::SAPI_HEADER_DELETE_PREFIX => {
                 // Cold path: only invoked by an explicit two-arg
                 // `header_remove($name, $prefix)` from PHP 8.5.6+.

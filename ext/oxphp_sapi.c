@@ -4790,7 +4790,10 @@ static void oxphp_soft_reset(void) {
      * the request itself, inside its fiber, together with the body read that
      * depends on it. */
     SG(request_info).current_user = NULL;
+#if PHP_VERSION_ID < 80600
+    /* PHP 8.6 made current_user a zend_string and dropped the length. */
     SG(request_info).current_user_length = 0;
+#endif
     /* Cookie data for PARSE_COOKIE callback. server_context was set by
      * set_request_data() in worker_wait_callback. */
     if (SG(server_context)) {
@@ -7333,7 +7336,7 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
                 /* No `else`: for classes without custom storage, leave
                  * default_object_handlers inherited from the parent.
                  * Overriding with our custom-handlers slot (which has
-                 * offset = XtOffsetOf(oxphp_custom_object, std) = 16 to
+                 * offset = offsetof(oxphp_custom_object, std) = 16 to
                  * reach the outer wrapper) would poison plain zend_object
                  * allocations (e.g. `new TypeException()` created via
                  * zend_throw_exception), since those objects have no
