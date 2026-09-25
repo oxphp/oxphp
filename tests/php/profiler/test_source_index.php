@@ -87,7 +87,6 @@ curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
 curl_setopt($ch, CURLOPT_HTTPHEADER, ['Authorization: Bearer test-token']);
 $body = (string) curl_exec($ch);
 $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-curl_close($ch);
 $stats = json_decode($body, true);
 $t->assertSame('stats 200', $code, 200);
 $t->assertTrue('stats has a runs_total breakdown',

@@ -29,8 +29,13 @@ if (!class_exists('OxphpClosureFatalProbe', false)) {
 if (!function_exists('oxphp_run_closure_that_fatals')) {
     function oxphp_run_closure_that_fatals(): void
     {
-        $fn = static function (): void {
-            trigger_error('fatal inside a closure', E_USER_ERROR);
+        // It closes over something, which is also the case that costs memory.
+        // PHP 8.6 caches a closure that captures nothing and keeps it for as
+        // long as the function declaring it, fatal or not, so one of those
+        // would read as held here with nothing leaked.
+        $payload = 'captured';
+        $fn = static function () use ($payload): void {
+            trigger_error("fatal inside a closure holding {$payload}", E_USER_ERROR);
         };
 
         OxphpClosureFatalProbe::$weak = \WeakReference::create($fn);

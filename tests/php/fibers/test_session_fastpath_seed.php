@@ -19,6 +19,11 @@ require_once __DIR__ . '/session_fastpath_latch.php';
 // which still left the _SESSION entry standing in the symbol table because only
 // the PS() slot was given back.
 
+// PHP 8.6 turns session.use_strict_mode on by default, and strict mode swaps an
+// id the store has never seen for a fresh one. The id here is named by the test
+// itself, which reads it back, so it has to be kept.
+ini_set('session.use_strict_mode', '0');
+
 session_id(str_repeat('fa', 16));
 session_start();
 $_SESSION['who'] = 'FASTPATH';

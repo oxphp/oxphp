@@ -25,7 +25,6 @@ $status = static function (string $url): ?int {
     ]);
     $ok = curl_exec($ch) !== false;
     $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-    curl_close($ch);
     return $ok ? $code : null;
 };
 
