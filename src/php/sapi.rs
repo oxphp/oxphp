@@ -5728,6 +5728,41 @@ mod tests {
     }
 
     #[test]
+    fn client_abort_fatal_needs_both_our_text_and_the_cancel_cell() {
+        let _g = FATAL_STATUS_LOCK.lock().unwrap();
+        // The log hook gets the engine's formatted line, not the bare message,
+        // so the wording has to be found inside it.
+        let logged = "PHP Fatal error:  Request cancelled (client_abort) in /x.php on line 3";
+
+        // No cell: the helper is reachable outside a request too.
+        unsafe { bindings::oxphp_bridge_set_cancel_ptr(std::ptr::null()) };
+        assert!(!unsafe { is_client_abort_fatal(CLIENT_ABORT_FATAL) });
+
+        let cell = std::sync::atomic::AtomicU8::new(0);
+        unsafe { bindings::oxphp_bridge_set_cancel_ptr(&cell as *const _) };
+
+        // Our wording, on a request that was cancelled for another reason or
+        // not at all — the latter is a script forging it with trigger_error().
+        for reason in [0u8, 2, 3, 4, 5] {
+            cell.store(reason, std::sync::atomic::Ordering::Relaxed);
+            assert!(
+                !unsafe { is_client_abort_fatal(CLIENT_ABORT_FATAL) },
+                "cancel reason {reason} must not quieten the client-abort wording"
+            );
+        }
+
+        // A client abort: our wording is quietened, bare or inside the log
+        // line; any other fatal is not.
+        cell.store(1, std::sync::atomic::Ordering::Relaxed);
+        assert!(unsafe { is_client_abort_fatal(CLIENT_ABORT_FATAL) });
+        assert!(unsafe { is_client_abort_fatal(logged) });
+        assert!(!unsafe { is_client_abort_fatal("Request cancelled (timeout)") });
+        assert!(!unsafe { is_client_abort_fatal("Call to undefined function f()") });
+
+        unsafe { bindings::oxphp_bridge_set_cancel_ptr(std::ptr::null()) };
+    }
+
+    #[test]
     fn collect_status_cancel_reason_beats_sg() {
         // A server-side cancellation makes RESPONSE (already 504/503/499 via
         // set_fatal_error_status_if_default) authoritative — SG must be ignored,
