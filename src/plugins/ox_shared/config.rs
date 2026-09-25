@@ -352,19 +352,12 @@ mod tests {
     /// Run `SharedConfig::from_ctx` with `var=value` as the only spelling of
     /// `key` set, and return what it logged.
     fn from_ctx_log_with(key: &str, var: &str, value: &str) -> String {
-        let spellings = [
-            format!("SHARED_{key}"),
-            format!("OX_SHARED_{key}"),
-            key.to_string(),
-        ];
-        let prev: Vec<_> = spellings
-            .iter()
-            .map(|n| (n.clone(), std::env::var(n).ok()))
+        let public = format!("SHARED_{key}");
+        let prefixed = format!("OX_SHARED_{key}");
+        let vars: Vec<(&str, Option<&str>)> = [public.as_str(), prefixed.as_str(), key]
+            .into_iter()
+            .map(|n| (n, (n == var).then_some(value)))
             .collect();
-        for n in &spellings {
-            std::env::remove_var(n);
-        }
-        std::env::set_var(var, value);
 
         let captured = Captured::default();
         let subscriber = tracing_subscriber::fmt()
@@ -372,26 +365,22 @@ mod tests {
             .with_max_level(tracing::Level::WARN)
             .with_ansi(false)
             .finish();
-        tracing::subscriber::with_default(subscriber, || {
-            with_ctx!(|ctx: &PluginContext| SharedConfig::from_ctx(ctx).expect("config"))
+        crate::config::test_env::with_env(&vars, || {
+            tracing::subscriber::with_default(subscriber, || {
+                with_ctx!(|ctx: &PluginContext| SharedConfig::from_ctx(ctx).expect("config"))
+            })
         });
 
-        for (name, v) in prev {
-            match v {
-                Some(v) => std::env::set_var(name, v),
-                None => std::env::remove_var(name),
-            }
-        }
         let bytes = captured.0.lock().unwrap().clone();
         String::from_utf8(bytes).expect("utf-8 log")
     }
 
-    /// Neither setting drives anything, so a deployment still carrying one is
-    /// told so at startup, under whichever of the two documented spellings it
-    /// used — and not under the bare key, which may belong to other software.
+    /// None of these settings drives anything, so a deployment still carrying
+    /// one is told so at startup, under whichever of the two documented
+    /// spellings it used — and not under the bare key, which may belong to
+    /// other software.
     #[test]
     fn deprecated_settings_are_reported_as_ignored() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         for (key, value) in [
             ("SOFT_LIMIT_RATIO", "0.5"),
             ("SHUTDOWN_TIMEOUT_SECONDS", "5"),
