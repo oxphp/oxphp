@@ -9069,7 +9069,7 @@ A background task looks for cross-thread wait-for cycles on `Shared\Mutex`: two 
 
 | Value | Detector | On a cycle |
 |-------|----------|------------|
-| `off` | Not started. `SHARED_LOCK_POLL_INTERVAL_MS` is unused and `oxphp_shared_deadlock_detected_total` stays at 0. | Nothing. A `withLockTimeout()` on the cycle gives up with `OperationTimeoutException` when its timeout runs out; a cycle made only of `withLock()` calls has no timeout of its own to end it. |
+| `off` | Not started. `SHARED_LOCK_POLL_INTERVAL_MS` is unused and `oxphp_shared_deadlock_detected_total` stays at 0. | Nothing. A `withLockTimeout()` on the cycle gives up with `OperationTimeoutException` when its timeout runs out; a cycle made only of `withLock()` calls has no timeout of its own to end it: each of its requests waits until it is ended, by `max_execution_time` if it has one, and the lock the ended request held stays locked (see [Shared\Mutex](shared-mutex.md)). |
 | `warn` — default in release builds | Runs. | Logs and counts (see below); the waits are left in place, with the same outcome as under `off`. |
 | `strict` — default in debug builds of the binary | Runs. | Logs and counts, and also signals the threads on the cycle: a `withLock()` on it throws `DeadlockException` within 100 ms of the scan, and a `withLockTimeout()` waits out its timeout and then throws `DeadlockException` in place of `OperationTimeoutException`. A waiter whose lock is released first — by another waiter's exception unwinding the closure that held it — acquires it and does not throw. |
 
@@ -10357,7 +10357,7 @@ Prometheus exposes per-Map gauges at `/metrics`:
 
 - **Guards a value, not just a section.** The wrapped value is passed into your closure **by reference**, so direct mutation inside the closure commits back when the closure returns normally.
 - **Three explicit wait policies** instead of one overloaded `?float $timeout`:
-  - `withLock($fn)` — block forever (or until the request fiber is cancelled).
+  - `withLock($fn)` — block until the lock is acquired, with no bound of its own; the wait ends early only when the request or async task it runs in is being ended.
   - `tryWithLock($fn)` — non-blocking; throws `ContentionException` if the lock is held.
   - `withLockTimeout($fn, int $ms)` — bounded wait; throws `OperationTimeoutException` on deadline expiry.
 - **PHP exceptions propagate freely.** If your closure throws an ordinary PHP exception, the lock releases and the exception bubbles up. The mutex is **not** corrupted — partial mutation is acceptable; the caller is responsible for restoring invariants.
@@ -10385,7 +10385,7 @@ The closure signature is `function (mixed &$value): mixed` — `$value` is passe
 
 | Method                | Behaviour                                                       |
 |-----------------------|-----------------------------------------------------------------|
-| `withLock($fn)`       | Block until acquired, then run the closure. Forever / cancel.   |
+| `withLock($fn)`       | Block until acquired, then run the closure. Waits as long as the request lives. |
 | `tryWithLock($fn)`    | Non-blocking. Throws `ContentionException` if held.             |
 | `withLockTimeout($fn, $ms)` | Bounded wait. `$ms > 0` required. Throws `OperationTimeoutException` on deadline. |
 | `id()`                | Registry identifier; useful for logging / observability.        |
@@ -10514,7 +10514,8 @@ try {
 - **Stored value is scalar-ish.** Strings, ints, floats, booleans, `null`, and nested arrays of those work. Objects, closures, and resources raise `TypeException`.
 - **Closure return covers scalars, `null`, and `Shared\*` instances; arrays are not yet supported.** The stored value can still be an array (mutate it via `&$value`), but the closure's own *return* path accepts string/int/float/bool/null/byte-string and any `OxPHP\Shared\Shareable` handle. Returning a PHP array raises `OxPHP\Shared\TypeException`. Workaround for arrays: capture into a `use (&$x)` variable, or read the state through a follow-up `withLock` that returns a scalar projection.
 - **Reentry on the same thread throws `DeadlockException`.** Use a different mutex or restructure the code — same-thread re-entry is a bug, not a feature.
-- **Fiber cancellation propagates as `Async\AsyncException`.** A `withLock` interrupted by request cancellation raises that exception; the lock is released cleanly.
+- **A `withLock` wait lasts as long as the request, and no longer.** When `max_execution_time` runs out, the server shuts down past its drain deadline with the request still running, or the async task the call runs in is cancelled while it waits, a `withLock` still waiting for the lock stops waiting, and the request ends the way that cancellation ends it anywhere else: a timeout is the same `504` fatal, not an exception your code can catch, while a cancelled async task sees `Async\AsyncException`. On a timeout the log — and the response, where `display_errors` is on — also carries a warning `Uncaught OxPHP\Async\AsyncException: Mutex::withLock: wait abandoned, the request is being ended` just ahead of the timeout fatal: the wait leaves by throwing that exception, and PHP reports an exception still in flight when a fatal error arrives. A client disconnecting does not stop the wait. With `max_execution_time = 0` and no shutdown, nothing does — use `withLockTimeout` where the wait needs a bound of its own.
+- **A fatal error inside the closure leaves the lock locked.** A fatal — `max_execution_time` running out while the closure runs included — ends the request without the release step, so the mutex stays locked for the life of the process: a later `withLock` on it from another worker thread waits until its own request is ended, and one from the worker thread that ran the closure throws `DeadlockException`, because that thread still counts the mutex as held. Exceptions are not affected: a closure that throws releases the lock as described above. Keep closures short enough that the request's time limit never runs out inside one.
 
 ## Exceptions
 

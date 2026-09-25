@@ -24,6 +24,9 @@ pub enum SharedError {
     Uninitialized,
     /// Serialised value exceeds SHARED_MAX_VALUE_SIZE.
     ValueTooLarge,
+    /// A blocking wait was left because the request (or async task) it runs
+    /// in is being ended — see `oxphp_bridge_request_end_pending`.
+    Cancelled,
     /// Panic caught at FFI boundary (Rust bug).
     Panicked,
 }
@@ -46,6 +49,7 @@ impl SharedError {
             Self::Cycle => -9,
             Self::Uninitialized => -10,
             Self::ValueTooLarge => -11,
+            Self::Cancelled => -12,
             Self::Panicked => -99,
         }
     }
@@ -65,6 +69,7 @@ impl std::fmt::Display for SharedError {
             Self::Cycle => write!(f, "cycle would form"),
             Self::Uninitialized => write!(f, "uninitialised wrapper"),
             Self::ValueTooLarge => write!(f, "value exceeds size cap"),
+            Self::Cancelled => write!(f, "cancelled"),
             Self::Panicked => write!(f, "internal: Rust panic at FFI boundary"),
         }
     }

@@ -383,6 +383,10 @@ extern "C" {
     // delivered a pending PHP exception. See the constant below.
     pub fn oxphp_bridge_fiber_await(promise_id: i64, timeout: f64, retval: *mut c_void) -> c_int;
     pub fn oxphp_bridge_in_fiber() -> c_int;
+    /// 1 when the request or async task running on this thread has an
+    /// interrupt pending that the engine will end it with at its next opcode
+    /// boundary; lets a native blocking wait step aside for it.
+    pub fn oxphp_bridge_request_end_pending() -> c_int;
     /// Cooperatively yield the current task fiber for one scheduler cycle.
     /// Returns 1 if it suspended (in a fiber), 0 if not in a fiber, -3 if
     /// the task was cancelled while yielded.

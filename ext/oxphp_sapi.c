@@ -6790,6 +6790,54 @@ static void oxphp_zend_interrupt_handler(zend_execute_data *execute_data)
     /* unreachable: zend_error_noreturn calls zend_bailout() */
 }
 
+/* Registered as the bridge's request-end check. Answers whether what the
+ * engine will do at its next interrupt check ends the request or task running
+ * here — the same decisions, in the same order, as the handler above, plus the
+ * max_execution_time case the engine handles itself (zend_fcall_interrupt calls
+ * zend_timeout() for EG(timed_out) before it ever reaches the handler).
+ *
+ * For native waits that are not an opcode boundary and so never reach either:
+ * a Shared\Mutex::withLock() waiting on a lock nobody will release would
+ * otherwise hold the worker thread past its deadline for good. The wait leaves,
+ * returns to the VM, and the interrupt that is already pending does the rest.
+ *
+ * A client leaving is not an end, for the reason the handler gives: it ends a
+ * request only at a write, unless a hard drain is under way.
+ *
+ * Nothing counts unless an interrupt is still pending. These states outlive
+ * the interrupt that acted on them: a task's cancel flag and a request's cancel
+ * reason stay set after the unwind, and the hard-drain latch is process-wide
+ * while only busy request workers are kicked. Read on their own they would turn
+ * away a `finally` block or shutdown function that runs after the unwind and
+ * needs a lock to clean up. The engine clears vm_interrupt before it calls the
+ * handler (zend_interrupt_helper, zend_fcall_interrupt), so a set byte is one
+ * it has yet to act on.
+ *
+ * The cost: a task cancel whose kick was taken by another fiber on this thread,
+ * or raised before the task published its interrupt address, is not seen here.
+ * Such a task waits as it did before this check and is cancelled at its next
+ * suspend point once the lock is acquired. */
+static int oxphp_request_end_pending(void)
+{
+    if (!zend_atomic_bool_load_ex(&EG(vm_interrupt))) {
+        return 0;
+    }
+    if (oxphp_current_fiber != NULL
+        && oxphp_current_fiber->cancel_cell != NULL
+        && atomic_load_explicit(oxphp_current_fiber->cancel_cell,
+                                memory_order_acquire)) {
+        return 1;
+    }
+    if (zend_atomic_bool_load_ex(&EG(timed_out))) {
+        return 1;
+    }
+    if (oxphp_bridge_is_drain_hard()) {
+        return 1;
+    }
+    oxphp_cancel_reason_t reason = oxphp_bridge_get_cancel_reason();
+    return reason != OXPHP_CANCEL_NONE && reason != OXPHP_CANCEL_CLIENT_ABORT;
+}
+
 /* The same mark, for the cancellation that does not come through the handler
  * above. The SAPI's write and flush wrappers read the request's cancel cell
  * themselves and end the request there, with a bare bailout: a request whose
@@ -7639,6 +7687,7 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
     /* Register fiber-await callback so Rust can call it via the bridge. */
     oxphp_bridge_set_fiber_await(oxphp_fiber_suspend_for_await);
     oxphp_bridge_set_in_fiber_check(oxphp_in_oxphp_fiber);
+    oxphp_bridge_set_request_end_check(oxphp_request_end_pending);
     oxphp_bridge_set_fiber_yield(oxphp_fiber_suspend_for_yield);
     oxphp_bridge_set_current_fiber_id_fn(oxphp_fiber_current_id);
     oxphp_bridge_set_async_io_backoff_fn(oxphp_async_io_backoff_bridge);

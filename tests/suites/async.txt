@@ -36,6 +36,9 @@ async/test_await_race_preserves_others
 async/test_async_output_drain_unbuffered
 async/test_async_jit_suspend_resume
 async/test_await_all_cancel_cpu_bound
+# A cancelled task keeps its cancel flag after it was unwound; a withLock in
+# its finally must still wait for the lock and run.
+shared/test_mutex_with_lock_cancelled_task_cleanup
 async/test_await_all_reject_member
 async/test_await_result_refcount
 async/test_await_jit_hot_loop_leak

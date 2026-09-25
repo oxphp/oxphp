@@ -538,6 +538,21 @@ pub unsafe fn oxphp_bridge_fiber_await(
 pub unsafe fn oxphp_bridge_in_fiber() -> c_int {
     0
 }
+
+thread_local! {
+    static MOCK_REQUEST_END_PENDING: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Host tests: what `oxphp_bridge_request_end_pending` answers on the calling
+/// thread. Per-thread, so a test's waiter thread cannot leak it into another test.
+#[cfg(test)]
+pub fn set_mock_request_end_pending(pending: bool) {
+    MOCK_REQUEST_END_PENDING.with(|c| c.set(pending));
+}
+
+pub unsafe fn oxphp_bridge_request_end_pending() -> c_int {
+    MOCK_REQUEST_END_PENDING.with(|c| c.get()) as c_int
+}
 pub unsafe fn oxphp_bridge_fiber_yield() -> c_int {
     0 // not in fiber — blocking path on host
 }

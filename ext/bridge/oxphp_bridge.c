@@ -2745,6 +2745,19 @@ int oxphp_bridge_in_fiber(void) {
     return 0;
 }
 
+static oxphp_request_end_check_fn_t sapi_request_end_check = NULL;
+
+void oxphp_bridge_set_request_end_check(oxphp_request_end_check_fn_t fn) {
+    sapi_request_end_check = fn;
+}
+
+int oxphp_bridge_request_end_pending(void) {
+    if (sapi_request_end_check != NULL) {
+        return sapi_request_end_check();
+    }
+    return 0;
+}
+
 /* ─── Async-task fiber scheduler callbacks ─────────────────── */
 
 /* Set once at startup (MINIT) before any worker threads spawn — same
