@@ -7,10 +7,19 @@ networks:
   test-net:
 
 # Reference template (YAML anchors don't cross files — each override is self-contained)
+#
+# Every profile built from docker/dev/Dockerfile lists PHP_VERSION under
+# build.args with no value: compose then takes it from the environment, so
+# `PHP_VERSION=8.5 ./run_all.sh` builds on PHP 8.5, and leaves the argument out
+# when the variable is unset, so the Dockerfile's own default applies. Compose
+# passes a build only the arguments a service lists, so a profile without the
+# key builds on that default whatever the environment says.
 x-oxphp-base: &oxphp-base
   build:
     context: ..
     dockerfile: docker/dev/Dockerfile
+    args:
+      PHP_VERSION:
   networks: [test-net]
   restart: "no"
   healthcheck:

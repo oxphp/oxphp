@@ -18,6 +18,7 @@ services:
       context: ..
       dockerfile: docker/dev/Dockerfile
       args:
+        PHP_VERSION:
         CARGO_FEATURES: "plugin-apm,plugin-async,plugin-profiler"
     ports:
       - "80"

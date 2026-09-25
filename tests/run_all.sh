@@ -8,6 +8,10 @@
 #   --no-build         Skip Docker image build
 #   --output=FORMAT    Output format: terminal (default), json, html
 #   --parallel=N       Max parallel profiles (default: 4)
+#
+# PHP_VERSION=8.5 ./tests/run_all.sh builds the profiles on PHP 8.5; unset, they
+# build on docker/dev/Dockerfile's default. Profiles layered on an already built
+# dev image (hooksdb, apm-db, zts_ext) run on whatever PHP that image carries.
 
 set -euo pipefail
 
