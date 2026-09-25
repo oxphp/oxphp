@@ -83,7 +83,7 @@ START_TIME=$(date +%s)
 log_info "Profiles: ${profiles[*]}"
 log_info "Output: $OUTPUT"
 
-# ── Build (each profile owns a tests-oxphp-<profile> image) ──
+# ── Build (each profile owns a ${COMPOSE_PROJECT_NAME}-oxphp-<profile> image) ──
 # Layer cache makes the second-onward builds near-instant; without
 # this loop, profiles whose image already exists locally reuse a
 # stale build (e.g. from a prior commit) and miss new symbols.
@@ -146,7 +146,7 @@ done
 # answer to a *different* request than the one under test, and the suite runner
 # issues one request at a time. These ride on the overflow profile's image.
 if [[ " ${profiles[*]} " == *" overflow "* ]] && [ -z "$FILTER_SUITE" ] && [ -z "$FILTER_TEST" ]; then
-    overload_image="tests-oxphp-overflow:latest"
+    overload_image="${COMPOSE_PROJECT_NAME}-oxphp-overflow:latest"
     if docker image inspect "$overload_image" >/dev/null 2>&1; then
         log_info "━━━ Standalone: queue admission control ━━━"
         emitted_before=$(wc -l < "$JSONL_FILE")

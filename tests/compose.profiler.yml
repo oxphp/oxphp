@@ -66,6 +66,3 @@ services:
     volumes:
       - ../www:/var/www/html
       - ./php:/var/www/html/public/tests
-networks:
-  test-net:
-    driver: bridge
