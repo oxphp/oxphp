@@ -32,9 +32,11 @@ set -u
 IMAGE="${1:-oxphp-oxphp:latest}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 FIX="$ROOT/tests/fixtures/apm_db"
-NET="oxdb-net"
-COL="oxdb-col"
-SRV="oxdb-srv"
+# Suffixed with the PID so two runs on one Docker host (two checkouts, two
+# sessions) do not remove each other's containers and network.
+NET="oxdb-net-$$"
+COL="oxdb-col-$$"
+SRV="oxdb-srv-$$"
 PASS=0
 FAIL=0
 

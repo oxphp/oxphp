@@ -63,10 +63,12 @@ set -u
 IMAGE="${1:-oxphp-oxphp:latest}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 FIX="$ROOT/tests/fixtures/otel_exception"
-NET="oxexc-net"
-COL="oxexc-col"
-SRV="oxexc-srv"
-WRK="oxexc-wrk"
+# Suffixed with the PID so two runs on one Docker host (two checkouts, two
+# sessions) do not remove each other's containers and network.
+NET="oxexc-net-$$"
+COL="oxexc-col-$$"
+SRV="oxexc-srv-$$"
+WRK="oxexc-wrk-$$"
 PASS=0
 FAIL=0
 
