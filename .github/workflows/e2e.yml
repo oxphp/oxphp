@@ -1,0 +1,137 @@
+name: Docker E2E
+
+# The Docker-level tests: every non-manual profile under tests/compose.*.yml,
+# the standalone checks run_all.sh drives only on an unfiltered run (queue
+# admission control, fiber-worker lifetime), and tests/otel_exception.sh, the one test
+# that goes through the real exception-capture FFI path. None of them runs in
+# pr.yml, and weekly-rebuild.yml only runs a fixed list of suites against the
+# released tags.
+
+on:
+  schedule:
+    - cron: '0 4 * * *'   # daily 04:00 UTC
+  workflow_dispatch:      # manual trigger, always runs; can target a branch
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY: ghcr.io
+  # Same package nightly.yml keeps its BuildKit layers in, under its own tags.
+  CACHE_IMAGE: oxphp/oxphp-buildcache
+
+jobs:
+  # Skip the scheduled run when main has not moved since the last green one.
+  changes:
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read
+    outputs:
+      run: ${{ steps.compare.outputs.run }}
+    steps:
+      - name: Compare HEAD with the last successful E2E run
+        id: compare
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [[ "$EVENT" == "workflow_dispatch" ]]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          LAST=$(gh run list -R "$GITHUB_REPOSITORY" --workflow e2e.yml \
+            --branch main --status success --limit 1 --json headSha -q '.[0].headSha')
+          if [[ "$LAST" == "$GITHUB_SHA" ]]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "main is still at $GITHUB_SHA; skipping."
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "Testing $GITHUB_SHA (last successful E2E: ${LAST:-none})"
+          fi
+
+  otel-exception:
+    name: OTel exception capture (PHP ${{ matrix.php }})
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ["8.4", "8.5"]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build dev image
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/dev/Dockerfile
+          load: true
+          push: false
+          provenance: false
+          build-args: |
+            PHP_VERSION=${{ matrix.php }}
+          tags: oxphp-e2e:php${{ matrix.php }}
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.CACHE_IMAGE }}:php${{ matrix.php }}-e2e-dev-amd64
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.CACHE_IMAGE }}:php${{ matrix.php }}-e2e-dev-amd64,mode=max,image-manifest=true,oci-mediatypes=true
+
+      - name: Run tests/otel_exception.sh
+        run: ./tests/otel_exception.sh oxphp-e2e:php${{ matrix.php }}
+
+  sweep:
+    name: Profile sweep (PHP ${{ matrix.php }})
+    needs: changes
+    if: needs.changes.outputs.run == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ["8.4", "8.5"]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    env:
+      # The compose profiles take PHP_VERSION from the environment and pass it
+      # to the build, so run_all.sh builds every profile on this version.
+      PHP_VERSION: ${{ matrix.php }}
+      # hooksdb builds FROM this image instead of its oxphp-oxphp:latest default.
+      OXPHP_BASE_IMAGE: oxphp-e2e:php${{ matrix.php }}
+    steps:
+      - uses: actions/checkout@v5
+
+      # hooksdb is layered on this image rather than built from the Dockerfile
+      # itself, so it is built on the same version as the profiles.
+      #
+      # Built with the default docker-driver builder, not a docker-container
+      # one (no setup-buildx-action here), on purpose: hooksdb builds FROM this
+      # image, which a docker-container builder cannot see in the local image
+      # store, and the profiles that share this image's Dockerfile
+      # and arguments then build from the same layer cache.
+      - name: Build dev image
+        run: docker build --build-arg PHP_VERSION="$PHP_VERSION" -f docker/dev/Dockerfile -t "$OXPHP_BASE_IMAGE" .
+
+      # Unfiltered on purpose: the standalone admission and fiber checks only
+      # run when neither --suite nor --test is given.
+      - name: Run tests/run_all.sh
+        run: ./tests/run_all.sh
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: e2e-sweep-report-php${{ matrix.php }}
+          path: tests/reports/
+          retention-days: 14

@@ -111,6 +111,14 @@ cleanup() {
 trap cleanup EXIT
 
 # ── Run profiles sequentially ────────────────────────────────
+# A skipped profile emits no JSONL of its own, and the report is assembled from
+# JSONL alone — without this record a sweep in which nothing came up at all
+# reports "0 failed" and exits 0.
+record_profile_failure() {
+    printf '{"test": "profile %s ran", "group": "startup", "pass": false, "assertions": [], "error": "%s", "meta": {}, "profile": "%s"}\n' \
+        "$1" "$2" "$1" >> "$JSONL_FILE"
+}
+
 for profile in "${profiles[@]}"; do
     log_info "━━━ Profile: $profile ━━━"
     # A profile that cannot even be brought up will never turn healthy, and
@@ -119,17 +127,22 @@ for profile in "${profiles[@]}"; do
     # has not built it.
     if ! start_profile "$profile"; then
         log_error "Profile $profile could not be started (check the prerequisites in its compose file), skipping"
+        record_profile_failure "$profile" "could not be started"
         continue
     fi
     if ! wait_healthy "$profile" 60; then
         log_error "Profile $profile failed to start, skipping"
+        record_profile_failure "$profile" "did not become healthy"
         stop_profile "$profile"
         continue
     fi
 
-    mapped_port=$(get_mapped_port "$profile")
+    # `compose port` fails outright when nothing is published, and under
+    # `set -e -o pipefail` that would end the whole sweep here, not skip one.
+    mapped_port=$(get_mapped_port "$profile" || true)
     if [ -z "$mapped_port" ]; then
         log_error "Could not get mapped port for $profile, skipping"
+        record_profile_failure "$profile" "no mapped port"
         stop_profile "$profile"
         continue
     fi
@@ -140,7 +153,12 @@ for profile in "${profiles[@]}"; do
     fi
     log_info "Base URL: $local_base_url"
 
+    emitted_before=$(wc -l < "$JSONL_FILE")
     "${SCRIPT_DIR}/run_profile.sh" "$profile" "$local_base_url" "$VERBOSE" >> "$JSONL_FILE" 2>/dev/null || true
+    if [ "$(wc -l < "$JSONL_FILE")" -eq "$emitted_before" ]; then
+        log_error "Profile $profile produced no results — recording as a failure"
+        record_profile_failure "$profile" "produced no results"
+    fi
 
     stop_profile "$profile"
 done
@@ -166,6 +184,8 @@ if [[ " ${profiles[*]} " == *" overflow "* ]] && [ -z "$FILTER_SUITE" ] && [ -z 
         fi
     else
         log_error "Skipping admission checks: image $overload_image not found (build the overflow profile first)"
+        printf '{"test": "admission checks ran", "group": "admission", "pass": false, "assertions": [], "error": "image %s not found", "meta": {}, "profile": "overflow"}\n' \
+            "$overload_image" >> "$JSONL_FILE"
     fi
 fi
 
