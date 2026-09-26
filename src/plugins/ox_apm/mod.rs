@@ -217,11 +217,13 @@ static DB_CAPTURE_PARAMS: AtomicBool = AtomicBool::new(false);
 
 /// Slow-query threshold (ms) for the DB auto-instrumentation hooks. `0`
 /// disables slow flagging.
+#[cfg(feature = "php")]
 pub(crate) fn slow_query_ms() -> u64 {
     SLOW_QUERY_MS.load(Ordering::Relaxed)
 }
 
 /// Whether the DB hooks should capture bound parameters into `db.params`.
+#[cfg(feature = "php")]
 pub(crate) fn db_capture_params() -> bool {
     DB_CAPTURE_PARAMS.load(Ordering::Relaxed)
 }
