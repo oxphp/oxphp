@@ -24,8 +24,11 @@ declare(strict_types=1);
 // whether the worker is still there and whether the recovery ran to its end.
 
 // A worker never shuts a request down, so the error handler the TestCase of an
-// earlier request installed is still standing on this thread — and it turns
-// E_USER_ERROR into an exception, which is not the fatal this case is about.
+// earlier request installed is still standing on this thread, and it throws on
+// every error it is handed. trigger_error() with E_USER_ERROR raises an
+// E_DEPRECATED first, as of PHP 8.4; the handler throws on that, and
+// trigger_error() returns with the exception without ever raising the
+// E_USER_ERROR. An exception is not the fatal this case is about.
 set_error_handler(null);
 
 if (!class_exists('OxPHPInputFatalOnCloseFilter', false)) {
@@ -51,8 +54,10 @@ if (!class_exists('OxPHPInputFatalOnCloseFilter', false)) {
     }
 }
 
-// The filter map is per thread and outlives the request on a worker, so a second
-// registration would warn into the body the suite reads.
+// The filter map is per thread and outlives the request on a worker, so once a
+// request on this worker has registered the name it stays registered. Registering
+// it again would return false and do nothing else, so the check only skips a call
+// known to fail.
 if (!in_array('oxphp-input-fatal-on-close', stream_get_filters(), true)) {
     stream_filter_register('oxphp-input-fatal-on-close', OxPHPInputFatalOnCloseFilter::class);
 }
