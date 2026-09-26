@@ -4864,6 +4864,18 @@ void oxphp_claim_forget(void *key) {
     if (slot != NULL) oxphp_claim_erase(slot);
 }
 
+bool oxphp_claim_tagged_held_by_other(oxphp_request_fiber *self) {
+    if (oxphp_claim_slots == NULL || oxphp_claim_count == 0) return false;
+
+    for (uint32_t i = 0; i <= oxphp_claim_mask; i++) {
+        const struct oxphp_claim *slot = &oxphp_claim_slots[i];
+        if (((uintptr_t) slot->key & 1) != 0 && slot->owner != NULL && slot->owner != self) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /* Give up every stream this fiber holds. Called where a request or task ends,
  * which is the release point the claim is defined against. */
 static void oxphp_claim_release_fiber(oxphp_request_fiber *fiber) {

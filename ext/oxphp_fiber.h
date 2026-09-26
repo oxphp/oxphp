@@ -676,6 +676,13 @@ bool oxphp_claim_acquire(void *key, oxphp_request_fiber *owner);
  * an address handed out again starts unclaimed. */
 void oxphp_claim_forget(void *key);
 
+/* Whether any key with its low bit set is held by a fiber other than `self`.
+ * Pointers the allocator hands out are never odd, so the tag marks keys that are
+ * not addresses — the persistent PDO constructors' per-source keys — and this is
+ * how a constructor with no source of its own asks whether any source is taken.
+ * A walk of the whole table, for a caller that is about to wait anyway. */
+bool oxphp_claim_tagged_held_by_other(oxphp_request_fiber *self);
+
 /* Run one tick of the event loop: check try_recv, timers, await results. */
 int oxphp_scheduler_tick(oxphp_fiber_scheduler *sched);
 

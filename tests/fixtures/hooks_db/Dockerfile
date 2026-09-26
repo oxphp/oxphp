@@ -83,3 +83,10 @@ RUN set -eux; \
 # red, and adding a test anywhere earlier in the suite moves the target. At 0 the
 # timer is never armed.
 RUN printf 'default_socket_timeout=2\nmax_execution_time=0\n' > /usr/local/etc/php/conf.d/zz-hooksdb.ini
+
+# A DSN alias, which PDO resolves from php.ini alone (pdo.dsn.<name> is read from
+# the startup configuration, not from ini_set), naming the profile's MySQL server
+# exactly as the tests spell it out in full. Only
+# test_persistent_ctor_gate_spellings names it: two constructors reaching one
+# data source through different spellings must still wait for each other.
+RUN printf 'pdo.dsn.hooksdb="mysql:host=hooksdb-mysql;port=3306;dbname=appdb"\n' > /usr/local/etc/php/conf.d/zz-hooksdb-dsn.ini
