@@ -6,6 +6,10 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # The plugins that build without libphp.so. Read by the plugins-only
+  # clippy row and the plugins-only test run; the test run fails if this
+  # stops matching what the php feature enables in Cargo.toml.
+  HOST_FEATURES: plugin-apm,plugin-async,plugin-profiler,plugin-shared
 
 jobs:
   fmt:
@@ -38,7 +42,8 @@ jobs:
           # the plugins, the default rows add `php` — so an item used only
           # from php-gated code would otherwise warn there and fail nothing.
           - name: host-plugins
-            flags: "--no-default-features --features plugin-apm,plugin-async,plugin-profiler,plugin-shared --all-targets"
+            flags: "--no-default-features --all-targets"
+            host_features: true
             php_id: ""
           # decorator-test rides along here because nothing else builds it:
           # it is deliberately not part of `php` (only the decorators test
@@ -71,8 +76,13 @@ jobs:
       - name: Clippy
         env:
           CLIPPY_FLAGS: ${{ matrix.flags }}
+          WITH_HOST_FEATURES: ${{ matrix.host_features }}
           PHP_VERSION_ID: ${{ matrix.php_id }}
-        run: cargo clippy $CLIPPY_FLAGS -- -D warnings
+        run: |
+          if [ "$WITH_HOST_FEATURES" = true ]; then
+            CLIPPY_FLAGS="$CLIPPY_FLAGS --features $HOST_FEATURES"
+          fi
+          cargo clippy $CLIPPY_FLAGS -- -D warnings
 
   # Two runs, because one feature set cannot cover both ends.
   #
@@ -120,17 +130,17 @@ jobs:
           restore-keys: test-${{ steps.rust.outputs.hash }}-
       - name: Test (no features)
         run: cargo test --no-default-features
-      # The feature list is checked against Cargo.toml rather than just
-      # documented: a fifth plugin added to `php = [...]` and not added here
-      # would silently stop being tested, which is the exact defect this step
-      # exists to prevent. A prose comment does not fail a build; this does.
+      # The feature list (HOST_FEATURES, workflow-level env) is checked
+      # against Cargo.toml rather than just documented: a fifth plugin added
+      # to `php = [...]` and not added there would silently stop being tested
+      # and linted, which is the exact defect this step exists to prevent. A
+      # prose comment does not fail a build; this does.
       - name: Test (host-buildable plugin features)
         run: |
-          HOST_FEATURES=plugin-apm,plugin-async,plugin-profiler,plugin-shared
           php_enables=$(sed -n 's/^php = \[\(.*\)\]$/\1/p' Cargo.toml | tr -d ' "')
           if [ "$php_enables" != "$HOST_FEATURES" ]; then
             echo "::error::the php feature enables [$php_enables]; this step runs [$HOST_FEATURES]"
-            echo "::error::add the new feature here if it builds without libphp.so, or record why it cannot"
+            echo "::error::add the new feature to HOST_FEATURES at the top of this workflow if it builds without libphp.so, or record why it cannot"
             exit 1
           fi
           cargo test --no-default-features --features "$HOST_FEATURES"
