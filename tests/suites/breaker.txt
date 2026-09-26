@@ -4,7 +4,8 @@
 # Order is the test. Each line is one request to a single worker, so the number
 # of consecutive fatals ahead of a probe is exactly the number of lines above
 # it, and a probe that reports requestCount() == 1 is reporting a worker that
-# booted after the lines above it ran.
+# booted after the lines above it ran. The `log ~` lines are the exception: they
+# send no request, and read the server log instead.
 
 breaker/test_breaker_baseline
 
@@ -21,6 +22,15 @@ breaker/test_breaker_fatal | GET | | 500 |
 breaker/test_breaker_fatal | GET | | 500 |
 breaker/test_breaker_fatal | GET | | 500 |
 breaker/test_breaker_trips_at_threshold
+
+# The same trip in the server log, which is where an operator meets it: each of
+# the three is named with its worker, what failed and how many in a row, and the
+# retire is written at warn so that this profile's log level keeps it. A `log ~`
+# line searches only what the latest block of requests above it wrote — the
+# lines since the last blank line before them — so each block answers for its
+# own lines.
+log ~oxphp: worker 0 request failed (bailout in the handler) — 3 in a row
+log ~Worker mode thread retired after consecutive request failures
 
 # An uncaught application exception is not a handler defect: the request ends
 # with a clean unwind and a 500, and the worker that served it is healthy. Three
@@ -71,6 +81,7 @@ breaker/test_breaker_shutdown_fatal | GET | | 500 |
 breaker/test_breaker_shutdown_fatal | GET | | 500 |
 breaker/test_breaker_shutdown_fatal | GET | | 500 |
 breaker/test_breaker_shutdown_retires
+log ~oxphp: worker 0 request failed (bailout in a shutdown function) — 3 in a row
 
 # And it must not clear somebody else's run. A request read as a success resets
 # the count, so an application alternating between a fatal in the handler and a
@@ -88,6 +99,7 @@ breaker/test_breaker_shutdown_dtor_fatal | GET | | 500 |
 breaker/test_breaker_shutdown_dtor_fatal | GET | | 500 |
 breaker/test_breaker_shutdown_dtor_fatal | GET | | 500 |
 breaker/test_breaker_shutdown_dtor_retires
+log ~oxphp: worker 0 request failed (bailout freeing the shutdown functions) — 3 in a row
 
 # And the boundary of all three: a deadline that expires in the shutdown window
 # is the server ending the request, not the request failing, and stays neutral —
@@ -217,6 +229,7 @@ breaker/test_breaker_session_write_fatal | GET | | 500 |
 breaker/test_breaker_session_write_fatal | GET | | 500 |
 breaker/test_breaker_session_write_fatal | GET | | 500 |
 breaker/test_breaker_session_write_retires
+log ~oxphp: worker 0 request failed (bailout writing the session) — 3 in a row
 
 # Requests whose clients leave while they are still waiting in the queue. Nobody
 # is left to read what they would produce, so the worker that reaches them
@@ -240,7 +253,8 @@ breaker/test_breaker_queued_cancel_tick
 # raises a fatal there leaves the worker's engine state what any fatal leaves
 # it, and the three streams that did it retire the worker: the staging request
 # is ended with it, answered 503, and the probe after it runs on the
-# replacement. Last in the file, so no count above depends on these.
+# replacement. Below every probe that reads an absolute recycle count, so none
+# of them depends on these.
 breaker/test_breaker_stream_walk_throw_neutral
 breaker/test_breaker_stream_walk_fatal | GET | | 503 |
 breaker/test_breaker_stream_walk_fatal_retires
@@ -257,3 +271,29 @@ breaker/test_breaker_stream_walk_stale_flag
 # staging request is answered 503, the probe runs on the replacement.
 breaker/test_breaker_stream_walk_session_fatal | GET | | 503 |
 breaker/test_breaker_stream_walk_session_fatal_retires
+
+# The failures that are not a bailout. A request that catches the server's
+# refusal to let it suspend its own fiber and tries again is ended after a
+# bounded number of refusals; the graceful exit that ends it answers 200, but
+# the request did not run to its end, and three of them retire the worker.
+breaker/test_breaker_suspend_retry >> /tests/fibers/fixture_suspend_retry.php | GET | | 200 |
+breaker/test_breaker_suspend_retry >> /tests/fibers/fixture_suspend_retry.php | GET | | 200 |
+breaker/test_breaker_suspend_retry >> /tests/fibers/fixture_suspend_retry.php | GET | | 200 |
+breaker/test_breaker_replaced
+log ~oxphp: worker 0 request failed (fiber refused to park) — 3 in a row
+log ~Worker mode thread retired after consecutive request failures
+
+# And a request whose fiber could not be started at all: three of them, started
+# by the event loop's tick under a stack size a parked request set.
+breaker/test_breaker_fiber_start_fails | GET | | 503 |
+breaker/test_breaker_replaced
+log ~oxphp: worker 0 request failed (fiber would not start) — 3 in a row
+log ~Worker mode thread retired after consecutive request failures
+
+# And a fatal in a destructor run as the request's ini is put back. That one
+# retires the worker on its own schedule rather than through the count, which
+# the probe after it reads; what the log line adds is that the failure is
+# counted and named all the same.
+breaker/test_breaker_ini_put_back_fatal >> /tests/fibers/test_ini_put_back_fatal_retires_the_worker.php | GET | | 500 |
+breaker/test_breaker_ini_put_back_fatal_probe >> /tests/fibers/test_ini_put_back_fatal_retires_the_worker_probe.php | GET | | 200 |
+log ~oxphp: worker 0 request failed (bailout putting back ini) — 1 in a row

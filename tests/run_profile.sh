@@ -28,11 +28,41 @@ if [ ${#suite_files[@]} -eq 0 ]; then
 fi
 
 for suite_file in "${suite_files[@]}"; do
+    # A `log ~` line searches only what the server wrote since the first request
+    # of the latest block that sent any — a block being a run of lines between
+    # blank ones. `log ~` lines send nothing, so they read the window of the
+    # requests above them wherever they sit, and consecutive ones share it. A
+    # block with no `log ~` line of its own still opens a window, so what it
+    # logs cannot answer for a later block.
+    log_from=0
+    block_head=""
+    # Taking a mark reads the whole log, so a suite with nothing to assert on it
+    # never takes one.
+    marks_log=false
+    grep -q '^log ~' "$suite_file" && marks_log=true
+    new_block=$marks_log
     while IFS= read -r test_line; do
-        [ -z "$test_line" ] && continue
+        if [[ "$test_line" =~ ^[[:space:]]*$ ]]; then
+            new_block=$marks_log
+            continue
+        fi
+
+        if ! is_log_assertion "$test_line" && [ "$new_block" = true ]; then
+            # A failed read widens the window to the whole log rather than
+            # ending this script, which would drop the rest of the profile's
+            # results without a failure being recorded for any of them.
+            log_from=$(server_log "$PROFILE" | wc -l | tr -d ' ') || log_from=0
+            # The path alone, without a `>> /override` or the `|` fields.
+            block_head="${test_line%%|*}"
+            block_head="${block_head%% >> *}"
+            block_head=$(echo "$block_head" | xargs)
+            new_block=false
+        fi
 
         local_result=""
-        if is_runner_test "$test_line"; then
+        if is_log_assertion "$test_line"; then
+            local_result=$(run_log_assertion "$PROFILE" "${test_line#log ~}" "$log_from" "$block_head" 2>/dev/null) || local_result=""
+        elif is_runner_test "$test_line"; then
             local_result=$(run_runner_test "$BASE_URL" "$test_line" 2>/dev/null) || local_result=""
         else
             test_path=$(echo "$test_line" | xargs)

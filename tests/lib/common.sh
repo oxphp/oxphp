@@ -176,9 +176,11 @@ get_suite_profile() {
     grep -m1 '^# profile:' "$suite_file" | sed 's/^# profile:[[:space:]]*//' || echo "default"
 }
 
+# Blank lines are kept: they separate a suite's blocks, which is what a `log ~`
+# line's window is measured by. Callers skip them as tests.
 get_suite_tests() {
     local suite_file="$1"
-    grep -v '^#' "$suite_file" | grep -v '^[[:space:]]*$' || true
+    grep -v '^#' "$suite_file" || true
 }
 
 list_profiles() {
