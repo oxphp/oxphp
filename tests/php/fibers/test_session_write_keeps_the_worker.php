@@ -22,6 +22,12 @@ require_once __DIR__ . '/session_write_probe.php';
 // Two inner requests, queued together: the WRITER, whose handler's write sleeps
 // on a hooked call, and a PEEK behind it. The peek reports the session it finds
 // and whether the writer's write had finished by the time it ran.
+//
+// What it tells apart: a build without the block on parking that the server
+// raises around that write. There the handler's usleep() parks, the peek runs in
+// the middle of the write, and all four assertions on what the peek found fail:
+// the write under way, nothing written yet, and the writer's session id and
+// $_SESSION standing.
 
 OxphpSessionWriteProbe::reset();
 
