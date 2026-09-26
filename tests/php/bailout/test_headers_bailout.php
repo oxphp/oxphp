@@ -34,8 +34,12 @@ const BLOCK_COST  = 2 * 4096;
 /** Free tail to leave behind: smaller than the padding header, larger than 0. */
 const TAIL_BYTES = 96 * 1024;
 
-/** Size of the `X-Pad` header the runner sends — see suites/bailout.txt. */
-const PAD_HEADER_BYTES = 200000;
+/**
+ * Size of the `X-Pad` header the runner sends — see suites/bailout.txt. It has
+ * to clear the tail left below (up to TAIL_BYTES plus one BLOCK_COST of
+ * rounding) and stay under Linux's 128 KiB limit on a single argument.
+ */
+const PAD_HEADER_BYTES = 120000;
 
 @unlink(MARKER_PATH);
 
