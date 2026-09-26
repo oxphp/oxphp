@@ -33,6 +33,13 @@ jobs:
           - name: no-default
             flags: "--no-default-features --all-targets"
             php_id: ""
+          # The feature set the `test` job's second run builds: the plugins
+          # without `php`. Neither neighbour compiles it — no-default drops
+          # the plugins, the default rows add `php` — so an item used only
+          # from php-gated code would otherwise warn there and fail nothing.
+          - name: host-plugins
+            flags: "--no-default-features --features plugin-apm,plugin-async,plugin-profiler,plugin-shared --all-targets"
+            php_id: ""
           # decorator-test rides along here because nothing else builds it:
           # it is deliberately not part of `php` (only the decorators test
           # image enables it), it gates no Rust tests of its own, and the

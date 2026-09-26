@@ -24,9 +24,11 @@ pub mod pdo;
 pub mod redis;
 
 use std::cell::RefCell;
+#[cfg(any(feature = "php", test))]
 use std::sync::Arc;
 use std::time::Instant;
 
+#[cfg(any(feature = "php", test))]
 use super::connection_meta::ConnectionMeta;
 
 /// A frame pushed onto the thread-local stack by `before_callback` and
@@ -82,12 +84,15 @@ pub fn restore_hook_frames(frames: Vec<HookFrame>) {
 
 /// Upper bound on captured bind parameters, so a query with thousands of
 /// parameters can't inflate a span attribute without limit.
+#[cfg(feature = "php")]
 const MAX_DB_PARAMS: usize = 64;
 
 /// Span attribute key/value pairs (`Arc<str>` so static tags append cheaply).
+#[cfg(any(feature = "php", test))]
 type SpanAttrs = Vec<(Arc<str>, Arc<str>)>;
 
 /// What a hooked database call is and how its arguments should be read.
+#[cfg(any(feature = "php", test))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DbAction {
     /// `PDO::__construct` — `args[0]` is the DSN string.
@@ -114,6 +119,7 @@ enum DbAction {
 /// free list and an `execute` on a statement created by an un-hooked path (e.g.
 /// `mysqli_stmt::prepare` via `stmt_init`, or a recycled handle) could read
 /// another statement's SQL.
+#[cfg(any(feature = "php", test))]
 fn classify_db(class: &str, func: &str) -> Option<DbAction> {
     match (class, func) {
         ("PDO", "__construct") => Some(DbAction::PdoConstruct),
@@ -129,6 +135,7 @@ fn classify_db(class: &str, func: &str) -> Option<DbAction> {
 
 /// Append the OTel semantic-convention connection attributes to a span's
 /// attribute list. Empty/zero fields are skipped so we never emit blank tags.
+#[cfg(any(feature = "php", test))]
 fn push_conn_attrs(attrs: &mut SpanAttrs, meta: &ConnectionMeta) {
     attrs.push((Arc::from("db.system"), Arc::from(meta.db_system)));
     if !meta.host.is_empty() {
@@ -148,6 +155,7 @@ fn push_conn_attrs(attrs: &mut SpanAttrs, meta: &ConnectionMeta) {
 /// Build the `db.*` span attributes for a query given its raw SQL and optional
 /// connection metadata: obfuscated `db.statement`, `db.operation`, plus the
 /// connection attributes.
+#[cfg(any(feature = "php", test))]
 fn build_query_attributes(sql: &str, conn: Option<&ConnectionMeta>) -> SpanAttrs {
     let statement = crate::plugins::ox_otel::strip_nul(&super::sql::obfuscate(sql)).into_owned();
     let mut attributes: SpanAttrs = Vec::with_capacity(6);
