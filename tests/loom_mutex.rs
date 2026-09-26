@@ -1,7 +1,7 @@
 //! Loom stress test for MutexInner poison semantics.
-//! Run with: RUSTFLAGS="--cfg loom" cargo test --test loom_mutex
-
-#![cfg(loom)]
+//! Runs with the rest of the test suite; alone:
+//!   cargo test --no-default-features --test loom_mutex
+//! No `cfg(loom)` gate — see `tests/loom_channel.rs` for why.
 
 use loom::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;

@@ -1,13 +1,12 @@
 //! Loom stress test for MapInner's atomic cap enforcement.
-//! Run with: RUSTFLAGS="--cfg loom" cargo test --test loom_map
-//! Not part of default CI; nightly job territory.
+//! Runs with the rest of the test suite; alone:
+//!   cargo test --no-default-features --test loom_map
+//! No `cfg(loom)` gate — see `tests/loom_channel.rs` for why.
 //!
 //! Models the fetch_update CAS-loop used by `set` to reserve a cap
 //! slot for a new key. The production code lives in
 //! `src/plugins/ox_shared/types/map.rs`; loom can't see DashMap's
 //! internals, so this standalone mirror isolates the atomic contract.
-
-#![cfg(loom)]
 
 use loom::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
