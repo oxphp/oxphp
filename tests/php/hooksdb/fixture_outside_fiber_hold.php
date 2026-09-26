@@ -11,9 +11,12 @@ declare(strict_types=1);
 //   raw        — through a hand-written RESP exchange on a plain tcp:// stream,
 //                which has no client level at all.
 //
-// The two that are mid-exchange block on an empty list, so Redis holds the reply back and the request stays
-// parked in its read for the whole window. Each has its own connection under its
-// own key, so the two shapes cannot answer for each other.
+// The two that are mid-exchange block on an empty list, so Redis holds the reply
+// back and the request stays parked in its read until the test pushes a value onto
+// that list — after the destructor it is waiting for has run. The idle one sleeps in
+// short steps until the test says so. The window is the upper bound on how long
+// the test may take to get there, not how long it runs. Each has its own connection
+// under its own key, so the shapes cannot answer for each other.
 //
 // Not a TestCase — the body is read by the request that started this one, so a
 // failure has to arrive as text rather than as an exception page.
@@ -29,7 +32,7 @@ try {
 
         // Printed verbatim: phpredis turns a reply meant for someone else into a
         // falsy result, so accepting anything falsy would accept the defect.
-        $popped = $redis->blPop(['hooksdb:outside:empty'], 5);
+        $popped = $redis->blPop(['hooksdb:outside:empty'], 12);
         $sharedState['outside_fiber_redis_done'] = true;
         echo 'redis-hold-done:' . var_export($popped, true);
     } elseif ($mode === 'redis-idle') {
@@ -41,7 +44,10 @@ try {
         $sharedState['outside_fiber_redis_idle'] = $redis;
         $redis->get('hooksdb:outside:probe');
 
-        oxphp_usleep(5_000_000);
+        $deadline = microtime(true) + 12;
+        while (!isset($sharedState['outside_fiber_release']) && microtime(true) < $deadline) {
+            oxphp_usleep(50_000);
+        }
         $sharedState['outside_fiber_redis_idle_done'] = true;
         echo 'redis-idle-done';
     } elseif ($mode === 'raw') {
@@ -54,12 +60,13 @@ try {
         $sharedState['outside_fiber_raw'] = $sock;
 
         $cmd = '';
-        foreach (['BLPOP', 'hooksdb:outside:raw', '5'] as $arg) {
+        foreach (['BLPOP', 'hooksdb:outside:raw', '12'] as $arg) {
             $cmd .= '$' . strlen($arg) . "\r\n{$arg}\r\n";
         }
         fwrite($sock, "*3\r\n{$cmd}");
-        // Everything that arrives in the first read after the pop times out. A nil
-        // array is `*-1\r\n`; anything past it is a reply to someone else's command.
+        // Everything that arrives in the first read after the pop returns: the
+        // key-value pair the test pushed, and anything past it is a reply to someone
+        // else's command.
         $reply = (string) fread($sock, 4096);
         $sharedState['outside_fiber_raw_done'] = true;
         echo 'raw-hold-done:' . json_encode($reply);
