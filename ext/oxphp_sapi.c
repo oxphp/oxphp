@@ -4360,8 +4360,8 @@ static void oxphp_filter_guard_restore(void)
  * extension's MINIT, and a miss would mean the engine came up without its own
  * builtins.
  *
- * "Installed" is the claim, and it is narrower than "in effect". Outside a
- * fiber every hook delegates to the handler it replaced, so a traditional-mode
+ * "Installed" is the claim, and it is narrower than "in effect". Where there are
+ * no fibers every hook delegates to the handler it replaced, so a traditional-mode
  * or CLI process reports the same set as a worker-mode one while behaving
  * natively throughout. Within the streams category it is narrower still: the
  * socket-read part can be dropped on its own (the php_log_err below is the only
