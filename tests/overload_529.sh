@@ -47,7 +47,8 @@
 #   L: the rate limit on those reports does not outlive the stall it
 #      suppresses — a stall beginning right after a reported one is still
 #      reported, once the window closes, rather than staying silent for as
-#      long as it lasts.
+#      long as it lasts — and its end is logged like that of any other
+#      reported stall.
 #   M: an application that calls back into this same server over HTTP. The
 #      inner call can only be served once the outer one frees its worker, and
 #      the outer one is waiting for the inner one, so the wait cannot succeed.
@@ -1000,8 +1001,11 @@ else
 fi
 
 # The gauge, read through the internal listener — which serves during the
-# stall precisely because it does not go through MAX_CONNECTIONS. Retried
-# briefly: the ninth connection has to reach the loop before the gauge moves.
+# stall precisely because it does not go through MAX_CONNECTIONS. The retries
+# only cover the ninth connection still being on its way to the loop. They
+# cannot recover a stall that has already ended: the gauge rises again only
+# when a connection is accepted with no permit for it, and nothing is sent
+# while this polls — so the real deadline is the first 4 s handler returning.
 K_STALLED=""
 for _ in $(seq 1 8); do
 	if docker exec "$SRV" wget -qO- http://127.0.0.1:9090/metrics 2>/dev/null \
@@ -1083,7 +1087,9 @@ fi
 # 12 s handlers against a 30 s admission budget mean nothing frees a permit
 # while it is being checked. Both halves are asserted — silent while the
 # window is open, reported once it closes — because a build that simply
-# stopped rate-limiting would pass the second half alone.
+# stopped rate-limiting would pass the second half alone. Then the scenario
+# waits for the second stall to end, which the first 12 s handler decides, and
+# checks that its late report got a resume line as well.
 docker rm -f "$SRV" >/dev/null 2>&1
 docker run -d --name "$SRV" \
 	-e DOCUMENT_ROOT=/var/www/html -e PHP_WORKERS=1 \
@@ -1104,18 +1110,29 @@ fi
 
 warns() { docker logs "$SRV" 2>&1 | grep -c 'accept loop parked'; }
 
+resumes() { docker logs "$SRV" 2>&1 | grep -c 'accept loop resumed'; }
+
 # First stall: nine short requests take the budget, the ninth connection has
 # to wait, and with no report behind it that wait is reported immediately.
-for _ in $(seq 1 9); do
-	curl -s -o /dev/null --max-time 30 \
-		"http://localhost:${PORT}/pause.php?ms=100" >/dev/null 2>&1 &
-done
-wait
+# All nine have to be connected before the first handler answers and hands its
+# permit on, and the handler has to stay short so the second stall below still
+# begins inside the window. One client opening nine connections, not nine
+# forked ones: on a loaded host nine forks can take longer than a short
+# handler, leaving eight live connections, no stall, and a red precondition on
+# a correct build. `--parallel-immediate` opens every connection up front
+# instead of waiting to see whether the first one can be shared, and
+# `Connection: close` ends each one with its response: kept alive in curl's
+# pool, a finished connection goes on holding its permit, and the first stall
+# lasts about eight handlers instead of one.
+curl -s -o /dev/null --parallel --parallel-immediate --parallel-max 9 \
+	-H 'Connection: close' --max-time 30 \
+	"http://localhost:${PORT}/pause.php?ms=100&n=[1-9]" >/dev/null 2>&1
 if [ "$(warns)" -eq 1 ]; then
 	ok "L: the first stall was reported when it began"
 else
 	bad "L: expected exactly 1 report from the first stall, got $(warns) — the rest of L proves nothing"
 fi
+L_FIRST_RESUMES="$(resumes)"
 
 # Second stall, seconds after the first and far longer.
 for _ in $(seq 1 9); do
@@ -1161,8 +1178,48 @@ else
 	bad "L: still $L_AFTER_WARNS report(s) — a stall that began inside the window stays silent for as long as it lasts"
 fi
 
-# The handlers outlive the checks by design; drop the container rather than
-# waiting out twelve seconds of sleeps that have nothing left to prove.
+# The exit from a report that was held back. K's resume line follows a report
+# written on entry; this one follows a report written after the loop had
+# already waited out the rest of the window, and nothing else in this file
+# reaches that path to its end. The first stall's own line is the baseline:
+# exactly one by now, since it ended before the second began and the second
+# has not ended yet.
+if [ "$L_FIRST_RESUMES" -eq 1 ] && [ "$(resumes)" -eq 1 ]; then
+	ok "L: the first stall's exit was logged, and the second has not ended yet"
+else
+	bad "L: expected 1 resume line both after the first stall and at the window's close, got ${L_FIRST_RESUMES} and $(resumes) — the check below proves nothing"
+fi
+
+# The earliest a permit can come free is the first 12 s handler returning,
+# some six seconds from here, and nothing else is sent meanwhile — so a new
+# resume line can only be the end of the second stall.
+L_RESUMED=""
+for _ in $(seq 1 40); do
+	[ "$(resumes)" -ge 2 ] && { L_RESUMED=1; break; }
+	sleep 0.5
+done
+if [ -n "$L_RESUMED" ] && [ "$(resumes)" -eq 2 ] && [ "$(warns)" -eq 2 ]; then
+	ok "L: the stall reported late is closed by a resume line too (2 reports, 2 resumes)"
+else
+	bad "L: $(warns) report(s) and $(resumes) resume line(s) — the stall reported after the window never logged its end"
+fi
+
+# And it carries a duration that fits that stall. Nothing frees a permit until
+# the first 12 s handler returns, so this stall lasts about twelve seconds from
+# its park, and about eight from its late report; the first stall's line reads
+# a tenth of a second. Five seconds separates this stall from the first one and
+# nothing finer — it does not tell a duration counted from the park apart from
+# one counted from the late report.
+L_STALLED_SECS="$(docker logs "$SRV" 2>&1 | grep 'accept loop resumed' | tail -1 \
+	| sed -n 's/.*"stalled_secs":\([0-9.]*\).*/\1/p')"
+if awk -v s="${L_STALLED_SECS:-0}" 'BEGIN { exit !(s >= 5) }'; then
+	ok "L: the last resume line carries the long stall's duration (stalled_secs=${L_STALLED_SECS})"
+else
+	bad "L: the last resume line reports stalled_secs=${L_STALLED_SECS:-absent} — far short of a stall that lasts until a 12 s handler returns"
+fi
+
+# The rest of the burst has nothing left to prove; drop the container rather
+# than waiting it out.
 docker rm -f "$SRV" >/dev/null 2>&1
 wait
 
