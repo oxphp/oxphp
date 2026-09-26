@@ -105,6 +105,10 @@ generate_certs() {
         -subj "/CN=oxphp-test" \
         -addext "subjectAltName=DNS:oxphp-test,DNS:localhost,IP:127.0.0.1" \
         2>/dev/null
+    # OpenSSL 3 writes the key 0600, owned by whoever runs the tests. The server
+    # reads it only after dropping to www-data, so from a bind mount on a Linux
+    # host that key is unreadable and the tls profile never comes up.
+    chmod 644 "$certs_dir/key.pem"
 }
 
 cleanup_certs() {

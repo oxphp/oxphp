@@ -1,5 +1,7 @@
 # profile: bailout
 # description: PHP fatal raised inside a SAPI callback walking the request state
 
-bailout/test_headers_bailout | GET | -H "X-Pad: $(printf %0200000d 0)" | 500 |
+# The padding header travels as a single curl argument, and Linux refuses any
+# one argument over 128 KiB before curl even starts — keep it below that.
+bailout/test_headers_bailout | GET | -H "X-Pad: $(printf %0120000d 0)" | 500 |
 bailout/test_worker_survives_bailout
