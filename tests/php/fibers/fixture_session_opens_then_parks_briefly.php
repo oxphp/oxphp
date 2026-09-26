@@ -20,6 +20,10 @@ ini_set('session.use_strict_mode', '0');
 session_start();
 $_SESSION['who'] = 'the request that opened it';
 
+// The test's cue to send the neighbour. Sent any earlier, the neighbour could be
+// taken before this request and would find no session to be handed.
+$sharedState['session_opener_opened'] = true;
+
 // Short: this must return while the neighbour admitted behind it is still
 // parked, so the worker reaches an admission with the opener gone and the
 // neighbour alive.
