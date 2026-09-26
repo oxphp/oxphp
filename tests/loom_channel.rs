@@ -1,11 +1,12 @@
 //! Loom concurrency stress for Channel lock-free invariants.
-//! Run with:
-//!   RUSTFLAGS="--cfg loom" cargo test --test loom_channel \
-//!     --no-default-features --features plugin-shared \
-//!     --release -- --test-threads=1
+//! Runs with the rest of the test suite; alone:
+//!   cargo test --no-default-features --test loom_channel
 //!
-//! Not part of default CI — nightly job territory. Matches the pattern
-//! established by `tests/loom_mutex.rs` and `tests/loom_counter.rs`.
+//! Like `tests/loom_mutex.rs` and `tests/loom_counter.rs`, this uses
+//! loom's types directly and none of the crate's, so it needs no
+//! `cfg(loom)` gate. Do not add one: `RUSTFLAGS="--cfg loom"` also
+//! switches tokio into its loom build, which drops `tokio::net` and
+//! breaks hyper-util before any test compiles.
 //!
 //! Scope limitation (important):
 //!   The real `ChannelInner` layers `parking_lot::Mutex`,
@@ -29,9 +30,9 @@
 //!   which is already an extensively-loom-tested upstream crate; there
 //!   is no useful additional exploration we can bolt on top without
 //!   rewriting `ChannelInner` against loom-shims. Known limitation;
-//!   nightly integration tests cover the real implementation end-to-end.
-
-#![cfg(loom)]
+//!   the real implementation is covered by the unit tests in
+//!   `src/plugins/ox_shared/types/channel.rs` and the `tests/php/shared/`
+//!   suite.
 
 use loom::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;

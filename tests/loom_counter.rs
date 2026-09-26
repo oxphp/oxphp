@@ -1,8 +1,7 @@
 //! Loom stress test for CounterInner under concurrent CAS.
-//! Run with: RUSTFLAGS="--cfg loom" cargo test --test loom_counter
-//! Not part of default CI; nightly job territory.
-
-#![cfg(loom)]
+//! Runs with the rest of the test suite; alone:
+//!   cargo test --no-default-features --test loom_counter
+//! No `cfg(loom)` gate — see `tests/loom_channel.rs` for why.
 
 use loom::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
