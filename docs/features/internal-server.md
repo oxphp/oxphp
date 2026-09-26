@@ -138,7 +138,7 @@ curl -s http://localhost:9090/config | jq .
 }
 ```
 
-`runtime_hooks` lists the runtime-hook categories the process installed at startup, as a parsed set rather than the raw `RUNTIME_HOOKS` value, so `all`, `1` and `sleep, streams` all read as `["sleep","streams"]` and a scraper needs no copy of that grammar. An empty list means no hook is installed, which is also the answer for a misspelled variable name. It reports what was installed, not what is in effect: outside a fiber the hooks delegate to the builtins they replaced, so a traditional-mode server reports the categories it set up while behaving natively. See [Runtime Hooks](../operations/configuration.md#runtime-hooks).
+`runtime_hooks` lists the runtime-hook categories the process installed at startup, as a parsed set rather than the raw `RUNTIME_HOOKS` value, so `all`, `1` and `sleep, streams` all read as `["sleep","streams"]` and a scraper needs no copy of that grammar. An empty list means no hook is installed, which is also the answer for a misspelled variable name. It reports what was installed, not what is in effect: where there are no fibers at all the hooks delegate to the builtins they replaced, so a traditional-mode server reports the categories it set up while behaving natively. See [Runtime Hooks](../operations/configuration.md#runtime-hooks).
 
 TLS certificate and key file paths are never emitted (only the `tls_enabled` boolean is exposed), and `internal_addr` and `error_pages_dir` are scrubbed from the served response — deployment topology and filesystem paths that aid an attacker and are not needed by scrapers.
 

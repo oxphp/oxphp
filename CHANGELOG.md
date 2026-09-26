@@ -4,6 +4,10 @@ All notable changes to OxPHP are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Worker mode with `RUNTIME_HOOKS=streams`: a destructor run between requests no longer lands inside another request's exchange on a shared connection.** Every hundred requests the worker loop collects cycles, and a destructor in a collected cycle runs there, outside any request fiber, while other requests may be parked mid-exchange on a connection the application shares. Code in that position used to skip the connection claims altogether. A phpredis command or a hand-written protocol on a raw socket then went onto the wire in the middle of the parked request's exchange, and the two read each other's replies with no error raised. The loop also blocked on that read until the parked request's reply arrived. Such code — and the same code on an async task thread, in any routing mode — is now checked at the socket: an operation that would wait, on a connection whose holder is parked on it waiting for its reply, fails at once the way a timeout does and sends nothing. phpredis fails that call and the holder keeps its reply. For PDO and mysqli, mysqlnd closes a connection whose write is refused, so the parked request ends with an error instead of reading the wrong reply. At any other moment the operation goes ahead as before, including on a connection a request holds but is not using.
+
 ## [0.12.0] - 2026-09-25
 
 ### Migration from 0.11.0

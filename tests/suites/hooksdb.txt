@@ -46,6 +46,12 @@ hooksdb/test_shared_pdo_attribute_filter
 # The other half of the guarantee: what a fiber gets when the wait does not win.
 hooksdb/test_shared_redis_wait_gives_up
 
+# The same claims, seen from code that is not in a request fiber at all — a
+# destructor the worker loop's cycle collection runs between requests. It cannot
+# wait, so it is refused at the socket while a holder is parked on its reply, and
+# goes through on a connection that is held but idle.
+hooksdb/test_shared_conn_outside_fiber_refused
+
 # A persistent connection is put into the pool, or found there, while another
 # fiber is mid-exchange on it. Registering a second one replaces the pool entry
 # and frees the connection behind it, which ends the request that was reading its
