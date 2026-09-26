@@ -2,7 +2,11 @@
 # A single PHP worker with a queue capacity of 1 causes rapid queue saturation.
 # Requests arriving at a full queue wait up to QUEUE_WAIT_TIMEOUT_MS for a slot
 # and receive 529 Site is Overloaded only if none frees up in time.
-# Used to test backpressure enforcement and overflow error handling.
+#
+# The suite on this profile only checks what one request can: that a lone
+# request is served at once. Backpressure itself is tested by
+# tests/overload_529.sh, which run_all.sh runs on this profile's image with
+# containers and settings of its own; the environment below does not reach it.
 #
 # Standalone usage:
 #   docker compose -f compose.yml -f compose.overflow.yml up
