@@ -138,6 +138,13 @@ hooks/test_request_start_time_across_suspends
 hooks/test_php_input_survives_suspend | POST | -H "Content-Type: application/json" -d '{"who":"outer","marker":"outer-body-4a71"}' | |
 hooks/test_php_input_first_read_after_suspend | POST | -H "Content-Type: application/json" -d '{"who":"outer","marker":"outer-body-2b60"}' | |
 
+# And a php://input handle held open across the suspension. The request served
+# in the window ends there, and the end of a request closes the php://input
+# handles on its own body — only those: this one is on the parked request's body
+# and has to read the rest of it after resuming. The two lines above read
+# through file_get_contents(), which holds no handle across the window.
+hooks/test_php_input_handle_survives_suspend | POST | -H "Content-Type: application/json" -d '{"who":"outer","marker":"outer-body-7e19"}' | |
+
 hooks/test_promise_survives_bystander
 hooks/test_orphan_drain_nonblocking
 hooks/test_stream_task_multiplex
@@ -175,6 +182,19 @@ hooks/test_body_stream_not_double_closed >> ?sighting=3
 # left pointing at the body its own request already released.
 hooks/test_php_input_handle_closed_after_request >> ?sighting=1 | POST | -H "Content-Type: application/x-www-form-urlencoded" -d "probe=survivor" | |
 hooks/test_php_input_handle_closed_after_request >> ?sighting=2 | POST | -H "Content-Type: application/x-www-form-urlencoded" -d "probe=survivor" | |
+
+# The same close, reaching userland. A handle kept past its request with a
+# userland filter on it: closing it at the end of the request calls the filter's
+# onclose(), which is PHP running inside that request's finalization. One case
+# fatals there, the other drops the handle's last reference. Each is followed by
+# the request that says whether the same worker is still serving and whether the
+# fatal's recovery ran to its end — the collector left protected is what a
+# recovery that stopped short leaves behind. Pairs stay adjacent: the second
+# line reads what the first left in this worker.
+hooks/test_php_input_filter_close_fatal | POST | -H "Content-Type: application/x-www-form-urlencoded" -d "probe=filter-fatal" | 500 |
+hooks/test_worker_serves_after_input_filter_close >> ?case=fatal
+hooks/test_php_input_filter_close_drops_handle | POST | -H "Content-Type: application/x-www-form-urlencoded" -d "probe=filter-drop" | |
+hooks/test_worker_serves_after_input_filter_close >> ?case=drop
 
 # A multipart upload in a request that suspends. The uploaded-file registry is
 # one slot per worker thread and is the only thing is_uploaded_file() and
