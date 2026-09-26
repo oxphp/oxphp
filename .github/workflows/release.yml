@@ -23,9 +23,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { php: "8.4", alpine: "3.23", arch: "amd64", runner: "ubuntu-latest" }
+          - { php: "8.4", alpine: "3.23", arch: "amd64", runner: "ubuntu-24.04" }
           - { php: "8.4", alpine: "3.23", arch: "arm64", runner: "ubuntu-24.04-arm" }
-          - { php: "8.5", alpine: "3.23", arch: "amd64", runner: "ubuntu-latest" }
+          - { php: "8.5", alpine: "3.23", arch: "amd64", runner: "ubuntu-24.04" }
           - { php: "8.5", alpine: "3.23", arch: "arm64", runner: "ubuntu-24.04-arm" }
     runs-on: ${{ matrix.runner }}
     steps:
@@ -159,7 +159,7 @@ jobs:
   manifest-84:
     needs: build
     if: always() && needs.build.result == 'success'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       PHP_MINOR: "8.4"
       ALPINE_VER: "3.23"
@@ -228,7 +228,7 @@ jobs:
   manifest-85:
     needs: build
     if: always() && needs.build.result == 'success'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       PHP_MINOR: "8.5"
       ALPINE_VER: "3.23"
@@ -300,7 +300,7 @@ jobs:
   sign-84:
     needs: manifest-84
     if: always() && needs.manifest-84.result == 'success'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v4
@@ -325,7 +325,7 @@ jobs:
   sign-85:
     needs: manifest-85
     if: always() && needs.manifest-85.result == 'success'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v4
@@ -353,7 +353,7 @@ jobs:
   aliases-84:
     needs: sign-84
     if: always() && needs.sign-84.result == 'success'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       PHP_MINOR: "8.4"
       ALPINE_VER: "3.23"
@@ -418,7 +418,7 @@ jobs:
   aliases-85:
     needs: sign-85
     if: always() && needs.sign-85.result == 'success'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       PHP_MINOR: "8.5"
       ALPINE_VER: "3.23"

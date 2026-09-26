@@ -10,7 +10,7 @@ env:
 jobs:
   fmt:
     name: Format
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
       - name: Toolchain pin matches MSRV
@@ -25,7 +25,7 @@ jobs:
 
   clippy:
     name: Clippy (${{ matrix.name }})
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -95,7 +95,7 @@ jobs:
   # instead of changing what these runs test against.
   test:
     name: Test
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
       - name: Install protoc
@@ -136,7 +136,7 @@ jobs:
   # the 8.5 bindings, and no test is version-gated.
   test-php:
     name: Test (php feature)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     container: php:8.4-zts-alpine3.23
     steps:
       # The PHP base image has no git, without which actions/checkout
@@ -166,7 +166,7 @@ jobs:
   # don't touch them finish in seconds with a no-op message.
   licenses:
     name: Licenses
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
 
@@ -256,7 +256,7 @@ jobs:
   # a Rust-only PR.
   docs:
     name: Docs
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
 
