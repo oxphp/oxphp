@@ -289,3 +289,63 @@ print(json.dumps(a))" "$assertions_list" "$php_assertions")
 is_runner_test() {
     [[ "$1" == *"|"* ]]
 }
+
+# A suite line of the form `log ~<text>`: the profile's server must have written
+# a log line containing <text>. Checked before is_runner_test, so the text may
+# contain anything, `|` included.
+is_log_assertion() {
+    [[ "$1" == "log ~"* ]]
+}
+
+# server_log <profile>
+# Everything the profile's server has written so far, stdout and stderr both,
+# one record per line.
+server_log() {
+    local profile="$1"
+    eval "$(compose_cmd "$profile") logs --no-log-prefix --no-color oxphp-${profile}" 2>/dev/null
+}
+
+# run_log_assertion <profile> <needle> <from_line> <block_head>
+# Passes when a line after the first <from_line> lines of the server log contains
+# <needle> as a plain substring. The caller picks <from_line> so that only what
+# the requests of the block under test wrote is searched: a line an earlier
+# block produced must not answer for a later one. <block_head> is the path of
+# that block's first request (`breaker/test_breaker_fatal`): the result is filed
+# under its group and named after it, so the same needle asserted for two blocks
+# reports as two different tests.
+#
+# A response can reach the client before the line its request logged reaches the
+# container's log, so the search is repeated for a few seconds before it fails.
+run_log_assertion() {
+    local profile="$1" needle="$2" from="$3" block_head="$4"
+    local window="" pass=false deadline=$((SECONDS + 5))
+    while :; do
+        window=$(server_log "$profile" | tail -n +"$((from + 1))")
+        # From a here-string, not a pipe: grep -q stops reading at the first
+        # match, and under pipefail the writer's SIGPIPE would turn a large
+        # window with the line in it into a miss.
+        if grep -qF -- "$needle" <<<"$window"; then
+            pass=true
+            break
+        fi
+        [ "$SECONDS" -ge "$deadline" ] && break
+        sleep 0.5
+    done
+
+    # On a miss, what the window did hold is the account of what happened
+    # instead, so its tail goes into the report.
+    printf '%s' "$window" | python3 -c "
+import json, sys
+needle, passed, head = sys.argv[1], sys.argv[2] == 'true', sys.argv[3]
+group, _, first = head.rpartition('/')
+name = 'server log contains: ' + needle
+assertion = {'name': name, 'pass': passed}
+if not passed:
+    lines = sys.stdin.read().splitlines()
+    assertion['expected'] = needle
+    assertion['actual'] = '\n'.join(lines[-8:]) if lines else '(no log lines in this window)'
+print(json.dumps({'test': '%s (block from %s)' % (needle, first or '?'),
+                  'group': group or 'log', 'pass': passed,
+                  'assertions': [assertion], 'error': None, 'meta': {}},
+                 ensure_ascii=False))" "$needle" "$pass" "$block_head"
+}
