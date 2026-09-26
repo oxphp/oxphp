@@ -11,6 +11,7 @@
 #include "Zend/zend_enum.h"
 #include "main/php_output.h"
 #include "main/php_main.h"
+#include "main/php_ini.h"
 #include "ext/standard/basic_functions.h"
 #include "ext/json/php_json.h"
 #include "ext/spl/spl_exceptions.h"
@@ -2852,10 +2853,10 @@ static bool oxphp_pdo_attr_call_is_local(zend_execute_data *execute_data, bool s
  * a miss, so they all connect and the second of them to register replaces a live
  * entry.
  *
- * Both are answered here. Constructors asking for a persistent connection run one
- * at a time per worker thread, which is the whole width of a pool since
- * EG(persistent_list) is per-thread, so the second one finds what the first
- * registered. And a pooled connection another fiber holds is reported alive
+ * Both are answered here. Constructors asking for a persistent connection to one
+ * data source run one at a time per worker thread — a thread is the whole width of
+ * a pool, since EG(persistent_list) is per-thread — so the second one finds what
+ * the first registered. And a pooled connection another fiber holds is reported alive
  * without a ping: sending one would itself be a command landing inside that
  * fiber's exchange, which is what the claim exists to prevent, and a connection
  * being used is the plainest evidence there is that it lives.
@@ -2874,10 +2875,108 @@ static bool oxphp_pdo_attr_call_is_local(zend_execute_data *execute_data, bool s
  * standing in front of nothing. */
 #ifdef OXPHP_HAVE_PDO_HEADERS
 
-/* The key persistent constructors serialise on. A thread-local address: claims
- * are per-thread already, and the address of a static cannot collide with the
- * stream and connection pointers the rest of the table is keyed by. */
-static __thread char oxphp_pdo_ctor_gate;
+/* The keys persistent constructors serialise on.
+ *
+ * One per data source rather than one for the thread, because a constructor holds
+ * its key for as long as it takes to connect, and one to a server that accepts the
+ * connection and never answers takes as long as its own read allows — mysqlnd sets
+ * its streams to mysqlnd.net_read_timeout, which ships as a day. With one key for
+ * the thread every persistent constructor to a healthy source behind it spent its
+ * whole wait budget and then went ahead unserialised, which is the race this exists
+ * to prevent.
+ *
+ * What has to share a key is every pair of constructors that can land on the same
+ * pool entry, and PDO names that entry "PDO:DBH:DSN=<source>:<user>:<password>",
+ * with the caller's own key appended when there is one — the parts joined by
+ * colons and nothing escaped. Two different sources therefore meet in the pool
+ * when one is the other followed by a colon and the difference is taken up by the
+ * credentials: "mysql:host=db" with user "a:b" names the same entry as
+ * "mysql:host=db:a" with user "b". So the key is taken from the resolved source only up to the
+ * colon after its driver prefix, which both of such a pair share. That is coarser
+ * than the pool entry — it ignores the credentials, and a host written with colons
+ * of its own shares a key with every other source of that driver written the same
+ * way up to there — and coarser is the safe direction: constructors wait for each
+ * other when they need not, and none that can meet in the pool is given two keys.
+ *
+ * The key is that prefix's hash with the low bit set rather than an address, so
+ * nothing about it is allocated or has to be freed. Every other key in the claim
+ * table is a pointer the allocator handed out, which is never odd, so the two
+ * kinds cannot be confused — and the tag is also what lets a constructor with no
+ * source ask whether any source is held (below). Two sources hashing to one key
+ * wait for each other, a stuck one holding the other up as the single key did, so
+ * the hash is FNV-1a and not the engine's own string hash: that one multiplies by
+ * 33 per character and mixes nothing, so names differing in two neighbouring
+ * characters collide outright — "db-ar" and "db-c0", "tenant_as" and "tenant_c1"
+ * — and generated host or database names fall into that all the time. FNV-1a has
+ * no such pattern for short differences; it is not keyed, so a pair built against
+ * it would still collide, but DSNs are the application's configuration rather
+ * than its clients' input.
+ *
+ * A constructor whose source cannot be read from here takes the wildcard instead,
+ * and only at a moment when no source key is held by another fiber; every other
+ * constructor waits for the wildcard as well as for its own key. Two spellings
+ * are answered that way. A `uri:` DSN names a file or URL PDO reads the real one
+ * from — repeating that read would be I/O of our own, and a second read is not
+ * guaranteed to see what PDO's sees. And an argument that is not a string yet is
+ * one PDO converts, which for an object means calling its __toString(): user code
+ * that could run a second time, and differently. Such a constructor waits holding
+ * nothing, so the constructors it waits for are not held up behind it; what it
+ * cannot avoid is waiting for every source at once, a stuck one included. And
+ * once it runs it holds the wildcard for as long as its own connect takes, so one
+ * whose source is the stuck server holds every other constructor on the thread
+ * up behind it, as the single key did. */
+static __thread uint64_t oxphp_pdo_ctor_any;
+
+/* The key a constructor given this DSN argument serialises on, or NULL for the
+ * wildcard. Resolved the way PDO resolves it before building its pool key: a name
+ * without a colon is an alias PDO looks up as pdo.dsn.<name> in php.ini, through
+ * the same lookup and the same 512-byte buffer, and the `uri:` check comes after
+ * that. A source PDO will refuse — an alias it cannot find, one with no colon —
+ * fails the constructor before the pool is reached, so its key does not matter. */
+static uint64_t oxphp_pdo_ctor_source_hash(const char *s, size_t len)
+{
+    uint64_t h = UINT64_C(0xcbf29ce484222325);
+    for (size_t i = 0; i < len; i++) {
+        h ^= (unsigned char) s[i];
+        h *= UINT64_C(0x100000001b3);
+    }
+    return h;
+}
+
+static void *oxphp_pdo_ctor_source_key(zval *dsn)
+{
+    if (Z_TYPE_P(dsn) == IS_REFERENCE) dsn = Z_REFVAL_P(dsn);
+    if (Z_TYPE_P(dsn) != IS_STRING) return NULL;
+
+    const char *source = Z_STRVAL_P(dsn);
+    if (strchr(source, ':') == NULL) {
+        char alt_dsn[512];
+        char *ini_dsn = NULL;
+        snprintf(alt_dsn, sizeof(alt_dsn), "pdo.dsn.%s", source);
+        if (cfg_get_string(alt_dsn, &ini_dsn) == SUCCESS) source = ini_dsn;
+    }
+    if (strncmp(source, "uri:", sizeof("uri:") - 1) == 0) return NULL;
+
+    size_t len = strlen(source);
+    const char *driver_end = strchr(source, ':');
+    if (driver_end != NULL) {
+        const char *next = strchr(driver_end + 1, ':');
+        if (next != NULL) len = (size_t) (next - source);
+    }
+    return (void *) (uintptr_t) ((oxphp_pdo_ctor_source_hash(source, len) << 1) | 1);
+}
+
+/* Whether this fiber may go ahead with `key` — NULL meaning the wildcard — as far
+ * as other fibers' constructors are concerned. */
+static bool oxphp_pdo_ctor_gate_clear(oxphp_request_fiber *self, void *key)
+{
+    oxphp_request_fiber *any = oxphp_claim_owner(&oxphp_pdo_ctor_any);
+    if (any != NULL && any != self) return false;
+    if (key == NULL) return !oxphp_claim_tagged_held_by_other(self);
+
+    oxphp_request_fiber *owner = oxphp_claim_owner(key);
+    return owner == NULL || owner == self;
+}
 
 /* Whether these constructor options ask for a persistent connection, read the way
  * PDO reads them: a non-empty non-numeric string names a pool key, anything else
@@ -2920,18 +3019,8 @@ static bool oxphp_pdo_opts_persistent(zval *opts)
  * Neither is what a constructor queueing behind a constructor is. The budget and
  * the poll are the same, because the reason for them is: a wait inside a request
  * is bounded by that request's own deadline.
- *
- * One gate for the thread rather than one per data source. Telling sources apart
- * would mean reproducing PDO's own pool key, which is the thing this has to agree
- * with, and while every source answers it would buy back only the microseconds a
- * constructor spends connecting. It is not free when one does not: a handshake to
- * an unreachable server holds the gate for as long as its own read allows —
- * mysqlnd sets its streams to mysqlnd.net_read_timeout, which ships as a day — and
- * every persistent constructor to a healthy source on this thread then spends its
- * whole budget here before going ahead unserialised, which is the race this exists
- * to prevent. The bound below is what keeps that from being a stall without end,
- * and a per-source gate is what would keep it from happening at all. */
-static oxphp_stream_claim_result oxphp_pdo_ctor_gate_await(oxphp_request_fiber *self)
+ */
+static oxphp_stream_claim_result oxphp_pdo_ctor_gate_await(oxphp_request_fiber *self, void *key)
 {
     int64_t budget_ns = oxphp_claim_budget_ns();
     struct timespec started;
@@ -2952,8 +3041,7 @@ static oxphp_stream_claim_result oxphp_pdo_ctor_gate_await(oxphp_request_fiber *
             return OXPHP_CLAIM_THREW;
         }
         if (rc > 0) {
-            oxphp_request_fiber *owner = oxphp_claim_owner(&oxphp_pdo_ctor_gate);
-            if (owner == NULL || owner == self) return OXPHP_CLAIM_OK;
+            if (oxphp_pdo_ctor_gate_clear(self, key)) return OXPHP_CLAIM_OK;
 
             struct timespec now;
             clock_gettime(CLOCK_MONOTONIC, &now);
@@ -2977,10 +3065,12 @@ static oxphp_stream_claim_result oxphp_pdo_ctor_gate_await(oxphp_request_fiber *
             static __thread int64_t last_ns = 0;
             if (oxphp_contended_log_ready(&last_ns)) {
                 php_log_err("oxphp: built a persistent PDO connection without waiting for the "
-                            "fiber that was building one on this worker — it did not finish in "
-                            "time, or this context cannot be suspended cooperatively. Both may "
-                            "end up with a connection of their own, and the one registered "
-                            "second replaces the first in the pool. That frees the first while a "
+                            "fiber that was building one to the same data source on this worker — "
+                            "or, where one side's DSN is a uri: or not a string, to any data "
+                            "source — it did not finish in time, or this "
+                            "context cannot be suspended cooperatively. Both may end up with a "
+                            "connection of their own, and the one registered second replaces the "
+                            "first in the pool. That frees the first while a "
                             "PDO object still points at it: the fiber reading on it is ended by a "
                             "fatal, and the object left holding the freed handle can take the "
                             "whole worker down when it is destroyed (logged at most once a second "
@@ -3415,15 +3505,16 @@ static void oxphp_pdo_construct_guarded(zif_handler orig, zval *built,
     /* Read without touching it: the original handler is still the one that
      * validates and consumes the arguments. */
     zval *opts = ZEND_NUM_ARGS() >= 4 ? ZEND_CALL_ARG(execute_data, 4) : NULL;
-    bool gated = false;
+    void *gate = NULL;
 
     if (self != NULL && oxphp_pdo_opts_persistent(opts)) {
-        void *key = &oxphp_pdo_ctor_gate;
-        oxphp_request_fiber *owner = oxphp_claim_owner(key);
-        bool ours = (owner == NULL || owner == self);
+        /* Argument 1 exists: the options above are argument 4. */
+        void *key = oxphp_pdo_ctor_source_key(ZEND_CALL_ARG(execute_data, 1));
+        void *take = key != NULL ? key : (void *) &oxphp_pdo_ctor_any;
+        bool ours = oxphp_pdo_ctor_gate_clear(self, key);
 
         if (!ours) {
-            switch (oxphp_pdo_ctor_gate_await(self)) {
+            switch (oxphp_pdo_ctor_gate_await(self, key)) {
                 case OXPHP_CLAIM_THREW:
                     return; /* cancelled; the exception is already pending */
                 case OXPHP_CLAIM_OK:
@@ -3432,16 +3523,26 @@ static void oxphp_pdo_construct_guarded(zif_handler orig, zval *built,
                 default:
                     /* Gave up. The constructor goes ahead unserialised, which is
                      * what it did before any of this: refusing it would fail a
-                     * request that has done nothing wrong. The gate is left with
-                     * the fiber that holds it, which is still inside its own
-                     * constructor and still has to be able to release it. */
+                     * request that has done nothing wrong. A key another fiber
+                     * holds is left with it, since that fiber is still inside its
+                     * own constructor and still has to be able to release it. Its
+                     * own key is taken if nobody holds it — the wait may have
+                     * been for the wildcard or, for the wildcard, for some other
+                     * source — so that constructors arriving after it still
+                     * queue behind it rather than join it. */
+                    {
+                        oxphp_request_fiber *owner = oxphp_claim_owner(take);
+                        ours = (owner == NULL || owner == self);
+                    }
                     break;
             }
         }
 
-        /* Failure means the claim table could not grow, which the socket path
-         * already reports; the constructor goes ahead either way. */
-        if (ours) gated = oxphp_claim_acquire(key, self);
+        /* Checked and taken with nothing in between that could suspend, so no
+         * other fiber's constructor can come between the two. Failure means the
+         * claim table could not grow, which the socket path already reports; the
+         * constructor goes ahead either way. */
+        if (ours && oxphp_claim_acquire(take, self)) gate = take;
     }
 
     uint64_t call = ++oxphp_pdo_ctor_calls;
@@ -3463,7 +3564,7 @@ static void oxphp_pdo_construct_guarded(zif_handler orig, zval *built,
      * nowhere else. The gate is released at the end of the request either way —
      * every claim this fiber holds is — so what a bailout costs is the rest of
      * that one request's unwind, during which another constructor waits. */
-    if (gated) oxphp_claim_forget(&oxphp_pdo_ctor_gate);
+    if (gate != NULL) oxphp_claim_forget(gate);
 
     if (built != NULL && Z_TYPE_P(built) == IS_OBJECT) {
         oxphp_pdo_install_shadow(php_pdo_dbh_fetch_inner(Z_OBJ_P(built)));

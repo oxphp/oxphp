@@ -82,6 +82,16 @@ hooksdb/test_persistent_ctor_shares_idle_connection
 hooksdb/test_persistent_ctor_dead_connection_replaced
 hooksdb/test_persistent_ctor_driver_without_liveness
 
+# Constructors wait for each other only where they can land on the same pool
+# entry. One stuck inside PDO against a server that accepts the connection and
+# never answers must not hold up constructors to a healthy one on the same worker;
+# and one data source reached through different spellings — an alias from php.ini,
+# a `uri:` file, a Stringable, or a DSN extended by `:…` that PDO's colon-joined
+# pool key cannot tell from the one without — is still one pool entry, so those
+# still wait.
+hooksdb/test_persistent_ctor_gate_per_source
+hooksdb/test_persistent_ctor_gate_spellings
+
 # And the state that answer is not given in, which is most of a pooled
 # connection's life: live, referenced by the handle the worker keeps, and claimed
 # by nobody, because a claim runs from a request's first query to the end of that
