@@ -26,8 +26,14 @@ register_shutdown_function(static function () use ($id): void {
 echo "ARMED:{$id}\n";
 
 if ($park) {
+    // Raised for as long as this request is parked: the test waits for it before
+    // sending the second request, and the second reports it.
+    $sharedState['shutdown_parks_parked'] = true;
     // Hooked: parks this request's fiber, which is what frees the worker to
     // serve the second request while this one still holds a registration.
     sleep(1);
+    $sharedState['shutdown_parks_parked'] = false;
     echo "RESUMED:{$id}\n";
+} else {
+    echo 'PEER-PARKED:' . (int) ($sharedState['shutdown_parks_parked'] ?? false) . "\n";
 }

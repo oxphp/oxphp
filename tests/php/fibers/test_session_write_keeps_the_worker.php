@@ -25,9 +25,23 @@ require_once __DIR__ . '/session_write_probe.php';
 
 OxphpSessionWriteProbe::reset();
 
-// Both sent before either is read: reading is what parks this request and lets
-// the worker take them, in the order they were sent.
+// The writer goes first, and the peek only once the writer has reached its
+// write. Two requests sent back to back are not taken in the order they were
+// sent: each connection is read by a task of its own, and a request joins the
+// worker's queue once its headers have been read. A peek taken first runs before
+// the writer has a session to write.
+//
+// Waiting parks this request, which is what lets the worker take the writer, and
+// this loop only runs again once the writer gives the worker back: in the middle
+// of its write on a build that lets it park there, after the write on one that
+// does not. The peek is sent at that point either way. The ceiling only bounds a
+// run where the writer never gets that far; the assertions below then say so.
 $writerSock = session_inner_send('/tests/fibers/fixture_session_write_parks.php', str_repeat('5a', 16));
+$deadline = microtime(true) + 3.0;
+while (!OxphpSessionWriteProbe::$writing && OxphpSessionWriteProbe::$written === null
+    && microtime(true) < $deadline) {
+    oxphp_usleep(10_000);
+}
 $peekSock = session_inner_send('/tests/fibers/fixture_session_peek_during_write.php', str_repeat('6b', 16));
 
 $writer = session_inner_read($writerSock);

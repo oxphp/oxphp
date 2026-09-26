@@ -36,11 +36,23 @@ require_once __DIR__ . '/session_inner_request.php';
 
 $openerId = str_repeat('7f', 16);
 
-// Sent before either is read: reading is what parks this request, and the worker
-// only takes an inner request once this one is parked. Both are queued first so
-// the neighbour is admitted while the opener holds the session rather than after
-// it has gone.
+// The opener goes first, and the neighbour only once the opener has its session
+// open. Two requests sent back to back are not taken in the order they were
+// sent: each connection is read by a task of its own, and a request joins the
+// worker's queue once its headers have been read. A neighbour taken first finds
+// no session to be handed.
+//
+// Waiting parks this request, which is what lets the worker take the opener. The
+// opener then parks for 0.3s, far longer than one step of this loop, so the
+// neighbour is sent, and admitted, while the opener still holds the session
+// rather than after it has gone. The ceiling only bounds a run where the cue
+// never comes; the premise assertions below then say so.
+unset($sharedState['session_opener_opened']);
 $openerSock = session_inner_send('/tests/fibers/fixture_session_opens_then_parks_briefly.php', $openerId);
+$deadline = microtime(true) + 3.0;
+while (!($sharedState['session_opener_opened'] ?? false) && microtime(true) < $deadline) {
+    oxphp_usleep(10_000);
+}
 $neighbourSock = session_inner_send('/tests/fibers/fixture_session_neighbour_holds_it.php', $openerId);
 
 // Parks here; comes back when the opener has finished, with the neighbour still
