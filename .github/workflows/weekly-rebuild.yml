@@ -23,7 +23,7 @@ jobs:
   # Job 1: read supported-versions.yml and emit the matrix
   # ──────────────────────────────────────────────────────────────
   plan:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     outputs:
       build_matrix: ${{ steps.compute.outputs.build_matrix }}
       merge_matrix: ${{ steps.compute.outputs.merge_matrix }}
@@ -68,7 +68,7 @@ jobs:
                 FIRST_M=0
                 MERGE_JSON+="{\"oxphp\":\"$OXPHP\",\"php\":\"$PHP\",\"alpine\":\"$ALPINE\"}"
                 for ARCH in amd64 arm64; do
-                  RUNNER="ubuntu-latest"
+                  RUNNER="ubuntu-24.04"
                   if [[ "$ARCH" == "arm64" ]]; then RUNNER="ubuntu-24.04-arm"; fi
                   if [[ $FIRST_B -eq 0 ]]; then BUILD_JSON+=","; fi
                   FIRST_B=0
@@ -264,7 +264,7 @@ jobs:
       fail-fast: true
       matrix:
         include: ${{ fromJson(needs.plan.outputs.merge_matrix) }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
         with:
@@ -331,7 +331,7 @@ jobs:
   manifest:
     needs: [plan, build, php-suite-subset]
     if: ${{ needs.build.result == 'success' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
