@@ -1469,7 +1469,12 @@ PHP_FUNCTION(oxphp_usleep)
  * the table; under ZTS the per-thread copies alias the same
  * zend_internal_function structs, so swapping after threads spawn would
  * be a data race and is never done. Outside a fiber the hooks delegate
- * to the saved original handler, byte-identical to native behavior. */
+ * to the saved original handler, byte-identical to native behavior — with
+ * one exception wherever fibers run (worker mode, async task threads): the
+ * socket hooks still refuse an operation that would wait on a stream a fiber is
+ * parked on waiting for its reply (see oxphp_stream_claim). On a thread that runs
+ * no fibers — a traditional-mode request thread or the CLI — nothing is ever
+ * parked. */
 
 static zif_handler oxphp_orig_sleep = NULL;
 static zif_handler oxphp_orig_usleep = NULL;
@@ -1875,7 +1880,17 @@ static bool oxphp_owner_awaits_fd(const oxphp_request_fiber *owner, int fd)
  * A conflict is therefore refused only in the window where it is real — the holder
  * parked on this descriptor waiting for its reply — and otherwise the claim is
  * taken over, which is also what clears an entry left behind by a stream that has
- * since been freed. */
+ * since been freed.
+ *
+ * `self` is NULL for code running outside any request fiber — a destructor the
+ * worker loop's cycle collection runs between requests. That code is checked like
+ * a fiber but never recorded: an entry with no owner would erase the holder's claim,
+ * and there is no request end to release one from. This is the only level such code
+ * is refused at. The client level's claim lasts to the end of the holder's request
+ * rather than its exchange, so code that cannot wait would be refused there for a
+ * connection nobody is using at that moment; here the refusal is confined to the
+ * holder being parked on this descriptor for its reply, which is the one window
+ * where the operation would land inside its exchange. */
 static oxphp_stream_claim_result oxphp_stream_claim(php_stream *stream,
                                                    const php_netstream_data_t *sock,
                                                    oxphp_request_fiber *self)
@@ -1892,7 +1907,7 @@ static oxphp_stream_claim_result oxphp_stream_claim(php_stream *stream,
         return OXPHP_CLAIM_REFUSED;
     }
 
-    if (!oxphp_claim_acquire(stream, self)) {
+    if (self != NULL && !oxphp_claim_acquire(stream, self)) {
         /* The claim table could not grow. The operation still goes ahead —
          * turning an allocation failure into a failed request would be worse
          * than the exposure — but from here on this stream is unprotected, so
@@ -1920,12 +1935,15 @@ static ssize_t oxphp_hooked_sockop_read(php_stream *stream, char *buf, size_t co
     /* Before anything else, and for every read rather than only the ones that
      * would wait: bytes already buffered on the stream belong to whichever
      * fiber's exchange put them there, so handing them to another one is the
-     * same defect as reading them off the wire. */
-    if (oxphp_current_fiber != NULL && sock != NULL && sock->socket != -1) {
+     * same defect as reading them off the wire. Outside a fiber too: code that
+     * runs between requests can reach a connection a parked fiber is reading, and
+     * is refused the same way — see oxphp_stream_claim. */
+    if (sock != NULL && sock->socket != -1) {
         /* Whichever table this stream carries has to route its close through the
          * hook before the read below can park on it — the close is the only
-         * warning a parked fiber gets that the stream is being freed. */
-        oxphp_note_stream_ops(stream);
+         * warning a parked fiber gets that the stream is being freed. Only a
+         * fiber parks. */
+        if (oxphp_current_fiber != NULL) oxphp_note_stream_ops(stream);
 
         oxphp_stream_claim_result claim =
             oxphp_stream_claim(stream, sock, oxphp_current_fiber);
@@ -2086,11 +2104,12 @@ static ssize_t oxphp_hooked_sockop_write(php_stream *stream, const char *buf, si
 {
     php_netstream_data_t *sock = (php_netstream_data_t *) stream->abstract;
 
-    if (oxphp_current_fiber != NULL && sock != NULL && sock->socket != -1) {
+    if (sock != NULL && sock->socket != -1) {
         /* Here as well as in the read hook: a command written on a connection is
          * normally the first thing a fiber does with it, so this is where a
-         * transport's table is usually seen first. */
-        oxphp_note_stream_ops(stream);
+         * transport's table is usually seen first. Outside a fiber the claim is
+         * checked and not taken, as in the read hook. */
+        if (oxphp_current_fiber != NULL) oxphp_note_stream_ops(stream);
 
         oxphp_stream_claim_result claim =
             oxphp_stream_claim(stream, sock, oxphp_current_fiber);
@@ -3222,8 +3241,13 @@ static zend_result oxphp_pdo_check_liveness(pdo_dbh_t *dbh)
      * snapshot's fiber does not tell it apart from anything else: with no current
      * fiber that tag is NULL and matches every snapshot written outside a fiber
      * as well as its own, so an answer given here would hand a connection a
-     * parked fiber is holding to code whose queries are guarded by nothing and
-     * would land in that fiber's exchange.
+     * parked fiber is holding to code that cannot wait for it. The ping itself is
+     * checked only at the socket. mysqlnd either refuses it from its own state,
+     * when the holder's exchange moved the connection out of ready, or sends it;
+     * while the holder is parked on this descriptor for its reply that write is
+     * refused, and mysqlnd answers a failed write by closing the connection — the
+     * holder's request fails with it instead of reading the ping's reply as its
+     * own.
      *
      * None of it applies where nothing but the pool holds the handle, which is
      * usually a claim outliving the object it was taken for: a claim is given up at

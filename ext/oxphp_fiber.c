@@ -193,6 +193,7 @@ void oxphp_fiber_loop_fci(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
 
 static void oxphp_claim_release_fiber(oxphp_request_fiber *fiber);
 static void oxphp_claim_reset_if_empty(void);
+static inline void oxphp_fiber_clear_suspend(oxphp_request_fiber *fiber);
 
 /* ─── VM stack rewind after a bailout ─────────────────── */
 
@@ -1587,6 +1588,13 @@ void oxphp_scheduler_destroy(oxphp_fiber_scheduler *sched) {
     oxphp_request_fiber * volatile fiber = sched->fibers_head;
     while (fiber) {
         oxphp_request_fiber *next = fiber->next;
+        /* The destructor below resumes the fiber without the scheduler, so its
+         * suspension is ended here, as every other resume does. Left in place, the
+         * descriptor set it points at belongs to a frame the unwind has already
+         * returned from, and the socket hooks — which check claims for code
+         * outside any fiber, as this unwind is — would read it and refuse the
+         * fiber its own connection. */
+        oxphp_fiber_clear_suspend(fiber);
         /* Before the bridge context and the parked state below: the unwind runs
          * PHP, which still reads both. */
         oxphp_fiber_release_guarded(fiber);

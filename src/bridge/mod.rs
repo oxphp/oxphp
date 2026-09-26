@@ -24,8 +24,8 @@ pub use mock as ffi;
 /// It is also what a build without PHP reads, since nothing there installs hooks.
 ///
 /// This reports what was *installed*, which is not the same as what is in
-/// effect: outside a fiber every hook delegates to the handler it replaced, so a
-/// traditional-mode process reports the categories it swapped while behaving
+/// effect: where there are no fibers every hook delegates to the handler it
+/// replaced, so a traditional-mode process reports the categories it swapped while behaving
 /// natively throughout.
 ///
 /// The extension parses `RUNTIME_HOOKS` and publishes the result; nothing here
