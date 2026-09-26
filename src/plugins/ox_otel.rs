@@ -734,6 +734,7 @@ impl PluginCompleteHandler for OtelCompleteHandler {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::test_env::with_env;
     use crate::events::EventDispatcher;
     use crate::plugin::context::PluginDecoratorDef;
     use crate::plugin::handler::{PluginInternalHandler, PluginMetricsCollector};
@@ -886,18 +887,6 @@ mod tests {
         assert!(get("exception.line").is_none());
     }
 
-    /// The crate-wide env lock (see `config::test_env`), not a local one:
-    /// these tests write process-global variables that other modules read —
-    /// `LISTEN_ADDR` is also read by `config::ServerConfig::from_env` — so
-    /// serializing them only against each other is not enough. Poison is
-    /// recovered rather than unwrapped, so a failing assert in one env test
-    /// does not cascade panics through every other one.
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        crate::config::test_env::ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-    }
-
     fn init_otel_plugin(plugin: &mut OtelPlugin) -> HashMap<String, serde_json::Value> {
         let mut dispatcher = EventDispatcher::new();
         let mut services: HashMap<String, Box<dyn std::any::Any + Send + Sync>> = HashMap::new();
@@ -939,16 +928,17 @@ mod tests {
 
     #[test]
     fn test_otel_plugin_disabled_by_default() {
-        let _lock = env_lock();
-        std::env::remove_var("OTEL_ENABLED");
-        let mut plugin = OtelPlugin::new();
-        let config = init_otel_plugin(&mut plugin);
+        let vars = [("OTEL_ENABLED", None)];
+        with_env(&vars, || {
+            let mut plugin = OtelPlugin::new();
+            let config = init_otel_plugin(&mut plugin);
 
-        assert_eq!(plugin.name(), "otel");
-        assert_eq!(plugin.version(), "0.1.0");
-        assert!(!plugin.enabled);
-        assert_eq!(config.get("enabled"), Some(&serde_json::json!(false)));
-        assert_eq!(plugin.health(), PluginHealth::Ok);
+            assert_eq!(plugin.name(), "otel");
+            assert_eq!(plugin.version(), "0.1.0");
+            assert!(!plugin.enabled);
+            assert_eq!(config.get("enabled"), Some(&serde_json::json!(false)));
+            assert_eq!(plugin.health(), PluginHealth::Ok);
+        });
     }
 
     #[test]
@@ -1099,170 +1089,197 @@ mod tests {
 
     #[test]
     fn test_build_sampler_defaults() {
-        let _lock = env_lock();
-        std::env::remove_var("OTEL_TRACES_SAMPLER");
-        std::env::remove_var("OTEL_TRACES_SAMPLER_ARG");
-        let sampler = OtelPlugin::build_sampler();
-        // Default is parentbased_traceidratio
-        assert!(matches!(sampler, Sampler::ParentBased(_)));
+        let vars = [
+            ("OTEL_TRACES_SAMPLER", None),
+            ("OTEL_TRACES_SAMPLER_ARG", None),
+        ];
+        with_env(&vars, || {
+            let sampler = OtelPlugin::build_sampler();
+            // Default is parentbased_traceidratio
+            assert!(matches!(sampler, Sampler::ParentBased(_)));
+        });
     }
 
     #[test]
     fn test_build_sampler_always_on() {
-        let _lock = env_lock();
-        std::env::set_var("OTEL_TRACES_SAMPLER", "always_on");
-        let sampler = OtelPlugin::build_sampler();
-        assert!(matches!(sampler, Sampler::AlwaysOn));
-        std::env::remove_var("OTEL_TRACES_SAMPLER");
+        let vars = [("OTEL_TRACES_SAMPLER", Some("always_on"))];
+        with_env(&vars, || {
+            let sampler = OtelPlugin::build_sampler();
+            assert!(matches!(sampler, Sampler::AlwaysOn));
+        });
     }
 
     #[test]
     fn test_build_sampler_always_off() {
-        let _lock = env_lock();
-        std::env::set_var("OTEL_TRACES_SAMPLER", "always_off");
-        let sampler = OtelPlugin::build_sampler();
-        assert!(matches!(sampler, Sampler::AlwaysOff));
-        std::env::remove_var("OTEL_TRACES_SAMPLER");
+        let vars = [("OTEL_TRACES_SAMPLER", Some("always_off"))];
+        with_env(&vars, || {
+            let sampler = OtelPlugin::build_sampler();
+            assert!(matches!(sampler, Sampler::AlwaysOff));
+        });
     }
 
     #[test]
     fn test_build_sampler_ratio() {
-        let _lock = env_lock();
-        std::env::set_var("OTEL_TRACES_SAMPLER", "traceidratio");
-        std::env::set_var("OTEL_TRACES_SAMPLER_ARG", "0.5");
-        let sampler = OtelPlugin::build_sampler();
-        assert!(matches!(sampler, Sampler::TraceIdRatioBased(r) if (r - 0.5).abs() < f64::EPSILON));
-        std::env::remove_var("OTEL_TRACES_SAMPLER");
-        std::env::remove_var("OTEL_TRACES_SAMPLER_ARG");
+        let vars = [
+            ("OTEL_TRACES_SAMPLER", Some("traceidratio")),
+            ("OTEL_TRACES_SAMPLER_ARG", Some("0.5")),
+        ];
+        with_env(&vars, || {
+            let sampler = OtelPlugin::build_sampler();
+            assert!(
+                matches!(sampler, Sampler::TraceIdRatioBased(r) if (r - 0.5).abs() < f64::EPSILON)
+            );
+        });
     }
 
     #[test]
     fn test_build_sampler_arg_parse_error_falls_back_to_one() {
-        let _lock = env_lock();
-        std::env::set_var("OTEL_TRACES_SAMPLER", "traceidratio");
-        std::env::set_var("OTEL_TRACES_SAMPLER_ARG", "not-a-number");
-        let sampler = OtelPlugin::build_sampler();
-        assert!(matches!(sampler, Sampler::TraceIdRatioBased(r) if (r - 1.0).abs() < f64::EPSILON));
-        std::env::remove_var("OTEL_TRACES_SAMPLER");
-        std::env::remove_var("OTEL_TRACES_SAMPLER_ARG");
+        let vars = [
+            ("OTEL_TRACES_SAMPLER", Some("traceidratio")),
+            ("OTEL_TRACES_SAMPLER_ARG", Some("not-a-number")),
+        ];
+        with_env(&vars, || {
+            let sampler = OtelPlugin::build_sampler();
+            assert!(
+                matches!(sampler, Sampler::TraceIdRatioBased(r) if (r - 1.0).abs() < f64::EPSILON)
+            );
+        });
     }
 
     #[test]
     fn test_build_sampler_arg_above_one_is_clamped() {
-        let _lock = env_lock();
-        std::env::set_var("OTEL_TRACES_SAMPLER", "traceidratio");
-        std::env::set_var("OTEL_TRACES_SAMPLER_ARG", "2.5");
-        let sampler = OtelPlugin::build_sampler();
-        assert!(matches!(sampler, Sampler::TraceIdRatioBased(r) if (r - 1.0).abs() < f64::EPSILON));
-        std::env::remove_var("OTEL_TRACES_SAMPLER");
-        std::env::remove_var("OTEL_TRACES_SAMPLER_ARG");
+        let vars = [
+            ("OTEL_TRACES_SAMPLER", Some("traceidratio")),
+            ("OTEL_TRACES_SAMPLER_ARG", Some("2.5")),
+        ];
+        with_env(&vars, || {
+            let sampler = OtelPlugin::build_sampler();
+            assert!(
+                matches!(sampler, Sampler::TraceIdRatioBased(r) if (r - 1.0).abs() < f64::EPSILON)
+            );
+        });
     }
 
     #[test]
     fn test_build_sampler_arg_below_zero_is_clamped() {
-        let _lock = env_lock();
-        std::env::set_var("OTEL_TRACES_SAMPLER", "traceidratio");
-        std::env::set_var("OTEL_TRACES_SAMPLER_ARG", "-0.5");
-        let sampler = OtelPlugin::build_sampler();
-        assert!(matches!(sampler, Sampler::TraceIdRatioBased(r) if r.abs() < f64::EPSILON));
-        std::env::remove_var("OTEL_TRACES_SAMPLER");
-        std::env::remove_var("OTEL_TRACES_SAMPLER_ARG");
+        let vars = [
+            ("OTEL_TRACES_SAMPLER", Some("traceidratio")),
+            ("OTEL_TRACES_SAMPLER_ARG", Some("-0.5")),
+        ];
+        with_env(&vars, || {
+            let sampler = OtelPlugin::build_sampler();
+            assert!(matches!(sampler, Sampler::TraceIdRatioBased(r) if r.abs() < f64::EPSILON));
+        });
     }
 
     #[test]
     fn test_build_sampler_arg_nan_falls_back_to_one() {
-        let _lock = env_lock();
-        std::env::set_var("OTEL_TRACES_SAMPLER", "traceidratio");
-        std::env::set_var("OTEL_TRACES_SAMPLER_ARG", "NaN");
-        let sampler = OtelPlugin::build_sampler();
-        assert!(matches!(sampler, Sampler::TraceIdRatioBased(r) if (r - 1.0).abs() < f64::EPSILON));
-        std::env::remove_var("OTEL_TRACES_SAMPLER");
-        std::env::remove_var("OTEL_TRACES_SAMPLER_ARG");
+        let vars = [
+            ("OTEL_TRACES_SAMPLER", Some("traceidratio")),
+            ("OTEL_TRACES_SAMPLER_ARG", Some("NaN")),
+        ];
+        with_env(&vars, || {
+            let sampler = OtelPlugin::build_sampler();
+            assert!(
+                matches!(sampler, Sampler::TraceIdRatioBased(r) if (r - 1.0).abs() < f64::EPSILON)
+            );
+        });
     }
 
     #[test]
     fn test_build_sampler_arg_zero_passes_through() {
-        let _lock = env_lock();
-        std::env::set_var("OTEL_TRACES_SAMPLER", "traceidratio");
-        std::env::set_var("OTEL_TRACES_SAMPLER_ARG", "0.0");
-        let sampler = OtelPlugin::build_sampler();
-        assert!(matches!(sampler, Sampler::TraceIdRatioBased(r) if r.abs() < f64::EPSILON));
-        std::env::remove_var("OTEL_TRACES_SAMPLER");
-        std::env::remove_var("OTEL_TRACES_SAMPLER_ARG");
+        let vars = [
+            ("OTEL_TRACES_SAMPLER", Some("traceidratio")),
+            ("OTEL_TRACES_SAMPLER_ARG", Some("0.0")),
+        ];
+        with_env(&vars, || {
+            let sampler = OtelPlugin::build_sampler();
+            assert!(matches!(sampler, Sampler::TraceIdRatioBased(r) if r.abs() < f64::EPSILON));
+        });
     }
 
     #[test]
     fn test_build_sampler_arg_one_passes_through() {
-        let _lock = env_lock();
-        std::env::set_var("OTEL_TRACES_SAMPLER", "traceidratio");
-        std::env::set_var("OTEL_TRACES_SAMPLER_ARG", "1.0");
-        let sampler = OtelPlugin::build_sampler();
-        assert!(matches!(sampler, Sampler::TraceIdRatioBased(r) if (r - 1.0).abs() < f64::EPSILON));
-        std::env::remove_var("OTEL_TRACES_SAMPLER");
-        std::env::remove_var("OTEL_TRACES_SAMPLER_ARG");
+        let vars = [
+            ("OTEL_TRACES_SAMPLER", Some("traceidratio")),
+            ("OTEL_TRACES_SAMPLER_ARG", Some("1.0")),
+        ];
+        with_env(&vars, || {
+            let sampler = OtelPlugin::build_sampler();
+            assert!(
+                matches!(sampler, Sampler::TraceIdRatioBased(r) if (r - 1.0).abs() < f64::EPSILON)
+            );
+        });
     }
 
     #[test]
     fn test_build_sampler_unknown_name_falls_back() {
-        let _lock = env_lock();
-        std::env::set_var("OTEL_TRACES_SAMPLER", "garbage_value_xyz");
-        std::env::remove_var("OTEL_TRACES_SAMPLER_ARG");
-        let sampler = OtelPlugin::build_sampler();
-        // Unknown name falls back to parentbased_traceidratio. The inner Sampler
-        // is wrapped in Box<dyn ShouldSample> and cannot be downcast, so we only
-        // assert on the outer variant — the inner arg (1.0 by default) is
-        // exercised by the other tests in this module.
-        assert!(matches!(sampler, Sampler::ParentBased(_)));
-        std::env::remove_var("OTEL_TRACES_SAMPLER");
+        let vars = [
+            ("OTEL_TRACES_SAMPLER", Some("garbage_value_xyz")),
+            ("OTEL_TRACES_SAMPLER_ARG", None),
+        ];
+        with_env(&vars, || {
+            let sampler = OtelPlugin::build_sampler();
+            // Unknown name falls back to parentbased_traceidratio. The inner Sampler
+            // is wrapped in Box<dyn ShouldSample> and cannot be downcast, so we only
+            // assert on the outer variant — the inner arg (1.0 by default) is
+            // exercised by the other tests in this module.
+            assert!(matches!(sampler, Sampler::ParentBased(_)));
+        });
     }
 
     #[test]
     fn test_build_resource_defaults() {
-        let _lock = env_lock();
-        std::env::remove_var("OTEL_SERVICE_NAME");
-        std::env::remove_var("OTEL_SERVICE_VERSION");
-        std::env::remove_var("OTEL_RESOURCE_ATTRIBUTES");
-        let resource = OtelPlugin::build_resource();
-        let sn = resource.get(&opentelemetry::Key::new("service.name"));
-        assert_eq!(sn.map(|v| v.to_string()), Some("oxphp".to_string()));
+        let vars = [
+            ("OTEL_SERVICE_NAME", None),
+            ("OTEL_SERVICE_VERSION", None),
+            ("OTEL_RESOURCE_ATTRIBUTES", None),
+        ];
+        with_env(&vars, || {
+            let resource = OtelPlugin::build_resource();
+            let sn = resource.get(&opentelemetry::Key::new("service.name"));
+            assert_eq!(sn.map(|v| v.to_string()), Some("oxphp".to_string()));
+        });
     }
 
     #[test]
     fn test_build_resource_custom() {
-        let _lock = env_lock();
-        std::env::set_var("OTEL_SERVICE_NAME", "my-app");
-        std::env::set_var("OTEL_SERVICE_VERSION", "2.0.0");
-        std::env::set_var("OTEL_RESOURCE_ATTRIBUTES", "env=prod,region=us-east-1");
-        let resource = OtelPlugin::build_resource();
+        let vars = [
+            ("OTEL_SERVICE_NAME", Some("my-app")),
+            ("OTEL_SERVICE_VERSION", Some("2.0.0")),
+            (
+                "OTEL_RESOURCE_ATTRIBUTES",
+                Some("env=prod,region=us-east-1"),
+            ),
+        ];
+        with_env(&vars, || {
+            let resource = OtelPlugin::build_resource();
 
-        assert_eq!(
-            resource
-                .get(&opentelemetry::Key::new("service.name"))
-                .map(|v| v.to_string()),
-            Some("my-app".to_string())
-        );
-        assert_eq!(
-            resource
-                .get(&opentelemetry::Key::new("service.version"))
-                .map(|v| v.to_string()),
-            Some("2.0.0".to_string())
-        );
-        assert_eq!(
-            resource
-                .get(&opentelemetry::Key::new("env"))
-                .map(|v| v.to_string()),
-            Some("prod".to_string())
-        );
-        assert_eq!(
-            resource
-                .get(&opentelemetry::Key::new("region"))
-                .map(|v| v.to_string()),
-            Some("us-east-1".to_string())
-        );
-
-        std::env::remove_var("OTEL_SERVICE_NAME");
-        std::env::remove_var("OTEL_SERVICE_VERSION");
-        std::env::remove_var("OTEL_RESOURCE_ATTRIBUTES");
+            assert_eq!(
+                resource
+                    .get(&opentelemetry::Key::new("service.name"))
+                    .map(|v| v.to_string()),
+                Some("my-app".to_string())
+            );
+            assert_eq!(
+                resource
+                    .get(&opentelemetry::Key::new("service.version"))
+                    .map(|v| v.to_string()),
+                Some("2.0.0".to_string())
+            );
+            assert_eq!(
+                resource
+                    .get(&opentelemetry::Key::new("env"))
+                    .map(|v| v.to_string()),
+                Some("prod".to_string())
+            );
+            assert_eq!(
+                resource
+                    .get(&opentelemetry::Key::new("region"))
+                    .map(|v| v.to_string()),
+                Some("us-east-1".to_string())
+            );
+        });
     }
 
     #[test]
@@ -1278,71 +1295,74 @@ mod tests {
 
     #[test]
     fn test_parse_headers_empty() {
-        let _lock = env_lock();
-        std::env::remove_var("OTEL_EXPORTER_OTLP_HEADERS");
-        let headers = OtelPlugin::parse_headers();
-        assert!(headers.is_empty());
+        let vars = [("OTEL_EXPORTER_OTLP_HEADERS", None)];
+        with_env(&vars, || {
+            let headers = OtelPlugin::parse_headers();
+            assert!(headers.is_empty());
+        });
     }
 
     #[test]
     fn test_parse_headers_single() {
-        let _lock = env_lock();
-        std::env::set_var(
+        let vars = [(
             "OTEL_EXPORTER_OTLP_HEADERS",
-            "Authorization=Bearer token123",
-        );
-        let headers = OtelPlugin::parse_headers();
-        assert_eq!(headers.len(), 1);
-        assert_eq!(headers.get("Authorization").unwrap(), "Bearer token123");
-        std::env::remove_var("OTEL_EXPORTER_OTLP_HEADERS");
+            Some("Authorization=Bearer token123"),
+        )];
+        with_env(&vars, || {
+            let headers = OtelPlugin::parse_headers();
+            assert_eq!(headers.len(), 1);
+            assert_eq!(headers.get("Authorization").unwrap(), "Bearer token123");
+        });
     }
 
     #[test]
     fn test_parse_headers_multiple() {
-        let _lock = env_lock();
-        std::env::set_var(
+        let vars = [(
             "OTEL_EXPORTER_OTLP_HEADERS",
-            "Authorization=Bearer tok,X-Custom=value42",
-        );
-        let headers = OtelPlugin::parse_headers();
-        assert_eq!(headers.len(), 2);
-        assert_eq!(headers.get("Authorization").unwrap(), "Bearer tok");
-        assert_eq!(headers.get("X-Custom").unwrap(), "value42");
-        std::env::remove_var("OTEL_EXPORTER_OTLP_HEADERS");
+            Some("Authorization=Bearer tok,X-Custom=value42"),
+        )];
+        with_env(&vars, || {
+            let headers = OtelPlugin::parse_headers();
+            assert_eq!(headers.len(), 2);
+            assert_eq!(headers.get("Authorization").unwrap(), "Bearer tok");
+            assert_eq!(headers.get("X-Custom").unwrap(), "value42");
+        });
     }
 
     #[test]
     fn test_parse_headers_whitespace_trimming() {
-        let _lock = env_lock();
-        std::env::set_var("OTEL_EXPORTER_OTLP_HEADERS", " key = val , k2 = v2 ");
-        let headers = OtelPlugin::parse_headers();
-        assert_eq!(headers.len(), 2);
-        assert_eq!(headers.get("key").unwrap(), "val");
-        assert_eq!(headers.get("k2").unwrap(), "v2");
-        std::env::remove_var("OTEL_EXPORTER_OTLP_HEADERS");
+        let vars = [("OTEL_EXPORTER_OTLP_HEADERS", Some(" key = val , k2 = v2 "))];
+        with_env(&vars, || {
+            let headers = OtelPlugin::parse_headers();
+            assert_eq!(headers.len(), 2);
+            assert_eq!(headers.get("key").unwrap(), "val");
+            assert_eq!(headers.get("k2").unwrap(), "v2");
+        });
     }
 
     #[test]
     fn test_parse_headers_empty_key_skipped() {
-        let _lock = env_lock();
-        std::env::set_var("OTEL_EXPORTER_OTLP_HEADERS", "=bad,good=val");
-        let headers = OtelPlugin::parse_headers();
-        assert_eq!(headers.len(), 1);
-        assert_eq!(headers.get("good").unwrap(), "val");
-        std::env::remove_var("OTEL_EXPORTER_OTLP_HEADERS");
+        let vars = [("OTEL_EXPORTER_OTLP_HEADERS", Some("=bad,good=val"))];
+        with_env(&vars, || {
+            let headers = OtelPlugin::parse_headers();
+            assert_eq!(headers.len(), 1);
+            assert_eq!(headers.get("good").unwrap(), "val");
+        });
     }
 
     #[test]
     fn test_server_address_stored() {
-        let _lock = env_lock();
-        std::env::remove_var("OTEL_ENABLED");
-        std::env::set_var("LISTEN_ADDR", "0.0.0.0:8080");
-        let mut plugin = OtelPlugin::new();
-        // Plugin is disabled so init won't try to connect to OTLP
-        init_otel_plugin(&mut plugin);
-        // server_address is only set when enabled, so check new() default
-        assert_eq!(plugin.server_address, "");
-        std::env::remove_var("LISTEN_ADDR");
+        let vars = [
+            ("OTEL_ENABLED", None),
+            ("LISTEN_ADDR", Some("0.0.0.0:8080")),
+        ];
+        with_env(&vars, || {
+            let mut plugin = OtelPlugin::new();
+            // Plugin is disabled so init won't try to connect to OTLP
+            init_otel_plugin(&mut plugin);
+            // server_address is only set when enabled, so check new() default
+            assert_eq!(plugin.server_address, "");
+        });
     }
 
     #[test]
@@ -1390,18 +1410,11 @@ mod tests {
 
         let plugin = OtelPlugin::new();
 
-        // Capture the result and clean up env inside the locked scope, then
-        // release the env lock BEFORE asserting: a failing assert must not
-        // unwind while still holding a lock the whole crate's env tests share.
-        let http = {
-            let _lock = env_lock();
-            std::env::set_var("OTEL_EXPORTER_OTLP_PROTOCOL", "grpc");
-            std::env::set_var("OTEL_EXPORTER_OTLP_ENDPOINT", "http://localhost:4317");
-            let http = plugin.init_provider();
-            std::env::remove_var("OTEL_EXPORTER_OTLP_PROTOCOL");
-            std::env::remove_var("OTEL_EXPORTER_OTLP_ENDPOINT");
-            http
-        };
+        let vars = [
+            ("OTEL_EXPORTER_OTLP_PROTOCOL", Some("grpc")),
+            ("OTEL_EXPORTER_OTLP_ENDPOINT", Some("http://localhost:4317")),
+        ];
+        let http = with_env(&vars, || plugin.init_provider());
 
         assert!(
             http.is_ok(),

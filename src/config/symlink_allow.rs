@@ -113,37 +113,6 @@ pub(crate) mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    // Crate-wide lock — see `config::test_env`. Re-exported because
-    // `server::routing::tests` locks it around RAII `EnvGuard` scopes.
-    pub(crate) use crate::config::test_env::ENV_LOCK;
-
-    /// RAII helper for tests that mutate a single env var. Restores the
-    /// previous value (set / unset, non-UTF-8 safe) on Drop, including during
-    /// a panic unwind — so an `assert!` after construction stays free of
-    /// manual save/restore dancing. Tests that need this for
-    /// `SYMLINK_ALLOW_PATHS` should hold `ENV_LOCK` for the same scope.
-    pub(crate) struct EnvGuard {
-        key: &'static str,
-        prev: Option<std::ffi::OsString>,
-    }
-
-    impl EnvGuard {
-        pub(crate) fn set(key: &'static str, value: &str) -> Self {
-            let prev = std::env::var_os(key);
-            std::env::set_var(key, value);
-            Self { key, prev }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            match &self.prev {
-                Some(v) => std::env::set_var(self.key, v),
-                None => std::env::remove_var(self.key),
-            }
-        }
-    }
-
     /// Create a tempdir whose canonical path is guaranteed not to land under
     /// any `BLACKLIST_PREFIXES` entry. `TempDir::new()` honours `TMPDIR` →
     /// defaults to `/tmp` on Linux CI, which is blacklisted; allow-list tests

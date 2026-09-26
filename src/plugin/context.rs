@@ -277,6 +277,7 @@ impl<'a> PluginContext<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::test_env::with_env;
     use crate::decorator::{
         AttributeTargets, DecoratorAction, DecoratorCallContext, DecoratorCallResult,
     };
@@ -322,9 +323,6 @@ mod tests {
 
     #[test]
     fn test_config_lookup_with_prefix() {
-        std::env::set_var("TEST_PLUGIN_API_KEY", "secret");
-        std::env::set_var("_OXPHP_TEST_SHARED_KEY", "shared");
-
         let mut dispatcher = EventDispatcher::new();
         let mut services = HashMap::new();
         let mut config = HashMap::new();
@@ -357,23 +355,22 @@ mod tests {
             &mut core_flags,
         );
 
-        assert_eq!(ctx.config("API_KEY"), Some("secret".to_string()));
-        assert_eq!(
-            ctx.config("_OXPHP_TEST_SHARED_KEY"),
-            Some("shared".to_string())
-        );
-        assert_eq!(ctx.config("MISSING"), None);
-
-        std::env::remove_var("TEST_PLUGIN_API_KEY");
-        std::env::remove_var("_OXPHP_TEST_SHARED_KEY");
+        let vars = [
+            ("TEST_PLUGIN_API_KEY", Some("secret")),
+            ("_OXPHP_TEST_SHARED_KEY", Some("shared")),
+        ];
+        with_env(&vars, || {
+            assert_eq!(ctx.config("API_KEY"), Some("secret".to_string()));
+            assert_eq!(
+                ctx.config("_OXPHP_TEST_SHARED_KEY"),
+                Some("shared".to_string())
+            );
+            assert_eq!(ctx.config("MISSING"), None);
+        });
     }
 
     #[test]
     fn test_config_prefixed_strict() {
-        // Set both the prefixed and the bare env var.
-        std::env::set_var("TEST_PLUGIN_OXPHP_TEST_STRICT_BARE_KEY", "prefixed-value");
-        std::env::set_var("OXPHP_TEST_STRICT_BARE_KEY", "bare-value");
-
         let mut dispatcher = EventDispatcher::new();
         let mut services = HashMap::new();
         let mut config = HashMap::new();
@@ -406,21 +403,34 @@ mod tests {
             &mut core_flags,
         );
 
-        // Prefixed var is consulted and returned.
-        assert_eq!(
-            ctx.config_prefixed("OXPHP_TEST_STRICT_BARE_KEY"),
-            Some("prefixed-value".to_string())
-        );
+        // Set both the prefixed and the bare env var: the prefixed one is
+        // consulted and returned.
+        let both = [
+            (
+                "TEST_PLUGIN_OXPHP_TEST_STRICT_BARE_KEY",
+                Some("prefixed-value"),
+            ),
+            ("OXPHP_TEST_STRICT_BARE_KEY", Some("bare-value")),
+        ];
+        with_env(&both, || {
+            assert_eq!(
+                ctx.config_prefixed("OXPHP_TEST_STRICT_BARE_KEY"),
+                Some("prefixed-value".to_string())
+            );
+        });
 
         // Only the prefixed form is checked; when it's absent, the bare var
         // must NOT be used as a fallback (that's `config()`'s job).
-        std::env::remove_var("TEST_PLUGIN_OXPHP_TEST_STRICT_BARE_KEY");
-        assert_eq!(ctx.config_prefixed("OXPHP_TEST_STRICT_BARE_KEY"), None);
+        let bare_only = [
+            ("TEST_PLUGIN_OXPHP_TEST_STRICT_BARE_KEY", None),
+            ("OXPHP_TEST_STRICT_BARE_KEY", Some("bare-value")),
+        ];
+        with_env(&bare_only, || {
+            assert_eq!(ctx.config_prefixed("OXPHP_TEST_STRICT_BARE_KEY"), None);
 
-        // A key that is never set should always return None.
-        assert_eq!(ctx.config_prefixed("ABSOLUTELY_MISSING"), None);
-
-        std::env::remove_var("OXPHP_TEST_STRICT_BARE_KEY");
+            // A key that is never set should always return None.
+            assert_eq!(ctx.config_prefixed("ABSOLUTELY_MISSING"), None);
+        });
     }
 
     #[test]
