@@ -1,5 +1,15 @@
 # profile: overflow
-# description: Queue overflow (529 Site Overloaded)
+# description: Queue overflow profile — lone request is served (529 checks: tests/overload_529.sh)
 
-overflow/test_queue_full_529
-overflow/test_retry_after_header
+# A 529 is the server's answer to a request other than the one that holds the
+# worker, so the suite runner — one request at a time — cannot produce one. The
+# admission checks (bursts within the budget, shedding with Retry-After, permit
+# release on pickup, reject-immediately with a zero budget, …) live in
+# tests/overload_529.sh, which run_all.sh drives on this profile's image
+# whenever the profile runs, except under --suite or --test.
+#
+# What one request can check: on an idle pool of one worker and one queue slot
+# a lone request is admitted and served at once. --max-time sits below the
+# profile's 1000 ms QUEUE_WAIT_TIMEOUT_MS, so a request that waited out the
+# budget fails here whether it ended in a 529 or was served late.
+overflow/test_lone_request_served | GET | --max-time 0.9 | 200
