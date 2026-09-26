@@ -7,8 +7,9 @@ use std::ffi::{OsStr, OsString};
 use std::sync::Mutex;
 
 /// Serializes every env-touching test in the crate. Held internally by
-/// [`with_env`]/[`with_env_os`]; RAII-style tests (e.g. `EnvGuard` users)
-/// lock it explicitly for their scope instead.
+/// [`with_env`]/[`with_env_os`]; tests that share its scope for other
+/// process-global state (e.g. the profiler's span-depth cap) lock it
+/// explicitly instead.
 pub(crate) static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// Lock, set/unset `vars` in order, run `f` and return its value, restore

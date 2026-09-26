@@ -29,8 +29,8 @@ fn setup_test_dir() -> TempDir {
 /// construct, then restore — same pattern as `php_deny::tests::with_env`.
 /// Tests that *do* need the env var set (e.g.
 /// `test_symlink_to_allowed_path_resolves`) build `RouteConfig` directly
-/// while holding the lock themselves; calling this helper while already
-/// holding the lock would deadlock.
+/// inside their own `with_env` window; calling this helper from inside one
+/// would deadlock.
 fn make_config(dir: &Path, entry_file: Option<&str>) -> RouteConfig {
     build_config_clean_env(dir, entry_file.map(|name| dir.join(name)), false)
 }
@@ -773,7 +773,7 @@ async fn test_symlink_escape_cached_on_second_request() {
 #[cfg(unix)]
 #[tokio::test]
 async fn test_symlink_to_allowed_path_resolves() {
-    use crate::config::symlink_allow::tests::{non_blacklisted_tempdir, EnvGuard, ENV_LOCK};
+    use crate::config::symlink_allow::tests::non_blacklisted_tempdir;
     use std::os::unix::fs::symlink;
 
     let dir = setup_test_dir();
@@ -784,17 +784,20 @@ async fn test_symlink_to_allowed_path_resolves() {
     fs::write(target_canonical.join("asset.txt"), "allowed asset").unwrap();
     symlink(target.path(), dir.path().join("assets")).unwrap();
 
-    // Hold ENV_LOCK + EnvGuard only across RouteConfig::new — it captures
+    // Set SYMLINK_ALLOW_PATHS only across RouteConfig::new — it captures
     // the allow-list into the struct, after which env mutation is irrelevant.
-    // Releasing before the .await avoids clippy::await_holding_lock on the
-    // std::sync::Mutex guard. Build RouteConfig directly because make_config()
-    // would re-acquire ENV_LOCK and clear SYMLINK_ALLOW_PATHS.
-    let rc = {
-        let _lock = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let _env = EnvGuard::set("SYMLINK_ALLOW_PATHS", target_canonical.to_str().unwrap());
+    // Closing the env window before the .await avoids
+    // clippy::await_holding_lock on its std::sync::Mutex guard. Build
+    // RouteConfig directly because make_config() opens its own env window
+    // that clears SYMLINK_ALLOW_PATHS.
+    let allow = [(
+        "SYMLINK_ALLOW_PATHS",
+        Some(target_canonical.to_str().unwrap()),
+    )];
+    let rc = crate::config::test_env::with_env(&allow, || {
         let server_config = ServerConfig::new("0.0.0.0:8080".to_string(), dir.path().to_path_buf());
         RouteConfig::new(&server_config, None, false)
-    };
+    });
     let cache = Arc::new(FileCache::new(200));
     let res = rc.resolve_request("/assets/asset.txt", &cache).await;
     assert!(
@@ -1293,23 +1296,13 @@ async fn test_worker_mode_route_never_carries_path_info() {
     let worker = dir.path().join("worker.php");
     fs::write(&worker, "<?php echo 'worker';").unwrap();
 
-    // Build the config inside a block so the `ENV_LOCK` guard is dropped
-    // before any `.await` below (clippy::await_holding_lock). The lock only
+    // Build the config inside an env window so its lock guard is dropped
+    // before any `.await` below (clippy::await_holding_lock). The window only
     // needs to cover `RouteConfig::new`, which reads `SYMLINK_ALLOW_PATHS`.
-    let mut rc = {
-        let _lock = crate::config::symlink_allow::tests::ENV_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let prev = std::env::var("SYMLINK_ALLOW_PATHS").ok();
-        std::env::remove_var("SYMLINK_ALLOW_PATHS");
+    let mut rc = crate::config::test_env::with_env(&[("SYMLINK_ALLOW_PATHS", None)], || {
         let config = ServerConfig::new("0.0.0.0:8080".to_string(), dir.path().to_path_buf());
-        let rc = RouteConfig::new(&config, Some(worker.as_path()), true);
-        match prev {
-            Some(v) => std::env::set_var("SYMLINK_ALLOW_PATHS", v),
-            None => std::env::remove_var("SYMLINK_ALLOW_PATHS"),
-        }
-        rc
-    };
+        RouteConfig::new(&config, Some(worker.as_path()), true)
+    });
     rc.set_worker_route(worker.clone());
 
     let cache = Arc::new(FileCache::new(200));

@@ -207,9 +207,6 @@ mod tests {
         assert_eq!(parse_usize(Some("not-a-number".into()), 42), 42);
     }
 
-    // Crate-wide lock for env-mutating tests — see `config::test_env`.
-    use crate::config::test_env::ENV_LOCK;
-
     // Mirrors PluginContext::new — keeping the wide arg list keeps the test
     // scaffolding obvious instead of hiding bookkeeping behind a builder.
     #[allow(clippy::too_many_arguments)]
@@ -296,29 +293,16 @@ mod tests {
         // When the operator sets `OX_SHARED_*` (plugin-prefixed fallback)
         // the error must name *that* variable, not the `SHARED_*` form they
         // never touched.
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        let prev_public = std::env::var("SHARED_TEST_FLAG").ok();
-        let prev_prefixed = std::env::var("OX_SHARED_TEST_FLAG").ok();
-        let prev_bare = std::env::var("TEST_FLAG").ok();
-        std::env::remove_var("SHARED_TEST_FLAG");
-        std::env::remove_var("TEST_FLAG");
-        std::env::set_var("OX_SHARED_TEST_FLAG", "garbage");
-
-        let err = with_ctx!(|ctx: &PluginContext| {
-            shared_bool(ctx, "TEST_FLAG", false).expect_err("garbage must error")
+        let vars = [
+            ("SHARED_TEST_FLAG", None),
+            ("TEST_FLAG", None),
+            ("OX_SHARED_TEST_FLAG", Some("garbage")),
+        ];
+        let err = crate::config::test_env::with_env(&vars, || {
+            with_ctx!(|ctx: &PluginContext| {
+                shared_bool(ctx, "TEST_FLAG", false).expect_err("garbage must error")
+            })
         });
-
-        // Restore env before asserting.
-        for (name, prev) in [
-            ("SHARED_TEST_FLAG", prev_public),
-            ("OX_SHARED_TEST_FLAG", prev_prefixed),
-            ("TEST_FLAG", prev_bare),
-        ] {
-            match prev {
-                Some(v) => std::env::set_var(name, v),
-                None => std::env::remove_var(name),
-            }
-        }
 
         let msg = err.to_string();
         assert!(
