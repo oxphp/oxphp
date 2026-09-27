@@ -19,9 +19,15 @@ impl StuckKind {
     }
 }
 
+/// `tick_delta` counts the interrupts the worker's VM answered since the
+/// previous scan, each scan raising one (see `Supervisor::scan_slot`). The VM
+/// answers where it would notice `max_execution_time` — at a loop's back edge,
+/// or when an internal call returns — so a thread inside a single C call does
+/// not, unless that call runs PHP code of its own (a callback).
+///
 /// `cpu_delta == 0` → stuck on syscall/lock (`io`).
 /// `cpu_delta > 0 && tick_delta == 0` → inside C code (`c_call`).
-/// `cpu_delta > 0 && tick_delta > 0` → PHP loop with function calls (`cpu`).
+/// `cpu_delta > 0 && tick_delta > 0` → PHP code running (`cpu`).
 pub fn classify(cpu_delta: u64, tick_delta: u64) -> StuckKind {
     if cpu_delta == 0 {
         StuckKind::Io
@@ -773,7 +779,7 @@ impl Supervisor {
     /// `run()` loop uses `scan_once_at_with_cache` instead.
     pub fn scan_once_at(&self, workers: &[WorkerSlot], now_us: u64) {
         for (id, slot) in workers.iter().enumerate() {
-            self.scan_slot(id, slot, now_us, read_thread_cpu_us);
+            self.scan_slot(id, slot, now_us, read_thread_cpu_us, WorkerSlot::kick);
         }
     }
 
@@ -785,7 +791,13 @@ impl Supervisor {
         cache: &mut CpuStatCache,
     ) {
         for (id, slot) in workers.iter().enumerate() {
-            self.scan_slot(id, slot, now_us, |tid| cache.read(id, tid));
+            self.scan_slot(
+                id,
+                slot,
+                now_us,
+                |tid| cache.read(id, tid),
+                WorkerSlot::kick,
+            );
         }
     }
 
@@ -795,6 +807,7 @@ impl Supervisor {
         slot: &WorkerSlot,
         now_us: u64,
         mut read_cpu_us: impl FnMut(u64) -> Option<u64>,
+        kick: impl FnOnce(&WorkerSlot),
     ) {
         let start = slot
             .heartbeat
@@ -807,15 +820,54 @@ impl Supervisor {
         let age_us = now_us.saturating_sub(start);
         self.metrics.observe_age(id, age_us);
 
-        if age_us < self.stuck_threshold_us {
-            return;
+        let past_threshold = age_us >= self.stuck_threshold_us;
+        if past_threshold {
+            self.metrics.observe_long_running(id);
         }
-        self.metrics.observe_long_running(id);
 
         let tid = slot
             .heartbeat
             .tid
             .load(std::sync::atomic::Ordering::Relaxed);
+
+        // Once per request, on the first scan within a period of the threshold
+        // — or past it, if the supervisor ran late — take both baselines and
+        // ask the worker whether its VM is moving, so that the next scan has a
+        // delta of this request's own and an answer to read. Classification
+        // waits for that scan. Whatever the baselines held came from an
+        // earlier request on this worker, or is 0 on a fresh one: the thread's
+        // whole CPU time would read as this request's, and an interrupt
+        // answered for an earlier request as this one's progress.
+        let baseline_taken = slot
+            .heartbeat
+            .baseline_start_us
+            .load(std::sync::atomic::Ordering::Relaxed)
+            == start;
+        if !baseline_taken {
+            let period_us = self.scan_period.as_micros() as u64;
+            if age_us.saturating_add(period_us) >= self.stuck_threshold_us {
+                let cpu_us = read_cpu_us(tid).unwrap_or(0);
+                slot.heartbeat
+                    .last_cpu_us
+                    .store(cpu_us, std::sync::atomic::Ordering::Relaxed);
+                let ticks = slot
+                    .heartbeat
+                    .ticks
+                    .load(std::sync::atomic::Ordering::Relaxed);
+                slot.heartbeat
+                    .last_ticks
+                    .store(ticks, std::sync::atomic::Ordering::Relaxed);
+                slot.heartbeat
+                    .baseline_start_us
+                    .store(start, std::sync::atomic::Ordering::Relaxed);
+                kick(slot);
+            }
+            return;
+        }
+        if !past_threshold {
+            return;
+        }
+
         let cpu_us = read_cpu_us(tid).unwrap_or(0);
         let prev_cpu = slot
             .heartbeat
@@ -835,6 +887,9 @@ impl Supervisor {
 
         let kind = classify(cpu_delta, tick_delta);
         self.metrics.observe_stuck(id, kind);
+
+        // The question the next scan reads the answer to.
+        kick(slot);
     }
 }
 
@@ -944,11 +999,13 @@ mod tests {
 
         let metrics = Arc::new(Metrics::new_with_workers(workers.len()));
         let s = Supervisor::with_threshold(metrics.clone(), 500_000, Duration::from_millis(1));
+        // The first scan takes the baselines, the second classifies.
         s.scan_once_at(workers, FAKE_NOW_US);
+        s.scan_once_at(workers, FAKE_NOW_US + 1_000);
 
         assert_eq!(
             metrics.worker_long_running_total[id].load(std::sync::atomic::Ordering::Relaxed),
-            1
+            2
         );
         assert_eq!(
             metrics.worker_stuck_total_io[id].load(std::sync::atomic::Ordering::Relaxed),
@@ -959,6 +1016,275 @@ mod tests {
             .heartbeat
             .request_start_us
             .store(0, std::sync::atomic::Ordering::Relaxed);
+        workers[id]
+            .heartbeat
+            .baseline_start_us
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    const PROGRESS_THRESHOLD_US: u64 = 10_000_000;
+    const PROGRESS_PERIOD: Duration = Duration::from_secs(1);
+
+    /// One scan of a private slot, with the thread CPU reading supplied and
+    /// every kick counted instead of delivered.
+    fn scan_progress(s: &Supervisor, slot: &WorkerSlot, now_us: u64, cpu_us: u64, kicks: &mut u32) {
+        s.scan_slot(0, slot, now_us, |_| Some(cpu_us), |_| *kicks += 1);
+    }
+
+    fn progress_supervisor() -> (Arc<Metrics>, Supervisor) {
+        let metrics = Arc::new(Metrics::new_with_workers(1));
+        let s = Supervisor::with_threshold(metrics.clone(), PROGRESS_THRESHOLD_US, PROGRESS_PERIOD);
+        (metrics, s)
+    }
+
+    fn stuck_counts(metrics: &Metrics) -> (u64, u64, u64) {
+        use std::sync::atomic::Ordering::Relaxed;
+        (
+            metrics.worker_stuck_total_io[0].load(Relaxed),
+            metrics.worker_stuck_total_c_call[0].load(Relaxed),
+            metrics.worker_stuck_total_cpu[0].load(Relaxed),
+        )
+    }
+
+    #[test]
+    fn a_request_short_of_the_threshold_is_not_interrupted() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let (metrics, s) = progress_supervisor();
+        let slot = WorkerSlot::new();
+        const NOW: u64 = 100_000_000;
+        // Three scan periods short: too early to ask the worker.
+        slot.heartbeat
+            .request_start_us
+            .store(NOW - (PROGRESS_THRESHOLD_US - 3_000_000), Relaxed);
+        slot.heartbeat.ticks.store(7, Relaxed);
+        slot.heartbeat.last_ticks.store(3, Relaxed);
+
+        let mut kicks = 0;
+        scan_progress(&s, &slot, NOW, 1_000, &mut kicks);
+
+        assert_eq!(
+            kicks, 0,
+            "a request below the threshold must not be interrupted"
+        );
+        assert_eq!(slot.heartbeat.last_ticks.load(Relaxed), 3);
+        assert_eq!(stuck_counts(&metrics), (0, 0, 0));
+    }
+
+    #[test]
+    fn the_scan_before_the_threshold_asks_the_worker_and_takes_the_baseline() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let (metrics, s) = progress_supervisor();
+        let slot = WorkerSlot::new();
+        const NOW: u64 = 100_000_000;
+        // Half a period short: the next scan is past the threshold.
+        slot.heartbeat
+            .request_start_us
+            .store(NOW - (PROGRESS_THRESHOLD_US - 500_000), Relaxed);
+        slot.heartbeat.ticks.store(7, Relaxed);
+        slot.heartbeat.last_ticks.store(3, Relaxed);
+
+        let mut kicks = 0;
+        scan_progress(&s, &slot, NOW, 1_000, &mut kicks);
+
+        assert_eq!(kicks, 1);
+        assert_eq!(slot.heartbeat.last_ticks.load(Relaxed), 7);
+        assert_eq!(slot.heartbeat.last_cpu_us.load(Relaxed), 1_000);
+        assert_eq!(
+            stuck_counts(&metrics),
+            (0, 0, 0),
+            "nothing is classified yet"
+        );
+        assert_eq!(metrics.worker_long_running_total[0].load(Relaxed), 0);
+    }
+
+    /// A tick left over from before the episode — a kick an earlier request
+    /// answered late — must not read as the VM answering this one.
+    #[test]
+    fn a_stale_tick_does_not_turn_a_c_call_into_cpu() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let (metrics, s) = progress_supervisor();
+        let slot = WorkerSlot::new();
+        const START: u64 = 100_000_000;
+        slot.heartbeat.request_start_us.store(START, Relaxed);
+        slot.heartbeat.ticks.store(5, Relaxed);
+        slot.heartbeat.last_ticks.store(4, Relaxed);
+
+        let mut kicks = 0;
+        scan_progress(
+            &s,
+            &slot,
+            START + PROGRESS_THRESHOLD_US - 500_000,
+            1_000,
+            &mut kicks,
+        );
+        // Burning CPU, and the kick is never answered: inside one C call.
+        scan_progress(
+            &s,
+            &slot,
+            START + PROGRESS_THRESHOLD_US + 500_000,
+            2_000,
+            &mut kicks,
+        );
+
+        assert_eq!(stuck_counts(&metrics), (0, 1, 0));
+        assert_eq!(kicks, 2, "each scan past the threshold asks again");
+    }
+
+    #[test]
+    fn an_answered_interrupt_reads_as_cpu() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let (metrics, s) = progress_supervisor();
+        let slot = WorkerSlot::new();
+        const START: u64 = 100_000_000;
+        slot.heartbeat.request_start_us.store(START, Relaxed);
+
+        let mut kicks = 0;
+        scan_progress(
+            &s,
+            &slot,
+            START + PROGRESS_THRESHOLD_US - 500_000,
+            1_000,
+            &mut kicks,
+        );
+        // The interrupt handler's increment, on the worker thread.
+        slot.heartbeat.ticks.fetch_add(1, Relaxed);
+        scan_progress(
+            &s,
+            &slot,
+            START + PROGRESS_THRESHOLD_US + 500_000,
+            2_000,
+            &mut kicks,
+        );
+        // Not answered this time: the loop went into a C call.
+        scan_progress(
+            &s,
+            &slot,
+            START + PROGRESS_THRESHOLD_US + 1_500_000,
+            3_000,
+            &mut kicks,
+        );
+
+        assert_eq!(stuck_counts(&metrics), (0, 1, 1));
+        assert_eq!(kicks, 3);
+    }
+
+    /// A supervisor that ran late meets the request already past the
+    /// threshold. That scan takes the baselines instead of classifying from
+    /// whatever an earlier request left in them.
+    #[test]
+    fn a_late_first_scan_takes_the_baseline_instead_of_classifying() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let (metrics, s) = progress_supervisor();
+        let slot = WorkerSlot::new();
+        const START: u64 = 100_000_000;
+        slot.heartbeat.request_start_us.store(START, Relaxed);
+        slot.heartbeat.ticks.store(5, Relaxed);
+        slot.heartbeat.last_ticks.store(4, Relaxed);
+
+        let mut kicks = 0;
+        scan_progress(
+            &s,
+            &slot,
+            START + PROGRESS_THRESHOLD_US + 3_000_000,
+            1_000,
+            &mut kicks,
+        );
+
+        assert_eq!(
+            stuck_counts(&metrics),
+            (0, 0, 0),
+            "nothing is classified yet"
+        );
+        assert_eq!(metrics.worker_long_running_total[0].load(Relaxed), 1);
+        assert_eq!(kicks, 1);
+        assert_eq!(slot.heartbeat.last_ticks.load(Relaxed), 5);
+
+        // Inside one C call: CPU moves, the kick is never answered.
+        scan_progress(
+            &s,
+            &slot,
+            START + PROGRESS_THRESHOLD_US + 4_000_000,
+            2_000,
+            &mut kicks,
+        );
+        assert_eq!(stuck_counts(&metrics), (0, 1, 0));
+    }
+
+    /// CPU the thread burned before this request — on an earlier one, or on
+    /// its bootstrap when the baseline is still 0 — must not read as this
+    /// request's.
+    #[test]
+    fn a_stale_cpu_baseline_does_not_turn_io_into_c_call() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let (metrics, s) = progress_supervisor();
+        let slot = WorkerSlot::new();
+        const START: u64 = 100_000_000;
+        slot.heartbeat.request_start_us.store(START, Relaxed);
+
+        let mut kicks = 0;
+        // Asleep: the thread's CPU reading does not move between the scans.
+        for now in [
+            START + PROGRESS_THRESHOLD_US - 500_000,
+            START + PROGRESS_THRESHOLD_US + 500_000,
+        ] {
+            scan_progress(&s, &slot, now, 750_000, &mut kicks);
+        }
+
+        assert_eq!(stuck_counts(&metrics), (1, 0, 0));
+    }
+
+    /// The baselines belong to one request: the next one on the worker takes
+    /// its own, rather than classifying against the last request's.
+    #[test]
+    fn the_next_request_takes_its_own_baseline() {
+        use std::sync::atomic::Ordering::Relaxed;
+        let (metrics, s) = progress_supervisor();
+        let slot = WorkerSlot::new();
+        const FIRST: u64 = 100_000_000;
+        slot.heartbeat.request_start_us.store(FIRST, Relaxed);
+
+        let mut kicks = 0;
+        scan_progress(
+            &s,
+            &slot,
+            FIRST + PROGRESS_THRESHOLD_US - 500_000,
+            1_000,
+            &mut kicks,
+        );
+        scan_progress(
+            &s,
+            &slot,
+            FIRST + PROGRESS_THRESHOLD_US + 500_000,
+            1_000,
+            &mut kicks,
+        );
+        assert_eq!(stuck_counts(&metrics), (1, 0, 0));
+
+        // The last kick is answered as the request finishes; another begins.
+        slot.heartbeat.ticks.fetch_add(1, Relaxed);
+        let second = FIRST + 2 * PROGRESS_THRESHOLD_US;
+        slot.heartbeat.request_start_us.store(second, Relaxed);
+
+        scan_progress(
+            &s,
+            &slot,
+            second + PROGRESS_THRESHOLD_US + 500_000,
+            9_000,
+            &mut kicks,
+        );
+        assert_eq!(
+            stuck_counts(&metrics),
+            (1, 0, 0),
+            "the first scan of a new request takes its baselines"
+        );
+        scan_progress(
+            &s,
+            &slot,
+            second + PROGRESS_THRESHOLD_US + 1_500_000,
+            9_000,
+            &mut kicks,
+        );
+        assert_eq!(stuck_counts(&metrics), (2, 0, 0));
     }
 
     /// Where the reproduction's progress counter froze: the pool had handled

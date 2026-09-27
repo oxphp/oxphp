@@ -124,27 +124,6 @@ static zend_observer_fcall_handlers oxphp_decorator_observer_init(zend_execute_d
 static void oxphp_decorator_begin(zend_execute_data *execute_data);
 static void oxphp_decorator_end(zend_execute_data *execute_data, zval *retval);
 
-/* Tick observer: increments the per-worker heartbeat tick counter on
- * every PHP function call. Used by the supervisor to distinguish
- * "stuck inside C extension" (cpu>0, ticks==0) from "PHP loop making
- * progress" (cpu>0, ticks>0). The fast path is `oxphp_bridge_tick`,
- * an inline atomic_fetch_add on a per-thread pointer. */
-static void oxphp_tick_observer_begin(zend_execute_data *execute_data)
-{
-    (void)execute_data;
-    oxphp_bridge_tick();
-}
-
-static zend_observer_fcall_handlers
-oxphp_tick_observer_init(zend_execute_data *execute_data)
-{
-    (void)execute_data;
-    return (zend_observer_fcall_handlers){
-        .begin = oxphp_tick_observer_begin,
-        .end   = NULL,
-    };
-}
-
 /* Profiler observer init — defined in ext/bridge/oxphp_bridge.c.
  * Registered globally at MINIT alongside the decorator observer;
  * multiple registrations are merged by the Zend Observer API. */
@@ -1250,6 +1229,19 @@ PHP_FUNCTION(oxphp_stream_flush)
 
 /* ─── Cooperative Sleep ───────────────────────────────────── */
 
+/* The record that this request has already been unwound for its cancellation,
+ * for a request running outside a request fiber — what cancel_delivered is
+ * inside one. Cleared at request startup (RINIT), which
+ * outside worker mode is every request. */
+static __thread bool oxphp_cancel_delivered_outside_fiber = false;
+
+static bool *oxphp_cancel_delivered_flag(void)
+{
+    return oxphp_current_fiber != NULL
+        ? &oxphp_current_fiber->cancel_delivered
+        : &oxphp_cancel_delivered_outside_fiber;
+}
+
 /* Uncatchable drain bail for a fiber force-resumed by the scheduler's drain
  * sweep: mark the connection aborted (so shutdown handlers calling
  * connection_aborted()/connection_status() observe it), then unwind via
@@ -1258,6 +1250,7 @@ PHP_FUNCTION(oxphp_stream_flush)
 static ZEND_COLD ZEND_NORETURN void oxphp_fiber_drain_bail(void)
 {
     PG(connection_status) |= PHP_CONNECTION_ABORTED;
+    *oxphp_cancel_delivered_flag() = true;
     zend_error_noreturn(E_ERROR, "Request cancelled (shutdown)");
 }
 
@@ -6751,6 +6744,15 @@ static const char* oxphp_cancel_reason_label(oxphp_cancel_reason_t r)
 
 static void oxphp_zend_interrupt_handler(zend_execute_data *execute_data)
 {
+    /* Progress signal for the supervisor. It raises this thread's
+     * vm_interrupt once a scan for a request near or past its stuck
+     * threshold, and reads whether the tick moved by the next scan: the VM
+     * answers where it would notice max_execution_time — a loop's back edge,
+     * an internal call's return — and a thread inside one C call that runs
+     * no PHP does not. First, before anything here can unwind: every
+     * interrupt that reaches the handler is an answer, whoever raised it. */
+    oxphp_bridge_tick();
+
     /* Path B: per-fiber async cancellation. A timed-out awaiter sets the
      * running task fiber's shared cancel cell and kicks this worker thread's
      * vm_interrupt cross-thread (the scheduler loop can't reach a CPU-bound
@@ -6781,6 +6783,22 @@ static void oxphp_zend_interrupt_handler(zend_execute_data *execute_data)
         oxphp_throw_exception("OxPHP\\Async\\AsyncException",
                               "Async task cancelled", 0);
         return; /* VM checks EG(exception) on return → unwinds this fiber only */
+    }
+
+    /* Already unwound for its cancellation: what runs now — its shutdown
+     * functions — is what that unwind lets run, and the reason cell, still
+     * set, is not a new cancellation. Such interrupts are passed on as when
+     * there is none — except max_execution_time, which still bounds those
+     * functions: handed to zend_timeout() as the engine would have, since the
+     * cell can no longer carry it. */
+    if (*oxphp_cancel_delivered_flag()) {
+        if (zend_atomic_bool_load_ex(&EG(timed_out))) {
+            zend_timeout();
+        }
+        if (orig_zend_interrupt_function) {
+            orig_zend_interrupt_function(execute_data);
+        }
+        return;
     }
 
     /* SIGALRM-driven max_execution_time: Zend sets EG(timed_out)=1
@@ -6908,6 +6926,7 @@ static void oxphp_zend_interrupt_handler(zend_execute_data *execute_data)
     if (oxphp_current_fiber != NULL && reason != OXPHP_CANCEL_STUCK) {
         oxphp_current_fiber->cancelled = true;
     }
+    *oxphp_cancel_delivered_flag() = true;
 
     zend_error_noreturn(E_ERROR,
         "Request cancelled (%s)",
@@ -6936,7 +6955,10 @@ static void oxphp_zend_interrupt_handler(zend_execute_data *execute_data)
  * away a `finally` block or shutdown function that runs after the unwind and
  * needs a lock to clean up. The engine clears vm_interrupt before it calls the
  * handler (zend_interrupt_helper, zend_fcall_interrupt), so a set byte is one
- * it has yet to act on.
+ * it has yet to act on — but not necessarily a cancellation: the supervisor
+ * raises it once a scan on a request near or past its stuck threshold, the
+ * request's cleanup included. So a request already unwound for its
+ * cancellation is not pending, whatever its reason cell still says.
  *
  * The cost: a task cancel whose kick was taken by another fiber on this thread,
  * or raised before the task published its interrupt address, is not seen here.
@@ -6955,6 +6977,9 @@ static int oxphp_request_end_pending(void)
     }
     if (zend_atomic_bool_load_ex(&EG(timed_out))) {
         return 1;
+    }
+    if (*oxphp_cancel_delivered_flag()) {
+        return 0;
     }
     if (oxphp_bridge_is_drain_hard()) {
         return 1;
@@ -7090,6 +7115,9 @@ static int oxphp_mark_cancelled_bailout(oxphp_cancel_reason_t reason) {
         oxphp_current_fiber->cancel_bailout_pending = true;
     }
 
+    /* The bridge bails on this answer: the request is unwound for its
+     * cancellation here as surely as by the interrupt handler. */
+    *oxphp_cancel_delivered_flag() = true;
     return 1;
 }
 
@@ -7779,11 +7807,6 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
     /* Register decorator observer */
     zend_observer_fcall_register(oxphp_decorator_observer_init);
 
-    /* Register tick observer — increments per-worker heartbeat counter
-     * once per PHP function call so the supervisor can classify
-     * long-running workers (io / c_call / cpu). */
-    zend_observer_fcall_register(oxphp_tick_observer_init);
-
     /* Register profiler observer. The init callback always returns
      * handlers for user functions; the begin/end pair early-returns
      * when g_prof.mode != PROFILE_ALL.
@@ -7885,6 +7908,8 @@ PHP_RINIT_FUNCTION(oxphp_sapi)
      * normal happy/error paths already clear; this is belt-and-suspenders
      * so a stranded entry can't bleed into a new request. */
     oxphp_bridge_aggregate_clear();
+
+    oxphp_cancel_delivered_outside_fiber = false;
 
     /* Mark the decorator instance cache uninitialized so the first decorator
      * of this request re-creates it in fresh request-scoped memory.
