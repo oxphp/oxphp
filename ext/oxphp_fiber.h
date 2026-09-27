@@ -40,15 +40,16 @@ struct oxphp_io_owner {
 /* ─── Cancellation Delivery ────────────────────────────── */
 
 /* How far a request has been unwound for its cancellation. What runs after an
- * unwind — its shutdown functions — is left alone by later interrupts, with one
+ * unwind — its shutdown functions — is not ended by a later interrupt, with one
  * exception: a request unwound before the drain deadline for any reason (a
  * client gone at a write, a timeout, a stream ended in the soft phase) can
  * still be ended once more when the deadline passes, or its cleanup would
- * outlive the drain and last until the forced process exit. */
+ * outlive the drain and last until the forced process exit. Interrupts only:
+ * a write or a suspend point on such a request still ends it as before. */
 typedef enum {
     OXPHP_UNWOUND_NONE = 0,
     OXPHP_UNWOUND_SOFT,     /* before the drain deadline */
-    OXPHP_UNWOUND_HARD,     /* at or past it: nothing ends the request again */
+    OXPHP_UNWOUND_HARD,     /* at or past it: no later interrupt ends it again */
 } oxphp_unwound_t;
 
 /* ─── Suspend Reasons ──────────────────────────────────── */
@@ -442,7 +443,10 @@ typedef struct _oxphp_request_fiber {
      * interrupt — the supervisor raises one a second on a request past its
      * stuck threshold — would read it as a new cancellation and end the
      * shutdown functions the first unwind let run. Unlike `cancelled`, raised
-     * for every reason a request is unwound on, _STUCK included. */
+     * for every reason a request is unwound on, _STUCK included. Not raised
+     * for max_execution_time unless its fatal is displayed (a write): the
+     * engine delivers it without the handler, so
+     * oxphp_cancel_already_delivered() reads that one from the reason cell. */
     uint8_t cancel_delivered;
     bool completed;         /* set by coroutine before final switch — low-level API never sets DEAD */
     /* This request is in the session standing on the thread — it opened one, or

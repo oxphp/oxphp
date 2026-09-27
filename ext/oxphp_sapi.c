@@ -1252,10 +1252,25 @@ static void oxphp_cancel_mark_delivered(void)
 
 /* Whether an interrupt reaching this request now is to be passed on rather
  * than read as a cancellation: it has been unwound already, and either at the
- * drain deadline or while the deadline is still ahead. */
+ * drain deadline or while the deadline is still ahead.
+ *
+ * max_execution_time is the unwind none of those paths is sure to mark: the
+ * engine checks EG(timed_out) before it would call the handler and ends the
+ * request in zend_timeout() itself, and the server's error callback records it
+ * by writing TIMEOUT into the reason cell. Only a displayed fatal gets it
+ * marked — its message is a write, and a write on a request with a reason in
+ * its cell marks it — so with display_errors off, as in production, nothing
+ * does. Nothing else writes TIMEOUT there — the handler
+ * does too, only on its way to unwinding — so a cell that holds it is a request
+ * that has been unwound for its timeout, and its shutdown functions, which a
+ * request ending at the timeout still runs, are left alone like any other's. */
 static bool oxphp_cancel_already_delivered(void)
 {
     uint8_t unwound = *oxphp_cancel_delivered_slot();
+    if (unwound == OXPHP_UNWOUND_NONE
+        && oxphp_bridge_get_cancel_reason() == OXPHP_CANCEL_TIMEOUT) {
+        unwound = OXPHP_UNWOUND_SOFT;
+    }
     return unwound == OXPHP_UNWOUND_HARD
         || (unwound == OXPHP_UNWOUND_SOFT && !oxphp_bridge_is_drain_hard());
 }
@@ -6767,10 +6782,10 @@ static void oxphp_zend_interrupt_handler(zend_execute_data *execute_data)
      * threshold, and reads whether the tick moved by the next scan: the VM
      * answers where it would notice max_execution_time — a loop's back edge,
      * an internal call's return — and a thread inside one C call does not,
-     * unless that call invokes a callable, PHP or internal: zend_call_function
-     * checks the flag after each one it runs. First, before anything here can
-     * unwind: every interrupt that reaches the handler is an answer, whoever
-     * raised it. */
+     * unless that call invokes a callable: a PHP one answers as it starts
+     * running, an internal one when it returns (zend_call_function checks the
+     * flag after it). First, before anything here can unwind: every interrupt
+     * that reaches the handler is an answer, whoever raised it. */
     oxphp_bridge_tick();
 
     /* Path B: per-fiber async cancellation. A timed-out awaiter sets the
@@ -6808,11 +6823,12 @@ static void oxphp_zend_interrupt_handler(zend_execute_data *execute_data)
     /* Already unwound for its cancellation: what runs now — its shutdown
      * functions — is what that unwind lets run, and the reason cell, still
      * set, is not a new cancellation. Such interrupts are passed on as when
-     * there is none — except max_execution_time, which still bounds those
-     * functions: handed to zend_timeout() as the engine would have, since the
-     * cell can no longer carry it. A request unwound before the drain
-     * deadline is not let through once the deadline has passed: it goes on
-     * below and is ended by the hard kick, as it was before its first unwind
+     * there is none. EG(timed_out) is handed to zend_timeout() as the engine
+     * would have: the engine answers it before calling the handler, so it is
+     * found raised here only when the timer fired between the two, and claimed
+     * below it would be lost, the cell already holding a reason. A request
+     * unwound before the drain deadline is not let through once the deadline
+     * has passed: it goes on below and the hard kick ends its cleanup too
      * (see oxphp_unwound_t). */
     if (oxphp_cancel_already_delivered()) {
         if (zend_atomic_bool_load_ex(&EG(timed_out))) {
