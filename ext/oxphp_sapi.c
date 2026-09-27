@@ -1229,17 +1229,35 @@ PHP_FUNCTION(oxphp_stream_flush)
 
 /* ─── Cooperative Sleep ───────────────────────────────────── */
 
-/* The record that this request has already been unwound for its cancellation,
+/* The record of how far this request has been unwound for its cancellation,
  * for a request running outside a request fiber — what cancel_delivered is
- * inside one. Cleared at request startup (RINIT), which
- * outside worker mode is every request. */
-static __thread bool oxphp_cancel_delivered_outside_fiber = false;
+ * inside one. Cleared at request startup (RINIT), which outside worker mode is
+ * every request. */
+static __thread uint8_t oxphp_cancel_delivered_outside_fiber = OXPHP_UNWOUND_NONE;
 
-static bool *oxphp_cancel_delivered_flag(void)
+static uint8_t *oxphp_cancel_delivered_slot(void)
 {
     return oxphp_current_fiber != NULL
         ? &oxphp_current_fiber->cancel_delivered
         : &oxphp_cancel_delivered_outside_fiber;
+}
+
+/* Called on every path that unwinds a request for its cancellation, just
+ * before it does. */
+static void oxphp_cancel_mark_delivered(void)
+{
+    *oxphp_cancel_delivered_slot() = oxphp_bridge_is_drain_hard()
+        ? OXPHP_UNWOUND_HARD : OXPHP_UNWOUND_SOFT;
+}
+
+/* Whether an interrupt reaching this request now is to be passed on rather
+ * than read as a cancellation: it has been unwound already, and either at the
+ * drain deadline or while the deadline is still ahead. */
+static bool oxphp_cancel_already_delivered(void)
+{
+    uint8_t unwound = *oxphp_cancel_delivered_slot();
+    return unwound == OXPHP_UNWOUND_HARD
+        || (unwound == OXPHP_UNWOUND_SOFT && !oxphp_bridge_is_drain_hard());
 }
 
 /* Uncatchable drain bail for a fiber force-resumed by the scheduler's drain
@@ -1250,7 +1268,7 @@ static bool *oxphp_cancel_delivered_flag(void)
 static ZEND_COLD ZEND_NORETURN void oxphp_fiber_drain_bail(void)
 {
     PG(connection_status) |= PHP_CONNECTION_ABORTED;
-    *oxphp_cancel_delivered_flag() = true;
+    oxphp_cancel_mark_delivered();
     zend_error_noreturn(E_ERROR, "Request cancelled (shutdown)");
 }
 
@@ -6748,9 +6766,11 @@ static void oxphp_zend_interrupt_handler(zend_execute_data *execute_data)
      * vm_interrupt once a scan for a request near or past its stuck
      * threshold, and reads whether the tick moved by the next scan: the VM
      * answers where it would notice max_execution_time — a loop's back edge,
-     * an internal call's return — and a thread inside one C call that runs
-     * no PHP does not. First, before anything here can unwind: every
-     * interrupt that reaches the handler is an answer, whoever raised it. */
+     * an internal call's return — and a thread inside one C call does not,
+     * unless that call invokes a callable, PHP or internal: zend_call_function
+     * checks the flag after each one it runs. First, before anything here can
+     * unwind: every interrupt that reaches the handler is an answer, whoever
+     * raised it. */
     oxphp_bridge_tick();
 
     /* Path B: per-fiber async cancellation. A timed-out awaiter sets the
@@ -6790,8 +6810,11 @@ static void oxphp_zend_interrupt_handler(zend_execute_data *execute_data)
      * set, is not a new cancellation. Such interrupts are passed on as when
      * there is none — except max_execution_time, which still bounds those
      * functions: handed to zend_timeout() as the engine would have, since the
-     * cell can no longer carry it. */
-    if (*oxphp_cancel_delivered_flag()) {
+     * cell can no longer carry it. A request unwound before the drain
+     * deadline is not let through once the deadline has passed: it goes on
+     * below and is ended by the hard kick, as it was before its first unwind
+     * (see oxphp_unwound_t). */
+    if (oxphp_cancel_already_delivered()) {
         if (zend_atomic_bool_load_ex(&EG(timed_out))) {
             zend_timeout();
         }
@@ -6926,7 +6949,7 @@ static void oxphp_zend_interrupt_handler(zend_execute_data *execute_data)
     if (oxphp_current_fiber != NULL && reason != OXPHP_CANCEL_STUCK) {
         oxphp_current_fiber->cancelled = true;
     }
-    *oxphp_cancel_delivered_flag() = true;
+    oxphp_cancel_mark_delivered();
 
     zend_error_noreturn(E_ERROR,
         "Request cancelled (%s)",
@@ -6958,7 +6981,8 @@ static void oxphp_zend_interrupt_handler(zend_execute_data *execute_data)
  * it has yet to act on — but not necessarily a cancellation: the supervisor
  * raises it once a scan on a request near or past its stuck threshold, the
  * request's cleanup included. So a request already unwound for its
- * cancellation is not pending, whatever its reason cell still says.
+ * cancellation is not pending, whatever its reason cell still says — unless
+ * the drain deadline has passed since, which ends its cleanup too.
  *
  * The cost: a task cancel whose kick was taken by another fiber on this thread,
  * or raised before the task published its interrupt address, is not seen here.
@@ -6978,7 +7002,7 @@ static int oxphp_request_end_pending(void)
     if (zend_atomic_bool_load_ex(&EG(timed_out))) {
         return 1;
     }
-    if (*oxphp_cancel_delivered_flag()) {
+    if (oxphp_cancel_already_delivered()) {
         return 0;
     }
     if (oxphp_bridge_is_drain_hard()) {
@@ -7117,7 +7141,7 @@ static int oxphp_mark_cancelled_bailout(oxphp_cancel_reason_t reason) {
 
     /* The bridge bails on this answer: the request is unwound for its
      * cancellation here as surely as by the interrupt handler. */
-    *oxphp_cancel_delivered_flag() = true;
+    oxphp_cancel_mark_delivered();
     return 1;
 }
 
@@ -7909,7 +7933,7 @@ PHP_RINIT_FUNCTION(oxphp_sapi)
      * so a stranded entry can't bleed into a new request. */
     oxphp_bridge_aggregate_clear();
 
-    oxphp_cancel_delivered_outside_fiber = false;
+    oxphp_cancel_delivered_outside_fiber = OXPHP_UNWOUND_NONE;
 
     /* Mark the decorator instance cache uninitialized so the first decorator
      * of this request re-creates it in fresh request-scoped memory.

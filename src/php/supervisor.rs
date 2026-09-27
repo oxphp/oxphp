@@ -23,7 +23,8 @@ impl StuckKind {
 /// previous scan, each scan raising one (see `Supervisor::scan_slot`). The VM
 /// answers where it would notice `max_execution_time` — at a loop's back edge,
 /// or when an internal call returns — so a thread inside a single C call does
-/// not, unless that call runs PHP code of its own (a callback).
+/// not, unless that call invokes a callable, PHP or internal: the engine checks
+/// after each one it calls back (`usort($a, 'strcmp')` reads as `cpu`).
 ///
 /// `cpu_delta == 0` → stuck on syscall/lock (`io`).
 /// `cpu_delta > 0 && tick_delta == 0` → inside C code (`c_call`).
