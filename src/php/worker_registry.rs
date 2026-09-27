@@ -63,7 +63,7 @@ impl WorkerSlot {
     /// it, or has already unpublished the address and this kick loads null.
     /// Both sides use SeqCst: the argument needs the store of null and the
     /// increment ordered against each other's loads.
-    fn kick(&self) {
+    pub(crate) fn kick(&self) {
         self.kicks_in_progress.fetch_add(1, Ordering::SeqCst);
         raise_interrupt(self.interrupt_flag_ptr.load(Ordering::SeqCst));
         self.kicks_in_progress.fetch_sub(1, Ordering::Release);

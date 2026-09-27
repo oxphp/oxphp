@@ -1224,18 +1224,18 @@ void oxphp_bridge_request_interrupt(void);
  * the address valid (the target worker thread must still be alive). */
 void oxphp_bridge_request_interrupt_at(void* addr);
 
-/* ── Tick observer ──
+/* ── Progress tick ──
  *
- * Per-worker counter incremented once per PHP function call by a
- * registered zend_observer_fcall_register callback. The supervisor
- * uses tick deltas (combined with thread CPU-time deltas) to
- * classify long-running workers: cpu_delta>0 + tick_delta==0 means
- * the worker is stuck inside a C extension, etc.
+ * Per-worker counter incremented by the SAPI's zend_interrupt_function
+ * handler each time the VM answers an interrupt. The supervisor raises
+ * vm_interrupt on a worker whose request is near or past the stuck
+ * threshold and uses tick deltas (combined with thread CPU-time deltas)
+ * to classify it: cpu_delta>0 + tick_delta==0 means the worker is stuck
+ * inside a C extension, etc. A request nobody interrupts never moves it.
  *
  * set_tick_ptr() is called once per worker on the first request
- * (zero-once gate). oxphp_bridge_tick() is the inline fast path
- * invoked by the observer; it bumps the per-thread pointer using a
- * relaxed atomic add. Cost: ~3 ns per call. */
+ * (zero-once gate). oxphp_bridge_tick() bumps the per-thread pointer
+ * using a relaxed atomic add. */
 extern _Thread_local _Atomic(uint64_t)* g_tick_ptr;
 
 void oxphp_bridge_set_tick_ptr(_Atomic(uint64_t)* ptr);

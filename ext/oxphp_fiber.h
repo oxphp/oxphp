@@ -421,7 +421,15 @@ typedef struct _oxphp_request_fiber {
      * See oxphp_mark_cancelled_bailout for why that rule is needed there and
      * nowhere else. */
     bool cancelled;
-    bool completed;          /* set by coroutine before final switch — low-level API never sets DEAD */
+    /* This request has already been unwound for its cancellation — by the
+     * interrupt handler, the drain sweep's bail or a write. The reason cell
+     * stays set for the rest of the request, so without this every later
+     * interrupt — the supervisor raises one a second on a request past its
+     * stuck threshold — would read it as a new cancellation and end the
+     * shutdown functions the first unwind let run. Unlike `cancelled`, raised
+     * for every reason a request is unwound on, _STUCK included. */
+    bool cancel_delivered;
+    bool completed;         /* set by coroutine before final switch — low-level API never sets DEAD */
     /* This request is in the session standing on the thread — it opened one, or
      * it was admitted while one was already there and was handed it. Session
      * state is per thread, not per fiber, so it can only be given back while no

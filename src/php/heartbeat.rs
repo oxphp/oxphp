@@ -1,8 +1,9 @@
 //! Per-worker mutable state observed by the supervisor.
 //!
 //! The supervisor reads these atomics once per second; the worker
-//! writes `request_start_us` on each request and bumps `ticks` once
-//! per PHP function call (via the Zend fcall observer).
+//! writes `request_start_us` on each request and bumps `ticks` each time
+//! its VM answers an interrupt (the supervisor raises one per scan for a
+//! request near or past the stuck threshold).
 
 use std::sync::atomic::AtomicU64;
 
@@ -13,6 +14,10 @@ pub struct WorkerHeartbeat {
     pub ticks: AtomicU64,
     pub last_ticks: AtomicU64,
     pub tid: AtomicU64,
+    /// `request_start_us` of the request the supervisor last took the
+    /// `last_cpu_us` / `last_ticks` baselines for. Written by the supervisor
+    /// only.
+    pub baseline_start_us: AtomicU64,
 }
 
 impl WorkerHeartbeat {
@@ -23,6 +28,7 @@ impl WorkerHeartbeat {
             ticks: AtomicU64::new(0),
             last_ticks: AtomicU64::new(0),
             tid: AtomicU64::new(0),
+            baseline_start_us: AtomicU64::new(0),
         }
     }
 }
