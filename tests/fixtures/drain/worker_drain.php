@@ -90,6 +90,26 @@ oxphp_worker(function () {
             }
             // unreachable
 
+        case '/abandon': // stream whose client leaves: the next write ends
+                         // the request, and its shutdown function then runs
+                         // far past the drain window. The deadline must still
+                         // end that cleanup — the first unwind does not exempt
+                         // it.
+            register_shutdown_function(function () {
+                error_log('abandon-cleanup-start');
+                $until = microtime(true) + 60;
+                while (microtime(true) < $until) {
+                }
+                error_log('abandon-cleanup-done');
+            });
+            header('Content-Type: text/event-stream');
+            for ($i = 0; ; $i++) {
+                echo "data: tick $i\n\n";
+                oxphp_stream_flush();
+                usleep(100000); // native: the client's leaving is met at a write
+            }
+            // unreachable
+
         case '/short': // ordinary request: native blocking sleep, no flush
             usleep((int)($_GET['ms'] ?? 3000) * 1000);
             echo 'short-done';

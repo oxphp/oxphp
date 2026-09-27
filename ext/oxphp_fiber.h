@@ -37,6 +37,20 @@ struct oxphp_io_owner {
     uint32_t idx;
 };
 
+/* ─── Cancellation Delivery ────────────────────────────── */
+
+/* How far a request has been unwound for its cancellation. What runs after an
+ * unwind — its shutdown functions — is left alone by later interrupts, with one
+ * exception: a request unwound before the drain deadline for any reason (a
+ * client gone at a write, a timeout, a stream ended in the soft phase) can
+ * still be ended once more when the deadline passes, or its cleanup would
+ * outlive the drain and last until the forced process exit. */
+typedef enum {
+    OXPHP_UNWOUND_NONE = 0,
+    OXPHP_UNWOUND_SOFT,     /* before the drain deadline */
+    OXPHP_UNWOUND_HARD,     /* at or past it: nothing ends the request again */
+} oxphp_unwound_t;
+
 /* ─── Suspend Reasons ──────────────────────────────────── */
 
 typedef enum {
@@ -421,14 +435,15 @@ typedef struct _oxphp_request_fiber {
      * See oxphp_mark_cancelled_bailout for why that rule is needed there and
      * nowhere else. */
     bool cancelled;
-    /* This request has already been unwound for its cancellation — by the
-     * interrupt handler, the drain sweep's bail or a write. The reason cell
+    /* Whether this request has already been unwound for its cancellation — by
+     * the interrupt handler, the drain sweep's bail or a write — and whether
+     * the drain deadline had passed by then (oxphp_unwound_t). The reason cell
      * stays set for the rest of the request, so without this every later
      * interrupt — the supervisor raises one a second on a request past its
      * stuck threshold — would read it as a new cancellation and end the
      * shutdown functions the first unwind let run. Unlike `cancelled`, raised
      * for every reason a request is unwound on, _STUCK included. */
-    bool cancel_delivered;
+    uint8_t cancel_delivered;
     bool completed;         /* set by coroutine before final switch — low-level API never sets DEAD */
     /* This request is in the session standing on the thread — it opened one, or
      * it was admitted while one was already there and was handed it. Session

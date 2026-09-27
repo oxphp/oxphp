@@ -2912,7 +2912,7 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
         fiber->cancel_bailout_pending = false;
         fiber->handler_threw = false;
         fiber->cancelled = false;
-        fiber->cancel_delivered = false;
+        fiber->cancel_delivered = OXPHP_UNWOUND_NONE;
     }
 }
 
@@ -2970,7 +2970,7 @@ oxphp_request_fiber *oxphp_scheduler_create_fiber(
     fiber->cancel_bailout_pending = false;
     fiber->handler_threw = false;
     fiber->cancelled = false;
-    fiber->cancel_delivered = false;
+    fiber->cancel_delivered = OXPHP_UNWOUND_NONE;
     fiber->completed = false;
     fiber->session_touched = false;
     fiber->consecutive_errors = 0;
@@ -5539,7 +5539,7 @@ int64_t oxphp_async_sched_spawn(void *op_array, void *static_vars,
     fiber->cancel_bailout_pending = false;
     fiber->handler_threw = false;
     fiber->cancelled = false;
-    fiber->cancel_delivered = false;
+    fiber->cancel_delivered = OXPHP_UNWOUND_NONE;
     fiber->consecutive_errors = 0;
     fiber->task_args = NULL;
     fiber->task_argc = 0;

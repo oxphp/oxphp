@@ -23,6 +23,10 @@
 # consecutive-error breaker, or the worker error-exits mid-drain and takes the
 # ordinary in-flight request down with it.
 #
+# Scenario F (cleanup of an abandoned stream): a stream whose client left is
+# ended at its next write, and its shutdown function then runs past the drain
+# window. Having been unwound once does not exempt it: the deadline ends it.
+#
 # NOT wired into run_all.sh or CI (like tests/cli_run.sh) — run manually after
 # touching the drain machinery (fiber sweep, cancel plumbing, drain latches).
 #
@@ -39,6 +43,7 @@ DRAIN_B="drain_b_$$"
 DRAIN_C="drain_c_$$"
 DRAIN_D="drain_d_$$"
 DRAIN_E="drain_e_$$"
+DRAIN_F="drain_f_$$"
 # Ephemeral free port unless the caller pins one via PORT=.
 PORT="${PORT:-$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')}"
 PASS=0
@@ -49,7 +54,7 @@ ok()   { printf '  \033[32mPASS\033[0m %s\n' "$1"; PASS=$((PASS + 1)); }
 bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$1"; FAIL=$((FAIL + 1)); }
 
 cleanup() {
-	docker rm -f "$DRAIN_A" "$DRAIN_B" "$DRAIN_C" "$DRAIN_D" "$DRAIN_E" >/dev/null 2>&1
+	docker rm -f "$DRAIN_A" "$DRAIN_B" "$DRAIN_C" "$DRAIN_D" "$DRAIN_E" "$DRAIN_F" >/dev/null 2>&1
 	rm -rf "$TMP"
 }
 trap cleanup EXIT
@@ -351,6 +356,51 @@ printf '%s' "$LOGS_E" | grep -q "Drain timeout reached" \
 	|| ok "E: deadline never reached, drain ended on completion"
 
 docker rm -f "$DRAIN_E" >/dev/null 2>&1
+
+# ── Scenario F: the deadline ends an abandoned stream's cleanup ─
+# The write after the client left unwinds the request and marks it as unwound,
+# so later interrupts leave its shutdown function alone. The drain deadline's
+# kick is the exception: without it the 60s cleanup lasts until the forced exit,
+# and the cell's CLIENT_ABORT never becomes the cancellation the hard phase is
+# there to deliver.
+if start_container "$DRAIN_F" 3; then
+	ok "F: container up"
+else
+	bad "F: container failed to start"; docker logs "$DRAIN_F" 2>&1 | tail -5; exit 1
+fi
+
+curl -N -s --max-time 1 "http://localhost:${PORT}/abandon" > /dev/null 2>&1
+
+# The premise: the request was unwound at a write and its cleanup is running.
+for _ in $(seq 1 10); do
+	docker logs "$DRAIN_F" 2>&1 | grep -q "abandon-cleanup-start" && break
+	sleep 1
+done
+docker logs "$DRAIN_F" 2>&1 | grep -q "abandon-cleanup-start" \
+	&& ok "F: client left, the write unwound the stream, its cleanup is running" \
+	|| bad "F: the abandoned stream's shutdown function never started"
+
+docker kill -s TERM "$DRAIN_F" >/dev/null
+ELAPSED=$(wait_exit_seconds "$DRAIN_F" 20)
+
+LOGS_F="$(docker logs "$DRAIN_F" 2>&1)"
+# The cancellation itself is logged at debug level, so read what the drain
+# saw: the request leaving (the drain completes) rather than the process
+# giving up on it two seconds later.
+printf '%s' "$LOGS_F" | grep -q "Drain timeout reached" \
+	&& ok "F: deadline reached with the cleanup still running" \
+	|| bad "F: deadline never reached — the premise did not hold"
+
+printf '%s' "$LOGS_F" | grep -q "All connections drained" \
+	&& ! printf '%s' "$LOGS_F" | grep -q "Forcing shutdown" \
+	&& ok "F: the deadline ended the cleanup (exited ${ELAPSED}s after SIGTERM)" \
+	|| bad "F: the cleanup outlived the deadline — it lasted until the forced shutdown"
+
+printf '%s' "$LOGS_F" | grep -q "abandon-cleanup-done" \
+	&& bad "F: the 60s cleanup ran to its end" \
+	|| ok "F: the cleanup did not run to its end"
+
+docker rm -f "$DRAIN_F" >/dev/null 2>&1
 
 echo
 echo "== result: $PASS passed, $FAIL failed =="
