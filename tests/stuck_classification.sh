@@ -18,6 +18,9 @@
 #           run to its end, not be cancelled a second time
 #   parked  the same, for a worker-mode request parked in oxphp_sleep(): the
 #           drain sweep resumes it and unwinds it at its suspend point
+#   timeout the call-free loop under set_time_limit(61): the engine ends it
+#           without the interrupt handler, and its 5 s shutdown function must
+#           run to its end under the interrupts that follow
 #
 # Each shape gets a container of its own with PHP_WORKERS=1, so every stuck
 # count on worker 0 is that shape's. The threshold is fixed at 60 seconds, so a
@@ -31,7 +34,7 @@ set -u
 IMAGE="${1:-oxphp-oxphp:latest}"
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 FIX="$ROOT/tests/fixtures/stuck"
-SHAPES="loop sleep ccall worker cleanup parked"
+SHAPES="loop sleep ccall worker cleanup parked timeout"
 PASS=0
 FAIL=0
 TMP="$(mktemp -d)"
@@ -118,6 +121,34 @@ drain_cleanup() {
 	fi
 }
 
+timeout_cleanup() {
+	# timeout_cleanup <metrics file>
+	# The timer may fire after this is reached — on a busy host, later than 61
+	# seconds of wall time — so wait for the shutdown function to finish or be
+	# ended rather than reading the log once.
+	local name="stuck_timeout_$$" logs
+	for _ in $(seq 1 90); do
+		logs="$(docker logs "$name" 2>&1)"
+		printf '%s' "$logs" | grep -qE "stuck-timeout: shutdown function finished|Request cancelled" && break
+		sleep 1
+	done
+	if ! printf '%s' "$logs" | grep -q "Maximum execution time"; then
+		bad "timeout: max_execution_time never ended the request"
+	elif printf '%s' "$logs" | grep -q "stuck-timeout: shutdown function finished" \
+		&& ! printf '%s' "$logs" | grep -q "Request cancelled"; then
+		# The premise: the shutdown function ran past the threshold, where
+		# the supervisor interrupts it once a scan.
+		if [ "$(long_running "$1")" -ge 3 ] 2>/dev/null; then
+			ok "timeout: shutdown function ran to its end under the supervisor's interrupts"
+		else
+			bad "timeout: no scan saw the shutdown function past the threshold"
+		fi
+	else
+		bad "timeout: shutdown function cut short"
+		printf '%s\n' "$logs" | grep -E "Maximum execution|cancelled|stuck-timeout" | tail -5
+	fi
+}
+
 long_running() {
 	awk '$1 == "oxphp_worker_long_running_total{worker_id=\"0\"}" { print $2 }' "$1"
 }
@@ -167,6 +198,12 @@ for shape in $SHAPES; do
 	c_call=$(stuck_count "$TMP/$shape.metrics" c_call)
 	cpu=$(stuck_count "$TMP/$shape.metrics" cpu)
 	seen="io=${io:-?} c_call=${c_call:-?} cpu=${cpu:-?}"
+	# A request ended too early is this shape's failure, not a missing
+	# premise: read what ended it first.
+	if [ "$shape" = timeout ]; then
+		timeout_cleanup "$TMP/$shape.metrics"
+		continue
+	fi
 	# The premise: worker 0 held a request past the threshold for the
 	# scans this reads. Without it every "never" column holds trivially.
 	if [ "$(long_running "$TMP/$shape.metrics")" -lt 3 ] 2>/dev/null \

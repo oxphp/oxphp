@@ -35,5 +35,27 @@ switch ($_GET['kind'] ?? '') {
             $i++;
         }
         // unreachable
+
+    case 'timeout': // a loop max_execution_time ends past the threshold
+        // Off, as in production: a displayed fatal is a write, and a write
+        // on a request with a reason in its cell records the unwind by
+        // itself — which would leave nothing here for the interrupt to get
+        // wrong.
+        ini_set('display_errors', '0');
+        set_time_limit(61);
+        register_shutdown_function(function () {
+            // The engine ended the request without our interrupt handler, and
+            // the supervisor keeps interrupting it while this runs: that must
+            // not end it a second time.
+            $until = microtime(true) + 5;
+            while (microtime(true) < $until) {
+            }
+            error_log('stuck-timeout: shutdown function finished');
+        });
+        $i = 0;
+        for (;;) {
+            $i++;
+        }
+        // unreachable
 }
 echo "done\n";
