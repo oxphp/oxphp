@@ -1,0 +1,4 @@
+# profile: hooksnetoff
+# description: Runtime hooks without the net category — the control for the net tests: TLS waits must hold the thread
+
+hooks/test_net_off_holds_thread

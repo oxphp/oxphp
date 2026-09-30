@@ -174,7 +174,7 @@ Returns an associative array with server and request metadata.
 | `worker_id` | `int` | Same value as `oxphp_worker_id()` |
 | `request_time` | `float` | Unix timestamp with microsecond precision when the request started |
 | `worker_mode` | `bool` | Whether the current process runs in worker mode |
-| `runtime_hooks` | `array` | The runtime-hook categories this process installed at startup, as a list of category names (`["sleep", "streams"]`). Empty when `RUNTIME_HOOKS` enabled nothing — see [Runtime Hooks](../operations/configuration.md#runtime-hooks) |
+| `runtime_hooks` | `array` | The runtime-hook categories this process installed at startup, as a list of category names (`["sleep", "streams", "net"]`). Empty when `RUNTIME_HOOKS` enabled nothing — see [Runtime Hooks](../operations/configuration.md#runtime-hooks) |
 
 **Example:**
 
@@ -186,7 +186,7 @@ $info = oxphp_server_info();
 //     "worker_id"     => 3,
 //     "request_time"  => 1738800000.123456,
 //     "worker_mode"   => true,
-//     "runtime_hooks" => ["sleep", "streams"],
+//     "runtime_hooks" => ["sleep", "streams", "net"],
 // ]
 
 $elapsed = microtime(true) - $info['request_time'];

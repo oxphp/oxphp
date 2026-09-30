@@ -11,6 +11,12 @@
 #include <sys/resource.h>
 #include <unistd.h>
 #include <fcntl.h>
+#include <errno.h>
+#include <poll.h>
+#if defined(__linux__)
+#include <dlfcn.h>
+#include <link.h>
+#endif
 
 /**
  * Thread-local context — one per OS thread.
@@ -6739,3 +6745,233 @@ int oxphp_bridge_wrap_result_ok_inplace(void *retval,
                               (zend_long)status_val);
     return 0;
 }
+
+/* ═══════════════════════════════════════════════════════════
+ *  libc wait interposition (RUNTIME_HOOKS category "net")
+ *
+ *  poll() is defined here with default visibility. This library is listed ahead
+ *  of libc, so the dynamic linker binds every poll() the process makes —
+ *  libphp's included — to this definition; libc's own is reached through
+ *  RTLD_NEXT. Only a poll() that libphp issues and that is meant to wait — a
+ *  timeout other than zero, an infinite one included — from inside a fiber, is
+ *  acted on, and the decision costs a NULL test, a range check over the
+ *  executable segments of one shared object, and the fiber lookup. Everything
+ *  else goes straight through.
+ * ═══════════════════════════════════════════════════════════ */
+
+#if defined(__linux__)
+
+#define OXPHP_NET_MAX_RANGES 8
+
+static struct { uintptr_t lo, hi; } net_libphp_ranges[OXPHP_NET_MAX_RANGES];
+static size_t net_libphp_range_count = 0;
+
+/* Written once from the PHP extension's MINIT, before any worker thread exists,
+ * and only read afterwards. */
+static oxphp_net_park_fn_t net_park_fn = NULL;
+
+typedef int (*net_poll_fn_t)(struct pollfd *, nfds_t, int);
+static net_poll_fn_t net_real_poll = NULL;
+
+struct net_scan {
+    uintptr_t anchor;
+    int visited;
+    bool found;
+    bool in_main_exe;
+};
+
+/* dl_iterate_phdr() callback: find the object whose loadable segments contain
+ * the anchor, and keep the executable ones — a return address always lands in
+ * code. Stops the walk at that object. */
+static int net_scan_object(struct dl_phdr_info *info, size_t size, void *data)
+{
+    (void) size;
+    struct net_scan *scan = data;
+
+    /* The first object walked is the main program on every libc this runs on. Its
+     * name is not a reliable sign of that: glibc reports an empty string, musl
+     * reports argv[0]. */
+    bool is_main = scan->visited++ == 0;
+
+    bool contains = false;
+    for (int i = 0; i < info->dlpi_phnum; i++) {
+        const ElfW(Phdr) *ph = &info->dlpi_phdr[i];
+        if (ph->p_type != PT_LOAD) continue;
+        uintptr_t lo = info->dlpi_addr + ph->p_vaddr;
+        if (scan->anchor >= lo && scan->anchor < lo + ph->p_memsz) {
+            contains = true;
+            break;
+        }
+    }
+    if (!contains) return 0;
+
+    scan->found = true;
+    if (is_main) {
+        scan->in_main_exe = true;
+        return 1;
+    }
+    for (int i = 0; i < info->dlpi_phnum; i++) {
+        const ElfW(Phdr) *ph = &info->dlpi_phdr[i];
+        if (ph->p_type != PT_LOAD || !(ph->p_flags & PF_X)) continue;
+        if (net_libphp_range_count == OXPHP_NET_MAX_RANGES) break;
+        uintptr_t lo = info->dlpi_addr + ph->p_vaddr;
+        net_libphp_ranges[net_libphp_range_count].lo = lo;
+        net_libphp_ranges[net_libphp_range_count].hi = lo + ph->p_memsz;
+        net_libphp_range_count++;
+    }
+    return 1;
+}
+
+/* Whether the poll() a caller in libphp is bound to is the one defined here. The
+ * symbol is looked up through the global scope, in load order, so a libc that
+ * comes ahead of this library — another link order, a preloaded library — would
+ * leave every call going straight past it, and the category would be reported as
+ * installed while doing nothing. */
+static bool net_poll_is_ours(void)
+{
+    void *bound = dlsym(RTLD_DEFAULT, "poll");
+    Dl_info self_info, bound_info;
+    if (bound == NULL || dladdr((void *) oxphp_bridge_set_net_park_fn, &self_info) == 0
+        || dladdr(bound, &bound_info) == 0) {
+        return false;
+    }
+    return bound_info.dli_fbase == self_info.dli_fbase;
+}
+
+int oxphp_bridge_set_net_park_fn(oxphp_net_park_fn_t fn, const void *libphp_anchor)
+{
+    if (fn == NULL) {
+        __atomic_store_n(&net_park_fn, NULL, __ATOMIC_RELAXED);
+        return 0;
+    }
+
+    struct net_scan scan = { .anchor = (uintptr_t) libphp_anchor };
+    net_libphp_range_count = 0;
+    dl_iterate_phdr(net_scan_object, &scan);
+    if (scan.in_main_exe) {
+        net_libphp_range_count = 0;
+        return -3;
+    }
+    if (!scan.found || net_libphp_range_count == 0) {
+        net_libphp_range_count = 0;
+        return -1;
+    }
+
+    if (!net_poll_is_ours()) {
+        net_libphp_range_count = 0;
+        return -2;
+    }
+
+    __atomic_store_n(&net_park_fn, fn, __ATOMIC_RELAXED);
+    return 0;
+}
+
+/* Raised by the park callback for the length of a connect that is being torn down
+ * outside any fiber — see oxphp_bridge_net_set_abort. Per thread: it describes what
+ * this thread is in the middle of, and nothing else runs on it meanwhile. */
+static __thread int net_abort_waits = 0;
+
+void oxphp_bridge_net_set_abort(int on)
+{
+    net_abort_waits = on;
+}
+
+static inline bool net_called_from_libphp(const void *return_address)
+{
+    uintptr_t addr = (uintptr_t) return_address;
+    for (size_t i = 0; i < net_libphp_range_count; i++) {
+        if (addr >= net_libphp_ranges[i].lo && addr < net_libphp_ranges[i].hi) return true;
+    }
+    return false;
+}
+
+static int net_libc_poll(struct pollfd *fds, nfds_t nfds, int timeout)
+{
+    net_poll_fn_t real = __atomic_load_n(&net_real_poll, __ATOMIC_RELAXED);
+    if (__builtin_expect(real == NULL, 0)) {
+        real = (net_poll_fn_t) dlsym(RTLD_NEXT, "poll");
+        if (real == NULL) {
+            errno = ENOSYS;
+            return -1;
+        }
+        __atomic_store_n(&net_real_poll, real, __ATOMIC_RELAXED);
+    }
+    return real(fds, nfds, timeout);
+}
+
+static int64_t net_monotonic_ns(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t) ts.tv_sec * 1000000000 + ts.tv_nsec;
+}
+
+int poll(struct pollfd *fds, nfds_t nfds, int timeout)
+{
+    oxphp_net_park_fn_t park = __atomic_load_n(&net_park_fn, __ATOMIC_RELAXED);
+    if (park == NULL || timeout == 0 || nfds == 0
+        || !net_called_from_libphp(__builtin_return_address(0))) {
+        return net_libc_poll(fds, nfds, timeout);
+    }
+
+    /* A connect that was cancelled in the middle of its wait, while the fiber was
+     * being torn down — which runs outside any fiber, so the test below would send
+     * the next address's wait to the thread. Answered at once, as the park would. */
+    if (__builtin_expect(net_abort_waits, 0)) return 0;
+
+    if (oxphp_bridge_current_fiber_id() == 0) {
+        return net_libc_poll(fds, nfds, timeout);
+    }
+
+    /* Ready already: answered without suspending anything. */
+    int rc = net_libc_poll(fds, nfds, 0);
+    if (rc != 0) return rc;
+
+    int64_t deadline_ns = timeout > 0 ? net_monotonic_ns() + (int64_t) timeout * 1000000 : -1;
+    for (;;) {
+        int left_ms = -1;
+        if (deadline_ns >= 0) {
+            int64_t left_ns = deadline_ns - net_monotonic_ns();
+            if (left_ns <= 0) return 0;
+            left_ms = (int) ((left_ns + 999999) / 1000000);
+        }
+
+        switch (park(fds, (unsigned long) nfds, left_ms)) {
+        case OXPHP_NET_PARK_DECLINED:
+            /* The caller waits the way it always did, for what is left. */
+            return net_libc_poll(fds, nfds, left_ms);
+        case OXPHP_NET_PARK_DEADLINE:
+        case OXPHP_NET_PARK_CANCELLED:
+            /* A cancelled wait reads, to the caller, as its own timeout: EINTR
+             * would be retried by every loop that can reach this, and a
+             * different error would be reported as a fault of the connection
+             * rather than the end of the task. What the task sees is the
+             * exception the park callback has already thrown. */
+            return 0;
+        default:
+            break;
+        }
+
+        /* Woken: the descriptor may have been drained by someone else in the
+         * meantime, in which case this goes round again for the time that is left. */
+        rc = net_libc_poll(fds, nfds, 0);
+        if (rc != 0) return rc;
+    }
+}
+
+#else /* !__linux__ */
+
+/* The interposition relies on ELF symbol binding and dl_iterate_phdr(). */
+int oxphp_bridge_set_net_park_fn(oxphp_net_park_fn_t fn, const void *libphp_anchor)
+{
+    (void) fn;
+    (void) libphp_anchor;
+    return -1;
+}
+
+void oxphp_bridge_net_set_abort(int on)
+{
+    (void) on;
+}
+
+#endif /* __linux__ */

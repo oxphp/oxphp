@@ -41,7 +41,7 @@ $tmp = "/tmp/worker_{$wid}_buffer.dat";',
 //     "worker_id"     => 3,
 //     "request_time"  => 1740000000.123456,
 //     "worker_mode"   => true,
-//     "runtime_hooks" => ["sleep", "streams"]
+//     "runtime_hooks" => ["sleep", "streams", "net"]
 // ]
 
 header("X-Worker: " . $info["worker_id"]);',

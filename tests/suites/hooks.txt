@@ -154,6 +154,50 @@ hooks/test_stream_timeout_worker
 hooks/test_select_task_multiplex
 hooks/test_select_request_multiplex
 
+# The net category: waits that are not reads on a tcp:// stream. The first three
+# are async tasks that connect to, handshake with and read from a peer that keeps
+# them waiting for a second each, two at a time on one async worker; the last two
+# are request fibers on local sockets, on the one PHP worker, one reading a socket
+# pair and the other writing into a full one. Each asserts the two waits overlap,
+# so each fails on a build that holds the thread for them.
+hooks/test_net_connect_task_multiplex
+hooks/test_net_tls_read_task_multiplex
+hooks/test_net_tls_handshake_task_multiplex
+hooks/test_net_generic_request_multiplex
+hooks/test_net_write_room_request_multiplex
+
+# What parking inside a TLS read must not do to a stream the worker shares: the
+# close of a stream under a parked reader ends that reader instead of resuming it
+# onto freed memory, and a second fiber reading the same stream is refused. Both
+# use the worker's shared state to hand the stream from one request to another,
+# which PHP_WORKERS=1 makes the only way they can meet.
+hooks/test_net_tls_closed_under_parked_reader
+hooks/test_net_tls_shared_second_fiber_refused
+hooks/test_net_tls_liveness_check_keeps_record
+
+# The same close, one operation further out: the fiber is parked in a read on a
+# second connection, started by the error handler that PHP calls from inside a
+# failed write on the one that is closed. The close has to reach the write, not
+# only the read.
+hooks/test_net_connection_closed_while_nested_operation_parked
+
+# The one connect the category leaves on the thread: a persistent stream is findable
+# by its key while it connects, so parking there would let a second fiber close it.
+# The server holds every persistent stream, including those whose key nothing else
+# shares. The opposite assertion to the multiplex tests above, on purpose.
+hooks/test_net_persistent_connect_holds_thread
+
+# A connect made from inside a connect: the engine reports a bindto it cannot bind
+# as a warning in the middle of its address loop, and an error handler that
+# connects somewhere itself must not end the outer connect's window. The outer wait
+# has to stay parked, so this one asserts overlap again.
+hooks/test_net_connect_made_in_warning_handler_keeps_outer_connect_parked
+
+# The PHP CLI binary loads the same extension with the same RUNTIME_HOOKS in its
+# environment, and has no libphp for the category to intercept: it must start
+# without a word on stderr.
+hooks/test_net_cli_binary_stays_quiet
+
 # Three POSTs, one worker: the request body is a stream resource, and worker mode
 # has no per-request resource list to close it. Listed three times because the
 # assertion is about the delta between two consecutive requests, not about any

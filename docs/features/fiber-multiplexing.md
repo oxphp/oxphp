@@ -132,7 +132,7 @@ Fiber multiplexing is **cooperative, not preemptive**. A fiber that calls a bloc
 - DNS resolution (`gethostbyname()`)
 - Any synchronous network or disk I/O
 
-Socket **reads** and **`stream_select()`** are the exception once `RUNTIME_HOOKS=streams` is enabled: both suspend the fiber instead of the thread, which covers clients that block on a PHP stream read (mysqlnd, phpredis, the HTTP stream wrappers) as well as loops waiting on several sockets at once. Writes, `socket_select()`, ext/curl, connecting and DNS resolution still block. Whether the categories were installed at all is reported as `runtime_hooks` by `oxphp_server_info()` and by `/config`. See [Configuration](../operations/configuration.md#runtime-hooks).
+Socket **reads** and **`stream_select()`** are the exception once `RUNTIME_HOOKS=streams` is enabled: both suspend the fiber instead of the thread, which covers clients that block on a PHP stream read (mysqlnd, phpredis, the HTTP stream wrappers) as well as loops waiting on several sockets at once. Writes, `socket_select()`, ext/curl, connecting and DNS resolution still block under `streams` alone; the `net` category also suspends connecting (persistent connects excepted), TLS handshakes and reads, reads on `unix://`, `udp://` and `udg://` sockets, socket pairs and the streams exported from sockets that are not TCP, and writes that wait for room, while `socket_select()`, ext/curl and DNS resolution still block. Whether the categories were installed at all is reported as `runtime_hooks` by `oxphp_server_info()` and by `/config`. See [Configuration](../operations/configuration.md#runtime-hooks).
 
 ### How to Avoid Blocking
 
