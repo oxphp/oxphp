@@ -1,0 +1,48 @@
+# profile: hooksdbapm
+# description: Runtime hooks against real MySQL and Redis with APM auto-instrumentation wrapping the same methods
+
+hooksdbapm/test_apm_active
+hooksdb/test_db_clients_reachable
+
+# The hooksdb tests whose shared connection is used through a method APM wraps
+# on top of the runtime hook: PDO and mysqli objects, and Redis commands. Each
+# of these fails if the wrapper calls around the guard instead of through it.
+hooksdb/test_shared_mysql_no_crosstalk
+hooksdb/test_shared_mysqli_connect_no_crosstalk
+hooksdb/test_shared_redis_no_crosstalk
+hooksdb/test_shared_redis_task_multiplex
+hooksdb/test_shared_persistent_no_crosstalk
+hooksdb/test_shared_db_concurrent_queries
+hooksdb/test_shared_pdo_attribute_filter
+hooksdb/test_shared_redis_wait_gives_up
+hooksdb/test_shared_mysqli_close_under_parked_reader
+
+# Persistent PDO constructors are serialised per data source by a hook on
+# PDO::__construct, which APM wraps too.
+hooksdb/test_persistent_ctor_race_one_connection
+hooksdb/test_persistent_ctor_under_parked_holder
+hooksdb/test_persistent_ctor_options_differ
+hooksdb/test_persistent_ctor_driver_option_not_shared
+hooksdb/test_persistent_ctor_shares_idle_connection
+hooksdb/test_persistent_ctor_dead_connection_replaced
+hooksdb/test_persistent_ctor_driver_without_liveness
+hooksdb/test_persistent_ctor_gate_per_source
+hooksdb/test_persistent_ctor_gate_spellings
+hooksdb/test_persistent_ctor_ping_under_concurrent_use
+hooksdb/test_persistent_ctor_nested_handle_keeps_claim
+
+# Its Redis commands go through the APM wrapper, but what it checks does not
+# depend on the wrapper: code outside a request fiber never waits for a claim,
+# and the refusal it expects happens at the socket, below the method handlers.
+# It passes with the wrapper calling around the guard too, and is here to show
+# the wrapper does not break that path, not to catch the guard being skipped.
+hooksdb/test_shared_conn_outside_fiber_refused
+
+# Controls: these never pass through the APM wrapper, and pass with or without
+# it. The procedural mysqli_query() is not an APM target; PDO::connect() returns
+# the driver subclass, whose inherited copy of query() APM does not wrap; and
+# pconnect()/rawCommand() are not APM targets. They show the runtime hooks still
+# hold on the paths APM leaves alone while it is enabled.
+hooksdb/test_shared_mysqli_no_crosstalk
+hooksdb/test_shared_pdo_connect_no_crosstalk
+hooksdb/test_shared_pconnect_two_objects

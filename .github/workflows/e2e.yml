@@ -107,7 +107,7 @@ jobs:
       # The compose profiles take PHP_VERSION from the environment and pass it
       # to the build, so run_all.sh builds every profile on this version.
       PHP_VERSION: ${{ matrix.php }}
-      # hooksdb builds FROM this image instead of its oxphp-oxphp:latest default.
+      # hooksdb and hooksdbapm build FROM this image instead of their oxphp-oxphp:latest default.
       OXPHP_BASE_IMAGE: oxphp-e2e:php${{ matrix.php }}
     steps:
       - uses: actions/checkout@v5

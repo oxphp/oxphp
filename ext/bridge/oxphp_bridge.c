@@ -4544,7 +4544,7 @@ typedef struct {
 typedef struct {
     char class_name[128];
     char func_name[128];
-    zif_handler original_handler; /* captured during MINIT before any replacement */
+    zif_handler original_handler; /* captured during MINIT, before the wrapper replaces it */
 } oxphp_apm_approved_hook_t;
 
 typedef struct {
@@ -4729,8 +4729,11 @@ void oxphp_apm_install_on_thread(void) {
                  approved_hooks[i].class_name);
         snprintf(entry->func_name, sizeof(entry->func_name), "%s",
                  approved_hooks[i].func_name);
-        /* Use the original handler captured during MINIT (before any replacement),
-           not the current handler which may already be our wrapper from another thread. */
+        /* Use the handler captured during MINIT, not the current one, which may
+           already be our wrapper from another thread. The captured handler is
+           not necessarily the extension's own: approval runs after the SAPI's
+           other handler swaps, so it can be one of those, which the wrapper
+           then calls through. */
         entry->original_handler = approved_hooks[i].original_handler;
 
         func->internal_function.handler = oxphp_apm_hook_wrapper;

@@ -7868,10 +7868,6 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
     }
 #endif
 
-    /* APM hook approval — validates targets against loaded extensions.
-       No handler replacement here; that happens per-thread in RINIT. */
-    oxphp_apm_approve_registered_hooks();
-
     /* Register fiber-await callback so Rust can call it via the bridge. */
     oxphp_bridge_set_fiber_await(oxphp_fiber_suspend_for_await);
     oxphp_bridge_set_in_fiber_check(oxphp_in_oxphp_fiber);
@@ -7920,6 +7916,20 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
     oxphp_filter_guard_install();
     oxphp_runtime_hooks_install();
     oxphp_request_body_hook_install();
+
+    /* APM hook approval — validates targets against loaded extensions and
+     * records the handler each one is to call. No handler replacement here;
+     * that happens per-thread in RINIT.
+     *
+     * After every handler swap above, not before: the handler recorded here is
+     * the one the APM wrapper calls. The runtime hooks replace several of the
+     * same methods (PDO::query, mysqli::prepare, the Redis commands, ...) with
+     * handlers that claim the connection for the calling fiber, and a wrapper
+     * that recorded the extension's own handler first would call around that
+     * claim, letting two fibers use one connection at once. Recorded here, the
+     * call runs wrapper, then claim, then the extension, and a span includes
+     * any wait for the connection. */
+    oxphp_apm_approve_registered_hooks();
 
     return SUCCESS;
 }

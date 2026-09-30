@@ -235,7 +235,7 @@ Database hooks (PDO, mysqli) decorate their spans with OpenTelemetry semantic-co
 
 Hook installation uses a two-phase design for thread safety under PHP ZTS:
 
-1. **Phase 1 (MINIT)** — during module initialization, OxPHP validates each target function against the loaded extensions and captures original handler pointers into a read-only approved list
+1. **Phase 1 (MINIT)** — during module initialization, OxPHP validates each target function against the loaded extensions and captures the handler pointer each target has at that point into a read-only approved list. This runs after OxPHP's own handler replacements, so with `RUNTIME_HOOKS` enabling `streams`, the handler captured for a PDO, mysqli or Redis method that category also hooks is OxPHP's guarded one: for a query or command it claims the connection for the calling fiber, and for `PDO::__construct` it serialises persistent constructors to the same data source (see [Runtime Hooks](../operations/configuration.md#runtime-hooks)). The span then wraps that guard. Inside worker-mode request fibers and async task fibers, where the guard can wait, the span's duration, and for a query the slow-query flag, includes any wait for a connection another request or task is using
 2. **Phase 2 (RINIT)** — on the first request per worker thread, the approved hooks are installed into that thread's function tables
 
 This ensures each ZTS worker thread has consistent function table modifications and thread-local state.
