@@ -80,6 +80,46 @@ struct oxphp_symbol_global_name {
 extern const struct oxphp_symbol_global_name
     oxphp_symbol_global_names[OXPHP_SYMBOL_GLOBAL_COUNT];
 
+/* What a fiber is in the middle of, as far as the waits below the stream layer
+ * are concerned: the socket stream an operation is running on, whether anything
+ * freed it while the fiber waited, whether the operation is a TLS loop that cannot
+ * simply be left, and whether a connect is going on, which frame it was started
+ * from, and whether it has been told it was cancelled. Operations nest — a user
+ * error handler or a stream notifier runs inside the one that raised it, and can
+ * start another on a stream of its own — so an operation takes the whole group,
+ * starts from an empty one, and gives back what it found when it ends. Held in one struct, rather than as separate fields,
+ * so that taking, restoring and forgetting it are each one assignment: a field
+ * added later cannot be left out of any of them.
+ *
+ * What an operation found is kept in the C frame of the call that began it, and
+ * `outer` points there from the group that replaced it. The chain exists for one
+ * reader, the close hook: the fiber can be parked in the innermost operation while
+ * another fiber closes the stream an enclosing one is still inside, and a name that
+ * only the innermost group carries would let that close go unnoticed. The links are
+ * valid for as long as the frames they point into, so the chain is walked only
+ * while the fiber is inside the operations, and is cut — the whole group zeroed —
+ * wherever a bailout is recovered from, which is the one way out that walks past
+ * the frames without running them.
+ *
+ * What the chain gives is limited by how the close hook finds the fiber: through
+ * the claim on the stream, which has one holder. While the fiber holds it, a close
+ * of any stream in the chain is seen; once another fiber's operation on the same
+ * stream has taken it over, the close finds that fiber and not this one. */
+typedef struct oxphp_io_op {
+    struct _php_stream *stream;
+    bool stream_closed;
+    bool abort_on_cancel;
+    bool in_connect;
+    bool connect_aborted;
+    /* The engine's frame that was current when the connect began: the frame of the
+     * function that asked for it. Only a wait made from that frame is the
+     * connect's own; one made from a deeper one is code the connect called out
+     * to — an error handler, for the warning about an unresolvable name or a bindto
+     * — and is nothing this group knows about. Compared, never dereferenced. */
+    const zend_execute_data *connect_frame;
+    struct oxphp_io_op *outer;
+} oxphp_io_op;
+
 /* Written on suspend only (oxphp_fiber_save_php_state) and read only while that
  * fiber is suspended — see oxphp_scheduler_start_fiber for why handing a fiber a
  * NEW request restores none of it. Holds no Zend VM state: zend_fiber_switch_context
@@ -334,24 +374,58 @@ typedef struct _oxphp_request_fiber {
         } io;
     } suspend_data;
 
-    /* The socket stream this fiber is parked inside an operation on, and whether
-     * anything freed it while it waited.
+    /* The operation this fiber is inside, as far as the waits below the stream
+     * layer are concerned: the socket stream it is running on, whether anything
+     * freed that stream while the fiber waited, whether it is a TLS loop, whether a
+     * connect is going on. See oxphp_io_op.
      *
      * A read that parks holds the php_stream and its php_netstream_data_t in a C
      * frame across the suspension, and the worker goes on running other fibers on
      * the same thread — one of which can close that very stream when the
      * connection is shared, which is the ordinary shape in worker mode. PHP then
      * frees both structs, and everything the resumed frame would do next, its
-     * return to php_stream_read() included, reads memory that is gone.
+     * return to php_stream_read() included, reads memory that is gone. The stream
+     * is named here so that the close hook can find the fiber and tell it.
      *
      * Kept on the fiber rather than in the parked frame on purpose: an unwind out
      * of the wait (a drain kill bails uncatchably) walks past that frame without
      * running anything in it, so a registration living there could not be taken
      * back. The fiber outlives every such exit and is cleared at the end of its
-     * request. Borrowed, never dereferenced — only compared, so a stale value can
-     * name freed memory without reading it. */
-    struct _php_stream *io_stream;
-    bool io_stream_closed;
+     * request, and wherever a bailout is recovered from. `stream` is borrowed: it
+     * is dereferenced only while `stream_closed` is clear, and the close hook
+     * sets that on every group of the chain that names the stream it is closing,
+     * so a stale value can name freed memory without anything reading it.
+     *
+     * `abort_on_cancel` is raised by an operation whose own loop keeps waiting until
+     * a clock of its own runs out — the OpenSSL record and handshake loops — and
+     * tells the park that a cancelled wait there cannot simply return, because the
+     * loop would wait again: the connection is shut down to end it. `in_connect` is
+     * raised for the length of the engine's TCP connect, which tries one address
+     * after another and waits for each. A wait of it that was ended by cancelling
+     * the fiber sets `connect_aborted`, and every wait after that one in the same
+     * connect is answered at once as cancelled too: otherwise the next address
+     * would be waited for natively, for what is left of the connect timeout, on the
+     * thread this cancellation was meant to free. That holds while the fiber is
+     * running. A fiber that is torn down with the scheduler is resumed from outside
+     * any fiber, where the bridge does not hand a poll() to the park callback at
+     * all, so there the callback raises a flag in the bridge for the rest of the
+     * connect instead: see oxphp_bridge_net_set_abort. */
+    oxphp_io_op io_op;
+
+    /* libc-level waits (RUNTIME_HOOKS category "net"). `net_park_off` keeps the
+     * fiber from parking in them, and from parking in the reads the category adds
+     * on local sockets: it is raised for good once the fiber has taken a
+     * cancellation at any suspend point, or been unwound out of such a wait — what
+     * runs next is cleanup, and a second suspension would only hand the
+     * cancellation to a retry loop that has already been told. `net_park_hold` is
+     * the same refusal for the length of an operation that is meant to hold the
+     * thread, such as accepting a connection: a count that the operation raises and
+     * lowers by itself, kept apart from `net_park_off` so that lowering it cannot
+     * undo a cancellation taken in between. Both are cleared where the request or
+     * task ends, and `net_park_hold`, with `io_op`, wherever a bailout is recovered
+     * from. */
+    bool net_park_off;
+    uint32_t net_park_hold;
 
     /* While PDO's destructor runs on this fiber, the request or task that last
      * used the object it is destroying, for the driver methods that destructor

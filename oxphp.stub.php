@@ -100,9 +100,9 @@ function oxphp_worker_id(): int {}
  * set before php_request_startup() for accurate timing.
  *
  * The runtime_hooks list names the hook categories this process installed at
- * startup ("sleep", "streams"), empty when RUNTIME_HOOKS enabled none. It says
- * the handlers were replaced, not that they suspend anything: outside a fiber
- * they delegate to the builtins they replaced.
+ * startup ("sleep", "streams", "net"), empty when RUNTIME_HOOKS enabled none. It
+ * says the handlers were replaced, not that they suspend anything: outside a
+ * fiber they delegate to the builtins they replaced.
  *
  * @return array{version: string, worker_id: int, request_time: float, worker_mode: bool, runtime_hooks: list<string>}
  *

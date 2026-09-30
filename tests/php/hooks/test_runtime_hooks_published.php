@@ -10,7 +10,7 @@ require_once __DIR__ . '/../test_helper.php';
 // categories it actually swapped handlers for.
 //
 // The spelling matters as much as the content. `1` is not a category name, so a
-// field carrying `["sleep","streams"]` can only have come from the value being
+// field carrying `["sleep","streams","net"]` can only have come from the value being
 // parsed into a state; a field echoing the string back would read `"1"` and
 // leave every caller to re-implement the grammar to find out what that enables.
 
@@ -19,7 +19,7 @@ require_once __DIR__ . '/../test_helper.php';
 // to fail.
 $test = new TestCase('runtime_hooks_published', 'hooks');
 
-$expected = ['sleep', 'streams'];
+$expected = ['sleep', 'streams', 'net'];
 
 $config = @file_get_contents('http://127.0.0.1:9090/config');
 $test->assertTrue('config endpoint reachable', is_string($config));

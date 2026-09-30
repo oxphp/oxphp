@@ -192,6 +192,7 @@ void oxphp_fiber_loop_fci(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
 /* ─── Forward declarations ─────────────────────────────── */
 
 static void oxphp_claim_release_fiber(oxphp_request_fiber *fiber);
+static void oxphp_fiber_forget_io_names(oxphp_request_fiber *fiber);
 static void oxphp_claim_reset_if_empty(void);
 static inline void oxphp_fiber_clear_suspend(oxphp_request_fiber *fiber);
 
@@ -499,6 +500,15 @@ static void oxphp_gc_unprotect_after_bailout(bool protect) {
  * logged: without a line here a worker retired for this reads, everywhere it
  * can be read, as an application that asked to be recycled. */
 static void oxphp_recover_from_bailout(const oxphp_vm_stack_mark *mark) {
+    /* The operation the fatal interrupted is over, whatever it was in the middle of:
+     * the names it left on the fiber go first, ahead of anything below that can run
+     * userland, because that userland can wait on a stream of its own and a wait
+     * that finds a freed stream named acts on it. Every recovery passes here, so a
+     * place that swallows a bailout and recovers need not remember to. */
+    if (oxphp_current_fiber != NULL) {
+        oxphp_fiber_forget_io_names(oxphp_current_fiber);
+    }
+
     /* Close the observer handlers the fatal left open, before anything below
      * touches the frames they were opened on.
      *
@@ -1586,6 +1596,11 @@ static void oxphp_fiber_release_guarded(oxphp_request_fiber *fiber) {
         zend_fiber_switch_unblock();
         CG(unclean_shutdown) = 0;
     } zend_end_try();
+
+    /* Raised by the park callback if this unwind ended a connect in the middle of
+     * its wait, and meant to last no longer than the connect. A fatal out of the
+     * unwind can leave it up, and nothing else on this thread would lower it. */
+    oxphp_bridge_net_set_abort(0);
 }
 
 void oxphp_scheduler_destroy(oxphp_fiber_scheduler *sched) {
@@ -2424,6 +2439,7 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
                     }
                 }
             } zend_catch {
+                oxphp_fiber_forget_io_names(fiber);
                 task_capture_fatal(fiber);
                 oxphp_recover_from_bailout(&mark);
             } zend_end_try();
@@ -2577,6 +2593,7 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
                 oxphp_discard_pending_exception();
             }
         } zend_catch {
+            oxphp_fiber_forget_io_names(fiber);
             fiber->handler_failed = true;
             fiber->failure_source = "bailout in the handler";
             /* max_execution_time does not come through the interrupt handler
@@ -3850,6 +3867,15 @@ static bool oxphp_session_state_present(void) {
                                      "_SESSION", sizeof("_SESSION") - 1) != NULL;
 }
 
+/* For the places that swallow a bailout with a zend_try of their own and do not go
+ * through the recovery: what the interrupted operation named on the fiber is not
+ * meaningful past this point — see oxphp_fiber_forget_io_names. */
+static void oxphp_forget_current_io_names(void) {
+    if (oxphp_current_fiber != NULL) {
+        oxphp_fiber_forget_io_names(oxphp_current_fiber);
+    }
+}
+
 void oxphp_session_release_request_state(void) {
     /* The write first, and always, the way every other SAPI ends a request:
      * php_session_flush(1) both saves the data and closes the save handler, and
@@ -3858,6 +3884,8 @@ void oxphp_session_release_request_state(void) {
     if (PS(session_status) == php_session_active) {
         zend_try {
             php_session_flush(1);
+        } zend_catch {
+            oxphp_forget_current_io_names();
         } zend_end_try();
     }
     /* Guarded, where upstream leaves it bare. Upstream reaches this after the
@@ -3870,6 +3898,8 @@ void oxphp_session_release_request_state(void) {
     if (!Z_ISUNDEF(PS(http_session_vars))) {
         zend_try {
             zval_ptr_dtor(&PS(http_session_vars));
+        } zend_catch {
+            oxphp_forget_current_io_names();
         } zend_end_try();
         ZVAL_UNDEF(&PS(http_session_vars));
     }
@@ -3887,6 +3917,8 @@ void oxphp_session_release_request_state(void) {
     if (PS(mod_data) || PS(mod_user_implemented)) {
         zend_try {
             PS(mod)->s_close(&PS(mod_data));
+        } zend_catch {
+            oxphp_forget_current_io_names();
         } zend_end_try();
     }
 
@@ -3961,6 +3993,8 @@ void oxphp_session_release_request_state(void) {
     zend_string *session_var_name = ZSTR_INIT_LITERAL("_SESSION", 0);
     zend_try {
         zend_delete_global_variable(session_var_name);
+    } zend_catch {
+        oxphp_forget_current_io_names();
     } zend_end_try();
     zend_string_release(session_var_name);
 
@@ -4883,6 +4917,22 @@ bool oxphp_claim_tagged_held_by_other(oxphp_request_fiber *self) {
     return false;
 }
 
+/* What an operation on a stream or a connect leaves on the fiber while it runs: the
+ * group in `io_op` — the stream it is inside, whether that stream was freed under
+ * it, whether it is a TLS loop, whether a connect is going on — and the count of
+ * holds on the thread. Each is put back by the frame that set it, and a bailout
+ * walks past those frames without running them — so every place that recovers from
+ * one has to do it, or the shutdown functions and destructors that follow see an
+ * operation that is over, the name of a stream that may be freed by then included.
+ * The recovery does it for all of them; the two arms of the loop do it again before
+ * anything else, because what they run next is userland. `net_park_off` is not
+ * among them: it says what has happened to the fiber and not what it is in the
+ * middle of. */
+static void oxphp_fiber_forget_io_names(oxphp_request_fiber *fiber) {
+    fiber->io_op = (oxphp_io_op) {0};
+    fiber->net_park_hold = 0;
+}
+
 /* Give up every stream this fiber holds. Called where a request or task ends,
  * which is the release point the claim is defined against. */
 static void oxphp_claim_release_fiber(oxphp_request_fiber *fiber) {
@@ -4891,8 +4941,8 @@ static void oxphp_claim_release_fiber(oxphp_request_fiber *fiber) {
      * without holding a claim on anything. An unwind out of the wait leaves the
      * pointer behind — the frame that set it is walked past, not run — and the end
      * of the request is the first moment it is certainly meaningless. */
-    fiber->io_stream = NULL;
-    fiber->io_stream_closed = false;
+    oxphp_fiber_forget_io_names(fiber);
+    fiber->net_park_off = false;
 
     if (oxphp_claim_slots == NULL || oxphp_claim_count == 0) return;
 

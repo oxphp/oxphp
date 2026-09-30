@@ -1010,7 +1010,7 @@ bool oxphp_bridge_get_superglobals_enabled(void);
 
 /** Publish the runtime-hook categories this process installed, as a
  *  comma-separated list of category names in a canonical order
- *  ("sleep,streams"). Called once from the PHP extension's MINIT, on the
+ *  ("sleep,streams,net"). Called once from the PHP extension's MINIT, on the
  *  startup thread, before any worker thread exists; the value is a property of
  *  the process rather than of a request, so it is a plain global and not
  *  __thread. Values longer than the buffer are truncated.
@@ -1541,6 +1541,51 @@ uint64_t oxphp_bridge_async_next_deadline_ns(void);
 typedef uint64_t (*oxphp_current_fiber_id_fn_t)(void);
 void oxphp_bridge_set_current_fiber_id_fn(oxphp_current_fiber_id_fn_t fn);
 uint64_t oxphp_bridge_current_fiber_id(void);
+
+/* ─── libc wait interposition (RUNTIME_HOOKS category "net") ──
+ * This library defines poll() and sits ahead of libc in the symbol search
+ * order, so every poll() the process makes arrives here first. Almost all of
+ * them are forwarded untouched. The exception is a poll() that libphp.so issues
+ * to wait — any timeout but zero, an infinite one included — from inside a
+ * request or task fiber: connecting a socket, an OpenSSL handshake or record
+ * read, a write waiting for buffer room. Those are
+ * the waits PHP makes below its stream layer, where no ops-table hook can reach,
+ * and this is where the fiber is suspended instead of the worker thread.
+ *
+ * The caller is identified by the address poll() returns to, matched against the
+ * executable segments of the shared object that contains `libphp_anchor`; every
+ * other caller (the Rust runtime, libc, other libraries) sees libc's poll() and
+ * nothing else.
+ *
+ * `fn` is called with the caller's own descriptor set and the time left, and
+ * answers what happened to the wait. NULL uninstalls. Returns 0 on success, -1
+ * when the interposition cannot be made safe: the anchor is not inside a shared
+ * object, so there is no range to recognise PHP's calls by. Returns -2 when the
+ * poll() that libphp is bound to is not this library's own, so that nothing would
+ * reach `fn`. Returns -3 when the anchor sits in the main executable — the PHP CLI
+ * binary, which carries the engine inside itself — whose own poll() calls could not
+ * be told from the host's (the Rust runtime's, in the server): not a fault of the
+ * installation, there is simply no libphp to intercept. */
+typedef enum {
+    OXPHP_NET_PARK_WOKE = 1,       /* a descriptor may be ready: look again */
+    OXPHP_NET_PARK_DECLINED = 0,   /* nothing was parked: do the wait natively */
+    OXPHP_NET_PARK_CANCELLED = -1, /* the fiber was cancelled or is unwinding */
+    OXPHP_NET_PARK_DEADLINE = -2,  /* the time ran out while parked */
+} oxphp_net_park_result;
+
+struct pollfd;
+typedef int (*oxphp_net_park_fn_t)(struct pollfd *fds, unsigned long nfds, int timeout_ms);
+int oxphp_bridge_set_net_park_fn(oxphp_net_park_fn_t fn, const void *libphp_anchor);
+
+/* While raised, every poll() libphp makes to wait (a timeout of zero is not one),
+ * on this thread, is answered at once as a timeout, whether or not a fiber is running. Meant for one
+ * case: a connect whose wait ended because the request was being torn down, which
+ * goes on to try the next address of the host name and would wait for it on the
+ * thread — and that teardown runs outside any fiber, so the check that sends a
+ * poll() to the park callback never lets the connect's next wait reach it. Raised
+ * by the callback when it sees that wait end that way, lowered by the code that
+ * ends the connect or the teardown. */
+void oxphp_bridge_net_set_abort(int on);
 
 /* ─── Async Exception Details ────────────────────────────── */
 void oxphp_bridge_set_async_exception(const char *cls, const char *msg);

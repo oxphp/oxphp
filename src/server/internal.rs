@@ -296,7 +296,7 @@ fn build_config_json(config: &Config, plugin_manager: &PluginManager) -> serde_j
         // publishes the categories it installed. Reported as the parsed set
         // rather than the raw value so a reader does not have to implement that
         // grammar to find out what is on — `RUNTIME_HOOKS=all` and
-        // `RUNTIME_HOOKS=sleep,streams` are one state and read as one here.
+        // `RUNTIME_HOOKS=sleep,streams,net` are one state and read as one here.
         obj.insert(
             "runtime_hooks".to_string(),
             serde_json::json!(crate::bridge::runtime_hooks()),

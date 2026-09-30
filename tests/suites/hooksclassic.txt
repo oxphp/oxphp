@@ -10,3 +10,7 @@ hooks/test_select_declines
 hooks/test_select_shapes
 hooks/test_select_cancel_hooked
 hooks/test_select_unwatchable_fd
+hooks/test_net_cancel_hooked
+hooks/test_net_cancel_cleanup_connect_holds_thread
+hooks/test_net_cancel_plain_write_keeps_connection
+hooks/test_net_cancel_inside_persistent_connect_keeps_cleanup_on_thread

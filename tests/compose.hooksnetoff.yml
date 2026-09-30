@@ -1,16 +1,14 @@
-# Runtime hooks in traditional mode: RUNTIME_HOOKS=1 + ASYNC_WORKERS=4.
-# Native sleep()/usleep() and blocking tcp:// socket reads are hooked to
-# fiber-suspending implementations.
-# Task fibers exercise the hooked path; the request context has no fiber,
-# so it exercises the original-handler fallback path.
+# The net category switched off while the rest of the hooks stay on:
+# RUNTIME_HOOKS=sleep,streams, one PHP worker, one async worker. The control for
+# the net tests in the hooks profile — the same TLS waits, run where nothing parks
+# them, have to hold the worker thread for their full length. A build in which the
+# category gate does nothing passes every test there and fails the one here.
 #
 # Standalone usage:
-#   docker compose -f compose.yml -f compose.hooksclassic.yml up
+#   docker compose -f compose.yml -f compose.hooksnetoff.yml up
 services:
-  # The peer for the net tests: a TLS server whose timing is set by the port. See
-  # fixtures/net_peer/tls_peer.php for what each port does. A stock PHP image rather
-  # than this build, so the peer can never be the thing being tested.
-  hooksclassic-netpeer:
+  # See compose.hooks.yml: the peer is a stock PHP image running the same script.
+  hooksnetoff-netpeer:
     image: php:8.4-zts-alpine3.23
     command: ["php", "/peer/tls_peer.php"]
     networks: [test-net]
@@ -24,14 +22,14 @@ services:
     volumes:
       - ./fixtures/net_peer:/peer:ro
 
-  oxphp-hooksclassic:
+  oxphp-hooksnetoff:
     build:
       context: ..
       dockerfile: docker/dev/Dockerfile
       args:
         PHP_VERSION:
     depends_on:
-      hooksclassic-netpeer:
+      hooksnetoff-netpeer:
         condition: service_healthy
     ports:
       - "80"
@@ -46,11 +44,12 @@ services:
     environment:
       LOG_LEVEL: error
       INTERNAL_ADDR: 0.0.0.0:9090
-      ASYNC_WORKERS: 4
-      RUNTIME_HOOKS: "1"
-      # The TLS peer the net tests connect to; the address that answers nothing is
-      # derived from it in the tests.
-      NET_PEER: hooksclassic-netpeer
+      WORKER_FILE: /var/www/html/worker/worker_entry.php
+      PHP_WORKERS: "1"
+      ASYNC_WORKERS: 1
+      RUNTIME_HOOKS: "sleep,streams"
+      NET_PEER: hooksnetoff-netpeer
     volumes:
       - ../www:/var/www/html
       - ./php:/var/www/html/public/tests
+      - ./fixtures/worker:/var/www/html/worker
