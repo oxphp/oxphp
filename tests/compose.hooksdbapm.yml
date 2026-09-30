@@ -1,0 +1,42 @@
+# The hooksdb setup (RUNTIME_HOOKS=1, one PHP worker, MySQL and Redis alongside)
+# with APM auto-instrumentation switched on as well.
+#
+# APM wraps some of the same database methods the runtime hooks guard —
+# PDO::__construct/query/exec/prepare, mysqli::query/prepare and a handful of
+# Redis commands — so with both enabled a call to one of them on the class itself
+# passes through two replacement handlers. The shared-connection tests only mean
+# something here if the APM wrapper calls the guarded handler rather than the
+# extension's own: otherwise two fibers sharing one connection are not kept apart.
+#
+# The OTLP endpoint points at nothing, as in compose.apm.yml: what is under test
+# is the call path through the wrapper, not the export.
+#
+# Builds from the same fixtures/hooks_db image as hooksdb; build the dev image
+# first.
+#
+# Standalone usage:
+#   docker compose -f compose.yml -f compose.hooksdbapm.yml up
+services:
+  hooksdb-mysql:
+    extends:
+      file: compose.hooksdb.yml
+      service: hooksdb-mysql
+
+  hooksdb-redis:
+    extends:
+      file: compose.hooksdb.yml
+      service: hooksdb-redis
+
+  oxphp-hooksdbapm:
+    extends:
+      file: compose.hooksdb.yml
+      service: oxphp-hooksdb
+    depends_on:
+      hooksdb-mysql:
+        condition: service_healthy
+      hooksdb-redis:
+        condition: service_healthy
+    environment:
+      OTEL_ENABLED: "true"
+      OTEL_APM_ENABLED: "true"
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://localhost:4317
