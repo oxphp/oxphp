@@ -4597,18 +4597,30 @@ static void oxphp_apm_hook_wrapper(zend_execute_data *execute_data, zval *return
     const char *cname = (execute_data->func->common.scope)
         ? ZSTR_VAL(execute_data->func->common.scope->name) : "";
 
-    /* Find the hook entry to get the original handler */
+    /* Find the hook entry to get the original handler. Case-insensitive, like
+     * oxphp_apm_lookup(): hooks are registered by name in any case (Redis::rpush),
+     * while fname/cname are the declared spelling (rPush). ASCII-only, so a
+     * userland setlocale() cannot change the result. The name is compared, not
+     * the zend_function pointer: a closure over the method ($r->rPush(...))
+     * calls this wrapper with a copy of the function. */
+    size_t fname_len = strlen(fname);
+    size_t cname_len = strlen(cname);
     zif_handler orig = NULL;
     for (int i = 0; i < apm_hook_count; i++) {
-        if (strcmp(apm_hooks[i].func_name, fname) == 0 &&
-            strcmp(apm_hooks[i].class_name, cname) == 0) {
+        if (zend_binary_strcasecmp(apm_hooks[i].func_name, strlen(apm_hooks[i].func_name),
+                                   fname, fname_len) == 0 &&
+            zend_binary_strcasecmp(apm_hooks[i].class_name, strlen(apm_hooks[i].class_name),
+                                   cname, cname_len) == 0) {
             orig = apm_hooks[i].original_handler;
             break;
         }
     }
 
     if (__builtin_expect(orig == NULL, 0)) {
-        /* Safety fallback — shouldn't happen. */
+        /* No entry for a function carrying this wrapper. Fail the call loudly
+         * rather than return NULL without running it. */
+        zend_throw_error(NULL, "OxPHP APM: no original handler for %s%s%s",
+                         cname, cname[0] ? "::" : "", fname);
         return;
     }
 
