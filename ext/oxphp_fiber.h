@@ -274,11 +274,14 @@ typedef struct {
 /* A request or task as PDO handle teardown tells them apart: the fiber it runs on
  * and that fiber's id for it, since a fiber goes on to the next request or task
  * once one ends. A NULL fiber is code outside any. `set` is false when there is
- * nothing to tell. */
+ * nothing to tell. `rollback_skipped` and `in_txn` carry the handle's transaction
+ * flag from a skipped rollback to the step PDO runs straight after it. */
 typedef struct {
     const struct _oxphp_request_fiber *fiber;
     uint64_t fiber_id;
     bool set;
+    bool rollback_skipped;
+    bool in_txn;
 } oxphp_pdo_teardown;
 
 /* ─── Request Fiber ────────────────────────────────────── */
@@ -550,9 +553,6 @@ typedef struct _oxphp_fiber_scheduler {
 
     /* Currently running fiber (NULL when in scheduler) */
     oxphp_request_fiber *current;
-
-    /* Fiber ID counter */
-    uint64_t next_fiber_id;
 
     /* Shared handler closure (passed to all fibers) */
     zend_fcall_info *shared_fci;

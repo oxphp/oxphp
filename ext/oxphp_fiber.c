@@ -983,9 +983,14 @@ int oxphp_fiber_park(oxphp_request_fiber *fiber) {
 
 /* ─── Scheduler Init / Destroy ─────────────────────────── */
 
+/* Fiber ids, per thread rather than per scheduler: a worker can run one
+ * scheduler after another, and an id has to keep telling a request or task apart
+ * after its scheduler is gone — a pooled PDO handle kept in a static remembers
+ * which one last used it. */
+static __thread uint64_t oxphp_next_fiber_id = 1;
+
 void oxphp_scheduler_init(oxphp_fiber_scheduler *sched) {
     memset(sched, 0, sizeof(*sched));
-    sched->next_fiber_id = 1;
     sched->epfd = -1;
     sched->timer_fd = -1;
 }
@@ -2959,7 +2964,7 @@ oxphp_request_fiber *oxphp_scheduler_create_fiber(
         fiber = ecalloc(1, sizeof(oxphp_request_fiber));
     }
 
-    fiber->fiber_id = sched->next_fiber_id++;
+    fiber->fiber_id = oxphp_next_fiber_id++;
     fiber->owner_sched = sched;
     fiber->fci = fci;
     fiber->fcc = fcc;
@@ -5522,7 +5527,7 @@ int64_t oxphp_async_sched_spawn(void *op_array, void *static_vars,
         oxphp_fiber_loop_fci(&fiber->zf->fci, &fiber->zf->fci_cache);
     }
 
-    fiber->fiber_id = sched->next_fiber_id++;
+    fiber->fiber_id = oxphp_next_fiber_id++;
     fiber->owner_sched = sched;
     fiber->task_mode = true;
     fiber->cancel_requested = false;
