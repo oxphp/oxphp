@@ -111,6 +111,33 @@ hooksdb/test_persistent_ctor_ping_under_concurrent_use
 # waits on something that is not the connection.
 hooksdb/test_persistent_ctor_nested_handle_keeps_claim
 
+# The other end of a shared handle's life. PDO's object destructor rolls back
+# the transaction the connection reports open and runs the driver's
+# end-of-request cleanup, both before it looks at whether other objects still
+# share the pooled connection — so a request dropping a handle it adopted reaches
+# into the request holding that connection. Once for the rollback, once for
+# pdo_sqlite's cleanup, which unregisters the holder's SQL functions, and once
+# for pdo_mysql's, which frees the result the holder is parked reading. The first
+# two also check that a handle dropped by the request holding the connection —
+# and, for the cleanup, one dropped on a connection nobody holds — still does
+# what PDO has always done.
+hooksdb/test_persistent_dtor_keeps_holder_transaction
+hooksdb/test_persistent_dtor_keeps_holder_functions
+hooksdb/test_persistent_dtor_under_streaming_holder
+
+# Whose handle it is, rather than which fiber it is destroyed on. The cycle
+# collector destroys a handle on whatever fiber runs it: another request's handle
+# collected by the holder must still leave the holder's transaction alone, and
+# the holder's own handle collected by another request must still roll it back.
+# And a handle belongs to the request that last used it, not the one that built
+# it, nor to a later task that happens to run on the same reused fiber.
+hooksdb/test_persistent_dtor_gc_keeps_holder_transaction
+hooksdb/test_persistent_dtor_gc_rolls_back_orphaned_transaction
+hooksdb/test_persistent_dtor_follows_last_user
+# PDO::rollBack() from a request whose wait for a held connection gave up
+# returns false and leaves the holder's transaction alone.
+hooksdb/test_persistent_rollback_refused_on_held_connection
+
 # Last, because both of these end by destroying the connection they hold: a fiber
 # parked inside a socket read holds the stream across the suspension, and another
 # fiber closing that same stream frees it under the reader. Once through a raw
