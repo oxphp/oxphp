@@ -2636,7 +2636,7 @@ static void oxphp_pdo_user_set(zend_object *obj, const oxphp_request_fiber *fibe
     oxphp_pdo_teardown *user = zend_hash_index_find_ptr(oxphp_pdo_users, key);
     if (user == NULL) {
         if (!add) return;
-        user = pemalloc(sizeof(*user), 1);
+        user = pecalloc(1, sizeof(*user), 1);
         zend_hash_index_add_new_ptr(oxphp_pdo_users, key, user);
     }
     user->fiber = fiber;
@@ -2649,7 +2649,7 @@ static void oxphp_pdo_user_set(zend_object *obj, const oxphp_request_fiber *fibe
  * one left behind would be lost with it. */
 static oxphp_pdo_teardown oxphp_pdo_user_take(zend_object *obj)
 {
-    oxphp_pdo_teardown found = { NULL, 0, false };
+    oxphp_pdo_teardown found = { 0 };
     if (oxphp_pdo_users == NULL) return found;
 
     zend_ulong key = (zend_ulong) (uintptr_t) obj;
@@ -3440,7 +3440,11 @@ static oxphp_pdo_teardown *oxphp_pdo_teardown_here(void)
  *
  * Not covered: a holder parked inside a call through one of its objects while
  * another of its objects is freed elsewhere gets the cleanup under that call —
- * as it would with none of this. */
+ * as it would with none of this. And an object of a request that has ended,
+ * collected while another request holds the connection, is not the holder's: a
+ * transaction it left open stays until a holder's object rolls back, with the
+ * holder's own statements inside it — where without this the rollback would
+ * have come at the collection instead, no sooner than the holder took over. */
 static bool oxphp_pdo_teardown_is_holders(pdo_dbh_t *dbh)
 {
     const oxphp_request_fiber *holder = oxphp_claim_owner(dbh);
@@ -3476,13 +3480,24 @@ static bool oxphp_pdo_called_by_rollback(pdo_dbh_t *dbh)
  * for it gave up, or from outside any fiber — the transaction open there is the
  * holder's, so nothing is sent and the call returns false; PDO then reports, by
  * the error mode, whatever error the shared handle already records, which can
- * be the holder's. The destructor ignores what it gets back and clears the
- * handle's own transaction flag either way; oxphp_pdo_free_obj puts it back
- * when the rollback was skipped. */
+ * be the holder's.
+ *
+ * The destructor ignores what it gets back and clears the handle's transaction
+ * flag either way. For pdo_odbc and pdo_dblib that flag is the only record of
+ * the transaction, so a skipped rollback would leave the holder's open on the
+ * server with nothing on the handle saying so: its commit() would throw, its own
+ * destructor would not roll back, and the pool would hand the open transaction to
+ * whoever came next. So the flag is noted here and put back by
+ * oxphp_pdo_persistent_shutdown, the next thing the destructor does — nothing
+ * runs in between, PHP code included. */
 static bool oxphp_pdo_rollback(pdo_dbh_t *dbh)
 {
-    if (oxphp_pdo_called_by_rollback(dbh) ? oxphp_pdo_held_by_other(dbh)
-                                          : !oxphp_pdo_teardown_is_holders(dbh)) {
+    if (oxphp_pdo_called_by_rollback(dbh)) {
+        if (oxphp_pdo_held_by_other(dbh)) return false;
+    } else if (!oxphp_pdo_teardown_is_holders(dbh)) {
+        oxphp_pdo_teardown *dying = oxphp_pdo_teardown_here();
+        dying->rollback_skipped = true;
+        dying->in_txn = dbh->in_txn;
         return false;
     }
 
@@ -3491,8 +3506,17 @@ static bool oxphp_pdo_rollback(pdo_dbh_t *dbh)
     return orig->rollback(dbh);
 }
 
+/* Installed on every guarded handle, the drivers without a cleanup of their own
+ * included — it is where a skipped rollback's transaction flag is put back. PDO
+ * calls this method from its destructor and from nowhere else. */
 static void oxphp_pdo_persistent_shutdown(pdo_dbh_t *dbh)
 {
+    oxphp_pdo_teardown *dying = oxphp_pdo_teardown_here();
+    if (dying->rollback_skipped) {
+        dbh->in_txn = dying->in_txn;
+        dying->rollback_skipped = false;
+    }
+
     if (!oxphp_pdo_teardown_is_holders(dbh)) return;
 
     const struct pdo_dbh_methods *orig = oxphp_pdo_shadow_orig(dbh);
@@ -3519,27 +3543,7 @@ static void oxphp_pdo_free_obj(zend_object *obj)
     oxphp_pdo_teardown *dying = oxphp_pdo_teardown_here();
     oxphp_pdo_teardown outer = *dying;
     *dying = oxphp_pdo_user_take(obj);
-
-    /* PDO clears the handle's transaction flag after the rollback whether or not
-     * it went anywhere. For pdo_odbc and pdo_dblib that flag is the only record
-     * of the transaction, so a skipped rollback would leave the holder's open on
-     * the server with nothing on the handle saying so: its commit() would throw,
-     * its own destructor would not roll back, and the pool would hand the open
-     * transaction to whoever came next. Put back. The extra reference keeps the
-     * handle alive through the original, which can free other objects on it; it
-     * can only be the last one where the pool no longer holds the handle, and
-     * then the handle stays allocated rather than freed under this write. */
-    pdo_dbh_t *dbh = php_pdo_dbh_fetch_inner(obj);
-    bool keep_txn = dbh != NULL && dbh->is_persistent && dbh->in_txn
-        && !oxphp_pdo_teardown_is_holders(dbh);
-    if (keep_txn) dbh->refcount++;
-
     oxphp_pdo_obj_orig->free_obj(obj);
-
-    if (keep_txn) {
-        dbh->in_txn = true;
-        dbh->refcount--;
-    }
     *dying = outer;
 }
 
@@ -3721,15 +3725,12 @@ static void oxphp_pdo_install_shadow(pdo_dbh_t *dbh)
             if (dbh->methods->set_attribute != NULL) {
                 oxphp_pdo_shadows[i].shadow.set_attribute = oxphp_pdo_set_attribute;
             }
-            /* Likewise only where the driver has one: pdo_pgsql has no
-             * end-of-request cleanup, and the destructor skips a slot left
-             * NULL. */
+            /* Likewise only where the driver has one. The end-of-request cleanup
+             * is installed regardless — see oxphp_pdo_persistent_shutdown. */
             if (dbh->methods->rollback != NULL) {
                 oxphp_pdo_shadows[i].shadow.rollback = oxphp_pdo_rollback;
             }
-            if (dbh->methods->persistent_shutdown != NULL) {
-                oxphp_pdo_shadows[i].shadow.persistent_shutdown = oxphp_pdo_persistent_shutdown;
-            }
+            oxphp_pdo_shadows[i].shadow.persistent_shutdown = oxphp_pdo_persistent_shutdown;
             oxphp_pdo_shadow_count = i + 1;
             shadow = &oxphp_pdo_shadows[i].shadow;
         } else {
