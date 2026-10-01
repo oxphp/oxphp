@@ -120,6 +120,26 @@ $t->assertSame(
     '0'
 );
 
+// The same through a closure, which runs a copy of the method whose handler is
+// the closure trampoline rather than the hooked one: it must still be told apart
+// from the destructor, or the rollback is skipped and the transaction stays open.
+$own->beginTransaction();
+$own->exec('INSERT INTO ox_dtor_txn_own VALUES (1)');
+$rollBack = $own->rollBack(...);
+$t->assertTrue('and through a closure', $rollBack());
+$t->assertFalse('which ended the transaction', $own->inTransaction());
+$t->assertSame(
+    'and the rollback reached the server',
+    (string) $own->query('SELECT COUNT(*) FROM ox_dtor_txn_own')->fetchColumn(),
+    '0'
+);
+unset($rollBack);
+// Left open by a failure above, the next beginTransaction() would throw and hide
+// which assertion it was.
+if ($own->inTransaction()) {
+    $own->rollBack();
+}
+
 $own->beginTransaction();
 $own->exec('INSERT INTO ox_dtor_txn_own VALUES (1)');
 unset($own);

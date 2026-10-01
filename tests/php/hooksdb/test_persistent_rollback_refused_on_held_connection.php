@@ -11,10 +11,12 @@ $t = new TestCase('persistent_rollback_refused_on_held_connection', 'hooksdb');
 // transaction on gets there only once its wait for the connection has given up —
 // and the transaction it would then roll back is the holder's, not its own.
 //
-// The wait is bounded by default_socket_timeout, so lowering it to a second makes
-// this request give up while the holder is still parked between its statements,
-// which is where a ROLLBACK would reach the server rather than be refused by the
-// client for arriving mid-exchange.
+// The wait is bounded by the startup value of default_socket_timeout, which this
+// profile's image sets to two seconds (tests/fixtures/hooks_db/Dockerfile); an
+// ini_set() here would not move it. The holder stays parked for up to five, so
+// this request gives up while the holder is still between its statements, which
+// is where a ROLLBACK would reach the server rather than be refused by the client
+// for arriving mid-exchange.
 $sharedState['dtor_txn_key'] = 'rollback-held-' . bin2hex(random_bytes(4));
 unset(
     $sharedState['dtor_txn_parked'],
@@ -55,7 +57,6 @@ $result = null;
 $waited = 0.0;
 $stillHeld = false;
 $keep = null;
-$timeout = ini_get('default_socket_timeout');
 try {
     $opts = [
         PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION,
@@ -63,7 +64,6 @@ try {
     ];
     $keep = new PDO($dsn, $user, $pass, $opts);
 
-    ini_set('default_socket_timeout', '1');
     $start = microtime(true);
     $result = $keep->rollBack();
     $waited = microtime(true) - $start;
@@ -73,13 +73,11 @@ try {
     $stillHeld = !($sharedState['dtor_txn_released'] ?? false);
 } catch (\Throwable $e) {
     $error = str_replace("\n", ' ', $e->getMessage());
-} finally {
-    ini_set('default_socket_timeout', (string) $timeout);
 }
 $sharedState['dtor_txn_dropped'] = true;
 
 $t->assertSame('the call returned rather than threw: ' . $error, $error, '');
-$t->assertTrue('this request gave up waiting for the connection first', $waited >= 0.8);
+$t->assertTrue('this request gave up waiting for the connection first', $waited >= 1.5);
 $t->assertTrue('while the holder was still inside its transaction', $stillHeld);
 $t->assertFalse('and rollBack() refused the holder\'s transaction', $result);
 

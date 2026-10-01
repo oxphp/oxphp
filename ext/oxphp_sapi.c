@@ -3452,16 +3452,21 @@ static bool oxphp_pdo_teardown_is_holders(pdo_dbh_t *dbh)
 
 /* Whether this rollback is PDO::rollBack() on this handle rather than the
  * destructor — the only two callers PDO has. Told apart by the running frame:
- * the method's own, on an object sharing this handle. The destructor pushes no
- * frame, so it sees whatever frame let go of the object — which can be that
- * method's, if the cycle collector runs inside it, and then a rollback is sent
- * that the caller had asked for anyway. A wrapper that replaced the method's
- * handler would hide the frame and send every call down the destructor's rule. */
+ * the method's own, on an object sharing this handle. Recognised by name and
+ * class rather than by handler, because a call through a closure —
+ * `$pdo->rollBack(...)`, Closure::fromCallable() — runs a copy of the function
+ * whose handler is the closure trampoline, and a wrapper another extension put
+ * on the method would hide ours the same way; the copy keeps name and class.
+ * The destructor pushes no frame, so it sees whatever frame let go of the
+ * object — which can be that method's, if the cycle collector runs inside it,
+ * and then a rollback is sent that the caller had asked for anyway. */
 static bool oxphp_pdo_called_by_rollback(pdo_dbh_t *dbh)
 {
     const zend_execute_data *ex = EG(current_execute_data);
     return ex != NULL && ex->func != NULL && ex->func->type == ZEND_INTERNAL_FUNCTION
-        && ex->func->internal_function.handler == oxphp_db_hook_pdo_rollback
+        && ex->func->common.scope != NULL && ex->func->common.function_name != NULL
+        && zend_string_equals_literal_ci(ex->func->common.function_name, "rollback")
+        && instanceof_function(ex->func->common.scope, php_pdo_get_dbh_ce())
         && Z_TYPE(ex->This) == IS_OBJECT
         && php_pdo_dbh_fetch_inner(Z_OBJ(ex->This)) == dbh;
 }
@@ -3471,9 +3476,9 @@ static bool oxphp_pdo_called_by_rollback(pdo_dbh_t *dbh)
  * for it gave up, or from outside any fiber — the transaction open there is the
  * holder's, so nothing is sent and the call returns false; PDO then reports, by
  * the error mode, whatever error the shared handle already records, which can
- * be the holder's. The destructor ignores what it gets back, and clears
- * the handle's own transaction flag either way, which a driver that reports its
- * transaction state itself — pdo_mysql, pdo_pgsql, pdo_sqlite — never reads. */
+ * be the holder's. The destructor ignores what it gets back and clears the
+ * handle's own transaction flag either way; oxphp_pdo_free_obj puts it back
+ * when the rollback was skipped. */
 static bool oxphp_pdo_rollback(pdo_dbh_t *dbh)
 {
     if (oxphp_pdo_called_by_rollback(dbh) ? oxphp_pdo_held_by_other(dbh)
@@ -3514,7 +3519,27 @@ static void oxphp_pdo_free_obj(zend_object *obj)
     oxphp_pdo_teardown *dying = oxphp_pdo_teardown_here();
     oxphp_pdo_teardown outer = *dying;
     *dying = oxphp_pdo_user_take(obj);
+
+    /* PDO clears the handle's transaction flag after the rollback whether or not
+     * it went anywhere. For pdo_odbc and pdo_dblib that flag is the only record
+     * of the transaction, so a skipped rollback would leave the holder's open on
+     * the server with nothing on the handle saying so: its commit() would throw,
+     * its own destructor would not roll back, and the pool would hand the open
+     * transaction to whoever came next. Put back. The extra reference keeps the
+     * handle alive through the original, which can free other objects on it; it
+     * can only be the last one where the pool no longer holds the handle, and
+     * then the handle stays allocated rather than freed under this write. */
+    pdo_dbh_t *dbh = php_pdo_dbh_fetch_inner(obj);
+    bool keep_txn = dbh != NULL && dbh->is_persistent && dbh->in_txn
+        && !oxphp_pdo_teardown_is_holders(dbh);
+    if (keep_txn) dbh->refcount++;
+
     oxphp_pdo_obj_orig->free_obj(obj);
+
+    if (keep_txn) {
+        dbh->in_txn = true;
+        dbh->refcount--;
+    }
     *dying = outer;
 }
 
