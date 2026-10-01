@@ -2610,6 +2610,63 @@ static oxphp_stream_claim_result oxphp_db_await_owner(void *key, oxphp_request_f
  * PDO::ATTR_PERSISTENT and is not the same thing — two objects built with
  * identical pconnect() arguments report different CLIENT IDs, with connection
  * pooling both on (the default) and off. */
+#ifdef OXPHP_HAVE_PDO_HEADERS
+/* For each PDO object on a pooled handle we guard, the request or task that last
+ * had a use for it: the one that built it, then each one that makes a claimed
+ * call through it. Read once, when the object is destroyed, to tell whether that
+ * destruction is the business of whoever holds the connection — see
+ * oxphp_pdo_free_obj. Per thread, like the objects; keyed by the object, whose
+ * entry its own destruction removes. */
+static __thread HashTable *oxphp_pdo_users = NULL;
+
+static void oxphp_pdo_user_dtor(zval *zv)
+{
+    pefree(Z_PTR_P(zv), 1);
+}
+
+static void oxphp_pdo_user_set(zend_object *obj, const oxphp_request_fiber *fiber, bool add)
+{
+    if (oxphp_pdo_users == NULL) {
+        if (!add) return;
+        oxphp_pdo_users = pemalloc(sizeof(HashTable), 1);
+        zend_hash_init(oxphp_pdo_users, 8, NULL, oxphp_pdo_user_dtor, 1);
+    }
+
+    zend_ulong key = (zend_ulong) (uintptr_t) obj;
+    oxphp_pdo_teardown *user = zend_hash_index_find_ptr(oxphp_pdo_users, key);
+    if (user == NULL) {
+        if (!add) return;
+        user = pemalloc(sizeof(*user), 1);
+        zend_hash_index_add_new_ptr(oxphp_pdo_users, key, user);
+    }
+    user->fiber = fiber;
+    user->fiber_id = fiber != NULL ? fiber->fiber_id : 0;
+    user->set = true;
+}
+
+/* Hand back and forget the entry for an object being destroyed. The table goes
+ * with its last entry: a worker thread comes and goes under dynamic scaling, and
+ * one left behind would be lost with it. */
+static oxphp_pdo_teardown oxphp_pdo_user_take(zend_object *obj)
+{
+    oxphp_pdo_teardown found = { NULL, 0, false };
+    if (oxphp_pdo_users == NULL) return found;
+
+    zend_ulong key = (zend_ulong) (uintptr_t) obj;
+    oxphp_pdo_teardown *user = zend_hash_index_find_ptr(oxphp_pdo_users, key);
+    if (user == NULL) return found;
+
+    found = *user;
+    zend_hash_index_del(oxphp_pdo_users, key);
+    if (zend_hash_num_elements(oxphp_pdo_users) == 0) {
+        zend_hash_destroy(oxphp_pdo_users);
+        pefree(oxphp_pdo_users, 1);
+        oxphp_pdo_users = NULL;
+    }
+    return found;
+}
+#endif
+
 static void *oxphp_db_conn_key(zend_object *obj, bool is_pdo)
 {
     if (obj == NULL) return NULL;
@@ -2686,6 +2743,11 @@ static void oxphp_db_guarded_call(zif_handler orig, bool conn_is_arg1, bool is_p
         /* Failure here means the table could not grow, which the socket path
          * already reports; the call goes ahead either way. */
         if (ours) (void) oxphp_claim_acquire(key, self);
+#ifdef OXPHP_HAVE_PDO_HEADERS
+        /* Only a call that has the connection: one that went ahead without it
+         * changes nothing about whose business this object is. */
+        if (ours && is_pdo) oxphp_pdo_user_set(conn, self, false);
+#endif
     }
 
     orig(INTERNAL_FUNCTION_PARAM_PASSTHRU);
@@ -3333,6 +3395,146 @@ static bool oxphp_pdo_set_attribute(pdo_dbh_t *dbh, zend_long attr, zval *val)
     return orig->set_attribute(dbh, attr, val);
 }
 
+/* Whether the connection under this handle belongs, for now, to a fiber other
+ * than the one asking. A fiber holds a connection from its first claimed call on
+ * it to the end of its request or task. Outside a fiber the current fiber is
+ * NULL, so any holder at all is someone else. */
+static bool oxphp_pdo_held_by_other(pdo_dbh_t *dbh)
+{
+    oxphp_request_fiber *owner = oxphp_claim_owner(dbh);
+    return owner != NULL && owner != oxphp_current_fiber;
+}
+
+/* Where PDO's destructor, running here, says whose object it is destroying: the
+ * running fiber's slot, or the thread's outside any fiber — where nothing
+ * suspends, so one slot is enough. */
+static __thread oxphp_pdo_teardown oxphp_pdo_teardown_outside;
+
+static oxphp_pdo_teardown *oxphp_pdo_teardown_here(void)
+{
+    return oxphp_current_fiber != NULL ? &oxphp_current_fiber->pdo_teardown
+                                       : &oxphp_pdo_teardown_outside;
+}
+
+/* PDO's object destructor calls the two methods below on a pooled handle before
+ * it looks at how many objects still share it, so dropping any one object
+ * reaches the driver as if it were the last. That is harmless where every object
+ * on a handle belongs to one request, as in a classic SAPI, and is not where
+ * requests share one: an object dropped by one request would roll back the
+ * transaction another has open on the connection, and run the driver's
+ * end-of-request cleanup under a request still using it — pdo_mysql's frees the
+ * result the holder is parked reading, and pdo_sqlite's unregisters the holder's
+ * SQL functions.
+ *
+ * So while a request or task holds the connection, the destructor reaches the
+ * driver only for an object the holder was the last to have a use for — built
+ * it, or made a claimed call through it since — and does so whichever fiber the
+ * object is destroyed on. That last part matters as much as the first: the
+ * cycle collector frees garbage on whatever fiber fills its buffer, and outside
+ * every fiber between requests, and a holder's object freed there is still the
+ * holder's to clean up; skipped, its transaction would stay open on the pooled
+ * connection for whoever takes it next. Any other object is skipped rather than
+ * put off: the state on the connection is the holder's, and the holder's own
+ * objects still clean up after it. On a connection nobody holds, every object
+ * does both, as before.
+ *
+ * Not covered: a holder parked inside a call through one of its objects while
+ * another of its objects is freed elsewhere gets the cleanup under that call —
+ * as it would with none of this. */
+static bool oxphp_pdo_teardown_is_holders(pdo_dbh_t *dbh)
+{
+    const oxphp_request_fiber *holder = oxphp_claim_owner(dbh);
+    if (holder == NULL) return true;
+
+    const oxphp_pdo_teardown *dying = oxphp_pdo_teardown_here();
+    return dying->set && dying->fiber == holder && dying->fiber_id == holder->fiber_id;
+}
+
+/* Whether this rollback is PDO::rollBack() on this handle rather than the
+ * destructor — the only two callers PDO has. Told apart by the running frame:
+ * the method's own, on an object sharing this handle. The destructor pushes no
+ * frame, so it sees whatever frame let go of the object — which can be that
+ * method's, if the cycle collector runs inside it, and then a rollback is sent
+ * that the caller had asked for anyway. A wrapper that replaced the method's
+ * handler would hide the frame and send every call down the destructor's rule. */
+static bool oxphp_pdo_called_by_rollback(pdo_dbh_t *dbh)
+{
+    const zend_execute_data *ex = EG(current_execute_data);
+    return ex != NULL && ex->func != NULL && ex->func->type == ZEND_INTERNAL_FUNCTION
+        && ex->func->internal_function.handler == oxphp_db_hook_pdo_rollback
+        && Z_TYPE(ex->This) == IS_OBJECT
+        && php_pdo_dbh_fetch_inner(Z_OBJ(ex->This)) == dbh;
+}
+
+/* PDO::rollBack() goes to the driver when the caller holds the connection or
+ * nobody does. With someone else holding it — reached once the caller's wait
+ * for it gave up, or from outside any fiber — the transaction open there is the
+ * holder's, so nothing is sent and the call returns false; PDO then reports, by
+ * the error mode, whatever error the shared handle already records, which can
+ * be the holder's. The destructor ignores what it gets back, and clears
+ * the handle's own transaction flag either way, which a driver that reports its
+ * transaction state itself — pdo_mysql, pdo_pgsql, pdo_sqlite — never reads. */
+static bool oxphp_pdo_rollback(pdo_dbh_t *dbh)
+{
+    if (oxphp_pdo_called_by_rollback(dbh) ? oxphp_pdo_held_by_other(dbh)
+                                          : !oxphp_pdo_teardown_is_holders(dbh)) {
+        return false;
+    }
+
+    const struct pdo_dbh_methods *orig = oxphp_pdo_shadow_orig(dbh);
+    if (orig == NULL || orig->rollback == NULL) return false;
+    return orig->rollback(dbh);
+}
+
+static void oxphp_pdo_persistent_shutdown(pdo_dbh_t *dbh)
+{
+    if (!oxphp_pdo_teardown_is_holders(dbh)) return;
+
+    const struct pdo_dbh_methods *orig = oxphp_pdo_shadow_orig(dbh);
+    if (orig != NULL && orig->persistent_shutdown != NULL) orig->persistent_shutdown(dbh);
+}
+
+/* PDO's own object handlers with the destructor wrapped, for the objects on a
+ * guarded pooled handle. PDO has one handler table for all of them, driver
+ * subclasses included. An object carrying some other — another extension's
+ * swap — is left unwrapped, and its destruction then counts as nobody's: on a
+ * held connection it skips both steps, even when it was the holder's. If the
+ * first object seen carries such a table, every later one is left unwrapped. */
+static zend_object_handlers oxphp_pdo_obj_handlers;
+static const zend_object_handlers *oxphp_pdo_obj_orig = NULL;
+
+/* Says whose object this is for the two methods above, which the destructor
+ * calls first. They can run PHP code — a warning from a failed rollback reaches
+ * the application's error handler — and that code can drop another object here,
+ * so the slot is put back as it was rather than cleared. A bailout out of the
+ * destructor leaves it standing; every wrapped object sets it before the two
+ * methods run, so only an unwrapped one could read it. */
+static void oxphp_pdo_free_obj(zend_object *obj)
+{
+    oxphp_pdo_teardown *dying = oxphp_pdo_teardown_here();
+    oxphp_pdo_teardown outer = *dying;
+    *dying = oxphp_pdo_user_take(obj);
+    oxphp_pdo_obj_orig->free_obj(obj);
+    *dying = outer;
+}
+
+static bool oxphp_pdo_wrap_obj(zend_object *obj)
+{
+    if (obj->handlers == &oxphp_pdo_obj_handlers) return true;
+
+    pthread_mutex_lock(&oxphp_pdo_shadow_lock);
+    if (oxphp_pdo_obj_orig == NULL) {
+        oxphp_pdo_obj_handlers = *obj->handlers;
+        oxphp_pdo_obj_handlers.free_obj = oxphp_pdo_free_obj;
+        oxphp_pdo_obj_orig = obj->handlers;
+    }
+    bool ours = (oxphp_pdo_obj_orig == obj->handlers);
+    pthread_mutex_unlock(&oxphp_pdo_shadow_lock);
+
+    if (ours) obj->handlers = &oxphp_pdo_obj_handlers;
+    return ours;
+}
+
 static zend_result oxphp_pdo_check_liveness(pdo_dbh_t *dbh)
 {
     /* Held by another fiber: alive, and not ours to ask. The ping is a command
@@ -3494,6 +3696,15 @@ static void oxphp_pdo_install_shadow(pdo_dbh_t *dbh)
             if (dbh->methods->set_attribute != NULL) {
                 oxphp_pdo_shadows[i].shadow.set_attribute = oxphp_pdo_set_attribute;
             }
+            /* Likewise only where the driver has one: pdo_pgsql has no
+             * end-of-request cleanup, and the destructor skips a slot left
+             * NULL. */
+            if (dbh->methods->rollback != NULL) {
+                oxphp_pdo_shadows[i].shadow.rollback = oxphp_pdo_rollback;
+            }
+            if (dbh->methods->persistent_shutdown != NULL) {
+                oxphp_pdo_shadows[i].shadow.persistent_shutdown = oxphp_pdo_persistent_shutdown;
+            }
             oxphp_pdo_shadow_count = i + 1;
             shadow = &oxphp_pdo_shadows[i].shadow;
         } else {
@@ -3593,7 +3804,16 @@ static void oxphp_pdo_construct_guarded(zif_handler orig, zval *built,
     if (gate != NULL) oxphp_claim_forget(gate);
 
     if (built != NULL && Z_TYPE_P(built) == IS_OBJECT) {
-        oxphp_pdo_install_shadow(php_pdo_dbh_fetch_inner(Z_OBJ_P(built)));
+        zend_object *obj = Z_OBJ_P(built);
+        pdo_dbh_t *dbh = php_pdo_dbh_fetch_inner(obj);
+        oxphp_pdo_install_shadow(dbh);
+        /* On a guarded handle, the object is this request's until a claimed
+         * call through it says otherwise. */
+        if (dbh != NULL && dbh->methods != NULL
+            && dbh->methods->check_liveness == oxphp_pdo_check_liveness
+            && oxphp_pdo_wrap_obj(obj)) {
+            oxphp_pdo_user_set(obj, self, true);
+        }
     }
 }
 #endif

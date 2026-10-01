@@ -271,6 +271,16 @@ typedef struct {
     HashTable *ini_parked;
 } oxphp_fiber_php_state;
 
+/* A request or task as PDO handle teardown tells them apart: the fiber it runs on
+ * and that fiber's id for it, since a fiber goes on to the next request or task
+ * once one ends. A NULL fiber is code outside any. `set` is false when there is
+ * nothing to tell. */
+typedef struct {
+    const struct _oxphp_request_fiber *fiber;
+    uint64_t fiber_id;
+    bool set;
+} oxphp_pdo_teardown;
+
 /* ─── Request Fiber ────────────────────────────────────── */
 
 typedef struct _oxphp_request_fiber {
@@ -339,6 +349,13 @@ typedef struct _oxphp_request_fiber {
      * name freed memory without reading it. */
     struct _php_stream *io_stream;
     bool io_stream_closed;
+
+    /* While PDO's destructor runs on this fiber, the request or task that last
+     * used the object it is destroying, for the driver methods that destructor
+     * calls — they are handed only the connection handle every object on a
+     * pooled connection shares. Per fiber because the first of them can suspend
+     * it before the second runs. See oxphp_pdo_free_obj in oxphp_sapi.c. */
+    oxphp_pdo_teardown pdo_teardown;
 
     /* The zend_fcall_info/cache for the handler closure (shared, not owned) */
     zend_fcall_info *fci;
