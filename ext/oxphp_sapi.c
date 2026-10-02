@@ -5242,7 +5242,11 @@ static void oxphp_serve_loop(zend_fcall_info *fci, zend_fcall_info_cache *fcc);
  * When a handler calls oxphp_async_await() or oxphp_sleep(), it suspends its
  * fiber, and the event loop picks up new requests or resumes ready fibers.
  *
- * Returns true on graceful shutdown, false if not in worker mode. */
+ * Returns true once the serve loop has exited — for any of the exits listed
+ * on oxphp_worker() in oxphp.stub.php, not only on shutdown — and false (with
+ * E_WARNING) outside worker mode. Throws InvalidServeContextException when
+ * re-entered on the same thread; a bailout out of the loop clears the
+ * re-entry flag and propagates. */
 PHP_FUNCTION(oxphp_worker)
 {
     zend_fcall_info fci;
