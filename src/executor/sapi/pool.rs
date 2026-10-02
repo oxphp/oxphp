@@ -61,8 +61,16 @@ fn worker_busy(id: usize) -> bool {
 
 /// Last step of every PHP worker thread, after its loop has returned and its
 /// final request is shut down: unpublish the slot's `EG(vm_interrupt)`
-/// address, wait out any cross-thread kick still writing through it, then
-/// release the thread's TSRM resources with `ts_free_thread()`.
+/// address, wait out any cross-thread kick still writing through it, close the
+/// thread's persistent resources, then release its TSRM resources with
+/// `ts_free_thread()`.
+///
+/// The persistent resources — pooled database connections, persistent streams —
+/// are kept in a list each thread owns, and PHP closes those lists only at
+/// process shutdown, for threads still registered with TSRM then.
+/// `ts_free_thread()` unregisters the thread and frees its globals but not that
+/// list, so without the explicit close every worker recycle or retire would
+/// leave its connections open, unreachable, until the process exits.
 ///
 /// Without the release, the next worker spawned in this slot can be handed a
 /// recycled thread id (musl reuses `pthread_t`), and TSRM then frees the dead
@@ -77,8 +85,13 @@ pub(super) fn release_worker_thread(id: usize) {
         slot.retire_interrupt();
     }
     // SAFETY: called on the worker thread itself, once, after its last PHP
-    // request has shut down; nothing on this thread touches PHP afterwards.
-    unsafe { crate::php::bindings::ts_free_thread() };
+    // request has shut down; the list is destroyed immediately before the TSRM
+    // block that holds it is freed, and nothing on this thread touches PHP
+    // afterwards.
+    unsafe {
+        crate::php::bindings::oxphp_bridge_destroy_persistent_list();
+        crate::php::bindings::ts_free_thread();
+    }
 }
 
 /// Best-effort wipe of a recycled WORKERS slot: drops the request's
