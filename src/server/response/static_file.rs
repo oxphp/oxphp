@@ -565,16 +565,135 @@ impl FileCache {
     }
 }
 
-/// Re-canonicalize a file path and verify it stays within the document root
-/// or any allow-listed symlink target. Returns `false` if the path escapes
-/// (TOCTOU mitigation).
-async fn verify_canonical(
+/// How long an open refused by another holder's lease keeps being retried.
+/// Linux removes a lease by force after `/proc/sys/fs/lease-break-time`
+/// (45 s by default), so the open gets through before this unless that limit
+/// was raised; past it the refusal is returned as an error.
+const LEASE_WAIT: Duration = Duration::from_secs(50);
+
+/// Open `path` for reading with O_NONBLOCK, so a link to a FIFO cannot block
+/// before the location check refuses it.
+///
+/// On Linux the flag also makes the open of a regular file fail with
+/// EWOULDBLOCK while another process holds a conflicting write lease (for
+/// example Samba with kernel oplocks). The open is then retried after an async
+/// pause rather than without the flag: every attempt resolves the path again,
+/// and a blocking retry would block for good on a link repointed at a FIFO
+/// between the attempts. The pause holds no thread. It is not cut short when
+/// the client goes away — the connection handler lets the dispatch finish —
+/// so an abandoned request waits out at most [`LEASE_WAIT`].
+async fn open_static(path: &Path) -> io::Result<tokio::fs::File> {
+    let deadline = Instant::now() + LEASE_WAIT;
+    let mut pause = Duration::from_millis(5);
+    loop {
+        let opened = tokio::fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(path)
+            .await;
+        match opened {
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock && Instant::now() < deadline => {
+                tokio::time::sleep(pause).await;
+                pause = (pause * 2).min(Duration::from_millis(100));
+            }
+            other => return other,
+        }
+    }
+}
+
+fn path_allowed(
+    path: &Path,
+    canonical_root: &Path,
+    allow_list: &crate::config::SymlinkAllowList,
+) -> bool {
+    path.starts_with(canonical_root) || allow_list.allows(path)
+}
+
+/// Verify that `file`, opened from `file_path`, lies within the document root
+/// or an allow-listed symlink target. Returns `false` if it escapes.
+///
+/// The location is read from the open descriptor, not from a fresh resolution
+/// of `file_path`: a symlink swapped before or after the open then cannot make
+/// the check describe a different file from the one that is read. Where the
+/// descriptor's path is unavailable, [`resolved_path_names_opened_file`] is
+/// the fallback.
+async fn opened_file_allowed(
+    file: &tokio::fs::File,
+    opened: &std::fs::Metadata,
     file_path: &Path,
     canonical_root: &Path,
     allow_list: &crate::config::SymlinkAllowList,
 ) -> bool {
-    match tokio::fs::canonicalize(file_path).await {
-        Ok(real) => real.starts_with(canonical_root) || allow_list.allows(&real),
+    use std::os::fd::AsRawFd;
+    match descriptor_paths(file.as_raw_fd()) {
+        Ok(paths) => paths
+            .iter()
+            .any(|path| path_allowed(path, canonical_root, allow_list)),
+        Err(_) => {
+            resolved_path_names_opened_file(file_path, opened, canonical_root, allow_list).await
+        }
+    }
+}
+
+/// Path of the file behind `fd`, as the kernel records it.
+#[cfg(target_os = "linux")]
+fn descriptor_paths(fd: std::os::fd::RawFd) -> io::Result<Vec<PathBuf>> {
+    std::fs::read_link(format!("/proc/self/fd/{fd}")).map(|path| vec![path])
+}
+
+/// Paths of the file behind `fd`, as the kernel records it: with and without
+/// firmlinks. `realpath` keeps whichever spelling the configured root used —
+/// `/Users/...` or `/System/Volumes/Data/Users/...` — while F_GETPATH always
+/// reports the firmlinked one, so a root written through the data volume
+/// would otherwise refuse every file under it.
+#[cfg(target_os = "macos")]
+fn descriptor_paths(fd: std::os::fd::RawFd) -> io::Result<Vec<PathBuf>> {
+    let mut paths = vec![fcntl_path(fd, libc::F_GETPATH)?];
+    if let Ok(path) = fcntl_path(fd, libc::F_GETPATH_NOFIRMLINK) {
+        paths.push(path);
+    }
+    Ok(paths)
+}
+
+#[cfg(target_os = "macos")]
+fn fcntl_path(fd: std::os::fd::RawFd, cmd: libc::c_int) -> io::Result<PathBuf> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut buf = [0u8; libc::PATH_MAX as usize];
+    // SAFETY: F_GETPATH and F_GETPATH_NOFIRMLINK write a NUL-terminated path
+    // of at most MAXPATHLEN (== PATH_MAX) bytes into the buffer, which is
+    // PATH_MAX bytes long.
+    if unsafe { libc::fcntl(fd, cmd, buf.as_mut_ptr()) } == -1 {
+        return Err(io::Error::last_os_error());
+    }
+    let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+    Ok(PathBuf::from(std::ffi::OsStr::from_bytes(&buf[..len])))
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn descriptor_paths(_fd: std::os::fd::RawFd) -> io::Result<Vec<PathBuf>> {
+    Err(io::ErrorKind::Unsupported.into())
+}
+
+/// Fallback for [`opened_file_allowed`]: resolve `file_path` again and require
+/// the result to be allowed and to name the same inode as the open file.
+/// Narrower than the descriptor check — a directory swapped back and forth
+/// between the resolution and its `stat` can still pass — but a link swapped
+/// once, before or after the open, is refused.
+async fn resolved_path_names_opened_file(
+    file_path: &Path,
+    opened: &std::fs::Metadata,
+    canonical_root: &Path,
+    allow_list: &crate::config::SymlinkAllowList,
+) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let Ok(real) = tokio::fs::canonicalize(file_path).await else {
+        return false;
+    };
+    if !path_allowed(&real, canonical_root, allow_list) {
+        return false;
+    }
+    match tokio::fs::metadata(&real).await {
+        Ok(meta) => meta.dev() == opened.dev() && meta.ino() == opened.ino(),
         Err(_) => false,
     }
 }
@@ -931,8 +1050,9 @@ fn respond_bytes(
 /// `levels` is what the server offers to anybody, which decides which
 /// responses vary by `Accept-Encoding` — a question about the representation
 /// rather than about this request.
-/// Re-validates the file path at serve time against `canonical_root`
-/// to mitigate TOCTOU symlink swap attacks.
+/// Checks where the opened file lives against `canonical_root` and the
+/// allow-list before reading it, so a symlink swapped after routing validated
+/// the path cannot serve a file outside the document root.
 #[allow(clippy::too_many_arguments)]
 pub async fn serve(
     file_path: &Path,
@@ -1031,30 +1151,14 @@ pub async fn serve(
         .to_string()
         .into();
 
-    // 2. TOCTOU mitigation: re-canonicalize before reading from disk.
-    //    Skip the syscall if the canonical cache already validated this path
-    //    (the routing layer's validate_path() populates this cache).
-    let already_validated = cache.get_canonical(&cache_key).is_some_and(|opt| {
-        opt.as_ref()
-            .is_some_and(|p| p.starts_with(canonical_root) || allow_list.allows(p))
-    });
-    if !already_validated && !verify_canonical(file_path, canonical_root, allow_list).await {
-        tracing::warn!(
-            path = %file_path.display(),
-            "TOCTOU: path escaped document root at serve time"
-        );
-        return Ok(Response::builder()
-            .status(StatusCode::NOT_FOUND)
-            .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
-            .body(full_body(Bytes::from_static(b"404 Not Found")))?);
-    }
-
-    // 3. Open the file and take metadata from the handle so that size,
+    // 2. Open the file and take metadata from the handle so that size,
     //    mtime, ETag, and the bytes served all describe the same inode.
     //    A stat() on the path followed by a separate open() would let a
     //    concurrent deploy swap the file in between, silently pairing new
     //    bytes with the old validator and mis-slicing Range responses.
-    let mut file = match tokio::fs::File::open(file_path).await {
+    //    The open is non-blocking, see [`open_static`].
+    let opened = open_static(file_path).await;
+    let mut file = match opened {
         Ok(f) => f,
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             return Ok(Response::builder()
@@ -1065,6 +1169,20 @@ pub async fn serve(
         Err(e) => return Err(e.into()),
     };
     let metadata = file.metadata().await?;
+
+    // 3. TOCTOU mitigation: check where the opened file actually lives before
+    //    a byte of it is read. The routing layer's validation is cached per
+    //    path and cannot see a symlink swapped after it ran.
+    if !opened_file_allowed(&file, &metadata, file_path, canonical_root, allow_list).await {
+        tracing::warn!(
+            path = %file_path.display(),
+            "TOCTOU: path escaped document root at serve time"
+        );
+        return Ok(Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+            .body(full_body(Bytes::from_static(b"404 Not Found")))?);
+    }
 
     let file_size = metadata.len();
     let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
@@ -1264,7 +1382,7 @@ mod tests {
         Levels::default()
     }
 
-    /// Canonicalize the temp dir path so it matches what `verify_canonical` resolves
+    /// Canonicalize the temp dir path so it matches what the serve-time check resolves
     /// (e.g. macOS `/var` → `/private/var` symlink).
     fn canonical_root(dir: &TempDir) -> PathBuf {
         std::fs::canonicalize(dir.path()).unwrap()
@@ -3470,5 +3588,381 @@ mod tests {
         headers.insert(header::IF_NONE_MATCH, etag.parse().unwrap());
         let response = serve_with(&file_path, &dir, &cache, headers).await;
         assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+    }
+
+    // ── Symlink swap after a path was validated ────────────────────────
+
+    /// Serve `file_path` as the connection handler does, against a chosen
+    /// allow-list, returning the status and the body.
+    async fn serve_checked(
+        file_path: &std::path::Path,
+        dir: &TempDir,
+        cache: &FileCache,
+        allow: &SymlinkAllowList,
+    ) -> (StatusCode, Bytes) {
+        let response = serve(
+            file_path,
+            cache,
+            &canonical_root(dir),
+            allow,
+            &http::Method::GET,
+            &HeaderMap::new(),
+            Some("public, max-age=86400"),
+            None,
+            offered(),
+        )
+        .await
+        .unwrap();
+        let status = response.status();
+        (status, body_bytes(response).await)
+    }
+
+    /// Record `path` as validated, the way the routing layer does on the
+    /// first request, before the link under it is swapped.
+    fn mark_validated(cache: &FileCache, path: &std::path::Path) {
+        cache.insert_canonical(
+            path.to_string_lossy().into_owned(),
+            Some(std::fs::canonicalize(path).unwrap()),
+        );
+    }
+
+    fn swap_symlink(target: &std::path::Path, link: &std::path::Path) {
+        fs::remove_file(link).unwrap();
+        std::os::unix::fs::symlink(target, link).unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_symlink_swapped_after_validation_is_not_served() {
+        let dir = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        fs::write(dir.path().join("inside.txt"), "INSIDE").unwrap();
+        fs::write(outside.path().join("secret.txt"), "OUTSIDE_SECRET").unwrap();
+        let link = dir.path().join("link.txt");
+        std::os::unix::fs::symlink(dir.path().join("inside.txt"), &link).unwrap();
+
+        let cache = FileCache::new(10);
+        mark_validated(&cache, &link);
+        swap_symlink(&outside.path().join("secret.txt"), &link);
+
+        let (status, body) = serve_checked(&link, &dir, &cache, &empty_allow()).await;
+        assert!(
+            !body.windows(14).any(|w| w == b"OUTSIDE_SECRET"),
+            "a link swapped after validation served the file outside the root"
+        );
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn test_directory_symlink_swapped_after_validation_is_not_served() {
+        let dir = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join("real")).unwrap();
+        fs::write(dir.path().join("real/f.txt"), "INSIDE").unwrap();
+        fs::write(outside.path().join("f.txt"), "OUTSIDE_SECRET").unwrap();
+        let link = dir.path().join("assets");
+        std::os::unix::fs::symlink(dir.path().join("real"), &link).unwrap();
+        let file_path = link.join("f.txt");
+
+        let cache = FileCache::new(10);
+        mark_validated(&cache, &file_path);
+        swap_symlink(outside.path(), &link);
+
+        let (status, body) = serve_checked(&file_path, &dir, &cache, &empty_allow()).await;
+        assert!(
+            !body.windows(14).any(|w| w == b"OUTSIDE_SECRET"),
+            "a directory link swapped after validation served a file outside the root"
+        );
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    /// A swap that stays inside the root is an ordinary deploy: the new
+    /// target is served.
+    #[tokio::test]
+    async fn test_symlink_swapped_within_root_serves_new_target() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("v1.txt"), "VERSION_ONE").unwrap();
+        fs::write(dir.path().join("v2.txt"), "VERSION_TWO").unwrap();
+        let link = dir.path().join("current.txt");
+        std::os::unix::fs::symlink(dir.path().join("v1.txt"), &link).unwrap();
+
+        let cache = FileCache::new(10);
+        mark_validated(&cache, &link);
+        swap_symlink(&dir.path().join("v2.txt"), &link);
+
+        let (status, body) = serve_checked(&link, &dir, &cache, &empty_allow()).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(&body[..], b"VERSION_TWO");
+    }
+
+    #[tokio::test]
+    async fn test_symlink_to_allow_listed_target_is_served() {
+        use crate::config::symlink_allow::tests::{non_blacklisted_tempdir, with_env};
+        let dir = TempDir::new().unwrap();
+        let shared = non_blacklisted_tempdir();
+        fs::write(shared.path().join("asset.txt"), "ALLOWED").unwrap();
+        let link = dir.path().join("asset.txt");
+        std::os::unix::fs::symlink(shared.path().join("asset.txt"), &link).unwrap();
+
+        let shared_canonical = std::fs::canonicalize(shared.path()).unwrap();
+        let mut allow = None;
+        with_env(Some(shared_canonical.to_str().unwrap()), || {
+            allow = Some(SymlinkAllowList::from_env(&canonical_root(&dir)).unwrap());
+        });
+        let allow = allow.unwrap();
+
+        let cache = FileCache::new(10);
+        let (status, body) = serve_checked(&link, &dir, &cache, &allow).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(&body[..], b"ALLOWED");
+
+        // Without the entry the same link is refused.
+        let cache = FileCache::new(10);
+        let (status, _) = serve_checked(&link, &dir, &cache, &empty_allow()).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    /// A link to a FIFO outside the root must be refused, not block the
+    /// request on an open() that waits for a writer.
+    #[tokio::test]
+    async fn test_symlink_to_fifo_outside_root_does_not_block() {
+        let dir = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let fifo = outside.path().join("pipe");
+        let c_fifo = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c_fifo.as_ptr(), 0o600) }, 0);
+        let link = dir.path().join("pipe.txt");
+        std::os::unix::fs::symlink(&fifo, &link).unwrap();
+
+        let cache = FileCache::new(10);
+        mark_validated(&cache, &link);
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            serve_checked(&link, &dir, &cache, &empty_allow()),
+        )
+        .await;
+        // A blocked open sits on a blocking-pool thread that the runtime
+        // waits for at shutdown; open the write end to release it so a
+        // regression fails here instead of hanging the test binary.
+        if result.is_err() {
+            let _writer = std::fs::OpenOptions::new().write(true).open(&fifo);
+        }
+        let (status, _) = result.expect("serve blocked opening a FIFO");
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    /// Open through a link that points outside the root, then point the link
+    /// back inside: a check that re-resolves the path would now see an inside
+    /// file, but the open handle is still the outside one.
+    async fn open_outside_then_swap_back(
+        dir: &TempDir,
+        outside: &TempDir,
+    ) -> (std::path::PathBuf, tokio::fs::File, std::fs::Metadata) {
+        fs::write(dir.path().join("inside.txt"), "INSIDE").unwrap();
+        fs::write(outside.path().join("secret.txt"), "OUTSIDE_SECRET").unwrap();
+        let link = dir.path().join("link.txt");
+        std::os::unix::fs::symlink(outside.path().join("secret.txt"), &link).unwrap();
+        let file = tokio::fs::File::open(&link).await.unwrap();
+        let metadata = file.metadata().await.unwrap();
+        swap_symlink(&dir.path().join("inside.txt"), &link);
+        (link, file, metadata)
+    }
+
+    #[tokio::test]
+    async fn test_opened_file_check_uses_the_descriptor_not_the_path() {
+        let dir = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let (link, file, metadata) = open_outside_then_swap_back(&dir, &outside).await;
+        assert!(
+            descriptor_paths(std::os::fd::AsRawFd::as_raw_fd(&file)).is_ok(),
+            "this host must exercise the descriptor path, not the fallback"
+        );
+        assert!(
+            !opened_file_allowed(
+                &file,
+                &metadata,
+                &link,
+                &canonical_root(&dir),
+                &empty_allow()
+            )
+            .await
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fallback_refuses_a_resolution_naming_another_inode() {
+        let dir = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let (link, _file, metadata) = open_outside_then_swap_back(&dir, &outside).await;
+        assert!(
+            !resolved_path_names_opened_file(
+                &link,
+                &metadata,
+                &canonical_root(&dir),
+                &empty_allow()
+            )
+            .await
+        );
+
+        // A resolution naming the opened inode is still refused outside the root.
+        let secret = outside.path().join("secret.txt");
+        assert!(
+            !resolved_path_names_opened_file(
+                &secret,
+                &metadata,
+                &canonical_root(&dir),
+                &empty_allow()
+            )
+            .await
+        );
+
+        // The same inode reached through an inside path passes.
+        let inside = dir.path().join("inside.txt");
+        let inside_meta = std::fs::metadata(&inside).unwrap();
+        assert!(
+            resolved_path_names_opened_file(
+                &link,
+                &inside_meta,
+                &canonical_root(&dir),
+                &empty_allow()
+            )
+            .await
+        );
+    }
+
+    /// A DOCUMENT_ROOT written through the macOS data-volume firmlink
+    /// (`/System/Volumes/Data/...`) canonicalises to that spelling, while
+    /// F_GETPATH reports the firmlinked one; files inside must still serve.
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn test_root_written_through_firmlink_serves_files() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join("a.txt"), "INSIDE").unwrap();
+        let mut spelled = std::path::PathBuf::from("/System/Volumes/Data");
+        spelled.push(canonical_root(&dir).strip_prefix("/").unwrap());
+        let root = std::fs::canonicalize(&spelled).unwrap();
+        assert!(root.starts_with("/System/Volumes/Data"), "{root:?}");
+
+        let cache = FileCache::new(10);
+        let response = serve(
+            &root.join("a.txt"),
+            &cache,
+            &root,
+            &empty_allow(),
+            &http::Method::GET,
+            &HeaderMap::new(),
+            Some("public, max-age=86400"),
+            None,
+            offered(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    /// Take a write lease on `path` through a descriptor held by this
+    /// process, and check that a non-blocking open now conflicts with it —
+    /// the premise both lease tests stand on, read before they measure.
+    #[cfg(target_os = "linux")]
+    fn hold_write_lease(path: &std::path::Path) -> fs::File {
+        use std::os::fd::AsRawFd;
+        use std::os::unix::fs::OpenOptionsExt;
+        let holder = fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        // Breaking the lease signals its holder with SIGIO, whose default
+        // action would end the test binary.
+        unsafe { libc::signal(libc::SIGIO, libc::SIG_IGN) };
+        assert_eq!(
+            unsafe { libc::fcntl(holder.as_raw_fd(), libc::F_SETLEASE, libc::F_WRLCK) },
+            0,
+            "set write lease: {}",
+            io::Error::last_os_error()
+        );
+        let refused = fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_NONBLOCK)
+            .open(path)
+            .unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::WouldBlock, "{refused}");
+        holder
+    }
+
+    #[cfg(target_os = "linux")]
+    fn release_lease_after(holder: fs::File, delay: Duration) -> std::thread::JoinHandle<()> {
+        use std::os::fd::AsRawFd;
+        std::thread::spawn(move || {
+            std::thread::sleep(delay);
+            unsafe { libc::fcntl(holder.as_raw_fd(), libc::F_SETLEASE, libc::F_UNLCK) };
+        })
+    }
+
+    /// With another holder's write lease on the file, the open is refused
+    /// until the lease goes; serve must wait it out and then answer.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_open_waits_out_a_write_lease() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("leased.txt");
+        fs::write(&path, "LEASED").unwrap();
+        let holder = hold_write_lease(&path);
+        let release = release_lease_after(holder, Duration::from_millis(300));
+
+        let started = Instant::now();
+        let cache = FileCache::new(10);
+        let (status, body) = serve_checked(&path, &dir, &cache, &empty_allow()).await;
+        let waited = started.elapsed();
+        release.join().unwrap();
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(&body[..], b"LEASED");
+        assert!(
+            waited >= Duration::from_millis(200),
+            "served after {waited:?}: the lease never held the open back"
+        );
+    }
+
+    /// A link repointed at a FIFO outside the root while the open waits on a
+    /// lease must be refused on the next attempt, not followed into a blocking
+    /// open of the FIFO.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn test_link_repointed_at_fifo_during_lease_wait_is_refused() {
+        let dir = TempDir::new().unwrap();
+        let outside = TempDir::new().unwrap();
+        let target = dir.path().join("x.txt");
+        fs::write(&target, "INSIDE").unwrap();
+        let fifo = outside.path().join("pipe");
+        let c_fifo = std::ffi::CString::new(fifo.to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(c_fifo.as_ptr(), 0o600) }, 0);
+        let link = dir.path().join("link.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        // One thread swaps and then releases, so the lease cannot go before
+        // the link has been repointed however late the thread is scheduled.
+        let holder = hold_write_lease(&target);
+        let swap_link = link.clone();
+        let swap_fifo = fifo.clone();
+        let swap = std::thread::spawn(move || {
+            use std::os::fd::AsRawFd;
+            std::thread::sleep(Duration::from_millis(100));
+            swap_symlink(&swap_fifo, &swap_link);
+            std::thread::sleep(Duration::from_millis(200));
+            unsafe { libc::fcntl(holder.as_raw_fd(), libc::F_SETLEASE, libc::F_UNLCK) };
+        });
+
+        let cache = FileCache::new(10);
+        mark_validated(&cache, &link);
+        let result = tokio::time::timeout(
+            Duration::from_secs(5),
+            serve_checked(&link, &dir, &cache, &empty_allow()),
+        )
+        .await;
+        if result.is_err() {
+            let _writer = fs::OpenOptions::new().write(true).open(&fifo);
+        }
+        swap.join().unwrap();
+        let (status, _) = result.expect("serve blocked opening the FIFO");
+        assert_eq!(status, StatusCode::NOT_FOUND);
     }
 }
