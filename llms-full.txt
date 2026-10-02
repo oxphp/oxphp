@@ -11471,7 +11471,7 @@ When both are set, `PHP_DENY_PATHS` wins and `PHP_DENY_DIRS` is reported as igno
 
 By default OxPHP refuses any request that resolves to a path outside the canonical `DOCUMENT_ROOT`. A symlink inside `DOCUMENT_ROOT` pointing at an external directory returns 404 and the path resolution logs `Blocked request: resolved path escapes document root`.
 
-This is the right default — it stops directory traversal, symlink-swap TOCTOU attacks, and accidentally exposing config files or secrets sitting one level up. But it also blocks legitimate patterns that frameworks have been using for years: Laravel's `php artisan storage:link`, Symfony asset bundles, shared upload volumes mounted into multiple containers.
+This is the right default — it stops directory traversal and accidentally exposing config files or secrets sitting one level up. But it also blocks legitimate patterns that frameworks have been using for years: Laravel's `php artisan storage:link`, Symfony asset bundles, shared upload volumes mounted into multiple containers.
 
 `SYMLINK_ALLOW_PATHS` is the explicit opt-in: you list the filesystem paths that symlinks under `DOCUMENT_ROOT` are permitted to resolve to. Anything not on the list keeps the strict 404 behaviour.
 
@@ -11514,7 +11514,7 @@ At request time, the routing layer canonicalises the resolved file path and veri
 2. equals exactly one of the allow-list entries (file targets), or
 3. starts with one of the allow-list entries followed by `/` (directory targets).
 
-The same check runs a second time as a TOCTOU guard inside the static-file serve path, after the route cache, before any read syscall.
+For static files the check runs a second time at serve time, on the file actually opened and before any byte of it is read. The location is taken from the open descriptor (`/proc/self/fd/N` on Linux, `F_GETPATH` on macOS), so a symlink swapped after the routing check — whose result is cached — is still refused. Where the descriptor's path is unavailable, the path is resolved again and must name the same file that was opened. A file answered from the in-memory cache is not reopened, so a swapped link keeps returning the bytes cached from its earlier, validated target until the entry is evicted (or, with `STATIC_REVALIDATE=on`, until revalidation notices the change).
 
 ## Blacklist
 
@@ -11550,9 +11550,9 @@ The blacklist itself is hardcoded — there is no env var to extend it. The defa
 
 - The allow-list is opt-in — the safe default of "no escapes" is preserved when the variable is unset
 - Entries are canonicalised at startup, so `..` and intermediate symlinks in the entry path are collapsed before storage
-- Runtime canonicalisation closes the symlink-swap TOCTOU window — the validated path is the path that gets read
+- Static files are checked on the opened file, so — on Linux with `/proc` mounted, and on macOS — swapping a symlink after it has been served once cannot make a later static-file response come from outside the allowed locations; the fallback used elsewhere is narrower, as described above
 - File targets match exactly; directory targets match by directory prefix. Listing a file at `/etc/passwd` would still be rejected by the blacklist, but more generally: listing a single file at `/opt/shared/license.key` does not implicitly grant access to siblings
-- Path validation results are cached per requested URL (one `realpath` per unique URL until eviction), so the runtime cost is amortised away
+- Routing-time validation is cached per requested URL (one `realpath` per unique URL until eviction); the serve-time check adds a lookup of the open descriptor's location for each static file read from disk, and nothing for a file served from the in-memory cache
 
 ## See Also
 
