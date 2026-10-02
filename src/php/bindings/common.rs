@@ -310,6 +310,10 @@ extern "C" {
 
     pub fn oxphp_execute_script_safe(file_handle: *mut c_void) -> c_int;
 
+    /// Close the calling thread's persistent resources (pooled DB connections,
+    /// persistent streams). Must be the last PHP call before `ts_free_thread()`.
+    pub fn oxphp_bridge_destroy_persistent_list();
+
     pub fn oxphp_bridge_set_sapi_callbacks(
         ub_write: Option<unsafe extern "C" fn(*const c_char, usize) -> usize>,
         flush: Option<unsafe extern "C" fn(*mut c_void)>,

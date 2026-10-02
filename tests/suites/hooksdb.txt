@@ -145,3 +145,10 @@ hooksdb/test_persistent_rollback_refused_on_held_connection
 # call that does wait but is bounded and eventually delegates.
 hooksdb/test_stream_closed_under_parked_reader
 hooksdb/test_shared_mysqli_close_under_parked_reader
+
+# After everything else, because the first of these retires the worker. A
+# persistent connection belongs to the thread that opened it, and a thread that
+# exits has to close it on the way out: PHP closes them only at process shutdown,
+# and only for threads still registered with it then.
+hooksdb/test_recycle_opens_persistent
+hooksdb/test_recycle_closes_persistent

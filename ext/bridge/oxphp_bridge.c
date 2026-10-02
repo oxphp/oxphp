@@ -2676,6 +2676,25 @@ int oxphp_execute_script_safe(void *file_handle) {
     return result;
 }
 
+/* Closes every persistent resource this thread opened — pooled PDO connections,
+ * mysqli `p:` links, pfsockopen() streams — by destroying the thread's own
+ * EG(persistent_list).
+ *
+ * For a worker thread PHP destroys this list only in zend_shutdown(), which
+ * covers the calling thread and every thread still registered with TSRM at that
+ * point. A worker thread that exits earlier releases its TSRM block with
+ * ts_free_thread(), and that does not touch the list (executor_globals_dtor
+ * frees the ini directives and constants only), so its connections would stay
+ * open in the process with nothing left that could reach them.
+ *
+ * Called on the exiting thread itself, after its last php_request_shutdown() and
+ * immediately before ts_free_thread(). The list is left destroyed, not empty, so
+ * nothing on this thread may use PHP between the two calls. The body is
+ * zend_destroy_rsrc_list(), which libphp does not export. */
+void oxphp_bridge_destroy_persistent_list(void) {
+    zend_hash_graceful_reverse_destroy(&EG(persistent_list));
+}
+
 /* ─── Async Dispatch Function Pointers ─────────────────────── */
 
 /*

@@ -1278,6 +1278,9 @@ static inline void oxphp_bridge_report_request_fibers(uint32_t count) {
 /** Execute PHP script with zend_try protection. Returns 1 on success, 0 on bailout. */
 int oxphp_execute_script_safe(void *file_handle);
 
+/** Close the calling thread's persistent resources. Last PHP call before ts_free_thread(). */
+void oxphp_bridge_destroy_persistent_list(void);
+
 /* ─── Worker Mode Metrics Getters ─────────────────────────── */
 
 /** Set the exit flag with reason 'scheduled' (1). Idempotent.
