@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex};
 use lru::LruCache;
 use percent_encoding::percent_decode_str;
 
-use crate::config::ServerConfig;
+use crate::config::{
+    DeniedMeta, DenyAction, DenyFallback, DenyFile, DenySource, RoutingModeKind, ServerConfig,
+};
 use crate::server::response::static_file::FileCache;
 
 mod framework;
@@ -60,16 +62,6 @@ impl Mode {
             Mode::Worker(r) => r.resolve_static_miss(ctx).await,
         }
     }
-
-    /// Mode kind for config decisions (`PhpDeny::from_env` gating).
-    fn kind(&self) -> crate::config::RoutingModeKind {
-        match self {
-            Mode::Traditional(_) => crate::config::RoutingModeKind::Traditional,
-            Mode::Framework(_) => crate::config::RoutingModeKind::Framework,
-            Mode::Spa(_) => crate::config::RoutingModeKind::Spa,
-            Mode::Worker(_) => crate::config::RoutingModeKind::Worker,
-        }
-    }
 }
 
 const ROUTE_CACHE_CAPACITY: usize = 10_000;
@@ -82,7 +74,8 @@ pub enum RouteResult {
     /// `path_info` is always `None` — the original URI lives in
     /// `denied_meta.path` so it is not duplicated.
     /// `denied_meta` is `Some` only when this `Execute` is the PHP-script
-    /// fallback for a `PHP_DENY_PATHS` match — drives `$_SERVER` enrichment.
+    /// fallback for a denied request — `PHP_DENY_PATHS` or `.oxphpdeny` —
+    /// and drives `$_SERVER` enrichment.
     /// `Arc` keeps the variant 8-byte-tagged in the common (None) case and
     /// turns the rare-path clone into one atomic increment.
     Execute(
@@ -94,11 +87,11 @@ pub enum RouteResult {
     Serve(PathBuf),
     /// File not found.
     NotFound,
-    /// Request was blocked by `PHP_DENY_PATHS` with an HTTP-status fallback.
-    /// `ErrorPagesHandler` may substitute a body. Kept as a dedicated variant
-    /// (not a generic `StatusCode`) so `connection.rs` can count denials
-    /// without guessing about the source of the status code.
-    Denied(u16),
+    /// Request was denied — by `PHP_DENY_PATHS` or a `.oxphpdeny` rule — with
+    /// an HTTP-status fallback. `ErrorPagesHandler` may substitute a body.
+    /// Kept as a dedicated variant (not a generic `StatusCode`) so
+    /// `connection.rs` can count the denial under the feature that made it.
+    Denied { status: u16, source: DenySource },
 }
 
 /// Classification of a sanitized URI path performed once in the common layer
@@ -131,6 +124,12 @@ pub struct RouteConfig {
     mode: Mode,
     worker_route: Option<RouteResult>,
     php_deny: Option<crate::config::PhpDeny>,
+    /// `.oxphpdeny` rules, matched against the sanitized URI before any disk
+    /// I/O.
+    deny_file: Option<Arc<DenyFile>>,
+    /// `PHP_DENY_FALLBACK` for `.oxphpdeny` deny rules; `None` when the file
+    /// has none (`>` and `!` rules never answer with it).
+    deny_file_fallback: Option<DenyFallback>,
     /// Cache of resolved routes keyed by URI path. `Mutex` rather than
     /// `RwLock` because `std::sync::RwLock` wraps `pthread_rwlock_t` on
     /// Linux and is ~2–3× slower than a futex-based `Mutex` in the
@@ -156,6 +155,9 @@ impl RouteConfig {
     ///
     /// Panics if the document root cannot be canonicalized, since symlink
     /// escape protection requires a valid, resolvable document root path.
+    /// Also panics on deny settings the server must not start with: an
+    /// invalid `PHP_DENY_*` or `SYMLINK_ALLOW_PATHS`, or a `PHP_DENY_FALLBACK`
+    /// the `.oxphpdeny` deny rules cannot use.
     pub fn new(
         config: &ServerConfig,
         entry_file: Option<&Path>,
@@ -172,26 +174,60 @@ impl RouteConfig {
 
         let document_root = Arc::new(config.document_root.clone());
 
-        let mode = if worker_mode_enabled {
-            Mode::Worker(WorkerRouter)
-        } else {
-            match entry_file.and_then(|p| {
-                let ext = p.extension().and_then(|s| s.to_str())?;
-                let name = p.file_name().and_then(|s| s.to_str())?;
-                Some((ext.to_ascii_lowercase(), name))
-            }) {
-                None => Mode::Traditional(TraditionalRouter::new(&document_root)),
-                Some((ext, name)) if ext == "php" => {
-                    Mode::Framework(FrameworkRouter::new(&document_root, name))
-                }
-                Some((_, name)) => Mode::Spa(SpaRouter::new(&document_root, name)),
+        let kind = RoutingModeKind::resolve(entry_file, worker_mode_enabled);
+        // `resolve` picks Framework and SPA only off an entry file with a
+        // UTF-8 name.
+        let entry_name = || {
+            entry_file
+                .and_then(|p| p.file_name()?.to_str())
+                .expect("Framework and SPA modes have a UTF-8 entry file name")
+        };
+        let mode = match kind {
+            RoutingModeKind::Worker => Mode::Worker(WorkerRouter),
+            RoutingModeKind::Traditional => {
+                Mode::Traditional(TraditionalRouter::new(&document_root))
             }
+            RoutingModeKind::Framework => {
+                Mode::Framework(FrameworkRouter::new(&document_root, entry_name()))
+            }
+            RoutingModeKind::Spa => Mode::Spa(SpaRouter::new(&document_root, entry_name())),
         };
 
-        let php_deny = crate::config::PhpDeny::from_env(&canonical_root, mode.kind())
-            .unwrap_or_else(|e| {
+        let php_deny =
+            crate::config::PhpDeny::from_env(&canonical_root, kind).unwrap_or_else(|e| {
                 panic!("Fatal: invalid PHP_DENY_* configuration: {e}");
             });
+
+        // A file that can exclude nothing — empty, comments, `!` rules —
+        // routes as no file does, depth cap included.
+        let deny_file = config
+            .deny_file
+            .clone()
+            .filter(|file| file.excludes_anything());
+        // A deny rule answers with `PHP_DENY_FALLBACK`, as a `PHP_DENY_PATHS`
+        // match does: reuse what that already parsed, else parse it here.
+        let deny_file_fallback = match &deny_file {
+            Some(file) if file.has_deny_rules() => Some(match &php_deny {
+                Some(deny) => deny.fallback().clone(),
+                None => {
+                    crate::config::deny_fallback_from_env(&canonical_root).unwrap_or_else(|e| {
+                        panic!("Fatal: invalid PHP_DENY_FALLBACK for .oxphpdeny: {e}");
+                    })
+                }
+            }),
+            _ => None,
+        };
+        // A worker thread runs nothing but the worker entry, so it cannot run
+        // a fallback script in a denied request's place.
+        if kind == RoutingModeKind::Worker
+            && matches!(deny_file_fallback, Some(DenyFallback::Script { .. }))
+        {
+            panic!(
+                "Fatal: PHP_DENY_FALLBACK is a script, but in worker mode every request runs \
+                 the worker entry — .oxphpdeny deny rules need a status code here \
+                 (e.g. PHP_DENY_FALLBACK=404)"
+            );
+        }
 
         let symlink_allow = crate::config::SymlinkAllowList::from_env(&canonical_root)
             .unwrap_or_else(|e| {
@@ -207,6 +243,8 @@ impl RouteConfig {
             mode,
             worker_route: None,
             php_deny,
+            deny_file,
+            deny_file_fallback,
             route_cache: Mutex::new(LruCache::new(
                 NonZeroUsize::new(ROUTE_CACHE_CAPACITY).unwrap(),
             )),
@@ -249,27 +287,19 @@ impl RouteConfig {
             pattern = %pattern,
             "PHP execution denied by PHP_DENY_PATHS"
         );
-        Some(match deny.fallback() {
-            crate::config::DenyFallback::Status(code) => RouteResult::Denied(*code),
-            crate::config::DenyFallback::Script { path, uri } => RouteResult::Execute(
-                path.clone(),
-                // path_info=None: SAPI reads the original URI from
-                // `denied_meta.path` instead — avoids a duplicate
-                // String allocation on the fallback path.
-                None,
-                Some(Arc::new(crate::config::DeniedMeta {
-                    path: original_uri.to_string(),
-                    pattern: pattern.to_string(),
-                    fallback_script_uri: uri.clone(),
-                })),
-            ),
-        })
+        Some(denied_route(
+            deny.fallback(),
+            DenySource::PhpDenyPaths,
+            original_uri,
+            pattern,
+        ))
     }
 
     /// Resolve a URI path to a route result using the file cache.
     ///
     /// Pipeline: dot-path block → route cache → decode → sanitize →
-    /// well-known PHP block → classify → mode dispatch → symlink validation → cache.
+    /// `.oxphpdeny` → well-known PHP block → classify → mode dispatch →
+    /// symlink validation → cache.
     pub async fn resolve_request(
         &self,
         uri_path: &str,
@@ -318,6 +348,54 @@ impl RouteConfig {
         let sanitized_cow = sanitize_path(&decoded);
         let sanitized: &str = &sanitized_cow;
 
+        // `.oxphpdeny`, before any disk I/O: a denied path answers the same
+        // whether it exists or not. Whether the request names a directory
+        // comes from the decoded URI — sanitizing drops its trailing `/`.
+        // Only Traditional runs whichever `.php` segment the path names;
+        // Framework splits PATH_INFO off its entry script alone, which every
+        // route runs anyway.
+        let to_entry = match self.deny_file.as_deref() {
+            None => false,
+            Some(deny_file) => {
+                // Matching re-checks every parent directory; past the cap a
+                // request is refused instead of matched.
+                if deny_file.too_costly(sanitized) {
+                    tracing::debug!(
+                        segments = sanitized.split('/').count(),
+                        bytes = sanitized.len(),
+                        "request refused: path too deep or too long to match against .oxphpdeny"
+                    );
+                    return Arc::new(RouteResult::NotFound);
+                }
+                let path_info = matches!(self.mode, Mode::Traditional(_));
+                match deny_file.check(sanitized, decoded.ends_with('/'), path_info) {
+                    None => false,
+                    Some(rule) if rule.action == DenyAction::Entry => true,
+                    Some(rule) => {
+                        // debug, not info: scanners hit these by the thousand,
+                        // and `oxphp_path_deny_total` already counts them.
+                        tracing::debug!(
+                            path = %sanitized,
+                            line = rule.line,
+                            rule = %rule.original,
+                            "request denied by .oxphpdeny"
+                        );
+                        let fallback = self
+                            .deny_file_fallback
+                            .as_ref()
+                            .expect("a file with deny rules is loaded with a fallback");
+                        // Not cached, for the reason `should_cache` gives.
+                        return Arc::new(denied_route(
+                            fallback,
+                            DenySource::DenyFile,
+                            sanitized,
+                            &rule.original,
+                        ));
+                    }
+                }
+            }
+        };
+
         // Compute has_php_component() once and share it across the
         // .well-known defence-in-depth check and URI classification.
         let has_php = has_php_component(sanitized);
@@ -336,23 +414,30 @@ impl RouteConfig {
             worker_route: self.worker_route.as_ref(),
         };
 
-        let result = match classify_uri_with_php(sanitized, has_php) {
-            UriKind::NoExtension => self.mode.resolve_no_extension(sanitized, &ctx).await,
-            // PHP_DENY_PATHS screen runs *before* disk I/O so denied paths
-            // produce the same response whether the file exists or not
-            // (no existence oracle).
-            UriKind::Php => match self.deny_check(sanitized, sanitized) {
-                Some(denied) => denied,
-                None => self.mode.resolve_php(sanitized, &ctx).await,
-            },
-            UriKind::OtherExtension => {
-                // Common disk check for non-.php extensions — done once here,
-                // shared across all modes via file_cache.
-                let candidate = self.document_root.join(sanitized);
-                if file_cache.is_file(&candidate.to_string_lossy()).await {
-                    RouteResult::Serve(candidate)
-                } else {
-                    self.mode.resolve_static_miss(sanitized, &ctx).await
+        let result = if to_entry {
+            // A `>` rule: the branch Framework and Worker take for a missing
+            // static file, so the entry script gets the request whether or
+            // not a file is there.
+            self.mode.resolve_static_miss(sanitized, &ctx).await
+        } else {
+            match classify_uri_with_php(sanitized, has_php) {
+                UriKind::NoExtension => self.mode.resolve_no_extension(sanitized, &ctx).await,
+                // PHP_DENY_PATHS screen runs *before* disk I/O so denied paths
+                // produce the same response whether the file exists or not
+                // (no existence oracle).
+                UriKind::Php => match self.deny_check(sanitized, sanitized) {
+                    Some(denied) => denied,
+                    None => self.mode.resolve_php(sanitized, &ctx).await,
+                },
+                UriKind::OtherExtension => {
+                    // Common disk check for non-.php extensions — done once here,
+                    // shared across all modes via file_cache.
+                    let candidate = self.document_root.join(sanitized);
+                    if file_cache.is_file(&candidate.to_string_lossy()).await {
+                        RouteResult::Serve(candidate)
+                    } else {
+                        self.mode.resolve_static_miss(sanitized, &ctx).await
+                    }
                 }
             }
         };
@@ -401,20 +486,20 @@ impl RouteConfig {
                     result
                 }
             }
-            RouteResult::NotFound | RouteResult::Denied(_) => result,
+            RouteResult::NotFound | RouteResult::Denied { .. } => result,
         };
 
         let arc = Arc::new(result);
-        // Skip the route cache for `PHP_DENY_PATHS` results. Both `Denied`
-        // and `Execute(_, _, Some(_))` are produced from attacker-controlled
-        // URIs with effectively unbounded cardinality — caching them would
-        // let an attacker spraying random `/uploads/{nonce}.php` evict hot
-        // legitimate entries from the LRU. Re-running `resolve_php` on a
-        // repeat denial costs only the `globset` byte scan; no disk I/O,
-        // no syscall.
+        // Skip the route cache for denials — `PHP_DENY_PATHS` and
+        // `.oxphpdeny` alike. Both `Denied` and `Execute(_, _, Some(_))` are
+        // produced from attacker-controlled URIs with effectively unbounded
+        // cardinality — caching them would let an attacker spraying random
+        // `/uploads/{nonce}.php` evict hot legitimate entries from the LRU.
+        // Re-running `resolve_php` on a repeat denial costs only the
+        // `globset` byte scan; no disk I/O, no syscall.
         let should_cache = !matches!(
             &*arc,
-            RouteResult::Denied(_) | RouteResult::Execute(_, _, Some(_))
+            RouteResult::Denied { .. } | RouteResult::Execute(_, _, Some(_))
         );
         if should_cache {
             self.cache_put(uri_path, &arc);
@@ -463,6 +548,39 @@ impl RouteConfig {
     /// The policy a script's location is checked against when it is opened.
     pub fn path_policy(&self) -> Arc<crate::path_guard::PathPolicy> {
         Arc::clone(&self.policy)
+    }
+}
+
+/// The route for a denied request: `fallback`'s status, or its script run in
+/// place of the one requested. `uri` (the sanitized request URI) and
+/// `pattern` (what matched) reach the script through `$_SERVER`.
+fn denied_route(
+    fallback: &DenyFallback,
+    source: DenySource,
+    uri: &str,
+    pattern: &str,
+) -> RouteResult {
+    match fallback {
+        DenyFallback::Status(code) => RouteResult::Denied {
+            status: *code,
+            source,
+        },
+        DenyFallback::Script {
+            path,
+            uri: script_uri,
+        } => RouteResult::Execute(
+            path.clone(),
+            // path_info=None: SAPI reads the original URI from
+            // `denied_meta.path` instead — avoids a duplicate
+            // String allocation on the fallback path.
+            None,
+            Some(Arc::new(DeniedMeta {
+                path: uri.to_string(),
+                pattern: pattern.to_string(),
+                fallback_script_uri: script_uri.clone(),
+                source,
+            })),
+        ),
     }
 }
 

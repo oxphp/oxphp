@@ -1,5 +1,8 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
+
+use super::DenyFile;
 
 /// Server-specific configuration loaded from environment variables.
 #[derive(Debug)]
@@ -7,6 +10,10 @@ pub struct ServerConfig {
     pub listen_addr: String,
     pub document_root: PathBuf,
     pub header_read_timeout: Duration,
+    /// `.oxphpdeny` from the top of `document_root`, when there is one. Set
+    /// by `Config::from_env`, which knows the routing mode the file is
+    /// checked against; the constructors here leave it `None`.
+    pub deny_file: Option<Arc<DenyFile>>,
 }
 
 impl ServerConfig {
@@ -15,6 +22,7 @@ impl ServerConfig {
             listen_addr,
             document_root,
             header_read_timeout: Duration::from_secs(5),
+            deny_file: None,
         }
     }
 
@@ -35,6 +43,7 @@ impl ServerConfig {
             listen_addr,
             document_root,
             header_read_timeout,
+            deny_file: None,
         })
     }
 }

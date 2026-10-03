@@ -1,0 +1,9 @@
+# What a legacy app keeps in its document root.
+vendor/
+*.sql
+/composer.*
+private/
+# .php files at any depth under uploads/, whatever the case of the extension.
+# A directory index escapes it: /uploads/ would run uploads/index.php, and
+# that request path names no .php file. PHP_DENY_PATHS=/uploads/** covers it.
+/uploads/**/*.php

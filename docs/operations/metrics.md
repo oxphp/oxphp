@@ -168,6 +168,7 @@ A high queue wait means requests took long to reach a worker, which is not by it
 |--------|------|-------------|
 | `oxphp_rate_limited_total` | counter | Requests rejected by the rate limiter (returned 429) |
 | `oxphp_php_deny_total` | counter | Requests blocked by `PHP_DENY_PATHS` (`.php` execution denied). See [PHP Execution Deny-List](../security/php-deny.md) |
+| `oxphp_path_deny_total` | counter | Requests denied by a `.oxphpdeny` rule; a request `PHP_DENY_PATHS` denies too is counted here only. See [Path Deny Rules](../security/oxphpdeny.md) |
 
 ## Static File Cache Metrics
 

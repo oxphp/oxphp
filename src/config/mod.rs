@@ -1,4 +1,6 @@
+mod deny_file;
 mod env_bool;
+mod ignore_rules;
 mod php_deny;
 mod proxy;
 mod server;
@@ -12,10 +14,13 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use crate::server::compression::{Coding, Levels};
+pub use deny_file::{DenyAction, DenyFile};
 #[allow(unused_imports)] // consumed by feature-gated plugins
 pub(crate) use env_bool::parse_bool_opt;
 pub(crate) use env_bool::{parse_bool_strict, parse_env_bool};
-pub use php_deny::{DeniedMeta, DenyFallback, PhpDeny, RoutingModeKind};
+pub use php_deny::{
+    deny_fallback_from_env, DeniedMeta, DenyFallback, DenySource, PhpDeny, RoutingModeKind,
+};
 pub use proxy::{
     classify_bind_exposure, parse_cidr_list, BindExposure, IpAllowList, TrustedProxyConfig,
 };
@@ -577,7 +582,7 @@ pub(crate) fn optional_utf8_env(name: &str) -> Result<Option<String>, crate::typ
 
 impl Config {
     pub fn from_env() -> Result<Self, crate::types::BoxError> {
-        let server = ServerConfig::from_env()?;
+        let mut server = ServerConfig::from_env()?;
         let log_level = std::env::var("LOG_LEVEL").unwrap_or_else(|_| "info".to_string());
         let executor_type = std::env::var("EXECUTOR")
             .unwrap_or_else(|_| "sapi".to_string())
@@ -645,6 +650,13 @@ impl Config {
             .unwrap_or(512 * 1024);
 
         let (entry_file, worker_mode_enabled) = resolve_entry_and_mode(&server.document_root)?;
+        // Here rather than with the routing: the internal server, which
+        // reports the file on `/config`, starts before the router is built.
+        server.deny_file = DenyFile::load(
+            &server.document_root,
+            RoutingModeKind::resolve(entry_file.as_deref(), worker_mode_enabled),
+        )?
+        .map(std::sync::Arc::new);
 
         // Parsed-but-ignored deprecation. Drop in a future release once telemetry
         // shows zero downstream usage.
@@ -782,6 +794,7 @@ impl Config {
                 listen_addr: "127.0.0.1:0".to_string(),
                 document_root: PathBuf::from("/var/www/html/public"),
                 header_read_timeout: Duration::from_secs(5),
+                deny_file: None,
             },
             log_level: "info".to_string(),
             executor_type: "stub".to_string(),
@@ -853,9 +866,15 @@ impl Config {
     /// Serialize configuration to JSON for the `/config` internal endpoint.
     /// Sensitive values (TLS paths) are redacted.
     pub fn to_json(&self) -> serde_json::Value {
+        // Counts only: the rules would map exactly the paths the file protects.
+        let deny_file = match &self.server.deny_file {
+            Some(file) => file.summary_json(),
+            None => serde_json::json!({ "loaded": false }),
+        };
         serde_json::json!({
             "listen_addr": self.server.listen_addr,
             "document_root": self.server.document_root.display().to_string(),
+            "deny_file": deny_file,
             "entry_file": self.entry_file.as_ref().map(|p| p.display().to_string()),
             "log_level": self.log_level,
             "executor_type": self.executor_type,
@@ -1480,6 +1499,76 @@ mod tests {
         assert_eq!(json["queue_capacity"], 128);
         assert_eq!(json["queue_wait_timeout_ms"], 1000);
         assert_eq!(json["queue_max_waiting"], 128);
+    }
+
+    #[test]
+    fn to_json_summarizes_the_deny_file_without_listing_rules() {
+        let mut config = Config::test_minimal();
+        assert_eq!(
+            config.to_json()["deny_file"],
+            serde_json::json!({ "loaded": false })
+        );
+
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(
+            dir.path().join(".oxphpdeny"),
+            "vendor/\n*.sql\n!/keep.sql\n",
+        )
+        .unwrap();
+        let file = test_env::with_env(&[("PHP_DENY_FALLBACK", None)], || {
+            DenyFile::load(dir.path(), RoutingModeKind::Traditional)
+        })
+        .unwrap()
+        .expect("file present");
+        config.server.deny_file = Some(std::sync::Arc::new(file));
+        assert_eq!(
+            config.to_json()["deny_file"],
+            serde_json::json!({
+                "allow": 1,
+                "deny": 2,
+                "entry": 0,
+                "fallback": "404",
+                "loaded": true,
+                "rules": 3,
+            })
+        );
+    }
+
+    /// Env for `Config::from_env` with `.oxphpdeny` under `root`: entry
+    /// selection pinned, nothing inherited from the shell.
+    fn deny_file_env<'a>(
+        root: &'a str,
+        entry_file: Option<&'a str>,
+    ) -> [(&'static str, Option<&'a str>); 6] {
+        [
+            ("DOCUMENT_ROOT", Some(root)),
+            ("ENTRY_FILE", entry_file),
+            ("INDEX_FILE", None),
+            ("WORKER_FILE", None),
+            ("WORKER_MODE_ENABLED", None),
+            ("PHP_DENY_FALLBACK", None),
+        ]
+    }
+
+    #[test]
+    fn from_env_loads_the_deny_file_for_the_resolved_mode() {
+        let dir = tempfile::TempDir::new().unwrap();
+        std::fs::write(dir.path().join("index.php"), "<?php").unwrap();
+        std::fs::write(dir.path().join(".oxphpdeny"), "vendor/\n> storage/\n").unwrap();
+        let root = dir.path().to_str().unwrap();
+
+        // Traditional: a `>` rule has no entry script to hand the request to,
+        // and `oxphp config --check` reports that before a deploy.
+        test_env::with_env(&deny_file_env(root, None), || {
+            let err = Config::from_env().unwrap_err().to_string();
+            assert!(err.contains(".oxphpdeny: line 2"), "{err}");
+        });
+        // Framework: the same file loads.
+        test_env::with_env(&deny_file_env(root, Some("index.php")), || {
+            let config = Config::from_env().unwrap();
+            let file = config.server.deny_file.expect("loaded");
+            assert_eq!(file.summary_json()["entry"], 1);
+        });
     }
 
     #[test]

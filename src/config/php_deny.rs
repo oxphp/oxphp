@@ -13,15 +13,35 @@
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 
-/// Routing mode as seen by the deny-list loader. Determines whether
-/// `PHP_DENY_PATHS` can apply (direct-mapping modes) or is redundant by
-/// construction (single-entry modes).
+/// Routing mode, as resolved from the entry file and the worker flag. Decides
+/// which deny features can apply: `PHP_DENY_PATHS` only in the direct-mapping
+/// modes, `.oxphpdeny` `>` rules only in the modes with an entry script.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RoutingModeKind {
     Traditional,
     Framework,
     Spa,
     Worker,
+}
+
+impl RoutingModeKind {
+    /// The mode `RouteConfig` routes in: worker mode when enabled, else by the
+    /// entry file's extension — `.php` is a front controller, any other an SPA
+    /// fallback, none (or a file name that is not UTF-8) direct file mapping.
+    pub fn resolve(entry_file: Option<&Path>, worker_mode_enabled: bool) -> Self {
+        if worker_mode_enabled {
+            return Self::Worker;
+        }
+        let ext = entry_file.and_then(|p| {
+            p.file_name()?.to_str()?;
+            p.extension()?.to_str()
+        });
+        match ext {
+            None => Self::Traditional,
+            Some(ext) if ext.eq_ignore_ascii_case("php") => Self::Framework,
+            Some(_) => Self::Spa,
+        }
+    }
 }
 
 use globset::GlobSet;
@@ -36,7 +56,8 @@ thread_local! {
     static MATCH_BUF: RefCell<Vec<usize>> = const { RefCell::new(Vec::new()) };
 }
 
-/// What to return when a request matches `PHP_DENY_PATHS`.
+/// What to return for a denied request — `PHP_DENY_FALLBACK`, shared by
+/// `PHP_DENY_PATHS` and `.oxphpdeny`.
 #[derive(Debug, Clone)]
 pub enum DenyFallback {
     /// Respond with a bare HTTP status (`ErrorPagesHandler` may substitute a body).
@@ -55,19 +76,32 @@ pub enum DenyFallback {
     },
 }
 
+/// Which feature denied a request. Picks the counter the denial is reported
+/// under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DenySource {
+    /// `PHP_DENY_PATHS`.
+    PhpDenyPaths,
+    /// A `.oxphpdeny` rule.
+    DenyFile,
+}
+
 /// Metadata attached to `RouteResult::Execute` on the deny-fallback path.
 /// Drives `$_SERVER` enrichment inside the SAPI.
 #[derive(Debug, Clone)]
 pub struct DeniedMeta {
     /// Original sanitized URI (no leading `/`).
     pub path: String,
-    /// Matched glob pattern from `PHP_DENY_PATHS`.
+    /// Matched glob pattern from `PHP_DENY_PATHS`, or the `.oxphpdeny` rule as
+    /// written in the file.
     pub pattern: String,
     /// URI-form of the fallback script (`/_security/denied.php`). Precomputed
     /// at config time from the canonical root — avoids a `strip_prefix` at
     /// request time that can silently fall back to the attacker URI when
     /// raw and canonical document roots differ.
     pub fallback_script_uri: String,
+    /// Which feature denied the request.
+    pub source: DenySource,
 }
 
 /// Compiled deny-list + fallback strategy.
@@ -119,8 +153,8 @@ impl PhpDeny {
                 None => return Ok(None),
             };
 
-        let fallback_raw = std::env::var("PHP_DENY_FALLBACK").unwrap_or_else(|_| "404".to_string());
-        let fallback = parse_fallback(&fallback_raw, document_root, &matcher, &patterns)?;
+        let fallback = deny_fallback_from_env(document_root)?;
+        reject_self_denied(&fallback, &matcher, &patterns)?;
 
         Ok(Some(Self {
             matcher,
@@ -184,12 +218,34 @@ impl PhpDeny {
     }
 }
 
-fn parse_fallback(
-    raw: &str,
-    document_root: &Path,
+/// Read `PHP_DENY_FALLBACK` (default `404`): the answer to a denied request,
+/// for `PHP_DENY_PATHS` and `.oxphpdeny` alike.
+pub fn deny_fallback_from_env(document_root: &Path) -> Result<DenyFallback, BoxError> {
+    let raw = std::env::var("PHP_DENY_FALLBACK").unwrap_or_else(|_| "404".to_string());
+    parse_fallback(&raw, document_root)
+}
+
+/// `PHP_DENY_PATHS` must not cover its own fallback script.
+fn reject_self_denied(
+    fallback: &DenyFallback,
     matcher: &GlobSet,
     patterns: &[String],
-) -> Result<DenyFallback, BoxError> {
+) -> Result<(), BoxError> {
+    let DenyFallback::Script { uri, .. } = fallback else {
+        return Ok(());
+    };
+    let rel = uri.trim_start_matches('/');
+    match matcher.matches(rel).first() {
+        Some(&i) => Err(format!(
+            "PHP_DENY_FALLBACK script {rel} would be denied by its own rules (matches pattern {:?}) — loop avoided",
+            patterns[i]
+        )
+        .into()),
+        None => Ok(()),
+    }
+}
+
+fn parse_fallback(raw: &str, document_root: &Path) -> Result<DenyFallback, BoxError> {
     let raw = raw.trim();
     if raw.is_empty() {
         return Err("PHP_DENY_FALLBACK is empty (default is '404')".into());
@@ -238,23 +294,11 @@ fn parse_fallback(
         .into());
     }
 
-    // Anti-loop: fallback script itself must not match PHP_DENY_PATHS.
     let fallback_rel = canonical
         .strip_prefix(&canonical_root)
         .unwrap_or(&canonical)
         .to_string_lossy()
         .into_owned();
-    if matcher.is_match(&fallback_rel) {
-        let matched_idx = matcher.matches(&fallback_rel);
-        let p = matched_idx
-            .first()
-            .map(|i| patterns[*i].as_str())
-            .unwrap_or("?");
-        return Err(format!(
-            "PHP_DENY_FALLBACK script {fallback_rel} would be denied by its own rules (matches pattern {p:?}) — loop avoided"
-        )
-        .into());
-    }
 
     // URI-form for `$_SERVER['SCRIPT_NAME']` — single leading `/`.
     let uri = format!("/{}", fallback_rel.trim_start_matches('/'));
@@ -335,6 +379,37 @@ mod tests {
         let d = deny_with("/uploads/**");
         assert_eq!(d.matches("api/users"), None);
         assert_eq!(d.matches(""), None);
+    }
+
+    #[test]
+    fn routing_mode_kind_follows_worker_flag_then_entry_extension() {
+        use RoutingModeKind::{Framework, Spa, Traditional, Worker};
+        for (entry, worker, want) in [
+            (None, false, Traditional),
+            (Some("/srv/index.php"), false, Framework),
+            (Some("/srv/index.PHP"), false, Framework),
+            (Some("/srv/index.html"), false, Spa),
+            (Some("/srv/index"), false, Traditional),
+            (Some("/srv/worker.php"), true, Worker),
+            (None, true, Worker),
+        ] {
+            assert_eq!(
+                RoutingModeKind::resolve(entry.map(Path::new), worker),
+                want,
+                "entry {entry:?}, worker {worker}"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn routing_mode_kind_without_a_utf8_entry_name_is_traditional() {
+        use std::os::unix::ffi::OsStrExt;
+        let entry = Path::new(std::ffi::OsStr::from_bytes(b"/srv/\xffindex.php"));
+        assert_eq!(
+            RoutingModeKind::resolve(Some(entry), false),
+            RoutingModeKind::Traditional
+        );
     }
 
     use tempfile::TempDir;
@@ -566,6 +641,53 @@ mod tests {
             || {
                 let dir = TempDir::new().unwrap();
                 assert!(PhpDeny::from_env(dir.path(), RoutingModeKind::Traditional).is_err());
+            },
+        );
+    }
+
+    #[test]
+    fn deny_fallback_from_env_defaults_to_404_and_parses_both_forms() {
+        let dir = make_tempdir_with_file("_security/denied.php");
+        let root = dir.path().to_path_buf();
+        with_env(&[("PHP_DENY_FALLBACK", None)], || {
+            assert!(matches!(
+                deny_fallback_from_env(&root).unwrap(),
+                DenyFallback::Status(404)
+            ));
+        });
+        with_env(&[("PHP_DENY_FALLBACK", Some("410"))], || {
+            assert!(matches!(
+                deny_fallback_from_env(&root).unwrap(),
+                DenyFallback::Status(410)
+            ));
+        });
+        with_env(
+            &[("PHP_DENY_FALLBACK", Some("/_security/denied.php"))],
+            || match deny_fallback_from_env(&root).unwrap() {
+                DenyFallback::Script { uri, .. } => assert_eq!(uri, "/_security/denied.php"),
+                other => panic!("expected a script fallback, got {other:?}"),
+            },
+        );
+        with_env(&[("PHP_DENY_FALLBACK", Some("banana"))], || {
+            assert!(deny_fallback_from_env(&root).is_err());
+        });
+    }
+
+    #[test]
+    fn deny_fallback_from_env_leaves_the_loop_check_to_php_deny_paths() {
+        // `.oxphpdeny` runs its fallback script directly, never through
+        // routing, so a script under a denied path is no loop for it.
+        let dir = make_tempdir_with_file("uploads/denied.php");
+        let root = dir.path().to_path_buf();
+        with_env(
+            &[
+                ("PHP_DENY_PATHS", Some("/uploads/**")),
+                ("PHP_DENY_FALLBACK", Some("/uploads/denied.php")),
+            ],
+            || {
+                assert!(deny_fallback_from_env(&root).is_ok());
+                let err = PhpDeny::from_env(&root, RoutingModeKind::Traditional).unwrap_err();
+                assert!(err.to_string().contains("loop avoided"), "{err}");
             },
         );
     }

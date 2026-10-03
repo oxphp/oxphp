@@ -105,6 +105,14 @@ curl -s http://localhost:9090/config | jq .
   "async_queue_capacity": 0,
   "async_workers": 0,
   "brotli_level": 5,
+  "deny_file": {
+    "allow": 1,
+    "deny": 3,
+    "entry": 1,
+    "fallback": "404",
+    "loaded": true,
+    "rules": 5
+  },
   "document_root": "/var/www/html/public",
   "drain_timeout_seconds": 30,
   "entry_file": "/var/www/html/public/index.php",
@@ -139,6 +147,8 @@ curl -s http://localhost:9090/config | jq .
 ```
 
 `runtime_hooks` lists the runtime-hook categories the process installed at startup, as a parsed set rather than the raw `RUNTIME_HOOKS` value, so `all`, `1` and `sleep, streams, net` all read as `["sleep","streams","net"]` and a scraper needs no copy of that grammar. An empty list means no hook is installed, which is also the answer for a misspelled variable name. It reports what was installed, not what is in effect: where there are no fibers at all the hooks delegate to the builtins they replaced, so a traditional-mode server reports the categories it set up while behaving natively. See [Runtime Hooks](../operations/configuration.md#runtime-hooks).
+
+`deny_file` summarizes the [`.oxphpdeny`](../security/oxphpdeny.md) file read from `DOCUMENT_ROOT` at startup: the number of rules, split by action — `deny`, `entry` for `>` rules, `allow` for `!` rules — and what a deny rule answers with, the `PHP_DENY_FALLBACK` status code or `"script"` without the script's path. The rules themselves are left out: on an internal server reachable from outside, they would be a map of exactly the paths the file protects. To see how each rule was read, start with `LOG_LEVEL=debug` and look for the `oxphpdeny rule` lines. Without the file the entry is `{"loaded": false}`.
 
 TLS certificate and key file paths are never emitted (only the `tls_enabled` boolean is exposed), and `internal_addr` and `error_pages_dir` are scrubbed from the served response — deployment topology and filesystem paths that aid an attacker and are not needed by scrapers.
 

@@ -14,10 +14,11 @@ Every request runs through a shared pipeline before the mode-specific logic kick
 1. **Dot-path filter** — paths containing hidden segments (`.git`, `.env`) are blocked, with an exception for `/.well-known/*` ([RFC 8615](https://www.rfc-editor.org/rfc/rfc8615))
 2. **Route cache lookup** — recently resolved URIs are returned from an LRU cache (10 000 entries)
 3. **Percent-decoding + sanitization** — encoded sequences like `%2e%2e` are decoded and traversal segments (`..`, `.`, empty) are stripped
-4. **Well-known PHP block** — defense-in-depth: `.php` scripts inside `/.well-known/` never execute
-5. **URI classification** — the sanitized path is classified once into `NoExtension`, `Php`, or `OtherExtension`
-6. **Mode dispatch** — each mode handles the three URI kinds with its own rules
-7. **Symlink validation** — every resolved filesystem path must canonicalize inside the document root, and a static file or PHP script is checked again, on the file actually opened, when it is read or executed
+4. **Path deny rules** — with a [`.oxphpdeny`](../security/oxphpdeny.md) file holding at least one deny or `>` rule, the sanitized path is matched before any disk access: a deny rule answers with `PHP_DENY_FALLBACK`, a `>` rule sends the request to the entry script, and a path past the file's depth and length limits gets 404
+5. **Well-known PHP block** — defense-in-depth: `.php` scripts inside `/.well-known/` never execute
+6. **URI classification** — the sanitized path is classified once into `NoExtension`, `Php`, or `OtherExtension`
+7. **Mode dispatch** — each mode handles the three URI kinds with its own rules
+8. **Symlink validation** — every resolved filesystem path must canonicalize inside the document root, and a static file or PHP script is checked again, on the file actually opened, when it is read or executed
 
 The classification step is the key efficiency: the disk check for static assets (`/style.css`, `/logo.png`) is performed **once** in the shared layer for `OtherExtension` URIs, so all three modes pay the same cost.
 
@@ -164,12 +165,13 @@ Worker mode activates when `WORKER_MODE_ENABLED=true` and `ENTRY_FILE` points at
 
 Arbitrary `.php` files in the document root are **never executed directly** in worker mode — a request to `/about.php` reaches the worker callback like any other route, even if `about.php` exists on disk. There is no directory-index lookup and no root `index.php` fallback either; the worker sees those requests itself.
 
-Two exceptions, both server-level defenses that run before mode dispatch: dot-segment paths (`/.git/config`, `/.env`, bare `/.well-known`) are rejected by [dot-path blocking](../security/dot-path-blocking.md), and `.php` URIs under `/.well-known/` are refused as defense-in-depth. Both return 404 and never reach the worker.
+The exceptions are server-level defenses that run before mode dispatch, and none of them reaches the worker: dot-segment paths (`/.git/config`, `/.env`, bare `/.well-known`) are rejected by [dot-path blocking](../security/dot-path-blocking.md), and `.php` URIs under `/.well-known/` are refused as defense-in-depth, both with 404. With a [`.oxphpdeny`](../security/oxphpdeny.md) file holding at least one deny or `>` rule, a path a deny rule matches gets the `PHP_DENY_FALLBACK` status, and a path past the file's depth and length limits gets 404.
 
-Startup-time validation rejects two combinations:
+Startup-time validation rejects three combinations:
 
 - `WORKER_MODE_ENABLED=true` with no `ENTRY_FILE` → `WORKER_MODE_ENABLED=true requires ENTRY_FILE to be set`.
 - `WORKER_MODE_ENABLED=true` with a non-`.php` `ENTRY_FILE` → `WORKER_MODE_ENABLED=true requires a .php ENTRY_FILE`.
+- A `.oxphpdeny` deny rule with a script `PHP_DENY_FALLBACK` → `PHP_DENY_FALLBACK is a script, but in worker mode every request runs the worker entry`. A worker thread runs nothing but the entry, so it cannot run a fallback script in a denied request's place; use a status code.
 
 See [Worker Mode](worker-mode.md) for full configuration details.
 
@@ -195,6 +197,7 @@ OxPHP applies multiple layers of protection to prevent directory traversal, hidd
 - **Dot-path blocking** blocks any path segment starting with `.` (e.g. `/.git/config`, `/.env`), with an exception for `/.well-known/*` per RFC 8615
 - **Well-known PHP block** — even with the dot-path exception, `.php` scripts under `/.well-known/` are never executed (defense-in-depth)
 - **PHP execution deny-list** — in the direct-mapping modes (Traditional and SPA), `PHP_DENY_PATHS` blocks `.php` execution at configured glob patterns (e.g. `/uploads/**`, or a single file like `/admin/legacy.php`) before any disk I/O. See [PHP Execution Deny-List](../security/php-deny.md)
+- **Path deny rules** — a [`.oxphpdeny`](../security/oxphpdeny.md) file at the top of `DOCUMENT_ROOT` lists, in gitignore syntax, paths that are never served — static files and scripts alike — or, with a `>` prefix, are handed to the entry script. It applies in every routing mode, right after the path is decoded and normalized and before any disk access
 
 > **Note:** If the document root directory does not exist at startup, the server exits with a fatal error. Symlink escape protection requires a valid, resolvable document root path.
 

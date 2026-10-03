@@ -1,0 +1,4 @@
+# profile: default
+# description: /config without a .oxphpdeny in DOCUMENT_ROOT
+
+oxphpdeny/test_config_without_file
