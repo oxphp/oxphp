@@ -91,7 +91,8 @@ pub struct ScriptRequest {
     /// building `SERVER_PORT`. `None` when the header is absent or invalid.
     pub forwarded_port: Option<u16>,
     /// Metadata for `$_SERVER['OXPHP_DENIED_*']` population — set only when
-    /// this request was routed here by the `PHP_DENY_PATHS` fallback.
+    /// this request was routed here by the `PHP_DENY_FALLBACK` script, after
+    /// a `PHP_DENY_PATHS` match or a `.oxphpdeny` deny rule.
     /// Boxed behind `Arc` so the field stays 8 bytes when `None` (the
     /// dominant case) and the rare-path clone is one atomic increment
     /// instead of three String clones.

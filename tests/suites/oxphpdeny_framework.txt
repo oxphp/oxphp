@@ -1,0 +1,9 @@
+# profile: oxphpdeny_framework
+# description: .oxphpdeny in Framework mode — `>` rules and a script fallback
+
+oxphpdeny/test_gt_rule_sends_existing_file_to_entry >> /storage/invoice.pdf | GET | -H "X-Expect-Uri: /storage/invoice.pdf" | 200 | content-type:~application/json
+oxphpdeny/test_gt_rule_sends_missing_file_to_entry >> /storage/ghost.pdf | GET | -H "X-Expect-Uri: /storage/ghost.pdf" | 200 | content-type:~application/json
+oxphpdeny/test_deny_runs_fallback_script >> /secret.txt | GET | -H "X-Expect-Path: /secret.txt" -H "X-Expect-Pattern: secret.txt" | 404 | content-type:~application/json
+oxphpdeny/test_deny_below_gt_dir_still_denied >> /storage/secret.txt | GET | -H "X-Expect-Path: /storage/secret.txt" -H "X-Expect-Pattern: secret.txt" | 404 | content-type:~application/json
+oxphpdeny/test_hidden_fallback_answers_itself >> /_security/denied.php | GET | -H "X-Expect-Path: /_security/denied.php" -H "X-Expect-Pattern: /_security/" | 404 | content-type:~application/json
+oxphpdeny/test_framework_static_outside_rules_served >> /assets/app.js | GET | | 200 |

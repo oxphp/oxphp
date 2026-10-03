@@ -1333,7 +1333,7 @@ async fn test_worker_mode_route_never_carries_path_info() {
 #[cfg(test)]
 mod php_deny_integration {
     use super::*;
-    use crate::config::ServerConfig;
+    use crate::config::{DenySource, ServerConfig};
     use crate::server::response::static_file::FileCache;
     use std::sync::Arc;
     use std::time::Duration;
@@ -1364,6 +1364,7 @@ mod php_deny_integration {
             listen_addr: "127.0.0.1:0".to_string(),
             document_root: dir.path().to_path_buf(),
             header_read_timeout: Duration::from_secs(5),
+            deny_file: None,
         };
         let entry_path = entry_file.map(|name| dir.path().join(name));
         let cache = Arc::new(FileCache::new(1024));
@@ -1392,7 +1393,13 @@ mod php_deny_integration {
             None,
         );
         let result = rc.resolve_request("/uploads/shell.php", &cache).await;
-        assert!(matches!(&*result, RouteResult::Denied(404)));
+        assert!(matches!(
+            &*result,
+            RouteResult::Denied {
+                status: 404,
+                source: DenySource::PhpDenyPaths
+            }
+        ));
     }
 
     #[tokio::test]
@@ -1406,7 +1413,13 @@ mod php_deny_integration {
             None,
         );
         let result = rc.resolve_request("/uploads/shell.php", &cache).await;
-        assert!(matches!(&*result, RouteResult::Denied(403)));
+        assert!(matches!(
+            &*result,
+            RouteResult::Denied {
+                status: 403,
+                source: DenySource::PhpDenyPaths
+            }
+        ));
     }
 
     #[tokio::test]
@@ -1421,7 +1434,13 @@ mod php_deny_integration {
         );
         let result = rc.resolve_request("/uploads/ghost.php", &cache).await;
         // Must be StatusCode (deny), not NotFound (would be an existence oracle).
-        assert!(matches!(&*result, RouteResult::Denied(404)));
+        assert!(matches!(
+            &*result,
+            RouteResult::Denied {
+                status: 404,
+                source: DenySource::PhpDenyPaths
+            }
+        ));
     }
 
     #[tokio::test]
@@ -1460,6 +1479,7 @@ mod php_deny_integration {
                 assert_eq!(meta.path, "uploads/shell.php");
                 assert_eq!(meta.pattern, "uploads/**");
                 assert_eq!(meta.fallback_script_uri, "/_security/denied.php");
+                assert_eq!(meta.source, DenySource::PhpDenyPaths);
             }
             other => panic!("expected Execute with DeniedMeta, got {other:?}"),
         }
@@ -1481,7 +1501,13 @@ mod php_deny_integration {
             None,
         );
         let result = rc.resolve_request("/uploads/shell.php/x", &cache).await;
-        assert!(matches!(&*result, RouteResult::Denied(404)));
+        assert!(matches!(
+            &*result,
+            RouteResult::Denied {
+                status: 404,
+                source: DenySource::PhpDenyPaths
+            }
+        ));
     }
 
     #[tokio::test]
@@ -1499,7 +1525,13 @@ mod php_deny_integration {
             Some("index.html"),
         );
         let result = rc.resolve_request("/uploads/shell.php", &cache).await;
-        assert!(matches!(&*result, RouteResult::Denied(404)));
+        assert!(matches!(
+            &*result,
+            RouteResult::Denied {
+                status: 404,
+                source: DenySource::PhpDenyPaths
+            }
+        ));
     }
 
     #[tokio::test]
@@ -1536,7 +1568,13 @@ mod php_deny_integration {
             None,
         );
         let result = rc.resolve_request("/uploads/", &cache).await;
-        assert!(matches!(&*result, RouteResult::Denied(404)));
+        assert!(matches!(
+            &*result,
+            RouteResult::Denied {
+                status: 404,
+                source: DenySource::PhpDenyPaths
+            }
+        ));
     }
 
     #[tokio::test]
@@ -1559,6 +1597,7 @@ mod php_deny_integration {
                 // resolved directory-index path.
                 assert_eq!(meta.path, "uploads");
                 assert_eq!(meta.pattern, "uploads/**");
+                assert_eq!(meta.source, DenySource::PhpDenyPaths);
             }
             other => panic!("expected Execute with DeniedMeta, got {other:?}"),
         }
@@ -1604,5 +1643,639 @@ mod php_deny_integration {
             RouteResult::Execute(path, _, None) => assert!(path.ends_with("worker.php")),
             other => panic!("expected worker Execute, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod deny_file_integration {
+    use super::*;
+    use crate::config::{DenyFile, DenySource, RoutingModeKind, ServerConfig};
+    use crate::server::response::static_file::FileCache;
+    use std::sync::Arc;
+    use tempfile::TempDir;
+
+    /// A document root holding `layout` and, when `rules` is given, a
+    /// `.oxphpdeny` with them, routed as `entry_file` and `worker_mode`
+    /// select. `env` applies while the file and the routing are built; the
+    /// deny variables are cleared first so an inherited value cannot leak in.
+    fn setup(
+        layout: &[(&str, &[u8])],
+        rules: Option<&str>,
+        env: &[(&str, Option<&str>)],
+        entry_file: Option<&str>,
+        worker_mode: bool,
+    ) -> (TempDir, Arc<FileCache>, super::RouteConfig) {
+        let dir = TempDir::new().unwrap();
+        for (rel, body) in layout {
+            let p = dir.path().join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, body).unwrap();
+        }
+        if let Some(rules) = rules {
+            std::fs::write(dir.path().join(".oxphpdeny"), rules).unwrap();
+        }
+        let entry_path = entry_file.map(|name| dir.path().join(name));
+        let mut vars: Vec<(&str, Option<&str>)> = vec![
+            ("PHP_DENY_PATHS", None),
+            ("PHP_DENY_DIRS", None),
+            ("PHP_DENY_FALLBACK", None),
+            ("SYMLINK_ALLOW_PATHS", None),
+        ];
+        vars.extend_from_slice(env);
+        let rc = crate::config::test_env::with_env(&vars, || {
+            let mut cfg = ServerConfig::new("127.0.0.1:0".to_string(), dir.path().to_path_buf());
+            let mode = RoutingModeKind::resolve(entry_path.as_deref(), worker_mode);
+            cfg.deny_file = DenyFile::load(dir.path(), mode).unwrap().map(Arc::new);
+            let mut rc = super::RouteConfig::new(&cfg, entry_path.as_deref(), worker_mode);
+            if worker_mode {
+                rc.set_worker_route(entry_path.clone().expect("worker mode requires entry"));
+            }
+            rc
+        });
+        (dir, Arc::new(FileCache::new(1024)), rc)
+    }
+
+    fn is_denied(result: &RouteResult, status: u16) -> bool {
+        matches!(
+            result,
+            RouteResult::Denied { status: s, source: DenySource::DenyFile } if *s == status
+        )
+    }
+
+    fn cached(rc: &super::RouteConfig, uri: &str) -> bool {
+        rc.route_cache.lock().unwrap().peek(uri).is_some()
+    }
+
+    #[tokio::test]
+    async fn deny_rules_apply_in_every_mode_whether_or_not_the_file_exists() {
+        let layout: &[(&str, &[u8])] = &[
+            ("index.php", b"<?php"),
+            ("index.html", b"<html>"),
+            ("vendor/autoload.php", b"<?php"),
+            ("vendor/lib.js", b"js"),
+            ("dump.sql", b"--"),
+        ];
+        for (entry, worker) in [
+            (None, false),
+            (Some("index.php"), false),
+            (Some("index.html"), false),
+            (Some("index.php"), true),
+        ] {
+            let (_dir, cache, rc) = setup(layout, Some("vendor/\n*.sql\n"), &[], entry, worker);
+            for uri in [
+                "/vendor/autoload.php",
+                "/vendor/ghost.php",
+                "/vendor/lib.js",
+                "/vendor/ghost.js",
+                "/vendor/",
+                "/dump.sql",
+                "/ghost.sql",
+            ] {
+                let result = rc.resolve_request(uri, &cache).await;
+                assert!(
+                    is_denied(&result, 404),
+                    "entry {entry:?}, worker {worker}, {uri}: {result:?}"
+                );
+                assert!(!cached(&rc, uri), "{uri}: a denial was cached");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn paths_the_rules_do_not_name_route_as_before() {
+        let (_dir, cache, rc) = setup(
+            &[("index.php", b"<?php"), ("assets/app.js", b"js")],
+            Some("vendor/\n"),
+            &[],
+            None,
+            false,
+        );
+        assert!(matches!(
+            &*rc.resolve_request("/assets/app.js", &cache).await,
+            RouteResult::Serve(_)
+        ));
+        // `/` has no path for a rule to name.
+        assert!(matches!(
+            &*rc.resolve_request("/", &cache).await,
+            RouteResult::Execute(_, _, None)
+        ));
+    }
+
+    #[tokio::test]
+    async fn normalization_does_not_bypass_the_rules() {
+        let (_dir, cache, rc) = setup(
+            &[("vendor/x.js", b"js")],
+            Some("vendor/\n"),
+            &[],
+            None,
+            false,
+        );
+        for uri in [
+            "//vendor/x.js",
+            "/vendor//x.js",
+            "/vend%6Fr/x.js",
+            "/vendor%2Fx.js",
+        ] {
+            let result = rc.resolve_request(uri, &cache).await;
+            assert!(is_denied(&result, 404), "{uri}: {result:?}");
+        }
+        // Dot segments are refused before the rules run.
+        for uri in ["/./vendor/x.js", "/a/../vendor/x.js"] {
+            let result = rc.resolve_request(uri, &cache).await;
+            assert!(
+                matches!(&*result, RouteResult::NotFound),
+                "{uri}: {result:?}"
+            );
+        }
+        // A deny rule ignores case: a case-insensitive filesystem would
+        // serve `vendor/x.js` for this.
+        let result = rc.resolve_request("/VENDOR/x.js", &cache).await;
+        assert!(is_denied(&result, 404), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn trailing_slash_table() {
+        // `admin/` misses the bare `/admin`; `admin` hits all four; `admin/*`
+        // and `admin/x` only what lies below.
+        let uris = ["/admin", "/admin/", "/admin/x", "/admin/x/y"];
+        for (rules, want) in [
+            ("admin/", [false, true, true, true]),
+            ("admin", [true, true, true, true]),
+            ("/admin", [true, true, true, true]),
+            ("admin/*", [false, false, true, true]),
+            ("admin/x", [false, false, true, true]),
+        ] {
+            let (_dir, cache, rc) = setup(
+                &[("admin/index.html", b"<html>")],
+                Some(rules),
+                &[],
+                None,
+                false,
+            );
+            for (uri, want) in uris.iter().zip(want) {
+                let result = rc.resolve_request(uri, &cache).await;
+                assert_eq!(
+                    is_denied(&result, 404),
+                    want,
+                    "rule {rules:?}, {uri}: {result:?}"
+                );
+            }
+        }
+        // Unanchored names match at any depth, anchored ones at the top only.
+        let (_dir, cache, rc) = setup(&[], Some("admin\n"), &[], None, false);
+        assert!(is_denied(
+            &*rc.resolve_request("/foo/admin", &cache).await,
+            404
+        ));
+        let (_dir, cache, rc) = setup(&[], Some("/admin\n"), &[], None, false);
+        assert!(!is_denied(
+            &*rc.resolve_request("/foo/admin", &cache).await,
+            404
+        ));
+    }
+
+    #[tokio::test]
+    async fn trailing_slash_variants_count_as_directories() {
+        let (_dir, cache, rc) = setup(
+            &[("admin/index.html", b"<html>"), ("composer.json", b"{}")],
+            Some("admin/\n/composer.*\n"),
+            &[],
+            None,
+            false,
+        );
+        for uri in ["/admin/", "/admin%2F", "/admin//", "/composer.json/"] {
+            let result = rc.resolve_request(uri, &cache).await;
+            assert!(is_denied(&result, 404), "{uri}: {result:?}");
+        }
+        assert!(matches!(
+            &*rc.resolve_request("/admin/.", &cache).await,
+            RouteResult::NotFound
+        ));
+    }
+
+    #[tokio::test]
+    async fn uri_rules_do_not_see_the_script_a_uri_resolves_to() {
+        // The documented gap, pinned so that closing it is a decision. Rules
+        // match the URI: `/admin` is not a directory request, so `admin/`
+        // misses it — and Traditional mode answers it with `admin/index.php`.
+        // A rule without the slash (`/admin`) closes both.
+        let (_dir, cache, rc) = setup(
+            &[("admin/index.php", b"<?php")],
+            Some("admin/\n"),
+            &[],
+            None,
+            false,
+        );
+        match &*rc.resolve_request("/admin", &cache).await {
+            RouteResult::Execute(path, _, None) => {
+                assert!(path.ends_with("admin/index.php"), "{path:?}")
+            }
+            other => panic!("expected admin/index.php to run, got {other:?}"),
+        }
+        // A file mask misses the directory index it resolves to.
+        let (_dir, cache, rc) = setup(
+            &[("uploads/index.php", b"<?php")],
+            Some("uploads/*.php\n"),
+            &[],
+            None,
+            false,
+        );
+        match &*rc.resolve_request("/uploads/", &cache).await {
+            RouteResult::Execute(path, _, None) => {
+                assert!(path.ends_with("uploads/index.php"), "{path:?}")
+            }
+            other => panic!("expected uploads/index.php to run, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn entry_rules_hand_the_request_to_the_front_controller() {
+        let (dir, cache, rc) = setup(
+            &[("index.php", b"<?php"), ("storage/invoice.pdf", b"%PDF")],
+            Some("> storage/\n"),
+            &[],
+            Some("index.php"),
+            false,
+        );
+        for uri in [
+            "/storage/invoice.pdf",
+            "/storage/ghost.pdf",
+            "/storage/report",
+        ] {
+            match &*rc.resolve_request(uri, &cache).await {
+                RouteResult::Execute(path, None, None) => {
+                    assert_eq!(path, &dir.path().join("index.php"), "{uri}")
+                }
+                other => panic!("{uri}: expected the front controller, got {other:?}"),
+            }
+            // Routing, not a denial: cached like any other route.
+            assert!(cached(&rc, uri), "{uri} was not cached");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_deny_below_an_entry_directory_still_denies() {
+        // `>` hands a directory to the front controller, which may stream
+        // its files to any logged-in user: a file the operator denied below
+        // it must stay denied, whichever line comes first.
+        for rules in [
+            "*.sql\n> /storage/invoices/\n",
+            "> /storage/invoices/\n*.sql\n",
+        ] {
+            let (_dir, cache, rc) = setup(
+                &[
+                    ("index.php", b"<?php"),
+                    ("storage/invoices/dump.sql", b"--"),
+                ],
+                Some(rules),
+                &[],
+                Some("index.php"),
+                false,
+            );
+            let result = rc
+                .resolve_request("/storage/invoices/dump.sql", &cache)
+                .await;
+            assert!(is_denied(&result, 404), "{rules:?}: {result:?}");
+        }
+        let (_dir, cache, rc) = setup(
+            &[("index.php", b"<?php"), ("storage/private/key.pem", b"k")],
+            Some("> /storage/\n/storage/private/\n"),
+            &[],
+            Some("index.php"),
+            false,
+        );
+        let result = rc.resolve_request("/storage/private/key.pem", &cache).await;
+        assert!(is_denied(&result, 404), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn entry_rules_in_worker_mode_dispatch_to_the_worker() {
+        let (dir, cache, rc) = setup(
+            &[("worker.php", b"<?php"), ("storage/invoice.pdf", b"%PDF")],
+            Some("> storage/\n"),
+            &[],
+            Some("worker.php"),
+            true,
+        );
+        match &*rc.resolve_request("/storage/invoice.pdf", &cache).await {
+            RouteResult::Execute(path, None, None) => {
+                assert_eq!(path, &dir.path().join("worker.php"))
+            }
+            other => panic!("expected the worker entry, got {other:?}"),
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "worker mode")]
+    fn worker_mode_rejects_a_script_fallback_for_deny_rules() {
+        let _ = setup(
+            &[("worker.php", b"<?php"), ("_security/denied.php", b"<?php")],
+            Some("vendor/\n"),
+            &[("PHP_DENY_FALLBACK", Some("/_security/denied.php"))],
+            Some("worker.php"),
+            true,
+        );
+    }
+
+    #[test]
+    fn worker_mode_ignores_a_script_fallback_no_rule_can_use() {
+        // `>` and `!` rules never answer with the fallback.
+        let _ = setup(
+            &[("worker.php", b"<?php"), ("_security/denied.php", b"<?php")],
+            Some("> storage/\n!keep\n"),
+            &[("PHP_DENY_FALLBACK", Some("/_security/denied.php"))],
+            Some("worker.php"),
+            true,
+        );
+    }
+
+    #[tokio::test]
+    async fn script_fallback_reports_the_rule_as_written() {
+        let (_dir, cache, rc) = setup(
+            &[("_security/denied.php", b"<?php"), ("secret.txt", b"s")],
+            Some("/secret.*\n"),
+            &[("PHP_DENY_FALLBACK", Some("/_security/denied.php"))],
+            None,
+            false,
+        );
+        match &*rc.resolve_request("/secret.txt", &cache).await {
+            RouteResult::Execute(path, None, Some(meta)) => {
+                assert!(path.ends_with("_security/denied.php"), "{path:?}");
+                assert_eq!(meta.source, DenySource::DenyFile);
+                assert_eq!(meta.path, "secret.txt");
+                assert_eq!(meta.pattern, "/secret.*");
+                assert_eq!(meta.fallback_script_uri, "/_security/denied.php");
+            }
+            other => panic!("expected the fallback script, got {other:?}"),
+        }
+        assert!(!cached(&rc, "/secret.txt"));
+    }
+
+    #[tokio::test]
+    async fn fallback_script_may_hide_itself() {
+        // `/_security/` keeps the script from being requested directly. Such a
+        // request is denied and answered by the script — once, not in a loop:
+        // a fallback script is run directly, never routed.
+        let (_dir, cache, rc) = setup(
+            &[("_security/denied.php", b"<?php")],
+            Some("/_security/\n"),
+            &[("PHP_DENY_FALLBACK", Some("/_security/denied.php"))],
+            None,
+            false,
+        );
+        match &*rc.resolve_request("/_security/denied.php", &cache).await {
+            RouteResult::Execute(path, None, Some(meta)) => {
+                assert!(path.ends_with("_security/denied.php"), "{path:?}");
+                assert_eq!(meta.pattern, "/_security/");
+            }
+            other => panic!("expected the fallback script, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn deny_file_comes_first_and_shares_php_deny_paths_fallback() {
+        let layout: &[(&str, &[u8])] =
+            &[("uploads/shell.php", b"<?php"), ("uploads/a.png", b"png")];
+        let env = &[
+            ("PHP_DENY_PATHS", Some("/uploads/**")),
+            ("PHP_DENY_FALLBACK", Some("403")),
+        ];
+        let (_dir, cache, rc) = setup(layout, Some("uploads/\n"), env, None, false);
+        for uri in ["/uploads/shell.php", "/uploads/a.png"] {
+            let result = rc.resolve_request(uri, &cache).await;
+            assert!(is_denied(&result, 403), "{uri}: {result:?}");
+        }
+        // What the file does not name, `PHP_DENY_PATHS` still denies.
+        let (_dir, cache, rc) = setup(layout, Some("vendor/\n"), env, None, false);
+        assert!(matches!(
+            &*rc.resolve_request("/uploads/shell.php", &cache).await,
+            RouteResult::Denied {
+                status: 403,
+                source: DenySource::PhpDenyPaths
+            }
+        ));
+    }
+
+    #[test]
+    #[should_panic(expected = "PHP_DENY_FALLBACK")]
+    fn a_bad_fallback_stops_startup_when_a_rule_denies() {
+        let _ = setup(
+            &[],
+            Some("vendor/\n"),
+            &[("PHP_DENY_FALLBACK", Some("banana"))],
+            None,
+            false,
+        );
+    }
+
+    #[tokio::test]
+    async fn a_bad_fallback_is_not_read_when_no_rule_denies() {
+        let (_dir, cache, rc) = setup(
+            &[("index.php", b"<?php"), ("storage/a.pdf", b"%PDF")],
+            Some("> storage/\n"),
+            &[("PHP_DENY_FALLBACK", Some("banana"))],
+            Some("index.php"),
+            false,
+        );
+        assert!(matches!(
+            &*rc.resolve_request("/storage/a.pdf", &cache).await,
+            RouteResult::Execute(_, None, None)
+        ));
+    }
+
+    #[tokio::test]
+    async fn allowlist_file_serves_only_its_exceptions() {
+        let (_dir, cache, rc) = setup(
+            &[
+                ("index.php", b"<?php"),
+                ("assets/app.js", b"js"),
+                ("lib/secret.php", b"<?php"),
+                ("notes.txt", b"n"),
+            ],
+            Some("*\n!/index.php\n!/assets/\n!/assets/**\n"),
+            &[],
+            None,
+            false,
+        );
+        // `/` has no path a rule can name: the root index still runs.
+        assert!(matches!(
+            &*rc.resolve_request("/", &cache).await,
+            RouteResult::Execute(_, _, None)
+        ));
+        assert!(matches!(
+            &*rc.resolve_request("/index.php", &cache).await,
+            RouteResult::Execute(_, _, None)
+        ));
+        assert!(matches!(
+            &*rc.resolve_request("/assets/app.js", &cache).await,
+            RouteResult::Serve(_)
+        ));
+        for uri in ["/lib/secret.php", "/notes.txt", "/anything"] {
+            let result = rc.resolve_request(uri, &cache).await;
+            assert!(is_denied(&result, 404), "{uri}: {result:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn trailing_slash_does_not_bypass_an_allowlist() {
+        // `!*/` re-includes every directory, the gitignore way to allow files
+        // below them. A trailing slash on a file must not count as one.
+        let (_dir, cache, rc) = setup(
+            &[
+                ("secret.txt", b"s"),
+                ("secret.php", b"<?php"),
+                ("app.js", b"js"),
+            ],
+            Some("*\n!*/\n!*.js\n"),
+            &[],
+            None,
+            false,
+        );
+        for uri in [
+            "/secret.txt",
+            "/secret.txt/",
+            "/secret.txt%2F",
+            "/secret.php/",
+        ] {
+            let result = rc.resolve_request(uri, &cache).await;
+            assert!(is_denied(&result, 404), "{uri}: {result:?}");
+        }
+        assert!(matches!(
+            &*rc.resolve_request("/app.js", &cache).await,
+            RouteResult::Serve(_)
+        ));
+    }
+
+    #[tokio::test]
+    async fn path_info_does_not_bypass_an_allowlist() {
+        // Traditional mode runs `secret.php` for `/secret.php/x.js`. Judged
+        // as a directory (`!*/`) and by its full path (`!*.js`), it would
+        // run a script the allowlist denies.
+        let rules = Some("*\n!*/\n!*.js\n");
+        let layout: &[(&str, &[u8])] = &[
+            ("secret.php", b"<?php"),
+            ("index.php", b"<?php"),
+            ("app.js", b"js"),
+        ];
+        let (_dir, cache, rc) = setup(layout, rules, &[], None, false);
+        for uri in ["/secret.php/x.js", "/secret.PHP/x.js", "/a/secret.php/x.js"] {
+            let result = rc.resolve_request(uri, &cache).await;
+            assert!(is_denied(&result, 404), "{uri}: {result:?}");
+        }
+        // Framework mode runs no script named in the URI: the front
+        // controller gets the request, as the path's own judgement says.
+        let (_dir, cache, rc) = setup(layout, rules, &[], Some("index.php"), false);
+        let result = rc.resolve_request("/secret.php/x.js", &cache).await;
+        assert!(
+            matches!(&*result, RouteResult::Execute(p, None, None) if p.ends_with("index.php")),
+            "{result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn deep_paths_are_refused_before_matching() {
+        // Traditional mode sends a missing extensionless path to the root
+        // index, so a path under the cap runs it and one past the cap — 65
+        // segments — is told apart by its NotFound.
+        let (_dir, cache, rc) = setup(
+            &[("index.php", b"<?php")],
+            Some("vendor/\n"),
+            &[],
+            None,
+            false,
+        );
+        let at_cap = "/a".repeat(64);
+        let over_cap = format!("{at_cap}/a");
+        assert!(matches!(
+            &*rc.resolve_request(&at_cap, &cache).await,
+            RouteResult::Execute(_, _, None)
+        ));
+        assert!(matches!(
+            &*rc.resolve_request(&over_cap, &cache).await,
+            RouteResult::NotFound
+        ));
+        assert!(!cached(&rc, &over_cap), "a refusal was cached");
+        let deep_vendor = format!("/vendor{}", "/a".repeat(10_000));
+        assert!(matches!(
+            &*rc.resolve_request(&deep_vendor, &cache).await,
+            RouteResult::NotFound
+        ));
+    }
+
+    #[tokio::test]
+    async fn long_deep_paths_are_refused_before_matching() {
+        // Under the segment cap, but each parent re-check scans ~1 KB more.
+        let (_dir, cache, rc) = setup(
+            &[("index.php", b"<?php")],
+            Some("vendor/\n"),
+            &[],
+            None,
+            false,
+        );
+        let uri = format!("/{}", vec!["a".repeat(1000); 63].join("/"));
+        assert!(matches!(
+            &*rc.resolve_request(&uri, &cache).await,
+            RouteResult::NotFound
+        ));
+        assert!(!cached(&rc, &uri), "a refusal was cached");
+    }
+
+    #[tokio::test]
+    async fn deep_paths_route_as_before_without_a_deny_file() {
+        let (_dir, cache, rc) = setup(&[("index.php", b"<?php")], None, &[], None, false);
+        assert!(matches!(
+            &*rc.resolve_request(&"/a".repeat(65), &cache).await,
+            RouteResult::Execute(_, _, None)
+        ));
+    }
+
+    #[tokio::test]
+    async fn deep_paths_route_as_before_when_no_rule_can_exclude() {
+        // Nothing to protect: the depth cap would only turn a route into 404.
+        for rules in ["", "# only a comment\n", "!keep\n"] {
+            let (_dir, cache, rc) =
+                setup(&[("index.php", b"<?php")], Some(rules), &[], None, false);
+            assert!(
+                matches!(
+                    &*rc.resolve_request(&"/a".repeat(65), &cache).await,
+                    RouteResult::Execute(_, _, None)
+                ),
+                "{rules:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn a_script_named_in_another_case_is_denied() {
+        // Routing runs `.PHP` as PHP, so `*.php` must cover it on a
+        // case-sensitive filesystem too.
+        let (_dir, cache, rc) = setup(
+            &[("index.php", b"<?php"), ("uploads/shell.PHP", b"<?php")],
+            Some("/uploads/*.php\n"),
+            &[],
+            None,
+            false,
+        );
+        let result = rc.resolve_request("/uploads/shell.PHP", &cache).await;
+        assert!(is_denied(&result, 404), "{result:?}");
+    }
+
+    #[tokio::test]
+    async fn the_documented_allowlist_serves_acme_challenges() {
+        // `/.well-known/` passes the dot-segment screen and reaches the
+        // rules, so an allowlist must re-include it or HTTP-01 renewal fails.
+        let rules = "*\n!/index.php\n!/assets/\n!/assets/**\n!/.well-known/\n!/.well-known/**\n";
+        let layout: &[(&str, &[u8])] = &[
+            ("index.php", b"<?php"),
+            (".well-known/acme-challenge/tok", b"tok"),
+            ("secret.txt", b"s"),
+        ];
+        let (_dir, cache, rc) = setup(layout, Some(rules), &[], None, false);
+        let result = rc
+            .resolve_request("/.well-known/acme-challenge/tok", &cache)
+            .await;
+        assert!(matches!(&*result, RouteResult::Serve(_)), "{result:?}");
+        let result = rc.resolve_request("/secret.txt", &cache).await;
+        assert!(is_denied(&result, 404), "{result:?}");
     }
 }

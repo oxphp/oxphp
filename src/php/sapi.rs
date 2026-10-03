@@ -5985,6 +5985,7 @@ mod tests {
                 path: "uploads/shell.php".to_string(),
                 pattern: "uploads/**".to_string(),
                 fallback_script_uri: "/_security/denied.php".to_string(),
+                source: crate::config::DenySource::PhpDenyPaths,
             })),
             profiling_mode: crate::profiling::ProfilingMode::Off,
         };

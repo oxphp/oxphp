@@ -134,6 +134,7 @@ curl -s http://localhost:9090/config | jq .
   "async_queue_capacity": 0,
   "async_workers": 0,
   "brotli_level": 5,
+  "deny_file": {"loaded": false},
   "document_root": "/var/www/html/public",
   "drain_timeout_seconds": 30,
   "entry_file": "/var/www/html/public/index.php",

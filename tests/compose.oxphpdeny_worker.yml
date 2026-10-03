@@ -1,0 +1,32 @@
+# .oxphpdeny in worker mode: `>` rules reach the worker entry, deny rules
+# answer with a status (a worker thread runs nothing but its entry, so a
+# fallback script is a startup error here).
+#
+# Standalone usage:
+#   docker compose -f compose.yml -f compose.oxphpdeny_worker.yml up
+services:
+  oxphp-oxphpdeny_worker:
+    build:
+      context: ..
+      dockerfile: docker/dev/Dockerfile
+      args:
+        PHP_VERSION:
+    ports:
+      - "80"
+    networks: [test-net]
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    environment:
+      LOG_LEVEL: error
+      INTERNAL_ADDR: 0.0.0.0:9090
+      WORKER_MODE_ENABLED: "true"
+      ENTRY_FILE: /var/www/html/worker/worker_entry.php
+    volumes:
+      - ./fixtures/oxphpdeny_worker/public:/var/www/html/public
+      - ./php:/var/www/html/public/tests
+      - ./fixtures/oxphpdeny_worker/worker:/var/www/html/worker

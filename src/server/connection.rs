@@ -618,8 +618,8 @@ async fn dispatch_request(
             let script_path = script_path.clone();
             let path_info = path_info.clone();
             let denied_meta = denied_meta.clone();
-            if denied_meta.is_some() {
-                server.metrics.php_denied();
+            if let Some(meta) = &denied_meta {
+                server.metrics.denied(meta.source);
             }
             let is_query = is_query_method(&parts.method);
 
@@ -925,15 +925,13 @@ async fn dispatch_request(
                 .body(full_body(Bytes::from_static(b"404 Not Found")))?,
             PhpExecData::default(),
         ),
-        RouteResult::Denied(code) => {
-            // `Denied` is emitted exclusively by the `PHP_DENY_PATHS`
-            // status-fallback path in `routing/traditional.rs`, so the
-            // metric increment here is source-specific by construction.
-            server.metrics.php_denied();
+        RouteResult::Denied { status, source } => {
+            // Counted under the feature that denied the request.
+            server.metrics.denied(*source);
             (
                 Response::builder()
                     .status(
-                        StatusCode::from_u16(*code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
+                        StatusCode::from_u16(*status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR),
                     )
                     .body(full_body(Bytes::new()))?,
                 PhpExecData::default(),

@@ -1,0 +1,6 @@
+# profile: oxphpdeny_worker
+# description: .oxphpdeny in worker mode — `>` rules reach the worker, deny rules answer 404
+
+oxphpdeny/test_gt_rule_sends_file_to_worker >> /storage/invoice.pdf | GET | -H "X-Expect-Uri: /storage/invoice.pdf" | 200 | content-type:~application/json
+oxphpdeny/test_worker_mode_denies_with_status >> /vendor/lib.js | GET | | 404 |
+oxphpdeny/test_worker_static_outside_rules_served >> /assets/app.js | GET | | 200 |

@@ -365,6 +365,9 @@ pub struct Metrics {
     /// Requests denied by PHP_DENY_PATHS.
     php_deny_total: AtomicU64,
 
+    /// Requests denied by a .oxphpdeny rule.
+    path_deny_total: AtomicU64,
+
     /// Static file cache hits and misses.
     static_cache_hits: AtomicU64,
     static_cache_misses: AtomicU64,
@@ -501,6 +504,7 @@ impl Metrics {
             queue_wait_count: AtomicU64::new(0),
             rate_limited_total: AtomicU64::new(0),
             php_deny_total: AtomicU64::new(0),
+            path_deny_total: AtomicU64::new(0),
             static_cache_hits: AtomicU64::new(0),
             static_cache_misses: AtomicU64::new(0),
             compressed_responses_total: AtomicU64::new(0),
@@ -746,8 +750,12 @@ impl Metrics {
         self.rate_limited_total.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn php_denied(&self) {
-        self.php_deny_total.fetch_add(1, Ordering::Relaxed);
+    pub fn denied(&self, source: crate::config::DenySource) {
+        let counter = match source {
+            crate::config::DenySource::PhpDenyPaths => &self.php_deny_total,
+            crate::config::DenySource::DenyFile => &self.path_deny_total,
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn static_cache_hit(&self) {
@@ -1269,6 +1277,16 @@ impl Metrics {
             "oxphp_php_deny_total {}",
             self.php_deny_total.load(Ordering::Relaxed)
         );
+        let _ = writeln!(
+            out,
+            "# HELP oxphp_path_deny_total Requests denied by a .oxphpdeny rule."
+        );
+        let _ = writeln!(out, "# TYPE oxphp_path_deny_total counter");
+        let _ = writeln!(
+            out,
+            "oxphp_path_deny_total {}",
+            self.path_deny_total.load(Ordering::Relaxed)
+        );
 
         // ── Static file cache ──
         let _ = writeln!(
@@ -1694,6 +1712,22 @@ mod tests {
         assert_eq!(m.total_requests(), 3);
         assert_eq!(m.requests_by_method[0].load(Ordering::Relaxed), 2);
         assert_eq!(m.requests_by_method[1].load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn denials_are_counted_per_source() {
+        use crate::config::DenySource;
+        let m = Metrics::new();
+        m.denied(DenySource::PhpDenyPaths);
+        m.denied(DenySource::DenyFile);
+        m.denied(DenySource::DenyFile);
+        let out = m.to_prometheus();
+        assert!(out.contains("\noxphp_php_deny_total 1\n"), "{out}");
+        assert!(out.contains("\noxphp_path_deny_total 2\n"), "{out}");
+        assert!(
+            out.contains("# TYPE oxphp_path_deny_total counter\n"),
+            "{out}"
+        );
     }
 
     #[test]

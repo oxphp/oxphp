@@ -5,7 +5,7 @@ description: Complete environment variable reference for OxPHP. Every setting, i
 
 # Configuration Reference
 
-OxPHP is configured entirely through environment variables. There are no configuration files to manage — every setting has a sensible default, so a zero-configuration deployment works out of the box.
+OxPHP is configured through environment variables, plus one optional file: [`.oxphpdeny`](../security/oxphpdeny.md), the path deny rules read from the top of `DOCUMENT_ROOT`. Every setting has a sensible default, so a zero-configuration deployment works out of the box.
 
 ### Boolean values
 
@@ -153,7 +153,7 @@ PHP execution time is bounded by PHP's own `max_execution_time` ini directive (a
 | `FRAME_OPTIONS` | `SAMEORIGIN` | Clickjacking protection. `SAMEORIGIN` allows framing only by pages on the same origin, `DENY` blocks all framing, `off` disables (use when managing framing via your own CSP). Any other value falls back to the `SAMEORIGIN` default with a startup warning. Sets both `X-Frame-Options` and `Content-Security-Policy: frame-ancestors` on every response. See [Clickjacking protection](#clickjacking-protection) below for the emitted header values, how server headers defer to application-set ones, and guidance on choosing a value |
 | `TRUSTED_PROXIES` | *(unset)* | Trusted reverse proxy networks (comma-separated CIDRs or `private`). When set, OxPHP extracts the real client IP from `Forwarded` ([RFC 7239](https://www.rfc-editor.org/rfc/rfc7239)) or `X-Forwarded-For` headers using the rightmost-non-trusted algorithm. Also processes `X-Forwarded-Proto` and `X-Forwarded-Host` for `$_SERVER['HTTPS']`, `REQUEST_SCHEME`, `SERVER_NAME`, and `SERVER_PORT`. Unset = feature disabled |
 | `PHP_DENY_PATHS` | *(unset)* | Comma-separated glob patterns whose `.php` files must never execute via direct URI (e.g. `/uploads/**,/cache/**,/admin/legacy.php`). Patterns may target whole directories or single files. Applies in the direct-mapping modes — Traditional and SPA; ignored with a startup warning in Framework and Worker modes, which never execute arbitrary `.php` files directly. Also covers scripts reached through directory-index resolution (`/uploads/` → `uploads/index.php`). For direct `.php` URIs, matching happens before disk I/O, so denied paths produce the same response whether the file exists or not (no existence oracle). The legacy name `PHP_DENY_DIRS` is accepted as a deprecated alias and emits a startup `WARN`. See [PHP Execution Deny-List](../security/php-deny.md) |
-| `PHP_DENY_FALLBACK` | `404` | What to return on a `PHP_DENY_PATHS` match. Either an HTTP status `400`–`599` (pairs with `ERROR_PAGES_DIR` for custom HTML) or a `/`-prefixed URI path to a PHP fallback script inside `DOCUMENT_ROOT`. The fallback script receives `OXPHP_DENIED_PATH` and `OXPHP_DENIED_PATTERN` in `$_SERVER`. Validated at startup: the script must exist, canonicalize inside `DOCUMENT_ROOT`, and must not itself match `PHP_DENY_PATHS` (loop prevention) |
+| `PHP_DENY_FALLBACK` | `404` | What to return on a `PHP_DENY_PATHS` match or a `.oxphpdeny` deny rule. Either an HTTP status `400`–`599` (pairs with `ERROR_PAGES_DIR` for custom HTML) or a `/`-prefixed URI path to a PHP fallback script inside `DOCUMENT_ROOT`. The fallback script receives `OXPHP_DENIED_PATH` and `OXPHP_DENIED_PATTERN` in `$_SERVER`. Validated at startup: the script must exist, canonicalize inside `DOCUMENT_ROOT`, and must not itself match `PHP_DENY_PATHS` (loop prevention). A `.oxphpdeny` rule may cover the script; in worker mode `.oxphpdeny` deny rules take a status code only. See [Path Deny Rules](../security/oxphpdeny.md) |
 | `SYMLINK_ALLOW_PATHS` | *(unset)* | Comma-separated list of absolute paths under which symlinks are permitted to escape `DOCUMENT_ROOT`. Each entry must already exist on disk; relative paths and missing paths abort startup. Unset = no symlink escapes allowed. See [Symlink Allow-Paths](../security/symlink-allow-paths.md) |
 
 The special value `private` expands to all RFC-1918 private networks, loopback, and link-local addresses (IPv4 and IPv6): `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `127.0.0.0/8`, `169.254.0.0/16`, `::1/128`, `fc00::/7`, `fe80::/10`.
@@ -474,6 +474,7 @@ curl -s http://localhost:9090/config | jq .
   "async_queue_capacity": 0,
   "async_workers": 0,
   "brotli_level": 5,
+  "deny_file": {"loaded": false},
   "document_root": "/var/www/html/public",
   "drain_timeout_seconds": 30,
   "entry_file": "/var/www/html/public/index.php",

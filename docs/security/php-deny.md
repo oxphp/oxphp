@@ -60,7 +60,7 @@ Matching is **case-sensitive**. On case-insensitive filesystems (default macOS H
 
 ## Fallback Modes
 
-`PHP_DENY_FALLBACK` controls what is returned on a match.
+`PHP_DENY_FALLBACK` controls what is returned on a match. It also answers requests denied by a [`.oxphpdeny`](oxphpdeny.md) rule — one setting for both.
 
 ### HTTP Status
 
@@ -81,14 +81,14 @@ PHP_DENY_PATHS="/uploads/**"
 PHP_DENY_FALLBACK="/_security/denied.php"
 ```
 
-The script is validated at startup — it must exist, canonicalize inside `DOCUMENT_ROOT`, and must not itself match `PHP_DENY_PATHS` (loop prevention; startup aborts otherwise). The script runs with two extra `$_SERVER` keys identifying the original request:
+The script is validated at startup — it must exist, canonicalize inside `DOCUMENT_ROOT`, and must not itself match `PHP_DENY_PATHS` (loop prevention; startup aborts otherwise). The loop check concerns `PHP_DENY_PATHS` only: a `.oxphpdeny` rule may cover the script, which then answers a direct request for itself. The script runs with two extra `$_SERVER` keys identifying the original request:
 
 | `$_SERVER` key | Value |
 |---|---|
 | `OXPHP_DENIED_PATH` | Original sanitized URI, with a leading `/` (same form as `PATH_INFO`) |
 | `OXPHP_DENIED_PATTERN` | The glob pattern that matched |
 
-`OXPHP_DENIED_PATTERN` is stored **without** a leading `/` (glob-normalized), while `OXPHP_DENIED_PATH` keeps the `/` of the request URI. If you compare the path against the pattern, `ltrim($_SERVER['OXPHP_DENIED_PATH'], '/')` first so both are in the same form.
+For a `PHP_DENY_PATHS` match, `OXPHP_DENIED_PATTERN` is stored **without** a leading `/` (glob-normalized), while `OXPHP_DENIED_PATH` keeps the `/` of the request URI; `ltrim($_SERVER['OXPHP_DENIED_PATH'], '/')` puts both in the same form. For a `.oxphpdeny` rule the pattern is the line as written in the file (`/composer.*`, `*.sql`), leading `/` included when the line has one — a script that answers both should not assume either form.
 
 Example honeypot:
 
@@ -119,13 +119,15 @@ The resolved-path screen is the one exception: it necessarily runs after route r
 
 | Metric | Description |
 |---|---|
-| `oxphp_php_deny_total` | Counter incremented on every denied request |
+| `oxphp_php_deny_total` | Counter incremented on every request `PHP_DENY_PATHS` denies |
 
-Each denial also produces a `tracing::info` log:
+Each such denial also produces a `tracing::info` log:
 
 ```
 PHP execution denied by PHP_DENY_PATHS path=uploads/shell.php pattern=uploads/**
 ```
+
+A request that a [`.oxphpdeny`](oxphpdeny.md) rule denies is answered before `PHP_DENY_PATHS` is checked, so it shows up in neither: it is counted in `oxphp_path_deny_total` and logged at `debug`.
 
 Access logs record the resulting status (the `PHP_DENY_FALLBACK` value or the fallback script's `http_response_code()`) — denied requests are not distinguished from normal requests at the access-log level. Cross-reference with the metric or the structured log to attribute spikes.
 
@@ -154,6 +156,7 @@ When both are set, `PHP_DENY_PATHS` wins and `PHP_DENY_DIRS` is reported as igno
 
 ## See Also
 
+- [Path Deny Rules](oxphpdeny.md) — keep any path, static or PHP, from being served, in every routing mode
 - [Routing](../features/routing.md) — routing modes and path security
 - [Error Pages](../features/error-pages.md) — custom HTML bodies for status-fallback responses
 - [Configuration Reference](../operations/configuration.md) — full env-var list

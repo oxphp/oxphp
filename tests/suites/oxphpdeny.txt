@@ -1,0 +1,17 @@
+# profile: oxphpdeny
+# description: .oxphpdeny in Traditional mode with the default 404 fallback
+
+oxphpdeny/test_vendor_script_denied >> /vendor/autoload.php | GET | | 404 |
+oxphpdeny/test_missing_file_denied_the_same >> /vendor/ghost.php | GET | | 404 |
+oxphpdeny/test_missing_file_outside_rules_falls_back >> /ghost.php | GET | | 200 |
+oxphpdeny/test_sql_dump_denied >> /dump.sql | GET | | 404 |
+oxphpdeny/test_composer_json_denied >> /composer.json | GET | | 404 |
+oxphpdeny/test_denied_on_head >> /composer.json | HEAD | | 404 |
+oxphpdeny/test_denied_on_post >> /dump.sql | POST | -d "x=1" | 404 |
+oxphpdeny/test_dir_rule_denies_directory_request >> /private/ | GET | | 404 |
+oxphpdeny/test_deny_file_itself_not_served >> /.oxphpdeny | GET | | 404 |
+oxphpdeny/test_static_outside_rules_served >> /assets/app.js | GET | | 200 |
+oxphpdeny/test_upload_script_in_another_case_denied >> /uploads/shell.PHP | GET | | 404 |
+oxphpdeny/test_nested_upload_script_denied >> /uploads/sub/shell.php | GET | | 404 |
+oxphpdeny/test_dir_rule_misses_bare_uri >> /private | GET | | 200 | content-type:~application/json
+oxphpdeny/test_denials_counted_and_summarized

@@ -5037,6 +5037,14 @@ curl -s http://localhost:9090/config | jq .
   "async_queue_capacity": 0,
   "async_workers": 0,
   "brotli_level": 5,
+  "deny_file": {
+    "allow": 1,
+    "deny": 3,
+    "entry": 1,
+    "fallback": "404",
+    "loaded": true,
+    "rules": 5
+  },
   "document_root": "/var/www/html/public",
   "drain_timeout_seconds": 30,
   "entry_file": "/var/www/html/public/index.php",
@@ -5071,6 +5079,8 @@ curl -s http://localhost:9090/config | jq .
 ```
 
 `runtime_hooks` lists the runtime-hook categories the process installed at startup, as a parsed set rather than the raw `RUNTIME_HOOKS` value, so `all`, `1` and `sleep, streams, net` all read as `["sleep","streams","net"]` and a scraper needs no copy of that grammar. An empty list means no hook is installed, which is also the answer for a misspelled variable name. It reports what was installed, not what is in effect: where there are no fibers at all the hooks delegate to the builtins they replaced, so a traditional-mode server reports the categories it set up while behaving natively. See [Runtime Hooks](../operations/configuration.md#runtime-hooks).
+
+`deny_file` summarizes the [`.oxphpdeny`](../security/oxphpdeny.md) file read from `DOCUMENT_ROOT` at startup: the number of rules, split by action — `deny`, `entry` for `>` rules, `allow` for `!` rules — and what a deny rule answers with, the `PHP_DENY_FALLBACK` status code or `"script"` without the script's path. The rules themselves are left out: on an internal server reachable from outside, they would be a map of exactly the paths the file protects. To see how each rule was read, start with `LOG_LEVEL=debug` and look for the `oxphpdeny rule` lines. Without the file the entry is `{"loaded": false}`.
 
 TLS certificate and key file paths are never emitted (only the `tls_enabled` boolean is exposed), and `internal_addr` and `error_pages_dir` are scrubbed from the served response — deployment topology and filesystem paths that aid an attacker and are not needed by scrapers.
 
@@ -6749,10 +6759,11 @@ Every request runs through a shared pipeline before the mode-specific logic kick
 1. **Dot-path filter** — paths containing hidden segments (`.git`, `.env`) are blocked, with an exception for `/.well-known/*` ([RFC 8615](https://www.rfc-editor.org/rfc/rfc8615))
 2. **Route cache lookup** — recently resolved URIs are returned from an LRU cache (10 000 entries)
 3. **Percent-decoding + sanitization** — encoded sequences like `%2e%2e` are decoded and traversal segments (`..`, `.`, empty) are stripped
-4. **Well-known PHP block** — defense-in-depth: `.php` scripts inside `/.well-known/` never execute
-5. **URI classification** — the sanitized path is classified once into `NoExtension`, `Php`, or `OtherExtension`
-6. **Mode dispatch** — each mode handles the three URI kinds with its own rules
-7. **Symlink validation** — every resolved filesystem path must canonicalize inside the document root, and a static file or PHP script is checked again, on the file actually opened, when it is read or executed
+4. **Path deny rules** — with a [`.oxphpdeny`](../security/oxphpdeny.md) file holding at least one deny or `>` rule, the sanitized path is matched before any disk access: a deny rule answers with `PHP_DENY_FALLBACK`, a `>` rule sends the request to the entry script, and a path past the file's depth and length limits gets 404
+5. **Well-known PHP block** — defense-in-depth: `.php` scripts inside `/.well-known/` never execute
+6. **URI classification** — the sanitized path is classified once into `NoExtension`, `Php`, or `OtherExtension`
+7. **Mode dispatch** — each mode handles the three URI kinds with its own rules
+8. **Symlink validation** — every resolved filesystem path must canonicalize inside the document root, and a static file or PHP script is checked again, on the file actually opened, when it is read or executed
 
 The classification step is the key efficiency: the disk check for static assets (`/style.css`, `/logo.png`) is performed **once** in the shared layer for `OtherExtension` URIs, so all three modes pay the same cost.
 
@@ -6899,12 +6910,13 @@ Worker mode activates when `WORKER_MODE_ENABLED=true` and `ENTRY_FILE` points at
 
 Arbitrary `.php` files in the document root are **never executed directly** in worker mode — a request to `/about.php` reaches the worker callback like any other route, even if `about.php` exists on disk. There is no directory-index lookup and no root `index.php` fallback either; the worker sees those requests itself.
 
-Two exceptions, both server-level defenses that run before mode dispatch: dot-segment paths (`/.git/config`, `/.env`, bare `/.well-known`) are rejected by [dot-path blocking](../security/dot-path-blocking.md), and `.php` URIs under `/.well-known/` are refused as defense-in-depth. Both return 404 and never reach the worker.
+The exceptions are server-level defenses that run before mode dispatch, and none of them reaches the worker: dot-segment paths (`/.git/config`, `/.env`, bare `/.well-known`) are rejected by [dot-path blocking](../security/dot-path-blocking.md), and `.php` URIs under `/.well-known/` are refused as defense-in-depth, both with 404. With a [`.oxphpdeny`](../security/oxphpdeny.md) file holding at least one deny or `>` rule, a path a deny rule matches gets the `PHP_DENY_FALLBACK` status, and a path past the file's depth and length limits gets 404.
 
-Startup-time validation rejects two combinations:
+Startup-time validation rejects three combinations:
 
 - `WORKER_MODE_ENABLED=true` with no `ENTRY_FILE` → `WORKER_MODE_ENABLED=true requires ENTRY_FILE to be set`.
 - `WORKER_MODE_ENABLED=true` with a non-`.php` `ENTRY_FILE` → `WORKER_MODE_ENABLED=true requires a .php ENTRY_FILE`.
+- A `.oxphpdeny` deny rule with a script `PHP_DENY_FALLBACK` → `PHP_DENY_FALLBACK is a script, but in worker mode every request runs the worker entry`. A worker thread runs nothing but the entry, so it cannot run a fallback script in a denied request's place; use a status code.
 
 See [Worker Mode](worker-mode.md) for full configuration details.
 
@@ -6930,6 +6942,7 @@ OxPHP applies multiple layers of protection to prevent directory traversal, hidd
 - **Dot-path blocking** blocks any path segment starting with `.` (e.g. `/.git/config`, `/.env`), with an exception for `/.well-known/*` per RFC 8615
 - **Well-known PHP block** — even with the dot-path exception, `.php` scripts under `/.well-known/` are never executed (defense-in-depth)
 - **PHP execution deny-list** — in the direct-mapping modes (Traditional and SPA), `PHP_DENY_PATHS` blocks `.php` execution at configured glob patterns (e.g. `/uploads/**`, or a single file like `/admin/legacy.php`) before any disk I/O. See [PHP Execution Deny-List](../security/php-deny.md)
+- **Path deny rules** — a [`.oxphpdeny`](../security/oxphpdeny.md) file at the top of `DOCUMENT_ROOT` lists, in gitignore syntax, paths that are never served — static files and scripts alike — or, with a `>` prefix, are handed to the entry script. It applies in every routing mode, right after the path is decoded and normalized and before any disk access
 
 > **Note:** If the document root directory does not exist at startup, the server exits with a fatal error. Symlink escape protection requires a valid, resolvable document root path.
 
@@ -11391,6 +11404,187 @@ MIME types are determined by file extension. Files without an extension (like `o
 ---
 
 
+# Path Deny Rules (`.oxphpdeny`)
+
+A `.oxphpdeny` file at the top of `DOCUMENT_ROOT` lists request paths the server must not serve directly. It is written in `.gitignore` syntax with one addition: a rule prefixed with `>` hands the request to the application's entry script instead of denying it.
+
+```gitignore
+# Never served — answered with PHP_DENY_FALLBACK (404 by default)
+/vendor
+/composer.*
+*.sql
+*.bak
+
+# Not served directly — the front controller decides
+> /storage/invoices/
+```
+
+It is meant for files a document root should not hold but often does: `vendor/` and `composer.json` in a legacy application served from its project root, database dumps and backups, build artefacts and source maps in a framework's `public/`. The rules apply in all four routing modes, to static files and PHP scripts alike, and they are checked before any disk access, so a denied path gets the same answer whether or not the file exists.
+
+The file is read once, at startup; edits take effect on the next start. Without the file nothing changes. The file itself is never served: like every path segment starting with `.` other than a leading `/.well-known/`, it is refused before routing.
+
+## Syntax
+
+What `.gitignore` supports, `.oxphpdeny` supports:
+
+- Blank lines and lines starting with `#` are skipped. A UTF-8 byte-order mark and CRLF line endings are accepted.
+- Trailing spaces are dropped unless escaped (`\ `).
+- `!` re-includes what an earlier rule excluded. `\#` and `\!` at the start of a line are a literal `#` and `!`.
+- A trailing `/` makes the rule match directories only.
+- A `/` at the start or in the middle anchors the pattern to the top of `DOCUMENT_ROOT`. Without one, the pattern matches at any depth: `vendor` covers `/vendor` and `/lib/vendor`.
+- `*` and `?` stay within one path segment; `[abc]`, `[a-z]`, `[!0-9]` and `[^0-9]` are character classes. As in git, `?` and a class match a single byte, and a class never matches `/`: `[!-]` is any byte of a name but `-`. A letter outside ASCII takes two or more bytes, so only `*` stands for one — `/caf*.txt`, not `/caf?.txt`. POSIX classes, backslash escapes, characters outside ASCII, a `-` right after a range and a range that runs backwards are not supported inside a class, and a negated class in a deny or `>` rule cannot name an ASCII letter — see below.
+- `**/` at the start, `/**` at the end and `/**/` in the middle match across directories; `**` anywhere else is a plain `*`. A longer run of `*` counts as `**`, as in git: `***/secret.txt` covers `/secret.txt` at any depth.
+- The last matching rule wins, and nothing below an excluded directory can be re-included: with `private/` excluded, `!private/ok.txt` has no effect. To exclude a directory's contents but keep some, exclude `/private/*` and re-include `!/private/ok.txt`.
+
+### `>` rules: hand the request to the application
+
+```gitignore
+> /storage/invoices/
+> *.map
+```
+
+A request matching a `>` rule is not served from disk; it goes to the entry script — the front controller (`ENTRY_FILE=index.php`) or the worker — with `REQUEST_URI` intact, exactly as a request for a missing file would. The application can check a session and stream the file itself. Spaces and tabs between `>` and the pattern are allowed; `\>` is a literal `>`. A `>` rule cannot be negated (`!>x` is an error), and `>` alone is an error.
+
+A deny rule still applies below a `>` directory: with `> /storage/invoices/` and `*.sql`, `/storage/invoices/dump.sql` is denied, whichever line comes first. A `!` rule that lifts the deny leaves the file to the `>` directory, as in git: add `!/storage/invoices/dump.sql` after `*.sql` and the entry script gets that request. `!` re-includes nothing below a `>` directory, as below any excluded one, so the file is still not served from disk.
+
+`>` rules need an entry script: in Traditional and SPA modes they stop startup.
+
+### Differences from `.gitignore`
+
+- **A malformed line stops startup**, with the file path and line number — git skips such lines silently. So does a file that is not UTF-8.
+- **`{a,b}` is literal.** Braces match themselves, as in git.
+- **A class that names `/` stops startup** — `[-/]`, or a range across it such as `[+-0]`. git accepts it and never matches `/` with it; write the separator outside the class.
+- **A POSIX class, a backslash inside a class, or a `-` right after a range stops startup** — `[[:digit:]]`, `[\]]`, `[a-b-c]`. git reads each its own way; write the range instead (`[0-9]`), put `]` first to match it, and put a literal `-` first or last (`[]-]`, `[-a-c]`).
+- **A range that runs backwards stops startup** — `[z-a]`, `[a--]`. git reads it as its first character alone, so `x[z-a]` covers only `xz`; write that character, or put the lower end first.
+- **A class holding a character outside ASCII stops startup** — `[äÄ]`. git matches a class against one byte, as the server does, and such a character takes two or more: `/[äÄ]dmin` would cover neither `/ädmin` nor `/Ädmin`, and `/[äÄ]*` would cover `/öffnungszeiten`, which starts with the same byte. Put `*` in its place.
+- **An escaped `/` stops startup** — `**\/secret.txt`, `\/vendor`. git reads `**\/secret.txt` as `secret.txt` below at least one directory — not `/secret.txt` itself — which the server would not, and `\/vendor` matches no path at all. A separator never needs the escape: write `/`.
+- **A line that covers other than it reads stops startup** — one that starts with a space or tab, ends in an unescaped tab, has `//` anywhere, or holds a NUL byte. git accepts each. Whitespace at either end becomes part of the name: ` > /storage/invoices/`, indented, is a deny rule for a path starting with a space rather than a `>` rule. Escape it with `\` when a name really starts or ends with it. `//vendor` and `vendor//` match no path at all. git ends a pattern at a NUL, so `vendor`, a NUL and more text cover `/vendor` in git, where the server would read the whole line and cover only a name holding that NUL. A file saved as UTF-16 has a NUL after every ASCII character: save it as UTF-8.
+- **A line of spaces and tabs is blank.** git reads a line holding a tab as a pattern, for a name made of that whitespace.
+- **Deny and `>` rules ignore the case of ASCII letters; `!` rules do not.** The server runs `/uploads/shell.PHP` as a PHP script on any filesystem, and a case-insensitive one (macOS, Windows) serves `/VENDOR/autoload.php` from `vendor/`, so a rule that matched one spelling would let the others through: `*.php` covers `shell.PHP`, and `vendor/` covers `/Vendor/`. A `!` rule re-includes only the spelling it names — with `*` and `!/index.php`, `/INDEX.PHP` stays denied — so ignoring case never lets the server serve from disk a path that exact matching would have kept from it. To keep it so, a negated class in a deny or `>` rule cannot name an ASCII letter, and one that does stops startup: ignoring case would make `[!i]` leave out `I` as well, and `/[!i]*.php` would run `/Info.php`. Match any character there and re-include the exception, which a `!` rule then matches exactly: `/*.php` and `!/i*.php`. git matches case-sensitively unless `core.ignorecase` is set.
+- **A few letters outside ASCII are read as ASCII.** A case-insensitive filesystem (macOS) reads them so, and serves `license.txt` for `/licenſe.txt`: `ſ` (long s) as `s`, `ß` and `ẞ` as `ss`, the Kelvin sign (U+212A) as `k`, the ligatures `ﬀ` `ﬁ` `ﬂ` `ﬃ` `ﬄ` `ﬅ` `ﬆ` as the letters they join, and the Greek question mark (U+037E) and varia (U+1FEF) as `;` and `` ` ``. Deny and `>` rules read them so too, in the request and in the rule: `/license.txt` covers `/licenſe.txt`, and `/straße/` covers `/strasse/`. A rule still covers what it covered as written, and `!` rules read these letters only as written, so a denial only widens.
+- **Other letters outside ASCII match only as written, and so does each Unicode form of a name.** A rule for `/ädmin` does not cover `/Ädmin`, and a rule for `café.txt` written with a composed `é` does not cover `cafe` followed by a combining accent (U+0301). Most Linux filesystems keep each spelling a separate file, so this matters on macOS, which treats both pairs as one file — a bind mount from macOS into Docker Desktop included: there, a request for the other spelling is served from disk. Put `*` in place of such letters (`/caf*.txt`) — `?` and a class match a single byte — or keep those files out of `DOCUMENT_ROOT`.
+- **At most 256 rules, each at most 128 bytes.** A rule past either limit stops startup with its line number — see [Limits](#limits).
+- **One file, at the top of `DOCUMENT_ROOT`, read at startup.** Files in subdirectories are not read. It must be a regular file of at most 1 MiB — a symlink to one is fine. A FIFO or a device stops startup unread; a larger file stops it once its first MiB is read.
+
+## What Is Matched
+
+Rules match the request path after percent-decoding and normalization: empty segments are dropped, so `//vendor/x`, `/vend%6Fr/x` and `/vendor%2Fx` are all `/vendor/x`. A segment starting with `.` — `.`, `..`, `.git` — never reaches the rules: the request is refused with a plain `404` first, without `PHP_DENY_FALLBACK` and without being counted. The exception is a leading `/.well-known/` ([RFC 8615](https://www.rfc-editor.org/rfc/rfc8615)), which [dot-path blocking](dot-path-blocking.md) lets through and the rules see like any other path. A request is a directory request when its decoded path ends with `/` (`/admin/`, `/admin%2F`, `/admin//`); a trailing-slash rule matches only those, and everything below them:
+
+| Rule | `/admin` | `/admin/` | `/admin/x` | `/admin/x/y` |
+|---|---|---|---|---|
+| `admin/` | — | denied | denied | denied |
+| `admin` or `/admin` | denied | denied | denied | denied |
+| `admin/*`, `admin/x` | — | — | denied | denied |
+
+The bare `/` is never matched, so an allowlist-style file still serves the site root:
+
+```gitignore
+*
+!/index.php
+!/assets/
+!/assets/**
+!/.well-known/
+!/.well-known/**
+```
+
+Keep the `/.well-known/` lines if the site renews its TLS certificate over ACME HTTP-01: without them, `/.well-known/acme-challenge/<token>` is denied.
+
+Two other readings of a request are judged too, and a denial under either stands. A directory request is also judged as the file it names: the router drops the trailing slash and may serve `/secret.txt/` as the file `secret.txt`. In Traditional mode, a `.php` segment followed by more path is judged as the script it names: `/secret.php/x.js` runs `secret.php` with PATH_INFO `/x.js`, so it is denied wherever `/secret.php` is. Either way, `!*/` — the gitignore way to re-include every directory — cannot bring a denied file back. In an allowlist, re-include a directory without the slash (`!/docs`) to keep `/docs/` itself reachable. No other file the router resolves a request to is judged — see the next section.
+
+### The Request Path, Not the File
+
+Rules see the path the client asked for, not the file the router resolves it to. A request that resolves to a different file is judged by its own path:
+
+- `/admin` with the rule `admin/`: in Traditional mode the router answers `/admin` with `admin/index.php`, and `/admin` is not a directory request. **To close a directory, write it without the trailing slash** (`/admin`).
+- `/uploads/` with the rule `uploads/*.php`: the directory index `uploads/index.php` runs, because the request path is `/uploads/`.
+- `/x.php/y.png` (PATH_INFO) runs `x.php` although the path ends in `.png`. The script is named in the path, so Traditional mode judges the request as `/x.php` too — see above.
+
+To stop `.php` execution in writable directories, use [`PHP_DENY_PATHS`](php-deny.md) as well: it also checks the script a request resolves to.
+
+## Routing Modes
+
+| Routing mode | Deny rules | `>` rules |
+|---|---|---|
+| Traditional (no `ENTRY_FILE`) | Yes | Startup error — there is no entry script |
+| SPA (`ENTRY_FILE=index.html`) | Yes | Startup error — `index.html` cannot take a request |
+| Framework (`ENTRY_FILE=index.php`) | Yes | Front controller |
+| Worker (`WORKER_MODE_ENABLED=true`) | Yes, with a status-code fallback | Worker entry |
+
+## Fallback
+
+A deny rule answers with [`PHP_DENY_FALLBACK`](php-deny.md#fallback-modes), the setting `PHP_DENY_PATHS` uses: an HTTP status (`404` by default; pairs with `ERROR_PAGES_DIR`) or a PHP script inside `DOCUMENT_ROOT`. The script receives `OXPHP_DENIED_PATH` (the request path, with a leading `/`) and `OXPHP_DENIED_PATTERN` (the rule as written in the file, e.g. `/composer.*`).
+
+The script may sit under a path the file denies — `/_security/` hides it from direct requests, and a direct request for it is answered by the script itself, as a denial. In worker mode the fallback must be a status code: a worker thread runs nothing but the worker entry. `PHP_DENY_FALLBACK` is read only when the file has at least one deny rule (or `PHP_DENY_PATHS` is in effect, in Traditional and SPA modes).
+
+When both `.oxphpdeny` and `PHP_DENY_PATHS` match a request, `.oxphpdeny` answers it.
+
+## Observability
+
+- **Metric:** `oxphp_path_deny_total` counts requests denied by a rule. `>` rules are routing, not denials, and are not counted. `oxphp_php_deny_total` keeps counting `PHP_DENY_PATHS` only; a request both deny is counted once, here.
+- **`/config`:** the `deny_file` entry gives the rule counts by action and the fallback kind, never the rules — see [Internal Server](../features/internal-server.md).
+- **Startup log:** `loaded 5 rules (3 deny, 1 entry, 1 allow) from /var/www/html/public/.oxphpdeny`. With `LOG_LEVEL=debug`, one `oxphpdeny rule` line per rule shows how it was read: line number, action, the pattern as written and the glob it compiled to.
+- **Per request:** each denial logs `request denied by .oxphpdeny` at `debug`, with the path, the rule and its line. A request refused for its depth and length logs `request refused: path too deep or too long to match against .oxphpdeny` at `debug`, with its segment count and length; it is not counted.
+
+## Startup Errors
+
+| Condition | Result |
+|---|---|
+| No `.oxphpdeny` | Feature off; nothing changes |
+| File unreadable or not UTF-8, or a symlink whose target is missing | Startup error |
+| Malformed line | Startup error with `<path>: line N: <message>` |
+| More than 256 rules, or a pattern longer than 128 bytes | Startup error with the line number |
+| `>` rule in Traditional or SPA mode | Startup error |
+| Worker mode, a deny rule, and a script `PHP_DENY_FALLBACK` | Startup error |
+| Invalid `PHP_DENY_FALLBACK` and at least one deny rule | Startup error |
+| Empty file, comments only, or only `!` rules | Nothing to deny: routing is unchanged, depth limit included; `/config` shows the file as loaded with its rule counts |
+
+`oxphp config --check` reports the file errors before a deploy (`config: INVALID`); the fallback checks run when the server builds its routing, at startup.
+
+## Limits
+
+- **Depth and length.** With at least one deny or `>` rule, a request path deeper than 64 segments, or whose segment count times its length passes 128 KiB, is answered `404` without being matched: matching re-checks every parent directory and scans each one's path, so its cost would otherwise grow with both. A path of up to 2 KiB is refused only for its depth; past that the budget is spent by 16 segments at 8 KiB, or 3 at about 43 KiB.
+- **Rules.** At most 256 rules, each pattern at most 128 bytes, not counting a leading `!` or `>`. A request path is matched against the rules one by one, and against each parent directory too, so these limits and the one above bound what a request costs. A typical file takes well under a millisecond a request. A file at both limits built to be slow — 256 long rules starting `/x/**/*`, against paths made to almost match them — takes about 40 ms a request and keeps about 50 MB of match state per Tokio worker thread.
+- **Case sensitivity** — see [Differences from `.gitignore`](#differences-from-gitignore).
+- **No reload.** Restart to apply an edit.
+
+## Examples
+
+A legacy application served from its project root:
+
+```gitignore
+/vendor
+/composer.*
+/config
+*.sql
+*.sql.gz
+*.bak
+*.log
+```
+
+WordPress:
+
+```gitignore
+/readme.html
+/license.txt
+/wp-config-sample.php
+/wp-content/debug.log
+```
+
+Downloads behind a login, in Framework mode — the front controller gets `/storage/invoices/2026-07.pdf`, checks the session and streams the file:
+
+```gitignore
+> /storage/invoices/
+```
+
+## See Also
+
+- [PHP Execution Deny-List](php-deny.md) — `PHP_DENY_PATHS` and `PHP_DENY_FALLBACK`
+- [Routing](../features/routing.md) — routing modes and path security
+- [Metrics](../operations/metrics.md) — `oxphp_path_deny_total`
+
+---
+
+
 # PHP Execution Deny-List
 
 `PHP_DENY_PATHS` blocks direct execution of `.php` files matching configured glob patterns. It targets a recurring class of vulnerabilities in legacy PHP applications: an attacker uploads a PHP file to a writable public directory (`/uploads`, `/cache`, image-resize temp dirs) and reaches it via direct URI to gain code execution.
@@ -11448,7 +11642,7 @@ Matching is **case-sensitive**. On case-insensitive filesystems (default macOS H
 
 ## Fallback Modes
 
-`PHP_DENY_FALLBACK` controls what is returned on a match.
+`PHP_DENY_FALLBACK` controls what is returned on a match. It also answers requests denied by a [`.oxphpdeny`](oxphpdeny.md) rule — one setting for both.
 
 ### HTTP Status
 
@@ -11469,14 +11663,14 @@ PHP_DENY_PATHS="/uploads/**"
 PHP_DENY_FALLBACK="/_security/denied.php"
 ```
 
-The script is validated at startup — it must exist, canonicalize inside `DOCUMENT_ROOT`, and must not itself match `PHP_DENY_PATHS` (loop prevention; startup aborts otherwise). The script runs with two extra `$_SERVER` keys identifying the original request:
+The script is validated at startup — it must exist, canonicalize inside `DOCUMENT_ROOT`, and must not itself match `PHP_DENY_PATHS` (loop prevention; startup aborts otherwise). The loop check concerns `PHP_DENY_PATHS` only: a `.oxphpdeny` rule may cover the script, which then answers a direct request for itself. The script runs with two extra `$_SERVER` keys identifying the original request:
 
 | `$_SERVER` key | Value |
 |---|---|
 | `OXPHP_DENIED_PATH` | Original sanitized URI, with a leading `/` (same form as `PATH_INFO`) |
 | `OXPHP_DENIED_PATTERN` | The glob pattern that matched |
 
-`OXPHP_DENIED_PATTERN` is stored **without** a leading `/` (glob-normalized), while `OXPHP_DENIED_PATH` keeps the `/` of the request URI. If you compare the path against the pattern, `ltrim($_SERVER['OXPHP_DENIED_PATH'], '/')` first so both are in the same form.
+For a `PHP_DENY_PATHS` match, `OXPHP_DENIED_PATTERN` is stored **without** a leading `/` (glob-normalized), while `OXPHP_DENIED_PATH` keeps the `/` of the request URI; `ltrim($_SERVER['OXPHP_DENIED_PATH'], '/')` puts both in the same form. For a `.oxphpdeny` rule the pattern is the line as written in the file (`/composer.*`, `*.sql`), leading `/` included when the line has one — a script that answers both should not assume either form.
 
 Example honeypot:
 
@@ -11507,13 +11701,15 @@ The resolved-path screen is the one exception: it necessarily runs after route r
 
 | Metric | Description |
 |---|---|
-| `oxphp_php_deny_total` | Counter incremented on every denied request |
+| `oxphp_php_deny_total` | Counter incremented on every request `PHP_DENY_PATHS` denies |
 
-Each denial also produces a `tracing::info` log:
+Each such denial also produces a `tracing::info` log:
 
 ```
 PHP execution denied by PHP_DENY_PATHS path=uploads/shell.php pattern=uploads/**
 ```
+
+A request that a [`.oxphpdeny`](oxphpdeny.md) rule denies is answered before `PHP_DENY_PATHS` is checked, so it shows up in neither: it is counted in `oxphp_path_deny_total` and logged at `debug`.
 
 Access logs record the resulting status (the `PHP_DENY_FALLBACK` value or the fallback script's `http_response_code()`) — denied requests are not distinguished from normal requests at the access-log level. Cross-reference with the metric or the structured log to attribute spikes.
 
@@ -11542,6 +11738,7 @@ When both are set, `PHP_DENY_PATHS` wins and `PHP_DENY_DIRS` is reported as igno
 
 ## See Also
 
+- [Path Deny Rules](oxphpdeny.md) — keep any path, static or PHP, from being served, in every routing mode
 - [Routing](../features/routing.md) — routing modes and path security
 - [Error Pages](../features/error-pages.md) — custom HTML bodies for status-fallback responses
 - [Configuration Reference](../operations/configuration.md) — full env-var list
@@ -14495,7 +14692,7 @@ The legacy free functions remain available and route through the same internal s
 
 # Configuration Reference
 
-OxPHP is configured entirely through environment variables. There are no configuration files to manage — every setting has a sensible default, so a zero-configuration deployment works out of the box.
+OxPHP is configured through environment variables, plus one optional file: [`.oxphpdeny`](../security/oxphpdeny.md), the path deny rules read from the top of `DOCUMENT_ROOT`. Every setting has a sensible default, so a zero-configuration deployment works out of the box.
 
 ### Boolean values
 
@@ -14643,7 +14840,7 @@ PHP execution time is bounded by PHP's own `max_execution_time` ini directive (a
 | `FRAME_OPTIONS` | `SAMEORIGIN` | Clickjacking protection. `SAMEORIGIN` allows framing only by pages on the same origin, `DENY` blocks all framing, `off` disables (use when managing framing via your own CSP). Any other value falls back to the `SAMEORIGIN` default with a startup warning. Sets both `X-Frame-Options` and `Content-Security-Policy: frame-ancestors` on every response. See [Clickjacking protection](#clickjacking-protection) below for the emitted header values, how server headers defer to application-set ones, and guidance on choosing a value |
 | `TRUSTED_PROXIES` | *(unset)* | Trusted reverse proxy networks (comma-separated CIDRs or `private`). When set, OxPHP extracts the real client IP from `Forwarded` ([RFC 7239](https://www.rfc-editor.org/rfc/rfc7239)) or `X-Forwarded-For` headers using the rightmost-non-trusted algorithm. Also processes `X-Forwarded-Proto` and `X-Forwarded-Host` for `$_SERVER['HTTPS']`, `REQUEST_SCHEME`, `SERVER_NAME`, and `SERVER_PORT`. Unset = feature disabled |
 | `PHP_DENY_PATHS` | *(unset)* | Comma-separated glob patterns whose `.php` files must never execute via direct URI (e.g. `/uploads/**,/cache/**,/admin/legacy.php`). Patterns may target whole directories or single files. Applies in the direct-mapping modes — Traditional and SPA; ignored with a startup warning in Framework and Worker modes, which never execute arbitrary `.php` files directly. Also covers scripts reached through directory-index resolution (`/uploads/` → `uploads/index.php`). For direct `.php` URIs, matching happens before disk I/O, so denied paths produce the same response whether the file exists or not (no existence oracle). The legacy name `PHP_DENY_DIRS` is accepted as a deprecated alias and emits a startup `WARN`. See [PHP Execution Deny-List](../security/php-deny.md) |
-| `PHP_DENY_FALLBACK` | `404` | What to return on a `PHP_DENY_PATHS` match. Either an HTTP status `400`–`599` (pairs with `ERROR_PAGES_DIR` for custom HTML) or a `/`-prefixed URI path to a PHP fallback script inside `DOCUMENT_ROOT`. The fallback script receives `OXPHP_DENIED_PATH` and `OXPHP_DENIED_PATTERN` in `$_SERVER`. Validated at startup: the script must exist, canonicalize inside `DOCUMENT_ROOT`, and must not itself match `PHP_DENY_PATHS` (loop prevention) |
+| `PHP_DENY_FALLBACK` | `404` | What to return on a `PHP_DENY_PATHS` match or a `.oxphpdeny` deny rule. Either an HTTP status `400`–`599` (pairs with `ERROR_PAGES_DIR` for custom HTML) or a `/`-prefixed URI path to a PHP fallback script inside `DOCUMENT_ROOT`. The fallback script receives `OXPHP_DENIED_PATH` and `OXPHP_DENIED_PATTERN` in `$_SERVER`. Validated at startup: the script must exist, canonicalize inside `DOCUMENT_ROOT`, and must not itself match `PHP_DENY_PATHS` (loop prevention). A `.oxphpdeny` rule may cover the script; in worker mode `.oxphpdeny` deny rules take a status code only. See [Path Deny Rules](../security/oxphpdeny.md) |
 | `SYMLINK_ALLOW_PATHS` | *(unset)* | Comma-separated list of absolute paths under which symlinks are permitted to escape `DOCUMENT_ROOT`. Each entry must already exist on disk; relative paths and missing paths abort startup. Unset = no symlink escapes allowed. See [Symlink Allow-Paths](../security/symlink-allow-paths.md) |
 
 The special value `private` expands to all RFC-1918 private networks, loopback, and link-local addresses (IPv4 and IPv6): `10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`, `127.0.0.0/8`, `169.254.0.0/16`, `::1/128`, `fc00::/7`, `fe80::/10`.
@@ -14964,6 +15161,7 @@ curl -s http://localhost:9090/config | jq .
   "async_queue_capacity": 0,
   "async_workers": 0,
   "brotli_level": 5,
+  "deny_file": {"loaded": false},
   "document_root": "/var/www/html/public",
   "drain_timeout_seconds": 30,
   "entry_file": "/var/www/html/public/index.php",
@@ -15297,6 +15495,7 @@ curl -s http://localhost:9090/config | jq .
   "async_queue_capacity": 0,
   "async_workers": 0,
   "brotli_level": 5,
+  "deny_file": {"loaded": false},
   "document_root": "/var/www/html/public",
   "drain_timeout_seconds": 30,
   "entry_file": "/var/www/html/public/index.php",
@@ -15574,6 +15773,7 @@ A high queue wait means requests took long to reach a worker, which is not by it
 |--------|------|-------------|
 | `oxphp_rate_limited_total` | counter | Requests rejected by the rate limiter (returned 429) |
 | `oxphp_php_deny_total` | counter | Requests blocked by `PHP_DENY_PATHS` (`.php` execution denied). See [PHP Execution Deny-List](../security/php-deny.md) |
+| `oxphp_path_deny_total` | counter | Requests denied by a `.oxphpdeny` rule; a request `PHP_DENY_PATHS` denies too is counted here only. See [Path Deny Rules](../security/oxphpdeny.md) |
 
 ## Static File Cache Metrics
 

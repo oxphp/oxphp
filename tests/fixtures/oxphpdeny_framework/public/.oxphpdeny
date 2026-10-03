@@ -1,0 +1,5 @@
+# Files the application serves itself, after its own checks.
+> storage/
+secret.txt
+# The fallback script is not for direct requests.
+/_security/
