@@ -432,6 +432,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
     use crate::plugin::types::PhpValue;
 
     ctx.register_class("OxPHP\\Shared\\Once")
+        .final_()
         .implements("OxPHP\\Shared\\Shareable")
         .with_storage(|| SharedHandle::new(SharedType::Once))
         .magic(MagicMethod::Clone)

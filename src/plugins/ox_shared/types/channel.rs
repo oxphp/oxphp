@@ -2120,6 +2120,7 @@ pub fn register_class(
     use crate::plugins::ox_shared::types::timeout::read_positive_ms_arg;
 
     ctx.register_class("OxPHP\\Shared\\Channel")
+        .final_()
         .implements("OxPHP\\Shared\\Shareable")
         .implements("Countable")
         .with_storage(|| SharedHandle::new(SharedType::Channel))

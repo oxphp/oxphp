@@ -4,8 +4,8 @@
  * registered at MINIT.
  *
  * This test does NOT instantiate a Shared\* class. It only verifies
- * the interface is reachable and can be checked via instanceof and
- * interface_exists.
+ * through interface_exists and Reflection that the interface is
+ * reachable and that a Shared type implements it.
  */
 
 header('Content-Type: text/plain');
@@ -25,11 +25,11 @@ if (!$r->isInterface()) {
     exit;
 }
 
-// Verify a class that implements it satisfies instanceof.
-$anon = new class implements \OxPHP\Shared\Shareable {};
-if (!($anon instanceof \OxPHP\Shared\Shareable)) {
+// Verify a Shared type implements it. Not by declaring a class of our own:
+// a class written in PHP is refused the interface.
+if (!(new ReflectionClass('OxPHP\\Shared\\Counter'))->implementsInterface('OxPHP\\Shared\\Shareable')) {
     http_response_code(500);
-    echo "FAIL: instanceof check failed\n";
+    echo "FAIL: OxPHP\\Shared\\Counter does not implement Shareable\n";
     exit;
 }
 

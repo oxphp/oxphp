@@ -1681,6 +1681,7 @@ fn handle_get(call: &mut NativeCall) -> Result<(), PhpError> {
 
 fn register_pool_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
     ctx.register_class("OxPHP\\Shared\\Pool")
+        .final_()
         .implements("OxPHP\\Shared\\Shareable")
         .with_storage(|| crate::plugins::ox_shared::handle::SharedHandle::new(SharedType::Pool))
         .magic(MagicMethod::Clone)

@@ -693,6 +693,7 @@ pub unsafe extern "C" fn oxphp_shared_mutex_try_with(
 
 pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
     ctx.register_class("OxPHP\\Shared\\Mutex")
+        .final_()
         .implements("OxPHP\\Shared\\Shareable")
         .with_storage(|| SharedHandle::new(SharedType::Mutex))
         .magic(MagicMethod::Clone)

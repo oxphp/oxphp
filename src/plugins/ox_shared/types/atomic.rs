@@ -422,6 +422,7 @@ pub(crate) fn order_type() -> PhpType {
 
 pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
     ctx.register_class("OxPHP\\Shared\\Atomic")
+        .final_()
         .implements("OxPHP\\Shared\\Shareable")
         .with_storage(|| SharedHandle::new(SharedType::Atomic))
         .magic(MagicMethod::Clone)
