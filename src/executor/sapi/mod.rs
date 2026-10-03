@@ -51,6 +51,13 @@ fn php_startup() {
     unsafe {
         sapi::install_error_cb();
     }
+
+    // 5. open_basedir for the primary script, which is handed to PHP already
+    // open. After php_module_startup, so that it sits in front of OPcache's
+    // compile hook, and before any worker thread runs.
+    unsafe {
+        bindings::oxphp_script_guard_install();
+    }
 }
 
 /// Build the spawn strategy once based on `WORKER_MODE_ENABLED`.
@@ -1100,6 +1107,7 @@ mod tests {
             body: Bytes::new(),
             remote_addr: "127.0.0.1:0".parse().unwrap(),
             document_root: Arc::new(PathBuf::from("/var/www/public")),
+            path_policy: crate::path_guard::test_policy("/var/www/public"),
             cancel_state: std::sync::Arc::new(crate::bridge::cancel::CancellationState::new()),
             trace_id: String::new(),
             span_id: String::new(),

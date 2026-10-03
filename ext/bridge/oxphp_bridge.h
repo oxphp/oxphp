@@ -1278,6 +1278,21 @@ static inline void oxphp_bridge_report_request_fibers(uint32_t count) {
 /** Execute PHP script with zend_try protection. Returns 1 on success, 0 on bailout. */
 int oxphp_execute_script_safe(void *file_handle);
 
+/** Initialise a primary script's zend_file_handle from an already-open file
+ *  descriptor, wrapped in a PHP stream the handle owns. Returns 0, or -1 when no
+ *  stream could be made (the descriptor is then still the caller's to close).
+ *  `path` is the verified, symlink-resolved location of the open file; it
+ *  becomes both the handle's `filename` (OPcache lookup, chdir) and its
+ *  `opened_path` (`__FILE__`). Call inside a request. */
+int oxphp_file_handle_init_fd(void *file_handle, int fd, const char *path);
+
+/** Apply open_basedir to a script handed over by oxphp_file_handle_init_fd() at
+ *  the point the engine applies it to a script it opens by name: when the file
+ *  is compiled, in front of OPcache. A refusal is reported the way the engine
+ *  reports a primary script it cannot open. Once, after php_module_startup(),
+ *  before any worker thread runs. */
+void oxphp_script_guard_install(void);
+
 /** Close the calling thread's persistent resources. Last PHP call before ts_free_thread(). */
 void oxphp_bridge_destroy_persistent_list(void);
 

@@ -2682,6 +2682,145 @@ int oxphp_execute_script_safe(void *file_handle) {
     return result;
 }
 
+#include "main/php_streams.h"  /* php_stream_*: the script's file is a PHP stream */
+
+/* The two stream callbacks php_stream_open_for_zend_ex() installs for a script
+ * it opens itself; both are static in main.c, so these are their equivalents. */
+static size_t oxphp_script_stream_fsizer(void *handle) {
+    php_stream_statbuf ssb;
+
+    if (php_stream_stat((php_stream *)handle, &ssb) == 0) {
+        return ssb.sb.st_size;
+    }
+    return 0;
+}
+
+static void oxphp_script_stream_closer(void *handle) {
+    php_stream_close((php_stream *)handle);
+}
+
+/* Initialises a primary script's handle from a file the caller already opened
+ * and checked, instead of leaving PHP to open the path itself. Returns 0, or -1
+ * when no stream could be made, in which case `fd` is still open and the
+ * caller's to close.
+ *
+ * open_basedir is not applied here: the engine applies it where it opens a
+ * script by name, and no such open happens for a handle that is already open.
+ * oxphp_script_guard_install() puts the check back where the engine has it.
+ *
+ * `fd` is taken over by a PHP stream that the handle owns:
+ * zend_destroy_file_handle() closes it, and a request that ends first closes it
+ * with the rest of the request's resources.
+ *
+ * The handle has the shape php_stream_open_for_zend_ex() gives a script it
+ * opens by name — a ZEND_HANDLE_STREAM over a php_stream — because that is the
+ * shape the engine's extensions are written against, not a FILE*. phar replaces
+ * the handle of a script whose name contains ".phar" and closes the old one only
+ * if it is a stream handle, so a FILE* would be left open by every request that
+ * runs a tar or zip phar; and stdio's fread cannot tell the engine a read
+ * failed, where the stream reader can, so a script whose read fails would run as
+ * whatever was read before the failure — the empty file, if the first read
+ * fails — instead of failing the request.
+ *
+ * `path` is the location the caller found the open file at, symlinks resolved.
+ * It is set as the handle's `filename` and as its `opened_path`, so that
+ * everything the engine works out from the handle by name names the file that
+ * was checked rather than whatever the requested path points at by the time it
+ * looks: OPcache looks the script up by `filename` and by `opened_path`;
+ * php_execute_script_ex() changes into the directory of `filename`; and when
+ * `opened_path` is unset it derives one from `filename` with expand_filepath(),
+ * which resolves symlinks by name through the realpath cache — a different file
+ * from the open one if the link has moved. `opened_path` is also what `__FILE__`
+ * and get_included_files() report. SCRIPT_FILENAME does not come from the
+ * handle: the SAPI sets it from the requested path.
+ *
+ * Takes void* for the same reason as oxphp_execute_script_safe. Call it inside
+ * a request: the stream and `opened_path` are allocated from the request. */
+int oxphp_file_handle_init_fd(void *file_handle, int fd, const char *path) {
+    zend_file_handle *handle = (zend_file_handle *)file_handle;
+    /* The descriptor is freshly opened, so its offset is 0 — what the engine
+     * tells the stream for a file it opens itself. */
+    php_stream *stream = _php_stream_fopen_from_fd(fd, "rb", NULL, true STREAMS_CC);
+
+    if (stream == NULL) {
+        return -1;
+    }
+    memset(handle, 0, sizeof(*handle));
+    handle->type = ZEND_HANDLE_STREAM;
+    handle->filename = zend_string_init(path, strlen(path), 0);
+    handle->opened_path = zend_string_init(path, strlen(path), 0);
+    handle->handle.stream.handle = stream;
+    handle->handle.stream.reader = (zend_stream_reader_t)_php_stream_read;
+    handle->handle.stream.fsizer = oxphp_script_stream_fsizer;
+    handle->handle.stream.closer = oxphp_script_stream_closer;
+    handle->handle.stream.isatty = 0;
+    /* A stream still open when the request ends is closed without a notice. */
+    php_stream_auto_cleanup(stream);
+    /* The zend stream layer reads the whole file in large chunks itself. */
+    php_stream_set_option(stream, PHP_STREAM_OPTION_READ_BUFFER, PHP_STREAM_BUFFER_NONE, NULL);
+    return 0;
+}
+
+/* open_basedir for the primary script.
+ *
+ * The engine checks open_basedir where it opens a script by name, in the
+ * plain-files wrapper, and does so inside zend_compile_file() — after
+ * php_execute_script_ex() has changed into the script's directory and run
+ * auto_prepend_file. A script handed over as an open file never goes through
+ * that open, so it is checked here, at the same moment: relative open_basedir
+ * entries such as "." resolve against the directory the engine changed into, and
+ * an open_basedir that auto_prepend_file narrowed with ini_set() applies to the
+ * script it prepends to. The check sits in front of OPcache, so a script it
+ * holds is checked too.
+ *
+ * Only the handle oxphp_file_handle_init_fd() made is looked at — recognised by
+ * its closer; includes, the prepended and appended files and everything else
+ * pass straight through.
+ *
+ * A refusal is reported the way the engine reports a primary script it cannot
+ * open: it opens the path by name, which open_basedir refuses with its own
+ * warnings, then raises the fatal error that compile_file() raises after a
+ * failed open, which sets the response status and bails out. As in
+ * compile_file(), no fatal error is raised while an exception is pending (an
+ * error handler may have thrown one from the warnings); the op_array is NULL
+ * then and the caller reports the exception.
+ *
+ * Whatever that open yields is closed unused. open_basedir refused the path an
+ * instant ago, so a file opened by name now means the path was swapped in
+ * between, and the file this request may run is the one that was opened and
+ * checked. */
+static zend_op_array *(*oxphp_prev_compile_file)(zend_file_handle *file_handle, int type);
+
+static zend_op_array *oxphp_script_guard_compile_file(zend_file_handle *file_handle, int type) {
+    if (file_handle->type == ZEND_HANDLE_STREAM
+        && file_handle->handle.stream.closer == oxphp_script_stream_closer
+        && php_check_open_basedir_ex(ZSTR_VAL(file_handle->filename), 0) != 0) {
+        zend_file_handle probe;
+
+        zend_stream_init_filename(&probe, ZSTR_VAL(file_handle->filename));
+        php_stream_open_for_zend_ex(&probe, USE_PATH | REPORT_ERRORS | STREAM_OPEN_FOR_INCLUDE);
+        zend_destroy_file_handle(&probe);
+        if (!EG(exception)) {
+            zend_message_dispatcher(
+                type == ZEND_REQUIRE ? ZMSG_FAILED_REQUIRE_FOPEN : ZMSG_FAILED_INCLUDE_FOPEN,
+                ZSTR_VAL(file_handle->filename));
+        }
+        return NULL;
+    }
+    return oxphp_prev_compile_file(file_handle, type);
+}
+
+/* Puts the open_basedir check above in front of whatever compiles files —
+ * OPcache's hook, when it is loaded — so call it after php_module_startup(),
+ * once, before any worker thread runs. Idempotent. */
+void oxphp_script_guard_install(void) {
+    if (zend_compile_file == oxphp_script_guard_compile_file) {
+        return;
+    }
+    oxphp_prev_compile_file = zend_compile_file;
+    zend_compile_file = oxphp_script_guard_compile_file;
+}
+
 /* Closes every persistent resource this thread opened — pooled PDO connections,
  * mysqli `p:` links, pfsockopen() streams — by destroying the thread's own
  * EG(persistent_list).
