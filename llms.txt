@@ -7,6 +7,7 @@
 - [Command-Line Interface](docs/getting-started/cli.md): The oxphp binary command grammar — serve the HTTP server, run a single PHP script under CLI semantics, validate configuration, and drop privileges with --user.
 - [Docker Guide](docs/getting-started/docker.md): Run OxPHP with Docker. Covers minimal and multi-stage Dockerfiles, Compose configuration, PHP ini mounts, health checks, and port reference.
 - [Installation](docs/getting-started/installation.md): Install OxPHP via Docker image or build from source. Covers prerequisites, verification, and platform notes.
+- [Migration](docs/getting-started/migration.md): Move an existing PHP application to OxPHP from nginx + PHP-FPM, FrankenPHP or RoadRunner — routing modes, configuration mapping, behaviour differences, and what does not carry over.
 - [Quick Start](docs/getting-started/quick-start.md): Get OxPHP running in under 5 minutes. Create a project, write a PHP app, start the server, and make your first request.
 
 ## Examples

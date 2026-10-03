@@ -43,6 +43,7 @@ OxPHP also includes capabilities that typically require separate tools or third-
 - [Quick Start](getting-started/quick-start.md) — build and run your first OxPHP application in under 5 minutes
 - [Docker Guide](getting-started/docker.md) — Dockerfiles, Compose configuration, volumes, and deployment patterns
 - [Command-Line Interface](getting-started/cli.md) — the `oxphp` command grammar: `serve`, `run` a single PHP script, `config`, and `--user` privilege drop
+- [Migration](getting-started/migration.md) — move from nginx + PHP-FPM, FrankenPHP or RoadRunner: routing modes, configuration mapping, behaviour differences, and what does not carry over
 
 ## Examples
 
