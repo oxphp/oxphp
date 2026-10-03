@@ -1,5 +1,5 @@
 use http::header::COOKIE;
-use http::HeaderMap;
+use http::{HeaderMap, HeaderValue};
 
 /// Parsed cookies for a specific plugin, with the prefix stripped.
 pub struct PluginCookies {
@@ -14,6 +14,40 @@ impl PluginCookies {
             .iter()
             .find(|(k, _)| k == key)
             .map(|(_, v)| v.as_str())
+    }
+}
+
+/// Join a `Cookie` header that arrived as several field lines into one.
+///
+/// An HTTP/2 client may split its cookies across field lines for better HPACK
+/// compression, and RFC 9113 section 8.2.3 requires the server to join them
+/// with `"; "` before passing them to an application; neither `h2` nor `hyper`
+/// does it. Over HTTP/1.1 a user agent must not send more than one (RFC 6265
+/// section 5.4), and one that does is joined the same way. Called once on
+/// every request before anything reads the header, so the plugins, the
+/// `__oxp_*` stripping and every superglobal see the same cookies.
+pub fn join_cookie_field_lines(headers: &mut HeaderMap) {
+    let mut lines = headers.get_all(COOKIE).iter();
+    let (Some(first), Some(_)) = (lines.next(), lines.next()) else {
+        return;
+    };
+
+    let mut joined = first.as_bytes().to_vec();
+    for line in headers.get_all(COOKIE).iter().skip(1) {
+        joined.extend_from_slice(b"; ");
+        joined.extend_from_slice(line.as_bytes());
+    }
+
+    // Each line is already a valid field value, and so is the separator. Were
+    // that ever not so, dropping the header keeps a plugin cookie on a later
+    // line from reaching the application.
+    match HeaderValue::from_bytes(&joined) {
+        Ok(value) => {
+            headers.insert(COOKIE, value);
+        }
+        Err(_) => {
+            headers.remove(COOKIE);
+        }
     }
 }
 
@@ -49,25 +83,17 @@ pub fn extract_plugin_cookies(headers: &HeaderMap, prefix: &str) -> PluginCookie
 /// hand, which a per-plugin prefix would put out of reach.
 ///
 /// The `Cookie` field lines are scanned in the order they arrived and the
-/// first pair whose name matches wins; a line carrying a byte outside visible
-/// ASCII is skipped rather than ending the search. Over HTTP/1.1 a conforming
-/// user agent sends only one such header (RFC 6265 section 5.4), but an
-/// HTTP/2 client may legitimately split its cookies across several field lines
-/// for better HPACK compression, and RFC 9113 section 8.2.3 puts the job of
-/// joining them back together with `"; "` on the server. Nothing below us does
-/// it — neither `h2` nor `hyper` rejoins them — so reading only the first field
-/// line would lose cookies sent by a conforming client. Scanning the lines in
-/// order stands in for scanning that concatenation, without building it.
-///
-/// `extract_plugin_cookies` and [`strip_plugin_cookies`] do still read only the
-/// first field line, so this function sees cookies they do not.
+/// first pair whose name matches wins; a line carrying a non-ASCII byte is
+/// skipped rather than ending the search. On a request the server is handling
+/// there is only one line by the time any plugin runs —
+/// [`join_cookie_field_lines`] has joined the rest into it — so there a
+/// non-ASCII byte anywhere in the header makes all of it unreadable, as it
+/// does for [`extract_plugin_cookies`] and the superglobals.
 ///
 /// The name is matched whole: a cookie called `__oxp_profiler_OXPROF` is not a
 /// match for `OXPROF`. Nothing here strips the cookie from the request either,
-/// so — unlike a `__oxp_*` one — the application still sees it: in `$_COOKIE`
-/// when the client sent its cookies on one field line, and otherwise in
-/// `$_SERVER['HTTP_COOKIE']`, because the SAPI builds `$_COOKIE` from the first
-/// field line alone while `$_SERVER` is built from the last.
+/// so — unlike a `__oxp_*` one — the application still sees it, in `$_COOKIE`
+/// and `$_SERVER['HTTP_COOKIE']` alike.
 #[allow(dead_code)] // consumed by feature-gated plugins
 pub(crate) fn find_raw_cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
     headers
@@ -245,6 +271,65 @@ mod tests {
         let headers = make_headers("session=abc; theme=dark");
         let cookies = extract_plugin_cookies(&headers, "__oxp_test_");
         assert_eq!(cookies.get("session"), None);
+    }
+
+    // ── join_cookie_field_lines tests ──
+
+    fn cookie_lines(headers: &HeaderMap) -> Vec<&[u8]> {
+        headers
+            .get_all(COOKIE)
+            .iter()
+            .map(|v| v.as_bytes())
+            .collect()
+    }
+
+    #[test]
+    fn test_join_cookie_field_lines_joins_in_arrival_order() {
+        let mut headers = HeaderMap::new();
+        headers.append(COOKIE, "a=1".parse().unwrap());
+        headers.append(COOKIE, "__oxp_t_s=1; b=2".parse().unwrap());
+        headers.append(COOKIE, "c=3".parse().unwrap());
+        join_cookie_field_lines(&mut headers);
+        assert_eq!(
+            cookie_lines(&headers),
+            [b"a=1; __oxp_t_s=1; b=2; c=3".as_slice()]
+        );
+    }
+
+    #[test]
+    fn test_join_cookie_field_lines_leaves_one_line_alone() {
+        let mut headers = make_headers("a=1;b=2");
+        join_cookie_field_lines(&mut headers);
+        assert_eq!(cookie_lines(&headers), [b"a=1;b=2".as_slice()]);
+    }
+
+    #[test]
+    fn test_join_cookie_field_lines_without_a_cookie_header() {
+        let mut headers = HeaderMap::new();
+        join_cookie_field_lines(&mut headers);
+        assert!(headers.get(COOKIE).is_none());
+    }
+
+    #[test]
+    fn test_join_cookie_field_lines_carries_non_ascii_bytes() {
+        // Joined as bytes: what such a byte means is left to the readers, the
+        // same as on a header that arrived as one line.
+        let mut headers = HeaderMap::new();
+        headers.append(COOKIE, HeaderValue::from_bytes(b"bin=\xff").unwrap());
+        headers.append(COOKIE, "a=1".parse().unwrap());
+        join_cookie_field_lines(&mut headers);
+        assert_eq!(cookie_lines(&headers), [b"bin=\xff; a=1".as_slice()]);
+    }
+
+    #[test]
+    fn test_join_then_strip_removes_a_plugin_cookie_from_any_line() {
+        let mut parts = make_parts("a=1");
+        parts
+            .headers
+            .append(COOKIE, "__oxp_t_s=1; b=2".parse().unwrap());
+        join_cookie_field_lines(&mut parts.headers);
+        strip_plugin_cookies(&mut parts);
+        assert_eq!(cookie_lines(&parts.headers), [b"a=1; b=2".as_slice()]);
     }
 
     // ── find_raw_cookie tests ──

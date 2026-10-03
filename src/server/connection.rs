@@ -174,7 +174,9 @@ pub async fn handle_request(
     mut closed_rx: tokio::sync::watch::Receiver<bool>,
 ) -> Result<Response<ResponseBody>, Infallible> {
     let start = Instant::now();
-    let (parts, body) = req.into_parts();
+    let (mut parts, body) = req.into_parts();
+    // Before `RequestReceived`: plugins read their cookies there.
+    crate::plugin::cookies::join_cookie_field_lines(&mut parts.headers);
 
     // Weigh Accept-Encoding before parts are consumed by the pipeline, and
     // without allocating for the one field line every client actually sends.
