@@ -55,6 +55,10 @@ pub struct ScriptRequest {
     pub body: Bytes,
     pub remote_addr: SocketAddr,
     pub document_root: Arc<PathBuf>,
+    /// Where this request's script may live: the canonical document root plus
+    /// the allowed symlink targets. The worker checks the opened script
+    /// against it before handing the file to PHP.
+    pub path_policy: Arc<crate::path_guard::PathPolicy>,
     /// Per-request cancellation state shared with the dispatch task.
     /// Holding an Arc on this side keeps the AtomicU8 alive even if
     /// the tokio future is dropped before the worker finishes.

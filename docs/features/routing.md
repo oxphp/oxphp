@@ -17,7 +17,7 @@ Every request runs through a shared pipeline before the mode-specific logic kick
 4. **Well-known PHP block** — defense-in-depth: `.php` scripts inside `/.well-known/` never execute
 5. **URI classification** — the sanitized path is classified once into `NoExtension`, `Php`, or `OtherExtension`
 6. **Mode dispatch** — each mode handles the three URI kinds with its own rules
-7. **Symlink validation** — every resolved filesystem path must canonicalize inside the document root
+7. **Symlink validation** — every resolved filesystem path must canonicalize inside the document root, and a static file or PHP script is checked again, on the file actually opened, when it is read or executed
 
 The classification step is the key efficiency: the disk check for static assets (`/style.css`, `/logo.png`) is performed **once** in the shared layer for `OtherExtension` URIs, so all three modes pay the same cost.
 
@@ -191,7 +191,7 @@ OxPHP applies multiple layers of protection to prevent directory traversal, hidd
 
 - **Percent-decoding** runs before sanitization, so encoded traversal attempts like `/%2e%2e/etc/passwd` are caught
 - **Segment filtering** removes `..`, `.`, and empty segments from the resolved path
-- **Symlink validation** canonicalizes every resolved path and verifies it remains within the document root. Symlinks that point outside the served directory are blocked
+- **Symlink validation** canonicalizes every resolved path and verifies it remains within the document root. Symlinks that point outside the served directory are blocked, including ones repointed after the path was first served: static files and PHP scripts are checked again on the file actually opened (see [Symlink Allow Paths](../security/symlink-allow-paths.md))
 - **Dot-path blocking** blocks any path segment starting with `.` (e.g. `/.git/config`, `/.env`), with an exception for `/.well-known/*` per RFC 8615
 - **Well-known PHP block** — even with the dot-path exception, `.php` scripts under `/.well-known/` are never executed (defense-in-depth)
 - **PHP execution deny-list** — in the direct-mapping modes (Traditional and SPA), `PHP_DENY_PATHS` blocks `.php` execution at configured glob patterns (e.g. `/uploads/**`, or a single file like `/admin/legacy.php`) before any disk I/O. See [PHP Execution Deny-List](../security/php-deny.md)

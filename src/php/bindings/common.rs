@@ -310,6 +310,24 @@ extern "C" {
 
     pub fn oxphp_execute_script_safe(file_handle: *mut c_void) -> c_int;
 
+    /// Initialise a primary script's `zend_file_handle` from an open file
+    /// descriptor, which a PHP stream owned by the handle takes over. Returns 0,
+    /// or -1 when no stream could be made — the descriptor is then still the
+    /// caller's to close. `path` is the checked, symlink-resolved location of the
+    /// open file; it becomes both the handle's `filename` and its `opened_path`
+    /// (see the C definition for why).
+    pub fn oxphp_file_handle_init_fd(
+        file_handle: *mut c_void,
+        fd: c_int,
+        path: *const c_char,
+    ) -> c_int;
+
+    /// Apply `open_basedir` to a script handed over by
+    /// `oxphp_file_handle_init_fd` when it is compiled — where the engine applies
+    /// it to a script it opens by name — in front of OPcache. Once, after
+    /// `php_module_startup`, before any worker thread runs.
+    pub fn oxphp_script_guard_install();
+
     /// Close the calling thread's persistent resources (pooled DB connections,
     /// persistent streams). Must be the last PHP call before `ts_free_thread()`.
     pub fn oxphp_bridge_destroy_persistent_list();

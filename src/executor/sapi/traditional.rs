@@ -3,6 +3,9 @@
 //! per channel message, driven by `worker_thread`.
 
 use std::ffi::CString;
+use std::os::fd::IntoRawFd;
+use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
@@ -11,6 +14,7 @@ use bytes::Bytes;
 use crossbeam_channel::RecvTimeoutError;
 
 use crate::executor::idle_clock::LastActive;
+use crate::path_guard::ScriptOpenError;
 use crate::php::sapi::Pickup;
 use crate::php::{bindings, sapi};
 use crate::types::{ScriptRequest, ScriptResponse};
@@ -124,6 +128,44 @@ fn answer_departed_client(wr: WorkerRequest, expired: bool) {
         crate::types::ScriptResponse::client_closed()
     };
     let _ = wr.response_tx.send(answer);
+}
+
+/// The answer for a script that could not be opened for execution.
+///
+/// A file outside the document root and the allowed symlink targets is
+/// answered as the router answers a path it refuses. One that has gone since
+/// routing is a 404 as well. PHP opening it by name would have reported a
+/// warning and a fatal error, and an unreadable one gets the plain 500 below,
+/// not those; with OPcache holding the script and `validate_timestamps` off, PHP
+/// would not have opened it at all and run the cached copy.
+fn refuse_script(path: &Path, error: ScriptOpenError) -> ScriptResponse {
+    let not_found = || ScriptResponse {
+        status: 404,
+        headers: vec![(
+            http::header::CONTENT_TYPE,
+            http::HeaderValue::from_static("text/plain; charset=utf-8"),
+        )],
+        body: Bytes::from_static(b"404 Not Found"),
+        ..Default::default()
+    };
+    match error {
+        ScriptOpenError::Escapes => {
+            tracing::warn!(
+                path = %path.display(),
+                "Blocked request: opened script escapes document root"
+            );
+            not_found()
+        }
+        ScriptOpenError::Io(e) if e.kind() == std::io::ErrorKind::NotFound => not_found(),
+        ScriptOpenError::Io(e) => {
+            tracing::warn!(path = %path.display(), error = %e, "Cannot open script");
+            ScriptResponse {
+                status: 500,
+                body: Bytes::from_static(b"Internal Server Error"),
+                ..Default::default()
+            }
+        }
+    }
 }
 
 fn worker_thread(
@@ -399,6 +441,20 @@ fn execute_request(
         return None;
     }
 
+    // Open the script and check where the opened file lives before any PHP
+    // state exists, so a refusal costs no request startup. PHP is then handed
+    // this very file rather than the path: the route was validated when it was
+    // first resolved and is cached without expiry, so a link repointed since
+    // would be followed by the open PHP does itself.
+    let verified =
+        match crate::path_guard::open_script_verified(&request.script_path, &request.path_policy) {
+            Ok(verified) => verified,
+            Err(error) => {
+                let _ = response_tx.send(refuse_script(&request.script_path, error));
+                return None;
+            }
+        };
+
     unsafe {
         // Bump the per-thread counter at request START so that
         // Worker::requestCount() inside the handler observes the current
@@ -523,12 +579,31 @@ fn execute_request(
     // bytecode. Compiles away when `plugin-shared` is off.
     drain_pool_stale_if_requested();
 
-    let script_path_str = request.script_path.to_str().unwrap_or("");
-    let script_path = CString::new(script_path_str).unwrap_or_default();
+    let opened_path = CString::new(verified.opened_path.as_os_str().as_bytes()).unwrap_or_default();
 
+    // From here the handle owns the descriptor (as a PHP stream);
+    // zend_destroy_file_handle() below closes it.
+    let raw_fd = verified.file.into_raw_fd();
     let mut file_handle: bindings::zend_file_handle = unsafe { std::mem::zeroed() };
-    unsafe {
-        bindings::zend_stream_init_filename(&mut file_handle, script_path.as_ptr());
+    // SAFETY: `raw_fd` is an open descriptor this thread owns; on success the
+    // handle's stream takes it over, on failure it is still ours to close.
+    let initialised = unsafe {
+        bindings::oxphp_file_handle_init_fd(
+            &mut file_handle as *mut _ as *mut std::os::raw::c_void,
+            raw_fd,
+            opened_path.as_ptr(),
+        )
+    };
+    if initialised != 0 {
+        unsafe {
+            libc::close(raw_fd);
+            bindings::php_request_shutdown(std::ptr::null_mut());
+        }
+        return Some(ScriptResponse {
+            status: 500,
+            body: Bytes::from_static(b"Internal Server Error"),
+            ..Default::default()
+        });
     }
 
     file_handle.primary_script = true;

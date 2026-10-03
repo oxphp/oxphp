@@ -125,11 +125,12 @@ pub(crate) struct ResolveCtx<'a> {
 /// Routing configuration with mode dispatch and caching layers.
 pub struct RouteConfig {
     document_root: Arc<PathBuf>,
-    canonical_root: PathBuf,
+    /// Canonical root plus allowed symlink targets. Shared with every request
+    /// handed to PHP, so the check made when the script is opened is this one.
+    policy: Arc<crate::path_guard::PathPolicy>,
     mode: Mode,
     worker_route: Option<RouteResult>,
     php_deny: Option<crate::config::PhpDeny>,
-    symlink_allow: crate::config::SymlinkAllowList,
     /// Cache of resolved routes keyed by URI path. `Mutex` rather than
     /// `RwLock` because `std::sync::RwLock` wraps `pthread_rwlock_t` on
     /// Linux and is ~2–3× slower than a futex-based `Mutex` in the
@@ -199,11 +200,13 @@ impl RouteConfig {
 
         Self {
             document_root,
-            canonical_root,
+            policy: Arc::new(crate::path_guard::PathPolicy::new(
+                canonical_root,
+                symlink_allow,
+            )),
             mode,
             worker_route: None,
             php_deny,
-            symlink_allow,
             route_cache: Mutex::new(LruCache::new(
                 NonZeroUsize::new(ROUTE_CACHE_CAPACITY).unwrap(),
             )),
@@ -212,7 +215,7 @@ impl RouteConfig {
 
     /// Returns the canonical document root.
     pub fn canonical_root(&self) -> &Path {
-        &self.canonical_root
+        self.policy.canonical_root()
     }
 
     /// Returns the document root path.
@@ -448,14 +451,18 @@ impl RouteConfig {
     }
 
     fn is_path_within_allowed(&self, canonical_path: &Path) -> bool {
-        canonical_path.starts_with(&self.canonical_root)
-            || self.symlink_allow.allows(canonical_path)
+        self.policy.allows(canonical_path)
     }
 
     /// Allow the static-file serve path to consult the same allow-list
     /// without exposing the internal field.
     pub fn symlink_allow(&self) -> &crate::config::SymlinkAllowList {
-        &self.symlink_allow
+        self.policy.symlink_allow()
+    }
+
+    /// The policy a script's location is checked against when it is opened.
+    pub fn path_policy(&self) -> Arc<crate::path_guard::PathPolicy> {
+        Arc::clone(&self.policy)
     }
 }
 

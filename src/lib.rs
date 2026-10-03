@@ -8,6 +8,7 @@ pub mod executor;
 pub mod frontend;
 pub mod handlers;
 pub mod metrics;
+pub mod path_guard;
 pub mod php;
 pub mod plugin;
 pub mod plugins;

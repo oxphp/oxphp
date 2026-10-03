@@ -725,6 +725,7 @@ async fn dispatch_request(
                 body: body_bytes,
                 remote_addr,
                 document_root: server.route_config.document_root_arc(),
+                path_policy: server.route_config.path_policy(),
                 cancel_state,
                 trace_id: metadata_get(metadata, "trace_id").to_string(),
                 span_id: metadata_get(metadata, "span_id").to_string(),

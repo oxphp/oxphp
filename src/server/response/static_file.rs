@@ -13,6 +13,7 @@ use lru::LruCache;
 use parking_lot::{Mutex, RwLock};
 use tokio_util::io::ReaderStream;
 
+use crate::path_guard::{descriptor_paths, path_allowed, LEASE_WAIT};
 use crate::server::compression::{Coding, Levels};
 use crate::types::{full_body, ResponseBody};
 
@@ -565,12 +566,6 @@ impl FileCache {
     }
 }
 
-/// How long an open refused by another holder's lease keeps being retried.
-/// Linux removes a lease by force after `/proc/sys/fs/lease-break-time`
-/// (45 s by default), so the open gets through before this unless that limit
-/// was raised; past it the refusal is returned as an error.
-const LEASE_WAIT: Duration = Duration::from_secs(50);
-
 /// Open `path` for reading with O_NONBLOCK, so a link to a FIFO cannot block
 /// before the location check refuses it.
 ///
@@ -601,14 +596,6 @@ async fn open_static(path: &Path) -> io::Result<tokio::fs::File> {
     }
 }
 
-fn path_allowed(
-    path: &Path,
-    canonical_root: &Path,
-    allow_list: &crate::config::SymlinkAllowList,
-) -> bool {
-    path.starts_with(canonical_root) || allow_list.allows(path)
-}
-
 /// Verify that `file`, opened from `file_path`, lies within the document root
 /// or an allow-listed symlink target. Returns `false` if it escapes.
 ///
@@ -633,45 +620,6 @@ async fn opened_file_allowed(
             resolved_path_names_opened_file(file_path, opened, canonical_root, allow_list).await
         }
     }
-}
-
-/// Path of the file behind `fd`, as the kernel records it.
-#[cfg(target_os = "linux")]
-fn descriptor_paths(fd: std::os::fd::RawFd) -> io::Result<Vec<PathBuf>> {
-    std::fs::read_link(format!("/proc/self/fd/{fd}")).map(|path| vec![path])
-}
-
-/// Paths of the file behind `fd`, as the kernel records it: with and without
-/// firmlinks. `realpath` keeps whichever spelling the configured root used —
-/// `/Users/...` or `/System/Volumes/Data/Users/...` — while F_GETPATH always
-/// reports the firmlinked one, so a root written through the data volume
-/// would otherwise refuse every file under it.
-#[cfg(target_os = "macos")]
-fn descriptor_paths(fd: std::os::fd::RawFd) -> io::Result<Vec<PathBuf>> {
-    let mut paths = vec![fcntl_path(fd, libc::F_GETPATH)?];
-    if let Ok(path) = fcntl_path(fd, libc::F_GETPATH_NOFIRMLINK) {
-        paths.push(path);
-    }
-    Ok(paths)
-}
-
-#[cfg(target_os = "macos")]
-fn fcntl_path(fd: std::os::fd::RawFd, cmd: libc::c_int) -> io::Result<PathBuf> {
-    use std::os::unix::ffi::OsStrExt;
-    let mut buf = [0u8; libc::PATH_MAX as usize];
-    // SAFETY: F_GETPATH and F_GETPATH_NOFIRMLINK write a NUL-terminated path
-    // of at most MAXPATHLEN (== PATH_MAX) bytes into the buffer, which is
-    // PATH_MAX bytes long.
-    if unsafe { libc::fcntl(fd, cmd, buf.as_mut_ptr()) } == -1 {
-        return Err(io::Error::last_os_error());
-    }
-    let len = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
-    Ok(PathBuf::from(std::ffi::OsStr::from_bytes(&buf[..len])))
-}
-
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn descriptor_paths(_fd: std::os::fd::RawFd) -> io::Result<Vec<PathBuf>> {
-    Err(io::ErrorKind::Unsupported.into())
 }
 
 /// Fallback for [`opened_file_allowed`]: resolve `file_path` again and require
