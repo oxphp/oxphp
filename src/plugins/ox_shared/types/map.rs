@@ -1710,6 +1710,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
     register_key_cursor_class(ctx)?;
 
     ctx.register_class("OxPHP\\Shared\\Map")
+        .final_()
         .implements("OxPHP\\Shared\\Shareable")
         .with_storage(|| SharedHandle::new(SharedType::Map))
         .magic(MagicMethod::Clone)

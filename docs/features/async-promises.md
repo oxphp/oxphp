@@ -221,10 +221,10 @@ Async closures run on separate threads. This imposes restrictions on what data c
 
 | Allowed | Not allowed |
 |---------|-------------|
-| `null`, `bool`, `int`, `float`, `string` | Plain objects (any class not implementing `OxPHP\Shared\Shareable`) |
+| `null`, `bool`, `int`, `float`, `string` | Any other object — `OxPHP\Shared\Shareable` is reserved for the `Shared\*` types, and a class written in PHP can neither implement it nor extend a class that does |
 | Arrays of scalar types | Resources (file handles, DB connections, streams) |
 | Nested scalar arrays | Closures whose `use` captures non-Shareable objects |
-| `Shared\*` instances (`Counter`, `Map`, `Channel`, `Atomic`, `Flag`, `Mutex`, `Once`, `Pool`, `Registry`) and other classes implementing `OxPHP\Shared\Shareable` | |
+| `Shared\*` instances (`Counter`, `Map`, `Channel`, `Atomic`, `Flag`, `Mutex`, `Once`, `Pool`, `Registry`) | |
 
 Additional constraints:
 

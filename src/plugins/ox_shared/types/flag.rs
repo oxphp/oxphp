@@ -230,6 +230,7 @@ use crate::plugins::ox_shared::handle::SharedHandle;
 
 pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
     ctx.register_class("OxPHP\\Shared\\Flag")
+        .final_()
         .implements("OxPHP\\Shared\\Shareable")
         .with_storage(|| SharedHandle::new(SharedType::Flag))
         .magic(MagicMethod::Clone)

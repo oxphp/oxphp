@@ -5848,6 +5848,25 @@ oxphp_profiler_observer_init(zend_execute_data *execute_data) {
 
 zend_class_entry *oxphp_shareable_ce = NULL;
 
+/* Only the plugin's own classes may implement the interface. A Shareable
+ * object crosses threads through the handle oxphp_plugin_get_shared_handle
+ * reads from the oxphp_custom_object prefix in front of it, and a class
+ * declared in PHP has no such prefix. The engine calls this hook for
+ * inherited interfaces as well as declared ones, so the declaration is
+ * refused either way, as Throwable and UnitEnum refuse the classes they are
+ * not meant for. A PHP subclass of a Shared type never gets this far: the
+ * Shared types are final, and the engine refuses to extend a final class
+ * before it looks at the interfaces. */
+static int oxphp_shareable_implement(zend_class_entry *iface, zend_class_entry *class_type)
+{
+    if (class_type->type == ZEND_INTERNAL_CLASS) {
+        return SUCCESS;
+    }
+    zend_error_noreturn(E_ERROR, "%s %s cannot implement interface %s, it is reserved for the OxPHP\\Shared types",
+        zend_get_object_type_uc(class_type), ZSTR_VAL(class_type->name), ZSTR_VAL(iface->name));
+    return FAILURE;
+}
+
 int oxphp_shareable_register_ce(void)
 {
     zend_class_entry tmp_ce;
@@ -5856,6 +5875,7 @@ int oxphp_shareable_register_ce(void)
     if (!oxphp_shareable_ce) {
         return FAILURE;
     }
+    oxphp_shareable_ce->interface_gets_implemented = oxphp_shareable_implement;
     return SUCCESS;
 }
 
@@ -5937,6 +5957,11 @@ int oxphp_plugin_get_shared_handle(zval *obj,
                                    const void **out_entry_ptr) {
     if (!obj || Z_TYPE_P(obj) != IS_OBJECT) return -1;
     if (!oxphp_is_shareable((void *)obj)) return -1;
+    /* OXPHP_OBJ steps back over the prefix only oxphp_plugin_create_object
+     * allocates; in front of any other object that memory is not ours.
+     * oxphp_shareable_implement keeps every such class away from the
+     * interface, and this keeps the arithmetic from resting on that alone. */
+    if (Z_OBJCE_P(obj)->create_object != oxphp_plugin_create_object) return -1;
     oxphp_custom_object *intern = OXPHP_OBJ(Z_OBJ_P(obj));
     if (intern == NULL || intern->rust_data == NULL) return -1;
     /* SharedHandle layout: *const Entry at offset 0, u8 type_tag at 8 */

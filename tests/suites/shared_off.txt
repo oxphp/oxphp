@@ -3,3 +3,4 @@
 
 shared_off/test_classes_absent
 shared_off/test_endpoints_absent
+shared/test_shareable_userland_implementer_refused

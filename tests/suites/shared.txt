@@ -87,3 +87,5 @@ shared/test_registry_memory
 shared/test_registry_reentrant
 shared/test_registry_factory_throws
 shared/test_registry_empty_key
+shared/test_shareable_userland_implementer_refused
+shared/test_shareable_subclass_refused
