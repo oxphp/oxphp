@@ -5,3 +5,7 @@ cookies/test_cookie_single | GET | -b "foo=bar" | |
 cookies/test_cookie_multiple | GET | -b "a=1; b=2" | |
 cookies/test_cookie_special_chars | GET | -b "encoded=hello%20world" | |
 cookies/test_cookie_empty_value | GET | -b "key=" | |
+cookies/test_cookie_split_field_lines >> ?case=h1-plugin-cookie-on-second-line | GET | -H "Cookie: a=1" -H "Cookie: __oxp_t_s=1; b=2" | |
+cookies/test_cookie_split_field_lines >> ?case=h1-plugin-cookie-on-first-line | GET | -H "Cookie: __oxp_t_s=1" -H "Cookie: a=1; b=2" | |
+cookies/test_cookie_split_field_lines >> ?case=h2-plugin-cookie-on-second-line | GET | --http2-prior-knowledge -H "Cookie: a=1" -H "Cookie: __oxp_t_s=1; b=2" | |
+cookies/test_cookie_split_field_lines >> ?case=h2-plugin-cookie-on-first-line | GET | --http2-prior-knowledge -H "Cookie: __oxp_t_s=1" -H "Cookie: a=1; b=2" | |
