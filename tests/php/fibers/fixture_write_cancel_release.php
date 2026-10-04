@@ -2,7 +2,8 @@
 
 declare(strict_types=1);
 
-// Inner request for fibers/test_write_cancel_releases_frames.
+// Inner request for fibers/test_write_cancel_releases_frames, and with
+// ?in=stream-fiber for fibers/test_write_cancel_in_a_fiber_releases_frames.
 //
 // Parks while holding an object in a local variable. The test closes this
 // request's connection during the park; when the request resumes, the first
@@ -30,6 +31,12 @@ declare(strict_types=1);
 // back what the abandoned frames were holding. stream-throw holds an object
 // whose destructor throws: it runs during that give-back, and the throw must end
 // nothing but itself.
+//
+// ?in=stream-fiber makes the same write from inside a Fiber the request starts
+// after it resumes. The engine catches the ending inside that fiber and destroys
+// the fiber's frames before it ends the request with it, so what the worker can
+// give back is what the request's own frames below the fiber were holding — and
+// the object is held there.
 //
 // ?in=destructor holds an object with a destructor instead. The destructor now
 // runs at the function's own return, as part of the request, because the
@@ -69,7 +76,7 @@ if (!class_exists('OxphpWriteCancelThrows', false)) {
 }
 
 if (!function_exists('oxphp_write_after_client_left')) {
-    function oxphp_write_after_client_left(string $holding = 'plain', bool $stream = false): void
+    function oxphp_write_after_client_left(string $holding = 'plain', bool $stream = false, bool $inFiber = false): void
     {
         // Held by this frame's variable and nothing else.
         $held = match ($holding) {
@@ -84,9 +91,16 @@ if (!function_exists('oxphp_write_after_client_left')) {
         sleep(2);
 
         OxphpWriteCancelProbe::$stage = 'before-write';
-        echo "nobody is left to read this\n";
-        if ($stream) {
-            oxphp_stream_flush();
+        if ($inFiber) {
+            (new \Fiber(static function (): void {
+                echo "nobody is left to read this\n";
+                oxphp_stream_flush();
+            }))->start();
+        } else {
+            echo "nobody is left to read this\n";
+            if ($stream) {
+                oxphp_stream_flush();
+            }
         }
         OxphpWriteCancelProbe::$stage = 'after-write';
     }
@@ -114,7 +128,7 @@ register_shutdown_function(static function (): void {
 });
 
 $in = $_GET['in'] ?? '';
-$stream = $in === 'stream' || $in === 'stream-throw';
+$stream = $in === 'stream' || $in === 'stream-throw' || $in === 'stream-fiber';
 if ($stream) {
     // The header alone is what makes the request a stream. Nothing is sent
     // before the park: a stream that has already sent its headers is no longer
@@ -129,5 +143,6 @@ oxphp_write_after_client_left(
         'stream-throw' => 'throws',
         default => 'plain',
     },
-    $stream
+    $stream,
+    $in === 'stream-fiber'
 );

@@ -12,6 +12,15 @@ fibers/test_generator_fatal_releases_once
 fibers/test_closure_fatal_releases_it
 fibers/test_shared_closure_fatal_releases
 fibers/test_write_cancel_releases_frames
+# These three end a request inside a Fiber, which leaves the fiber that served
+# it unable to answer Fiber::getCurrent() for the rest of its life — a later
+# line that lands on it and asks would see null. The third asks its worker to
+# exit, which takes all three of those fibers with it, so nothing may be
+# inserted between them.
+fibers/test_write_cancel_in_a_fiber_releases_frames
+fibers/test_fatal_inside_a_userland_fiber_keeps_the_worker
+fibers/test_fatal_in_a_generator_in_a_fiber_keeps_the_server | GET | | 500 |
+fibers/test_fatal_in_a_generator_in_a_fiber_keeps_the_server_probe
 fibers/test_ob_survives_suspend
 fibers/test_gc_survives_fatal
 fibers/test_gc_survives_shutdown_fatal
@@ -46,6 +55,8 @@ fibers/test_ini_put_back_reports_a_throw | GET | | 500 |
 fibers/test_ini_put_back_reports_a_throw_probe
 fibers/test_ini_put_back_fatal_retires_the_worker | GET | | 500 |
 fibers/test_ini_put_back_fatal_retires_the_worker_probe
+fibers/test_fatal_in_a_gc_destructor_keeps_the_server | GET | | 500 |
+fibers/test_fatal_in_a_gc_destructor_keeps_the_server_probe
 fibers/test_ini_put_back_survives_a_growing_set | GET | | 200 |
 fibers/test_ini_put_back_survives_a_growing_set_probe
 
