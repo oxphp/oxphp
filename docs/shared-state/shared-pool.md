@@ -177,6 +177,7 @@ The factory runs **lazily** on the acquiring worker thread. A pool with `maxSize
 
 - The factory must return a PHP object. Returning a non-object surfaces as `TypeException` from the acquire call, and the slot is not counted against the budget.
 - A factory that throws propagates its own exception to the acquire caller unchanged, and the slot is not counted against the budget.
+- A fatal error inside the factory ends the request, and the slot is not counted against the budget either.
 - The destroy callback (if supplied) runs when the pool drops a slot: idle timeout expiry, explicit `evict()`, or server shutdown. It runs on a worker thread (not on the Tokio thread driving the eviction scheduler), so PHP is safe to call.
 - A destroy callback that throws is logged but does not poison the pool — the slot is already being destroyed, so there is nothing useful to roll back.
 
@@ -223,7 +224,7 @@ Every acquire variant first tries to satisfy the request immediately — reuse a
 
 **Why this differs from `Mutex::tryWithLock()`.** Both are non-blocking `try*` calls, but `Pool` returns `null` on contention while `Mutex` throws `ContentionException`. The split is structural, not stylistic. `Pool` is **handle-first**: every acquire hands back a `Handle`, so the "saturated" outcome has a natural carrier — `?Handle`, where `null` means "no slot" and never collides with a real value (a `Handle` is never itself a user value). `Mutex` is **closure-only** by design — it deliberately never hands a lock guard back to PHP, so a held lock cannot leak past the closure. That leaves `tryWithLock` with no object to return as nullable, and the closure's own `mixed` result may legitimately be `null` — so `null` cannot double as "not acquired". With neither a handle nor a free sentinel, the only unambiguous contention signal left is an exception. Catch accordingly: `tryAcquire` → test for `null`; `tryWithLock` → `catch (ContentionException)`.
 
-Exceptions thrown inside the factory propagate to the acquire caller unchanged and do not consume budget. Exceptions inside the `with()` / `withTimeout()` body propagate to the caller after the slot is released.
+Exceptions thrown inside the factory propagate to the acquire caller unchanged and do not consume budget. Exceptions inside the `with()` / `withTimeout()` body propagate to the caller after the slot is released. A fatal error inside the body ends the request, and the slot goes back to the pool all the same, in whatever state the body left it: as after a throw, except that no `finally` block in the body has run. If a body can be ended halfway through an exchange — a reply not yet read, a transaction still open — start each body by putting the resource back into a known state.
 
 ## Observability
 

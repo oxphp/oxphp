@@ -2292,6 +2292,15 @@ unsafe extern "C" fn native_dispatch_callback(
         handler.handle(&mut call)
     }));
 
+    // A PHP callable the handler ran was ended by a bailout, which the bridge
+    // held back so the handler could return; the C stub raises it again as
+    // soon as this returns. Nothing is thrown or logged: the request is over,
+    // and throwing allocates — after an out-of-memory fatal that can be a
+    // second fatal, and that one would cross these frames.
+    if crate::bridge::ffi::oxphp_bridge_deferred_bailout_pending() != 0 {
+        return -1;
+    }
+
     match result {
         Ok(Ok(())) => 0,
         Ok(Err(e)) => {
@@ -2382,6 +2391,11 @@ unsafe extern "C" fn method_dispatch_callback(
         );
         handler.handle(&mut call)
     }));
+
+    // See native_dispatch_callback.
+    if unsafe { crate::bridge::ffi::oxphp_bridge_deferred_bailout_pending() } != 0 {
+        return -1;
+    }
 
     match result {
         Ok(Ok(())) => 0,

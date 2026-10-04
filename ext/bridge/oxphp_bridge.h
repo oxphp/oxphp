@@ -1467,6 +1467,14 @@ void oxphp_bridge_set_request_end_check(oxphp_request_end_check_fn_t fn);
  * Returns 0 when no SAPI callback is registered. */
 int oxphp_bridge_request_end_pending(void);
 
+/* A bailout that ended a call into PHP a Shared\* handler made, held back
+ * so the handler's Rust frames could return. Pending: 1 while held, else 0 —
+ * for the Rust dispatchers, which must neither throw nor log on its way
+ * out. Take: the same answer, and the flag is cleared — for the C dispatch
+ * stubs, which raise it again. */
+int oxphp_bridge_deferred_bailout_pending(void);
+int oxphp_bridge_take_deferred_bailout(void);
+
 /** Call Rust async dispatch. Returns promise_id (>= 0) or -1 on error. */
 int64_t oxphp_bridge_async_dispatch(
     void *op_array, void *static_vars, void *this_ptr,
@@ -2325,6 +2333,7 @@ int oxphp_shared_wrapper_new(zval *out,
 #define OXPHP_SHARED_INVOKE_PHP_THREW    1
 #define OXPHP_SHARED_INVOKE_BAD_CALLABLE -1
 #define OXPHP_SHARED_INVOKE_BAD_RETURN   -2
+#define OXPHP_SHARED_INVOKE_BAILOUT      -4
 #endif
 
 /* If the callable returned a Shared\* object, the C side calls
@@ -2368,7 +2377,8 @@ int oxphp_shared_invoke_byref_1_portbuf(zval *callable,
 void oxphp_shared_free_zval(void *p);
 
 /* Shared\Map::forEach — invoke $fn(key, value); 1=stop, 0=continue,
- * <0=bad callable / deserialise failure / PHP throw. */
+ * <0=bad callable / deserialise failure / PHP throw / bailout
+ * (OXPHP_SHARED_INVOKE_BAILOUT). */
 int oxphp_shared_invoke_2_ret_stop(zval *callable,
                                    int key_kind,
                                    int64_t key_int,
@@ -2413,6 +2423,8 @@ int oxphp_pool_spike_capture(void *callable_zval, uint64_t *out_tid);
  *  -1   — no captured fcc (capture never called).
  *  -2   — callable threw; `EG(exception)` is set.
  *  -3   — internal serialisation failure.
+ *  -4   — a bailout ended it, in the callable or around it
+ *         (OXPHP_SHARED_INVOKE_BAILOUT).
  */
 int oxphp_pool_spike_invoke(
     uint64_t *out_captured_tid,

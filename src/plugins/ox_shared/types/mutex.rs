@@ -406,6 +406,18 @@ pub unsafe extern "C" fn oxphp_shared_mutex_with(
                 set_last_error("closure threw");
                 Err(SharedError::Generic)
             }
+            Ok(rc) if rc == ffi::OXPHP_SHARED_INVOKE_BAILOUT => {
+                // A bailout ended the call — a fatal error, or a write to a
+                // request that was cancelled, in the closure or in resolving
+                // it or freeing what it left — and the dispatch stub raises
+                // it again once this has returned. Unlike a throw, nothing
+                // the closure wrote is kept — the C side hands no state
+                // back — and unlike a panic the mutex is not corrupted: the
+                // guards above release the lock on the way out, as they do
+                // on every other exit.
+                set_last_error("Mutex::withLock: closure ended by a bailout");
+                Err(SharedError::Generic)
+            }
             Ok(rc) if rc == ffi::OXPHP_SHARED_INVOKE_BAD_RETURN => {
                 // Closure ran to completion without throwing. Two sub-cases:
                 //   (a) the *return value* is non-Shareable but the by-ref
@@ -643,6 +655,11 @@ pub unsafe extern "C" fn oxphp_shared_mutex_try_with(
                 }
                 entry.registry.record_op(entry);
                 set_last_error("closure threw");
+                Err(SharedError::Generic)
+            }
+            Ok(rc) if rc == ffi::OXPHP_SHARED_INVOKE_BAILOUT => {
+                // See the matching arm in `oxphp_shared_mutex_with`.
+                set_last_error("Mutex::tryWithLock: closure ended by a bailout");
                 Err(SharedError::Generic)
             }
             Ok(rc) if rc == ffi::OXPHP_SHARED_INVOKE_BAD_RETURN => {

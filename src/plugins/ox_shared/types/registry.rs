@@ -847,6 +847,17 @@ fn registry_get_or_create(
                     // instead of overwriting it. `creating` aborts on drop.
                     Err(PhpError::Custom("Shared\\Registry: factory threw".into()))
                 }
+                x if x == bridge_ffi::OXPHP_SHARED_INVOKE_BAILOUT => {
+                    // A fatal error or a cancelled write ended the request
+                    // in the factory call or around it — resolving the
+                    // factory, or freeing a value it returned that could not
+                    // be stored. The dispatch stub raises it again and
+                    // nothing is thrown; `creating` aborts on drop, so the
+                    // key is free for the next caller.
+                    Err(PhpError::Custom(
+                        "Shared\\Registry: factory ended by a bailout".into(),
+                    ))
+                }
                 x if x == bridge_ffi::OXPHP_SHARED_INVOKE_BAD_RETURN => {
                     if !out_buf.is_null() {
                         unsafe { bridge_ffi::oxphp_portable_free(out_buf) };

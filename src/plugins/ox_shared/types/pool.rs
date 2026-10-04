@@ -1129,6 +1129,12 @@ pub unsafe extern "C" fn oxphp_shared_pool_acquire(
                 let err = if rc == -1 {
                     set_last_error("Shared\\Pool factory threw (see EG(exception))");
                     crate::plugins::ox_shared::error::SharedError::Generic
+                } else if rc == ffi::OXPHP_SHARED_INVOKE_BAILOUT {
+                    // A fatal error or a cancelled write ended the request
+                    // in the factory call or around it; the dispatch stub
+                    // raises it again.
+                    set_last_error("Shared\\Pool factory ended by a bailout");
+                    crate::plugins::ox_shared::error::SharedError::Generic
                 } else if rc == -2 {
                     set_last_error(
                         "Shared\\Pool factory must return an object \
@@ -1290,6 +1296,13 @@ pub unsafe extern "C" fn oxphp_shared_pool_with(
                  see EG(exception) for the body throw",
             );
         }
+        return crate::plugins::ox_shared::error::SharedError::Generic.code();
+    }
+    if body_rc == ffi::OXPHP_SHARED_INVOKE_BAILOUT {
+        // A fatal error or a cancelled write ended the request in the
+        // body call or around it. The slot went back above, as on a
+        // throw; the dispatch stub raises the bailout again.
+        set_last_error("body ended by a bailout");
         return crate::plugins::ox_shared::error::SharedError::Generic.code();
     }
     if body_rc == -1 {

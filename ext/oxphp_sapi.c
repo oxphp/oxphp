@@ -6241,6 +6241,13 @@ ZEND_FUNCTION(oxphp_native_dispatch)
     }
 
     int rc = dispatch(func_name, args, argc, return_value);
+    /* A bailout the handler's PHP callable ran into, held back until the
+     * handler's Rust frames had returned (see OXPHP_SHARED_RUN_GUARDED in
+     * the bridge). Raised again before anything reads rc: the request is
+     * over, and the handler's error only says how it got out. */
+    if (oxphp_bridge_take_deferred_bailout()) {
+        zend_bailout();
+    }
     if (rc != 0) {
         int has_exc = (EG(exception) != NULL) ? 1 : 0;
         /* If Rust already threw a PHP exception via oxphp_throw_exception(),
@@ -6363,6 +6370,10 @@ ZEND_FUNCTION(oxphp_method_dispatch)
     }
 
     int rc = dispatch(class_index, method_name, args, argc, return_value, rust_data, this_zval);
+    /* See oxphp_native_dispatch. */
+    if (oxphp_bridge_take_deferred_bailout()) {
+        zend_bailout();
+    }
     if (rc != 0 && !EG(exception)) {
         zend_throw_error(NULL, "Plugin method %s::%s failed",
             execute_data->func->common.scope
