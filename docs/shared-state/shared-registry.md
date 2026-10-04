@@ -138,7 +138,7 @@ If you rotate keys (per-tenant entries that come and go, key-versioning), addres
 | `Shared\SharedException` (draining) | The server is shutting down — the registry refuses new acquires and binds. Expected during graceful shutdown; not a code bug. |
 | `Shared\SharedException` (bind race) | A peer creator was already settled into the slot while this thread's factory was running (the factory's entry was NOT pinned under the key). Retry the call. |
 | `\InvalidArgumentException` (SPL) | Empty `$key`. Argument validation, distinct from domain type errors. |
-| *(factory's exception)* | If the factory throws, the slot is aborted (Creating → absent, waiters wake to retry) and the original exception propagates to the creator. |
+| *(factory's exception)* | If the factory throws, the slot is aborted (Creating → absent, waiters wake to retry) and the original exception propagates to the creator. A fatal error inside the factory aborts the slot the same way, and still ends the request. |
 
 `Shared\DeadlockException` extends `OxPHP\Async\AsyncException` — `catch (AsyncException)` sweeps it together with bounded-wait timeouts elsewhere in `Shared\*`. The two distinct `DeadlockException` cases share the class; tell them apart by the message (`"reentrant get-or-create"` vs `"waited too long … cross-key cycle"`).
 

@@ -387,6 +387,10 @@ extern "C" {
     /// interrupt pending that the engine will end it with at its next opcode
     /// boundary; lets a native blocking wait step aside for it.
     pub fn oxphp_bridge_request_end_pending() -> c_int;
+    /// 1 while a bailout that ended a call into PHP a Shared\* handler made
+    /// is held back for the dispatch stub to raise again. A dispatcher that sees
+    /// it neither throws nor logs: the request is already over.
+    pub fn oxphp_bridge_deferred_bailout_pending() -> c_int;
     /// Cooperatively yield the current task fiber for one scheduler cycle.
     /// Returns 1 if it suspended (in a fiber), 0 if not in a fiber, -3 if
     /// the task was cancelled while yielded.
@@ -855,3 +859,11 @@ pub const OXPHP_SHARED_INVOKE_BAD_CALLABLE: c_int = -1;
 /// Distinct from `BAD_CALLABLE` so callers can surface a precise error
 /// instead of conflating "invalid callable" with "invalid return".
 pub const OXPHP_SHARED_INVOKE_BAD_RETURN: c_int = -2;
+/// "Ended by a bailout": a fatal error, `max_execution_time`, a hard drain
+/// or a cancelled write ended the helper — in the callable, in resolving
+/// it, or in a destructor run on the way out. The bridge holds the bailout
+/// back so the handler can return normally — giving back what it held on
+/// the way — and the dispatch stub raises it again once the handler is
+/// done. Every out-param is NULL; nothing the callable produced is handed
+/// back.
+pub const OXPHP_SHARED_INVOKE_BAILOUT: c_int = -4;

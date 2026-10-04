@@ -2441,6 +2441,8 @@ fn for_each_impl(
         if stop < 0 {
             // Callback threw or invalid callable — EG(exception) is
             // already set on the PHP side; bail without overwriting.
+            // Or a bailout ended the call, which the dispatch stub
+            // raises again.
             return Err(PhpError::Custom("Map::forEach callback failed".into()));
         }
         if stop != 0 {

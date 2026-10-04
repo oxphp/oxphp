@@ -1040,6 +1040,7 @@ pub const OXPHP_SHARED_INVOKE_OK: c_int = 0;
 pub const OXPHP_SHARED_INVOKE_PHP_THREW: c_int = 1;
 pub const OXPHP_SHARED_INVOKE_BAD_CALLABLE: c_int = -1;
 pub const OXPHP_SHARED_INVOKE_BAD_RETURN: c_int = -2;
+pub const OXPHP_SHARED_INVOKE_BAILOUT: c_int = -4;
 
 // ── Shared\Pool bridge (host mock) ───────────────────────
 // Host tests cannot invoke PHP, so every factory/body path fails

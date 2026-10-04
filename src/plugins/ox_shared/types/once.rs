@@ -116,6 +116,11 @@ impl Eq for PoisonInfo {}
 /// - `Invalid` is a *programmer mistake at the call site* — the
 ///   argument was not callable at all. It always resets so a follow-up
 ///   call with a real callable succeeds, regardless of `FailureMode`.
+/// - `Bailout` is the *request being ended* during the call — a fatal
+///   error, `max_execution_time`, a hard drain, in the factory or in
+///   resolving it or freeing what it returned. It says nothing
+///   about the factory, so it always resets too: the next caller runs
+///   its own.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OnceFactoryError {
     /// The PHP factory threw; carries the captured exception info.
@@ -125,6 +130,8 @@ pub enum OnceFactoryError {
     /// The factory ran and returned, but its value cannot be stored in
     /// shared memory (closure / resource / non-`Shareable` object).
     NotSerialisable,
+    /// A bailout ended the call, in the factory or around it.
+    Bailout,
 }
 
 /// RAII guard that resets the state from `Pending` to `Uninitialized` if a
@@ -336,6 +343,15 @@ impl OnceInner {
                 // fault, never poison).
                 self.state.store(ST_UNINIT, Ordering::Release);
                 Err(SharedError::Type)
+            }
+            Err(OnceFactoryError::Bailout) => {
+                // The request was ended during the call; the dispatch
+                // stub raises the bailout again once this has returned,
+                // and `set_lock` is released on the way. Not a factory
+                // failure, so not Poison either: the cell goes back to
+                // Uninitialized and the next caller runs its own.
+                self.state.store(ST_UNINIT, Ordering::Release);
+                Err(SharedError::Generic)
             }
         }
     }
@@ -671,6 +687,10 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
                         // the original exception still propagates to this caller.
                         Err(OnceFactoryError::Threw(capture_pending_exception()))
                     }
+                    x if x == ffi::OXPHP_SHARED_INVOKE_BAILOUT => {
+                        set_last_error("Once::getOrInit: factory ended by a bailout");
+                        Err(OnceFactoryError::Bailout)
+                    }
                     x if x == ffi::OXPHP_SHARED_INVOKE_BAD_RETURN => {
                         if !out_buf.is_null() {
                             unsafe { ffi::oxphp_portable_free(out_buf) };
@@ -706,6 +726,7 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
                 }
                 Err(SharedError::Generic) => {
                     // PHP exception already pending; framework surfaces it.
+                    // Or a bailout is, which the dispatcher leaves alone.
                     Err(PhpError::Custom("Once::getOrInit factory threw".into()))
                 }
                 Err(SharedError::Poisoned) => Err(poisoned_error(inner)),
@@ -1009,6 +1030,23 @@ mod tests {
         );
         // get() returns None (handler turns Poisoned-state into PoisonedException).
         assert!(o.get().is_none());
+    }
+
+    #[test]
+    fn get_or_init_bailout_resets_even_in_poison_mode() {
+        let o = OnceInner::with_mode(OnceFailureMode::Poison);
+        let err = o
+            .get_or_init(|| Err(OnceFactoryError::Bailout))
+            .unwrap_err();
+        assert_eq!(err, SharedError::Generic);
+        // The request was ended, the factory did not fail: nothing to poison.
+        assert_eq!(o.state(), ST_UNINIT);
+        assert!(o.poison_info().is_none());
+        // And the next caller runs its own factory.
+        let v = o
+            .get_or_init(|| Ok(SharedValue::Long(1)))
+            .expect("retry after bailout");
+        assert!(matches!(v, SharedValue::Long(1)));
     }
 
     #[test]

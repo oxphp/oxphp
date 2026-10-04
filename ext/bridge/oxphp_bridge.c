@@ -6026,6 +6026,89 @@ int oxphp_shared_wrapper_new(zval *out, uint8_t type_tag, const void *entry_ptr)
 #define OXPHP_SHARED_INVOKE_PHP_THREW   1
 #define OXPHP_SHARED_INVOKE_BAD_CALLABLE -1
 #define OXPHP_SHARED_INVOKE_BAD_RETURN  -2
+/* A bailout ended the helper, which is being held back — see
+ * OXPHP_SHARED_RUN_GUARDED. Returned by every helper below that runs under
+ * it, the Pool and spike helpers included, so it sits outside the codes any
+ * of them uses otherwise (the spike's go down to -3).
+ * oxphp_pool_destroy_invoke() does not run under it: it is also called from
+ * outside a plugin handler, where no stub would raise the bailout. */
+#define OXPHP_SHARED_INVOKE_BAILOUT     -4
+
+/* A bailout OXPHP_SHARED_RUN_GUARDED caught and is holding back. Set in its
+ * zend_catch; taken — read and cleared — by the plugin dispatch stubs
+ * (oxphp_method_dispatch, oxphp_native_dispatch) once the Rust handler
+ * between them and the guarded helper has returned, and they re-raise it.
+ *
+ * Every guarded helper is called from inside a plugin method or function
+ * handler, so a flag that is set always has a stub below it to take it, and
+ * nothing between the two parks the fiber that set it. A guarded helper
+ * called from anywhere else would leave the flag for the next stub on the
+ * thread to raise in a request that never failed. */
+static __thread int oxphp_shared_deferred_bailout = 0;
+
+int oxphp_bridge_deferred_bailout_pending(void) {
+    return oxphp_shared_deferred_bailout;
+}
+
+int oxphp_bridge_take_deferred_bailout(void) {
+    int pending = oxphp_shared_deferred_bailout;
+    oxphp_shared_deferred_bailout = 0;
+    return pending;
+}
+
+/* Runs `call` — one of the helpers below, start to finish: resolving its
+ * callable (which can autoload), the call, and the destructors that freeing
+ * what it got back can run — under zend_try, with a bailout kept on this
+ * side of the Rust frames that called the helper.
+ *
+ * Most helpers are called from a Rust handler that holds something across
+ * the call and gives it back once the call is over: a Mutex's lock, a Once's
+ * init lock and a Registry key's creation slot in a Drop, a Pool slot and the
+ * budget for one in a call the handler makes after the helper returns. A
+ * fatal error, max_execution_time or a hard drain in any of that ends in
+ * zend_bailout(), whose longjmp lands in the request's zend_try past those
+ * frames, and on a frame a longjmp crosses neither a Drop nor the code after
+ * the call runs: what the handler held would stay held for the life of the
+ * process. So the bailout is caught here, `rc` is set to
+ * OXPHP_SHARED_INVOKE_BAILOUT so the handler returns normally, and the
+ * dispatch stub raises it again once it is back in C. The engine does the
+ * same on one stack in zend_mm_safe_error() — catch its own fatal's bailout,
+ * put the heap right, bail out again — and across two in a Fiber:
+ * zend_fiber_execute catches it, and zend_fiber_switch_to raises it again on
+ * the other side of the switch. Map::forEach and the Pool spike hold nothing
+ * across the call and go through here all the same, so that no bailout out
+ * of these helpers jumps across the Rust frames that called them.
+ *
+ * Nothing is freed or called here. The frames the bailout abandoned stay
+ * where they are for whoever recovers from the raised-again one, as the
+ * direct longjmp would have left them, and so do the helper's own locals:
+ * they can hold user objects that a bailout with no fatal error behind it
+ * has not flagged as destructed, and releasing one could run a destructor
+ * in a request that is already over. The one thing put back is
+ * EG(current_execute_data), which _zend_bailout() clears before it jumps:
+ * the handler's own frame is still live, and the engine treats an exception
+ * thrown with no frame as uncaught on the spot — it runs the user exception
+ * handler, or reports a fatal of its own.
+ *
+ * A helper called while a caught bailout is still waiting to be raised again
+ * is refused rather than run: no userland runs between a caught bailout and
+ * its re-raise. */
+#define OXPHP_SHARED_RUN_GUARDED(rc, call)                                  \
+    do {                                                                    \
+        if (oxphp_shared_deferred_bailout) {                                \
+            (rc) = OXPHP_SHARED_INVOKE_BAILOUT;                             \
+            break;                                                          \
+        }                                                                   \
+        zend_execute_data *oxphp_execute_data_on_entry =                    \
+            EG(current_execute_data);                                       \
+        zend_try {                                                          \
+            (rc) = (call);                                                  \
+        } zend_catch {                                                      \
+            EG(current_execute_data) = oxphp_execute_data_on_entry;         \
+            oxphp_shared_deferred_bailout = 1;                              \
+            (rc) = OXPHP_SHARED_INVOKE_BAILOUT;                             \
+        } zend_end_try();                                                   \
+    } while (0)
 
 /* Invoke a zero-argument closure/callable. Returns its portbuf-encoded
  * return value in *out_ret_buf (emalloc'd via the same free path as
@@ -6033,11 +6116,14 @@ int oxphp_shared_wrapper_new(zval *out, uint8_t type_tag, const void *entry_ptr)
  *
  * On closure throw: returns OXPHP_SHARED_INVOKE_PHP_THREW. EG(exception)
  * stays set for the caller's plugin-method wrapper to surface.
+ *
+ * On a bailout anywhere in it: returns OXPHP_SHARED_INVOKE_BAILOUT with
+ * every out-param NULL.
  */
-int oxphp_shared_invoke_0_portbuf(zval *callable,
-                                  uint8_t **out_ret_buf,
-                                  size_t *out_ret_len,
-                                  const void **out_retained_entry)
+static int oxphp_shared_invoke_0_portbuf_unguarded(zval *callable,
+                                                   uint8_t **out_ret_buf,
+                                                   size_t *out_ret_len,
+                                                   const void **out_retained_entry)
 {
     if (!callable || !out_ret_buf || !out_ret_len || !out_retained_entry)
         return OXPHP_SHARED_INVOKE_BAD_CALLABLE;
@@ -6108,6 +6194,24 @@ int oxphp_shared_invoke_0_portbuf(zval *callable,
     return OXPHP_SHARED_INVOKE_OK;
 }
 
+int oxphp_shared_invoke_0_portbuf(zval *callable,
+                                  uint8_t **out_ret_buf,
+                                  size_t *out_ret_len,
+                                  const void **out_retained_entry)
+{
+    int rc;
+    OXPHP_SHARED_RUN_GUARDED(rc, oxphp_shared_invoke_0_portbuf_unguarded(
+        callable, out_ret_buf, out_ret_len, out_retained_entry));
+    if (rc == OXPHP_SHARED_INVOKE_BAILOUT
+        && out_ret_buf && out_ret_len && out_retained_entry) {
+        /* What it filled in before the bailout is not handed back. */
+        *out_ret_buf = NULL;
+        *out_ret_len = 0;
+        *out_retained_entry = NULL;
+    }
+    return rc;
+}
+
 /* Invoke a 1-argument closure where arg 0 is a by-reference zval
  * materialised from the caller's SharedValue (encoded in state_buf).
  * After the closure returns, re-serialise the (possibly mutated)
@@ -6126,6 +6230,11 @@ int oxphp_shared_invoke_0_portbuf(zval *callable,
  *                          can honour a no-rollback policy.
  *   INVOKE_BAD_CALLABLE  — callable itself is unusable (NULL, fcall_init
  *                          failure, missing required args).
+ *   INVOKE_BAILOUT       — a bailout ended it, in the closure or around
+ *                          it. Every out-param is NULL (and *did_mutate
+ *                          0): no state is handed back, so what the
+ *                          closure wrote before it was ended is not
+ *                          kept.
  *   INVOKE_BAD_RETURN    — callable ran to completion but either its
  *                          return value or the post-call state contains
  *                          a non-Shareable zval (closure, resource,
@@ -6164,16 +6273,16 @@ int oxphp_shared_invoke_0_portbuf(zval *callable,
  *   decoding (or on any early exit). NULL when there is nothing to
  *   retain (serialise step failed, ret was IS_UNDEF/IS_NULL, etc.).
  */
-int oxphp_shared_invoke_byref_1_portbuf(zval *callable,
-                                         const uint8_t *state_buf,
-                                         size_t state_len,
-                                         uint8_t **new_state_buf,
-                                         size_t *new_state_len,
-                                         uint8_t **out_ret_buf,
-                                         size_t *out_ret_len,
-                                         int *did_mutate,
-                                         void **out_retained_state,
-                                         void **out_retained_ret)
+static int oxphp_shared_invoke_byref_1_portbuf_unguarded(zval *callable,
+                                                        const uint8_t *state_buf,
+                                                        size_t state_len,
+                                                        uint8_t **new_state_buf,
+                                                        size_t *new_state_len,
+                                                        uint8_t **out_ret_buf,
+                                                        size_t *out_ret_len,
+                                                        int *did_mutate,
+                                                        void **out_retained_state,
+                                                        void **out_retained_ret)
 {
     if (!callable || !state_buf || state_len == 0 ||
         !new_state_buf || !new_state_len ||
@@ -6305,6 +6414,42 @@ int oxphp_shared_invoke_byref_1_portbuf(zval *callable,
     return OXPHP_SHARED_INVOKE_OK;
 }
 
+int oxphp_shared_invoke_byref_1_portbuf(zval *callable,
+                                         const uint8_t *state_buf,
+                                         size_t state_len,
+                                         uint8_t **new_state_buf,
+                                         size_t *new_state_len,
+                                         uint8_t **out_ret_buf,
+                                         size_t *out_ret_len,
+                                         int *did_mutate,
+                                         void **out_retained_state,
+                                         void **out_retained_ret)
+{
+    int rc;
+    OXPHP_SHARED_RUN_GUARDED(rc, oxphp_shared_invoke_byref_1_portbuf_unguarded(
+        callable, state_buf, state_len, new_state_buf, new_state_len,
+        out_ret_buf, out_ret_len, did_mutate, out_retained_state,
+        out_retained_ret));
+    if (rc == OXPHP_SHARED_INVOKE_BAILOUT
+        && new_state_buf && new_state_len && out_ret_buf && out_ret_len
+        && did_mutate && out_retained_state && out_retained_ret) {
+        /* What it filled in before the bailout is not handed back, the
+         * state the closure wrote included — and not freed either, since
+         * a destructor after the state was retained can be what bailed
+         * out: a retained value can hold the last reference to a Shared
+         * object whose release runs userland (a Pool's $destroy), and
+         * nothing may run before the stub raises the bailout again. */
+        *new_state_buf = NULL;
+        *new_state_len = 0;
+        *out_ret_buf = NULL;
+        *out_ret_len = 0;
+        *did_mutate = 0;
+        *out_retained_state = NULL;
+        *out_retained_ret = NULL;
+    }
+    return rc;
+}
+
 /* Release a retained-state zval produced by
  * `oxphp_shared_invoke_byref_1_portbuf` (`*out_retained_state`). NULL
  * is a no-op (callers don't have to gate themselves). */
@@ -6324,14 +6469,16 @@ void oxphp_shared_free_zval(void *p)
  *
  * Returns 1 to STOP iteration (callback returned bool false), 0 to
  * continue, <0 on a bad callable, a deserialise failure, or a PHP throw
- * (EG(exception) stays set for the caller's method wrapper to surface). */
-int oxphp_shared_invoke_2_ret_stop(zval *callable,
-                                   int key_kind,
-                                   int64_t key_int,
-                                   const char *key_ptr,
-                                   size_t key_len,
-                                   const char *val_buf,
-                                   size_t val_len)
+ * (EG(exception) stays set for the caller's method wrapper to surface),
+ * and OXPHP_SHARED_INVOKE_BAILOUT — also <0 — when a bailout ended it,
+ * in the callback or around it. */
+static int oxphp_shared_invoke_2_ret_stop_unguarded(zval *callable,
+                                                    int key_kind,
+                                                    int64_t key_int,
+                                                    const char *key_ptr,
+                                                    size_t key_len,
+                                                    const char *val_buf,
+                                                    size_t val_len)
 {
     if (!callable) return -1;
 
@@ -6378,6 +6525,20 @@ int oxphp_shared_invoke_2_ret_stop(zval *callable,
     int stop = (Z_TYPE(ret_zv) == IS_FALSE) ? 1 : 0;
     zval_ptr_dtor(&ret_zv);
     return stop;
+}
+
+int oxphp_shared_invoke_2_ret_stop(zval *callable,
+                                   int key_kind,
+                                   int64_t key_int,
+                                   const char *key_ptr,
+                                   size_t key_len,
+                                   const char *val_buf,
+                                   size_t val_len)
+{
+    int rc;
+    OXPHP_SHARED_RUN_GUARDED(rc, oxphp_shared_invoke_2_ret_stop_unguarded(
+        callable, key_kind, key_int, key_ptr, key_len, val_buf, val_len));
+    return rc;
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -6444,7 +6605,7 @@ int oxphp_pool_spike_capture(void *callable_zval, uint64_t *out_tid) {
     return 0;
 }
 
-int oxphp_pool_spike_invoke(
+static int oxphp_pool_spike_invoke_unguarded(
     uint64_t *out_captured_tid,
     uint64_t *out_current_tid,
     uint8_t **out_ret_buf,
@@ -6480,6 +6641,22 @@ int oxphp_pool_spike_invoke(
     }
     zval_ptr_dtor(&ret_zv);
     return 0;
+}
+
+int oxphp_pool_spike_invoke(
+    uint64_t *out_captured_tid,
+    uint64_t *out_current_tid,
+    uint8_t **out_ret_buf,
+    size_t *out_ret_len)
+{
+    int rc;
+    OXPHP_SHARED_RUN_GUARDED(rc, oxphp_pool_spike_invoke_unguarded(
+        out_captured_tid, out_current_tid, out_ret_buf, out_ret_len));
+    if (rc == OXPHP_SHARED_INVOKE_BAILOUT && out_ret_buf && out_ret_len) {
+        *out_ret_buf = NULL;
+        *out_ret_len = 0;
+    }
+    return rc;
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -6549,11 +6726,13 @@ void oxphp_pool_fcc_free(void *fcc_heap) {
  * Status codes:
  *   0  — OK, `*out_slot_zv_heap` populated (IS_OBJECT guaranteed).
  *  -1  — factory threw; EG(exception) set, nothing allocated.
+ *  OXPHP_SHARED_INVOKE_BAILOUT — a bailout ended it, in the factory
+ *        or around it; `*out_slot_zv_heap` is NULL.
  *  -2  — factory returned non-object. v1 requires objects so the
  *        release path can match via spl_object_id-style identity
  *        stored in the Shared\Pool\Handle wrapper's rust_data slot.
  *        Caller surfaces TypeException; nothing allocated. */
-int oxphp_pool_factory_invoke(void *fcc_heap, void **out_slot_zv_heap) {
+static int oxphp_pool_factory_invoke_unguarded(void *fcc_heap, void **out_slot_zv_heap) {
     if (!fcc_heap || !out_slot_zv_heap) return -1;
     *out_slot_zv_heap = NULL;
 
@@ -6584,10 +6763,21 @@ int oxphp_pool_factory_invoke(void *fcc_heap, void **out_slot_zv_heap) {
     return 0;
 }
 
+int oxphp_pool_factory_invoke(void *fcc_heap, void **out_slot_zv_heap) {
+    int rc;
+    OXPHP_SHARED_RUN_GUARDED(rc, oxphp_pool_factory_invoke_unguarded(
+        fcc_heap, out_slot_zv_heap));
+    if (rc == OXPHP_SHARED_INVOKE_BAILOUT && out_slot_zv_heap) {
+        *out_slot_zv_heap = NULL;
+    }
+    return rc;
+}
+
 /* Invoke a 1-arg body: body($resource). The resource is the
- * pool's slot_zv — the body receives a ZVAL_COPY'd reference,
- * so object-method calls on it affect the underlying resource
- * naturally (Z_OBJ identity preserved).
+ * pool's slot_zv, passed as the argument itself: the call copies it
+ * into the body's frame and never writes to it, so the body gets its
+ * own reference (Z_OBJ identity preserved) and a bailout leaves no
+ * extra one held here.
  *
  * On success, ZVAL_COPY the return into `*user_out_zv`. On
  * throw, EG(exception) stays set and `user_out_zv` is untouched.
@@ -6595,10 +6785,12 @@ int oxphp_pool_factory_invoke(void *fcc_heap, void **out_slot_zv_heap) {
  * Status codes:
  *   0  — OK, user_out_zv filled.
  *  -1  — body is not a valid callable.
- *  -2  — body threw; EG(exception) set. */
-int oxphp_pool_body_invoke(void *body_callable_zv,
-                            void *slot_zv_heap,
-                            void *user_out_zv)
+ *  -2  — body threw; EG(exception) set.
+ *  OXPHP_SHARED_INVOKE_BAILOUT — a bailout ended it, in the body or
+ *        around it; user_out_zv untouched. */
+static int oxphp_pool_body_invoke_unguarded(void *body_callable_zv,
+                                            void *slot_zv_heap,
+                                            void *user_out_zv)
 {
     if (!body_callable_zv || !slot_zv_heap || !user_out_zv) return -1;
     zval *body = (zval *)body_callable_zv;
@@ -6614,9 +6806,6 @@ int oxphp_pool_body_invoke(void *body_callable_zv,
     }
     if (err) efree(err);
 
-    zval args[1];
-    ZVAL_COPY(&args[0], slot);
-
     zval ret_zv;
     ZVAL_UNDEF(&ret_zv);
 
@@ -6624,9 +6813,7 @@ int oxphp_pool_body_invoke(void *body_callable_zv,
                               fcc.object,
                               fcc.called_scope,
                               &ret_zv,
-                              1, args, NULL);
-
-    zval_ptr_dtor(&args[0]);
+                              1, slot, NULL);
 
     if (EG(exception)) {
         zval_ptr_dtor(&ret_zv);
@@ -6636,6 +6823,16 @@ int oxphp_pool_body_invoke(void *body_callable_zv,
     ZVAL_COPY(out, &ret_zv);
     zval_ptr_dtor(&ret_zv);
     return 0;
+}
+
+int oxphp_pool_body_invoke(void *body_callable_zv,
+                            void *slot_zv_heap,
+                            void *user_out_zv)
+{
+    int rc;
+    OXPHP_SHARED_RUN_GUARDED(rc, oxphp_pool_body_invoke_unguarded(
+        body_callable_zv, slot_zv_heap, user_out_zv));
+    return rc;
 }
 
 /* ZVAL_COPY a heap slot-zval into a user out-zval. Used by
