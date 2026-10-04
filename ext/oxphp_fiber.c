@@ -96,8 +96,30 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler);
  * installs its own after module startup, so that one runs first and this one
  * behind it, and both run before the bailout. What does matter is that every
  * callback in the chain delegates — one that answered a fatal without calling
- * the next would leave the frame unrecorded. */
-static __thread zend_execute_data *oxphp_bailout_frame = NULL;
+ * the next would leave the frame unrecorded.
+ *
+ * Recorded together with the context it was read in, because a frame is only
+ * ever on the VM stack of the context that pushed it — and a bailout raised
+ * inside a Fiber the request is running does not end in the context it started
+ * in. A fatal in one a script started, or in the one the cycle collector runs
+ * destructors in when it collects inside a fiber, which a worker-mode request
+ * is, is caught by the engine inside that fiber first. It destroys the fiber's
+ * VM stack on the way back to whoever started or resumed it, and only then bails
+ * out again there (zend_fiber_execute, zend_fiber_switch_context,
+ * zend_fiber_switch_to). So what the callback records is freed memory by the
+ * time the request's own catch runs, and the frames the request can still give
+ * back are its own, from the call that entered the fiber down.
+ *
+ * The record is handed on to that context as the bailout travels to it, one
+ * fiber at a time, by the observer further down — which the engine runs at the
+ * one moment both ends of the hop are still known. A walk reads the record only
+ * when it was left for the walk's own context. */
+typedef struct {
+    zend_fiber_context *context;
+    zend_execute_data *frame;
+} oxphp_bailout_site;
+
+static __thread oxphp_bailout_site oxphp_bailout_frame = {NULL, NULL};
 
 typedef void (*oxphp_error_cb_t)(int type, zend_string *file, const uint32_t line, zend_string *message);
 static oxphp_error_cb_t oxphp_next_error_cb = NULL;
@@ -115,12 +137,171 @@ static oxphp_error_cb_t oxphp_next_error_cb = NULL;
  * clears it on the way in; see there. */
 static __thread bool oxphp_fatal_bailed = false;
 
+/* Reads engine state, writes nothing but the record and allocates nothing: this
+ * runs inside the error callback, which the engine may reach with its memory
+ * limit already spent. */
+static void oxphp_record_bailout_frame(void) {
+    oxphp_bailout_frame.context = EG(current_fiber_context);
+    oxphp_bailout_frame.frame = EG(current_execute_data);
+}
+
+/* A generator that was running in a fiber a bailout is leaving, called from the
+ * observer below while that fiber's frames are still allocated.
+ *
+ * Its frame is its own — on the heap rather than on the fiber's VM stack — so it
+ * outlives the fiber, and what becomes of it when the generator object goes
+ * depends on which of zend_generator_close's two paths CG(unclean_shutdown)
+ * selects. Both give back the symbol table, the compiled variables, the extra
+ * named params and This, which the close does before it looks at the flag. Only
+ * the long path goes on to the frame's extra arguments, the walk of the calls it
+ * had half pushed, and the frame itself; under the flag the close returns before
+ * all three, which is why the walk below does that part for a frame it finds
+ * (and says so where it does it).
+ *
+ * So a generator whose last reference goes during that walk needs nothing from
+ * here: the flag is still up at that point, and the close stops short of the
+ * calls. The one this is about is the kind that outlives the walk — held by a
+ * static, a registry, an object the request did not own, or by nothing but the
+ * object store at worker exit — and is therefore let go of only once the flag
+ * has come down, since a worker has to lower it to serve anything else. That is
+ * the long path, and the long path walks the calls the generator had half pushed
+ * when the fatal came. Those were pushed on the fiber's VM stack, which the
+ * cleanup right after this observer frees — and a generator made long before the
+ * fiber ends up there too, because resuming one inside a fiber lays its frozen
+ * calls back down on that fiber's stack.
+ *
+ * The link to them is the only thing the generator holds that points there, and
+ * letting go of it is the whole of what has to happen: the engine's walk of
+ * half-pushed calls does nothing at all for a frame that has none, while
+ * everything else on that path reads the heap frame and keeps running at its
+ * proper time — the extra arguments, the live temporaries given up by their live
+ * ranges, the frame freed after them. What is given up is whatever those
+ * half-pushed calls were holding, which sits on the pages being freed and is
+ * reachable from nowhere else by the time anything could ask for it.
+ *
+ * A generator parked at a yield is not this case: the engine freezes its pending
+ * calls into an allocation of its own and lets go of the link itself
+ * (zend_generator_freeze_call_stack), then lays them back down on the stack of
+ * whichever context resumes it.
+ *
+ * The chain is required to reach the fiber's own bottom frame before anything is
+ * touched, for the reason the release walk requires the same of its own: past
+ * that frame lie the caller's, and the generators running there are live. A
+ * chain that runs out first is left alone.
+ *
+ * Running out is a case that happens, not one merely guarded against: a fiber
+ * whose first VM-stack page could not be allocated is flagged as having bailed
+ * out before it is ever given a bottom frame to name (zend_fiber_execute takes
+ * the page inside the same try whose catch sets the flag, and names the bottom
+ * only after), so the bottom arrives here as nothing and the chain runs out
+ * against it. Asking for the end of the chain before asking for the bottom is
+ * what makes that case return; the other order would take the two for the same
+ * thing and send the walk below past the fiber into the caller's frames, where
+ * the generators are live. */
+static void oxphp_disarm_abandoned_generators(zend_execute_data *from,
+                                              const zend_execute_data *stack_bottom) {
+    for (const zend_execute_data *probe = from;; probe = probe->prev_execute_data) {
+        if (probe == NULL) {
+            return;
+        }
+        if (probe == stack_bottom) {
+            break;
+        }
+    }
+
+    for (zend_execute_data *ex = from; ex != stack_bottom; ex = ex->prev_execute_data) {
+        if (!(ZEND_CALL_INFO(ex) & ZEND_CALL_GENERATOR)) {
+            continue;
+        }
+        /* Where the engine keeps it — zend_fiber_object_gc says as much where it
+         * walks a suspended fiber's frames for the collector — and only while
+         * this frame is still the one the generator is running on. */
+        zend_generator *generator = (zend_generator *)ex->return_value;
+        if (generator != NULL && generator->execute_data == ex) {
+            ex->call = NULL;
+        }
+    }
+}
+
+/* A fiber the bailout is leaving, at the one moment the engine lets anything
+ * look at it: zend_fiber_destroy_context notifies its observers before it runs
+ * the context's cleanup, and the switch that leaves a dead fiber reaches that
+ * call only after putting EG(current_fiber_context) and the rest of the VM state
+ * back (zend_fiber_switch_context). So the dying fiber's frames are still
+ * allocated here, the context the bailout is about to be raised in is the
+ * current one again, and the frame it will be raised from is the one the switch
+ * put back — whatever was current when the switch into the dying fiber was made.
+ * For a fiber userland started, that is the Fiber::start() or resume() call
+ * waiting for this switch to return. For the one the collector runs destructors
+ * in, which it builds and drives from C with no userland call anywhere, it is
+ * whatever frame the collection ran from. It can also be nothing at all, and
+ * both of the walks below are written for that.
+ *
+ * That restore is what makes the moment usable, and it belongs to that switch
+ * rather than to the destroy: the engine destroys a context from one other
+ * place, on the arriving side of a switch into a context that has never run,
+ * where nothing has been restored yet and EG(current_fiber_context) already
+ * names the context being entered (zend_fiber_trampoline). A Fiber cannot
+ * arrive there — the switch a dying one makes targets the context that resumed
+ * it, which has run by definition — and the kind check below turns that place
+ * away in any case, since what the engine documents it for is the symmetric
+ * coroutines an extension drives itself.
+ *
+ * Which is both ends of the hop, and the reason the hop is made here rather than
+ * worked out in the error callback: the way back is read from the engine's own
+ * restored state instead of from the fiber, so it is known even for the two
+ * entries that leave the fiber's own note of it empty — a fatal raised while the
+ * fiber's first VM-stack page is being allocated, and a parked fiber resumed to
+ * unwind because nothing refers to it any more. It also costs no limit on how
+ * deep the fibers may go, since each is handed on as the bailout passes it
+ * rather than the whole route being read at once.
+ *
+ * The engine runs this for every fiber it destroys, so a bailout is what it
+ * looks for: a fiber that returned or threw unwound through the engine's own
+ * path, which leaves neither a frame worth handing on nor a generator holding a
+ * link into the stack. And it runs once per context — the dead one is destroyed
+ * by the switch that leaves it, and nothing destroys a context twice. */
+static void oxphp_fiber_hand_on_bailout_frame(zend_fiber_context *destroying) {
+    /* The context the engine starts on, and any an extension drives itself, are
+     * not Fibers and have no fiber behind them to read. */
+    if (destroying == NULL || destroying->kind != zend_ce_fiber) {
+        return;
+    }
+    zend_fiber *fiber = zend_fiber_from_context(destroying);
+
+    /* Only a record left in this very fiber says anything about its frames, and
+     * it is taken back here however the fiber ended, because its frames go
+     * either way. Which is also what keeps a record from ever naming a context
+     * that has been destroyed: a Fiber's context sits inside the Fiber object
+     * (zend_fibers.h, struct _zend_fiber), so the next Fiber the request makes
+     * can be handed the same address, and a record left behind would then be
+     * read for a fiber it was never about. The fiber's bottom frame is still
+     * named at this point, because the cleanup that unnames it is what runs
+     * after this. */
+    if (oxphp_bailout_frame.context == destroying) {
+        if (fiber->flags & ZEND_FIBER_FLAG_BAILOUT) {
+            oxphp_disarm_abandoned_generators(oxphp_bailout_frame.frame, fiber->stack_bottom);
+        }
+        oxphp_bailout_frame.context = NULL;
+        oxphp_bailout_frame.frame = NULL;
+    }
+
+    if (!(fiber->flags & ZEND_FIBER_FLAG_BAILOUT)) {
+        return;
+    }
+
+    /* Handed on whether or not anything was recorded inside the fiber: the
+     * bailout travels to the caller either way. */
+    oxphp_bailout_frame.context = EG(current_fiber_context);
+    oxphp_bailout_frame.frame = EG(current_execute_data);
+}
+
 static void oxphp_bailout_frame_cb(int type, zend_string *file, const uint32_t line, zend_string *message) {
     if (type & OXPHP_BAILOUT_ERROR_TYPES) {
         if (!(type & E_DONT_BAIL)) {
             oxphp_fatal_bailed = true;
         }
-        oxphp_bailout_frame = EG(current_execute_data);
+        oxphp_record_bailout_frame();
         /* And that this request had a fatal at all, which is the one thing the
          * cancellation mark on the write path cannot work out for itself: the
          * engine displays the message before it bails, so the mark meets a
@@ -153,15 +334,14 @@ static void oxphp_bailout_frame_cb(int type, zend_string *file, const uint32_t l
  * giving those frames back runs is not always the same after a write as after a
  * fatal, and oxphp_recover_from_bailout says how.
  *
- * Not recorded while a userland Fiber is running inside the request. The engine
- * catches a bailout inside that fiber itself, destroys the fiber's VM stack on
- * the way back to whoever resumed it, and only then bails out again there
- * (zend_fiber_execute, zend_fiber_switch_to): a frame recorded here would point
- * into memory that is gone by the time the walk reads it. */
+ * Recorded the way the callback records, context and all, because the bailout is
+ * the same one: a write made from inside a Fiber the request is running ends
+ * that fiber first and the request after it, exactly as a fatal raised there
+ * does, and leaves the request the same frames to give back along the same
+ * route. */
 void oxphp_fiber_record_cancel_bailout_frame(void) {
-    if (oxphp_current_fiber != NULL
-        && EG(current_fiber_context) == &oxphp_current_fiber->zf->context) {
-        oxphp_bailout_frame = EG(current_execute_data);
+    if (oxphp_current_fiber != NULL) {
+        oxphp_record_bailout_frame();
     }
 }
 
@@ -169,6 +349,10 @@ void oxphp_fiber_minit(void) {
     if (!oxphp_next_error_cb) {
         oxphp_next_error_cb = zend_error_cb;
         zend_error_cb = oxphp_bailout_frame_cb;
+        /* Its own list, walked only when the engine destroys a fiber context —
+         * registering it costs nothing anywhere else, and in particular does
+         * not turn on the observation of calls. */
+        zend_observer_fiber_destroy_register(oxphp_fiber_hand_on_bailout_frame);
     }
 
     memset(&oxphp_fiber_loop_fn, 0, sizeof(oxphp_fiber_loop_fn));
@@ -198,12 +382,15 @@ static inline void oxphp_fiber_clear_suspend(oxphp_request_fiber *fiber);
 
 /* ─── VM stack rewind after a bailout ─────────────────── */
 
-/* Where the VM stack stood at a point the loop can return to. */
+/* Where the VM stack stood at a point the loop can return to, and in which
+ * context: the VM stack is the context's own, so a frame recorded in any other
+ * one is not on it. */
 typedef struct {
     zend_vm_stack stack;
     zval *top;
     zval *end;
     zend_execute_data *execute_data;
+    zend_fiber_context *context;
 } oxphp_vm_stack_mark;
 
 static inline void oxphp_vm_stack_save(oxphp_vm_stack_mark *mark) {
@@ -211,6 +398,7 @@ static inline void oxphp_vm_stack_save(oxphp_vm_stack_mark *mark) {
     mark->top = EG(vm_stack_top);
     mark->end = EG(vm_stack_end);
     mark->execute_data = EG(current_execute_data);
+    mark->context = EG(current_fiber_context);
 }
 
 /* Give back the one reference a frame holds on whatever it is running: the
@@ -291,13 +479,20 @@ uint64_t oxphp_fiber_pool_heap_bytes(void) {
  * A generator that was running is in this chain too, and is the one thing in it
  * that must be handled rather than released — see below. */
 static void oxphp_release_abandoned_frames(const oxphp_vm_stack_mark *mark) {
-    zend_execute_data *ex = oxphp_bailout_frame;
-    oxphp_bailout_frame = NULL;
+    /* The frame the bailout left this mark's context from: the one the fatal was
+     * raised in when that was here, and the call that entered the fiber it was
+     * raised in when it was not — handed over as the bailout left that fiber.
+     * What that fiber's own frames were holding stays allocated: the engine
+     * freed their pages without releasing any of it. A record left for another
+     * context means nothing here to give back. */
+    zend_execute_data *ex = (oxphp_bailout_frame.context == mark->context) ? oxphp_bailout_frame.frame : NULL;
+    oxphp_bailout_frame.context = NULL;
+    oxphp_bailout_frame.frame = NULL;
 
     /* Walk the chain first and require it to end exactly on the frame the mark
-     * was taken from. A fatal reported from another fiber, or a bailout nothing
-     * recorded a frame for, leaves a pointer that has nothing to do with these
-     * frames, and freeing along it would be freeing live memory. */
+     * was taken from. A fatal reported from another request's fiber, or a
+     * bailout nothing recorded a frame for, leaves a record that has nothing to
+     * do with these frames, and freeing along it would be freeing live memory. */
     bool through_internal = false;
     for (zend_execute_data *probe = ex; probe != mark->execute_data; probe = probe->prev_execute_data) {
         if (probe == NULL) {
@@ -347,7 +542,13 @@ static void oxphp_release_abandoned_frames(const oxphp_vm_stack_mark *mark) {
              * one a script left in a registry, say — would be closed as if
              * nothing had happened, and the rest of that close walks the frames
              * the interrupted call had half pushed, which the rewind below has
-             * since given back to the allocator. */
+             * since given back to the allocator.
+             *
+             * Only generators this context was running reach here. One left
+             * running inside a fiber the bailout came out of is on a stack this
+             * walk never enters, and the only thing anyone can still do for it
+             * is done while that stack is alive — see
+             * oxphp_disarm_abandoned_generators. */
             zend_generator *generator = (zend_generator *)ex->return_value;
             if (generator != NULL && generator->execute_data == ex) {
                 generator->execute_data = NULL; /* first, as the engine does */
@@ -610,7 +811,7 @@ static void oxphp_recover_from_bailout(const oxphp_vm_stack_mark *mark) {
          * frames it had already passed, and the release below, following that
          * chain, would never reach them. Nothing in the walk reads this, so it
          * simply goes back afterwards. */
-        zend_execute_data *bailout_frame = oxphp_bailout_frame;
+        oxphp_bailout_site bailout_frame = oxphp_bailout_frame;
         zend_object *ex_on_entry = EG(exception);
         zend_try {
             zend_observer_fcall_end_all();
@@ -766,7 +967,8 @@ static void oxphp_recover_from_bailout(const oxphp_vm_stack_mark *mark) {
      * the next recovery in this same request would follow one into frames this
      * one has already released. The walk clears this itself on the path where it
      * returns; these are the paths where it does not. */
-    oxphp_bailout_frame = NULL;
+    oxphp_bailout_frame.context = NULL;
+    oxphp_bailout_frame.frame = NULL;
 
     oxphp_vm_stack_rewind(mark);
     CG(unclean_shutdown) = 0;
@@ -2507,7 +2709,8 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
         oxphp_vm_stack_save(&mark);
         /* Nothing recorded by an earlier iteration may be walked as if it
          * belonged to this one. */
-        oxphp_bailout_frame = NULL;
+        oxphp_bailout_frame.context = NULL;
+        oxphp_bailout_frame.frame = NULL;
 
         /* Where the output buffer stack stands before this request opens any
          * of its own — what the end of the request ends down to. */
