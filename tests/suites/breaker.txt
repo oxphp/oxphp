@@ -297,3 +297,12 @@ log ~Worker mode thread retired after consecutive request failures
 breaker/test_breaker_ini_put_back_fatal >> /tests/fibers/test_ini_put_back_fatal_retires_the_worker.php | GET | | 500 |
 breaker/test_breaker_ini_put_back_fatal_probe >> /tests/fibers/test_ini_put_back_fatal_retires_the_worker_probe.php | GET | | 200 |
 log ~oxphp: worker 0 request failed (bailout putting back ini) — 1 in a row
+
+# And a request ended inside usort() by its time limit, over enough rows that
+# what the sort leaves behind is far past the threshold. A cancellation is
+# neutral to the count, so nothing here is counted as a failure and the worker
+# is recycled on its own schedule, which the probe after it reads; what the log
+# line adds is that the recycle is named, because nothing else says why.
+breaker/test_breaker_bailout_in_usort >> /tests/fibers/test_bailout_in_usort_retires_the_worker.php | GET | | 504 |
+breaker/test_breaker_bailout_in_usort_probe >> /tests/fibers/test_bailout_in_usort_retires_the_worker_probe.php | GET | | 200 |
+log ~oxphp: worker 0 retiring: the heap grew

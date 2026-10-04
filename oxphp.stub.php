@@ -258,8 +258,10 @@ function oxphp_usleep(int $microseconds): void {}
  * The loop exits when the server shuts down, when a dynamic pool
  * (PHP_WORKERS=MIN:MAX) retires this worker after it has sat idle, when the
  * application calls Worker::scheduleExit(), when the worker passes
- * WORKER_MAX_MEMORY_MIB, or after three consecutive requests come apart — a
- * fatal error in the handler being the usual one.
+ * WORKER_MAX_MEMORY_MIB, when a request ended with an internal function's call
+ * on its stack has left it holding much more memory than before, or after
+ * three consecutive requests come apart — a fatal error in the handler being
+ * the usual one.
  * Code after oxphp_worker() runs once the loop has exited, for any of those
  * reasons and not only on shutdown.
  *
@@ -2665,9 +2667,11 @@ namespace OxPHP\Server {
 
         /**
          * Reason for the pending exit, or null when no exit is pending.
-         * One of: 'scheduled' (scheduleExit() was called), 'max_memory'
-         * (WORKER_MAX_MEMORY_MIB threshold crossed), 'error' (the worker
-         * loop bailed). Always null in traditional mode.
+         * One of: 'scheduled' (scheduleExit() was called, or the worker retired
+         * itself after a request ended with an internal function's call on its
+         * stack left it holding much more memory), 'max_memory' (WORKER_MAX_MEMORY_MIB
+         * threshold crossed), 'error' (the worker loop bailed). Always null in
+         * traditional mode.
          */
         public function exitReason(): ?string {}
 

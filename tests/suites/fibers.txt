@@ -48,3 +48,53 @@ fibers/test_ini_put_back_fatal_retires_the_worker | GET | | 500 |
 fibers/test_ini_put_back_fatal_retires_the_worker_probe
 fibers/test_ini_put_back_survives_a_growing_set | GET | | 200 |
 fibers/test_ini_put_back_survives_a_growing_set_probe
+
+# A request ended inside an internal function leaves what that function held
+# behind, and nothing frees it. The worker is retired for it when the heap grew
+# by more than a threshold between two moments with no request in flight, and not
+# otherwise: a worker that kept a lot on purpose in plain code is left alone, and
+# so is one that then has a few hundred rows left behind by a sort — the growth
+# that came before it is not counted against it, which is why the pairs are in
+# this order. The time limit ends them, which no failure counter sees.
+fibers/test_bailout_in_usort_retires_the_worker | GET | | 504 |
+fibers/test_bailout_in_usort_retires_the_worker_probe
+
+# The fibers a worker creates keep their stacks for as long as it lives, and a
+# burst of a couple of hundred requests at once creates more of them than the
+# threshold: that is the worker's own growth. It must neither retire a worker for
+# a small sort ended in the same stretch nor hide a large one. Each of the first
+# two runs on the worker the line before retired, so that the burst has fibers to
+# create; the third runs on the worker the second left, whose fibers exist by now,
+# and a leak past the threshold is retired for all the same.
+fibers/test_bailout_in_usort_among_many_new_fibers_retires_the_worker | GET | | 200 |
+fibers/test_bailout_in_usort_among_many_new_fibers_retires_the_worker_probe
+fibers/test_bailout_in_usort_among_many_new_fibers_keeps_the_worker | GET | | 200 |
+fibers/test_bailout_in_usort_among_many_new_fibers_keeps_the_worker_probe
+fibers/test_bailout_in_usort_after_the_fibers_were_created_retires_the_worker | GET | | 504 |
+fibers/test_bailout_in_usort_after_the_fibers_were_created_retires_the_worker_probe
+fibers/test_bailout_outside_an_internal_function_keeps_the_worker | GET | | 504 |
+fibers/test_bailout_outside_an_internal_function_keeps_the_worker_probe
+fibers/test_bailout_in_usort_with_little_data_keeps_the_worker | GET | | 504 |
+fibers/test_bailout_in_usort_with_little_data_keeps_the_worker_probe
+fibers/test_bailout_leak_retire_waits_for_a_parked_neighbour | GET | | 200 |
+fibers/test_bailout_leak_retire_waits_for_a_parked_neighbour_probe
+
+# The first stretch a worker is busy is not judged: what a fresh worker builds on
+# its first requests (compiled scripts, caches, lazily loaded state) is not
+# something a request ended inside an internal function left behind, and judging
+# it would retire every replacement in turn for as long as timeouts keep coming.
+# The first line retires the worker so that the second runs on a fresh one; it
+# grows past the threshold in the same stretch it is ended in, and is left alone.
+fibers/test_bailout_first_stretch_a_worker_is_replaced | GET | | 200 |
+fibers/test_bailout_first_stretch_keeps_the_worker | GET | | 500 |
+fibers/test_bailout_first_stretch_keeps_the_worker_probe
+
+# Objects that refer to themselves are garbage until the collector runs, and what
+# a request ended inside an internal function lets go of is not a leak when the
+# collector holds them as possible roots — it finds them before the heap is read.
+# When it does not (what the walk after a bailout lets go of is never added to its
+# buffer) nothing will free them, which is a leak, and the worker is retired.
+fibers/test_bailout_in_a_callback_over_buffered_cycles_keeps_the_worker | GET | | 504 |
+fibers/test_bailout_in_a_callback_over_buffered_cycles_keeps_the_worker_probe
+fibers/test_bailout_in_a_callback_over_unbuffered_cycles_retires_the_worker | GET | | 504 |
+fibers/test_bailout_in_a_callback_over_unbuffered_cycles_retires_the_worker_probe

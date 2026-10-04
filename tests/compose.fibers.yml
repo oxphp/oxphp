@@ -27,6 +27,12 @@ services:
       PHP_WORKERS: "1"
       ASYNC_WORKERS: 1
       RUNTIME_HOOKS: "1"
+      # A worker the server retires is replaced only after the replacement has
+      # booted the entry file, and with one worker nobody serves in between: the
+      # request that follows a retire has to be allowed to wait for it, where the
+      # 1 s default would refuse it with a queue refusal that reads exactly like
+      # the retire not having happened.
+      QUEUE_WAIT_TIMEOUT_MS: "10000"
     volumes:
       - ../www:/var/www/html
       - ./php:/var/www/html/public/tests

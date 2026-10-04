@@ -27,6 +27,14 @@
 # ended at its next write, and its shutdown function then runs past the drain
 # window. Having been unwound once does not exempt it: the deadline ends it.
 #
+# Scenario G (no retire for a leak during a drain): a stream that holds more
+# than a worker may grow by before a request ended inside an internal function is
+# taken to have left something behind is ended by the soft sweep, in the worker's
+# own sleep. The worker must not read that as a leak and retire itself, which
+# the pool's monitor would answer by booting a replacement until the shutdown
+# itself begins. That the replacement comes up is not asserted: the container is
+# gone within a second of the stream's end, before the monitor's next tick.
+#
 # NOT wired into run_all.sh or CI (like tests/cli_run.sh) — run manually after
 # touching the drain machinery (fiber sweep, cancel plumbing, drain latches).
 #
@@ -44,6 +52,7 @@ DRAIN_C="drain_c_$$"
 DRAIN_D="drain_d_$$"
 DRAIN_E="drain_e_$$"
 DRAIN_F="drain_f_$$"
+DRAIN_G="drain_g_$$"
 # Ephemeral free port unless the caller pins one via PORT=.
 PORT="${PORT:-$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')}"
 PASS=0
@@ -54,7 +63,7 @@ ok()   { printf '  \033[32mPASS\033[0m %s\n' "$1"; PASS=$((PASS + 1)); }
 bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$1"; FAIL=$((FAIL + 1)); }
 
 cleanup() {
-	docker rm -f "$DRAIN_A" "$DRAIN_B" "$DRAIN_C" "$DRAIN_D" "$DRAIN_E" "$DRAIN_F" >/dev/null 2>&1
+	docker rm -f "$DRAIN_A" "$DRAIN_B" "$DRAIN_C" "$DRAIN_D" "$DRAIN_E" "$DRAIN_F" "$DRAIN_G" >/dev/null 2>&1
 	rm -rf "$TMP"
 }
 trap cleanup EXIT
@@ -401,6 +410,50 @@ printf '%s' "$LOGS_F" | grep -q "abandon-cleanup-done" \
 	|| ok "F: the cleanup did not run to its end"
 
 docker rm -f "$DRAIN_F" >/dev/null 2>&1
+
+# ── Scenario G: a drain is not a reason to retire ────────────
+# The stream keeps 6 MiB and is then ended by the soft sweep inside the worker's
+# own sleep, so the walk after it passes through an internal frame and the heap
+# is more than the threshold past where it was. Neither is a leak: the sweep ends
+# the request on purpose, and the process is about to go.
+if start_container "$DRAIN_G" 30; then
+	ok "G: container up"
+else
+	bad "G: container failed to start"; docker logs "$DRAIN_G" 2>&1 | tail -5; exit 1
+fi
+
+# A request that has come and gone, so that what follows is judged: the first
+# stretch a worker is busy for never is.
+curl -fsS "http://localhost:${PORT}/" >/dev/null 2>&1
+
+curl -N -s --max-time 40 "http://localhost:${PORT}/retain" > "$TMP/g1" 2>&1 &
+for _ in $(seq 1 10); do
+	grep -q "tick 0" "$TMP/g1" 2>/dev/null && break
+	sleep 0.5
+done
+grep -q "tick 0" "$TMP/g1" \
+	&& ok "G: the stream is running and holds its memory" \
+	|| bad "G: the stream never started"
+sleep 1
+
+docker kill -s TERM "$DRAIN_G" >/dev/null
+ELAPSED=$(wait_exit_seconds "$DRAIN_G" 25)
+
+LOGS_G="$(docker logs "$DRAIN_G" 2>&1)"
+# The premise: the drain, and not something else, ended the stream.
+printf '%s' "$LOGS_G" | grep -q "Request cancelled (shutdown)" \
+	&& ok "G: the drain ended the stream" \
+	|| bad "G: the stream was not ended by the drain"
+
+printf '%s' "$LOGS_G" | grep -q "retiring: the heap grew" \
+	&& bad "G: the worker retired itself for what the drain did to the stream" \
+	|| ok "G: the worker did not retire itself during the drain"
+
+[ "$ELAPSED" -le 12 ] \
+	&& ok "G: exited ${ELAPSED}s after SIGTERM (<=12s)" \
+	|| bad "G: exit took ${ELAPSED}s"
+
+docker rm -f "$DRAIN_G" >/dev/null 2>&1
 
 echo
 echo "== result: $PASS passed, $FAIL failed =="

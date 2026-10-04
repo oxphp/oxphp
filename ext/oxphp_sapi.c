@@ -29,6 +29,7 @@
 #    define OXPHP_HAVE_PDO_HEADERS 1
 #  endif
 #endif
+#include <inttypes.h>
 #include <limits.h>
 #include <stdlib.h>
 #include <strings.h>
@@ -6102,6 +6103,37 @@ static void oxphp_serve_loop(zend_fcall_info *fci, zend_fcall_info_cache *fcc)
 
     #define WORKER_GC_INTERVAL 100
     #define WORKER_MAX_CONSECUTIVE_ERRORS 3
+    /* How much the heap may grow between two moments with no request in flight
+     * before a request ended with an internal function on its call stack is
+     * taken to have left that function's allocations behind. Above what an
+     * ordinary request moves it by — about the size of its body, which the next
+     * soft reset frees — and below what a sort of a large array that was ended
+     * part-way leaves. A leak under it is not retired for, and waits for
+     * WORKER_MAX_MEMORY_MIB or, without one, for the memory_limit to start
+     * failing requests.
+     *
+     * What is measured is the heap, not what the function held, so whatever else
+     * grew it in the same window counts. The first window a worker is busy for
+     * is therefore not judged: the application builds its state on demand in the
+     * first requests, a few MiB of it is ordinary, and a replacement worker that
+     * met the same trouble as the one before it would be retired for that every
+     * time. What is left behind in that window stays, once per worker. */
+    #define OXPHP_BAILOUT_LEAK_RETIRE_BYTES (4u * 1024 * 1024)
+
+    /* The heap, and the heap the fibers this thread created hold, the last time
+     * no request was in flight. A flag an earlier loop on this thread left —
+     * its fibers are woken to be ended as it exits, and that goes through
+     * internal frames too — is not this loop's to act on.
+     *
+     * The warm-up window ends at the first such moment after a request was
+     * taken. The count is the thread's, and is reset only when worker mode is
+     * set up for it, so what it was when this loop began is what to compare
+     * with. */
+    (void)oxphp_fiber_take_internal_bailout();
+    uint64_t quiet_heap = zend_memory_usage(0);
+    uint64_t quiet_pool = oxphp_fiber_pool_heap_bytes();
+    uint64_t served_at_start = ctx->requests_done;
+    bool warmed_up = false;
 
     while (1) {
         /* Publish the fiber census from the loop, which keeps turning whatever
@@ -6207,6 +6239,95 @@ static void oxphp_serve_loop(zend_fcall_info *fci, zend_fcall_info_cache *fcc)
         /* GC every N requests */
         if (ctx->requests_done > 0 && (ctx->requests_done % WORKER_GC_INTERVAL) == 0) {
             gc_collect_cycles();
+        }
+
+        /* A request ended with an internal function's call still on its stack
+         * may have left behind whatever that function was holding in its own
+         * locals — usort() sorts a copy of the array, and a copy keeps every
+         * element alive — and the walk after the bailout can neither see it nor
+         * say how much it was. Nor can it tell a function that was cut short from
+         * one that had already returned: the engine looks for a time limit before
+         * it takes a finished internal call off the stack, so a limit reached the
+         * moment after a database call returned finds that call's frame there,
+         * and the call's result stays too: in a temporary of the caller, which
+         * the walk does not free, when the result is used, and in the engine's
+         * own local, which nothing frees, when it is not. So the frame is a
+         * reason to look, and what decides is the heap: when a request went
+         * through one, it is compared with the last moment nothing was in flight,
+         * and a worker that grew past the threshold is retired. A large result
+         * is such growth, and retiring for it is right.
+         *
+         * Compared at such moments, not around the one request, because a worker
+         * runs requests alongside each other and the heap moves for all of them
+         * while one is parked. And a retire here takes no request with it, which
+         * a retire while another is parked would.
+         *
+         * Two windows are not judged, though the flag is taken from them so that
+         * it does not outlive them. The first, whose growth is the application
+         * warming up. And any while the server drains: the drain ends the requests
+         * it finds parked in the worker's own waits, which are internal functions,
+         * and the pool's monitor boots a replacement for a worker that exits until
+         * the shutdown itself begins, which is after the drain — so a worker
+         * retired here would be booted again in the middle of it.
+         *
+         * Two kinds of growth are not a leak and are taken out of the figure. The
+         * fibers the worker created in the stretch keep their stacks for as long
+         * as it lives, which for a worker that runs a couple of hundred requests
+         * at once is more than the threshold by itself. And objects that refer to
+         * themselves, which are garbage until the collector finds them: it runs
+         * here, for such a request only, before the heap is read. It finds those
+         * it already holds as possible roots. The engine raises the collector's
+         * guard for the whole of a bailout, and while it is up what the walk after
+         * it lets go of is not buffered, so a cycle that only that walk released
+         * stays — a leak in the proper sense, which nothing frees and which is
+         * counted. The baseline can hold garbage that an earlier stretch left and
+         * this collection frees, which takes that much off the growth shown, so a
+         * leak that small can go unseen. */
+        if (sched.fiber_count == 0) {
+            bool bailed_in_internal = oxphp_fiber_take_internal_bailout();
+            bool judged = bailed_in_internal && warmed_up && !oxphp_bridge_is_draining();
+            /* Stack buffer and the SAPI's logger, not php_log_err(): that one
+             * builds its line from the heap when error_log names a file, the
+             * heap has just grown and may be at its limit, and a bailout from
+             * here would take the whole serve loop with it. */
+            char msg[320];
+            if (judged && !oxphp_serve_loop_collect_cycles()) {
+                snprintf(msg, sizeof(msg),
+                         "oxphp: worker %d retiring: a destructor ended in a fatal "
+                         "error while the cycle collector ran, or while an "
+                         "exception one of them threw was dropped, after a request "
+                         "that ended with an internal function's call on its stack",
+                         oxphp_bridge_get_worker_id());
+                if (sapi_module.log_message != NULL) {
+                    sapi_module.log_message(msg, LOG_NOTICE);
+                }
+                oxphp_bridge_schedule_exit();
+                break;
+            }
+            uint64_t heap = zend_memory_usage(0);
+            uint64_t pool = oxphp_fiber_pool_heap_bytes();
+            uint64_t pool_grown = pool - quiet_pool;
+            if (judged
+                && heap > quiet_heap + pool_grown + OXPHP_BAILOUT_LEAK_RETIRE_BYTES) {
+                snprintf(msg, sizeof(msg),
+                         "oxphp: worker %d retiring: the heap grew %" PRIu64
+                         " bytes, not counting the fibers it created, since the "
+                         "worker last had no request in flight, and a request in "
+                         "that time was ended with an internal function's call on "
+                         "its stack, which may have kept what it held",
+                         oxphp_bridge_get_worker_id(),
+                         heap - quiet_heap - pool_grown);
+                if (sapi_module.log_message != NULL) {
+                    sapi_module.log_message(msg, LOG_NOTICE);
+                }
+                oxphp_bridge_schedule_exit();
+                break;
+            }
+            quiet_heap = heap;
+            quiet_pool = pool;
+            if (ctx->requests_done > served_at_start) {
+                warmed_up = true;
+            }
         }
     }
 
