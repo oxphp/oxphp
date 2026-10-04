@@ -696,6 +696,20 @@ void oxphp_fiber_minit(void);
  * bailout. */
 void oxphp_fiber_record_cancel_bailout_frame(void);
 
+/* Whether a bailout has gone through an internal function's frame since this
+ * was last called on the thread, and lowers the answer. An internal function's
+ * own allocations are on no frame the release after a bailout can reach, so
+ * this is all the release has to say about whether a worker may be holding
+ * some. */
+bool oxphp_fiber_take_internal_bailout(void);
+
+/* How much heap the fibers this thread has created hold for as long as the
+ * scheduler lives: a stack, a structure and an object each. Only goes up. What
+ * the worker's heap grew by in a stretch, less what this grew by in it, is what
+ * the worker's own work added — the pool of fibers is the server's growth, and no
+ * request's. */
+uint64_t oxphp_fiber_pool_heap_bytes(void);
+
 /* Fill `fci`/`fcc` with a zero-argument call to that function. The fcc carries
  * the handler directly, so no name lookup happens and the function stays out of
  * the global function table — userland can neither see nor call it. */
@@ -914,6 +928,10 @@ int     oxphp_async_sched_cancel(int64_t fiber_id);
  * memory. See the definition in oxphp_fiber.c for the whole argument. */
 #define OXPHP_EXCEPTION_DRAIN_LIMIT 16u
 void    oxphp_discard_pending_exception(void);
+
+/* Run the cycle collector from the serve loop, with the recovery a fatal in a
+ * destructor it runs needs. False: a fatal got in the way, retire the worker. */
+bool    oxphp_serve_loop_collect_cycles(void);
 
 /* Destroy this thread's task scheduler (frees fiber C stacks + task payload).
  * Called from the extension RSHUTDOWN; a no-op if no task ever spawned. */

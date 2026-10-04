@@ -2,10 +2,33 @@
 // Worker-mode fixture for tests/graceful_drain.sh. Each route parks the
 // request in a different long-lived shape so the drain test can assert that
 // SIGTERM cancels every one of them — and spares the short-lived one.
+
+// What /retain keeps for the life of the worker.
+final class DrainKept
+{
+    public static array $held = [];
+}
+
 oxphp_worker(function () {
     $path = parse_url($_SERVER['REQUEST_URI'] ?? '/', PHP_URL_PATH);
     switch ($path) {
         case '/sse': // streaming + cooperative sleep (fiber SLEEP suspend)
+            header('Content-Type: text/event-stream');
+            for ($i = 0; ; $i++) {
+                echo "data: tick $i\n\n";
+                oxphp_stream_flush();
+                oxphp_sleep(0.5);
+            }
+            // unreachable
+
+        case '/retain': // keeps well over the 4 MiB a worker may grow by before a
+                        // request ended inside an internal function is taken to
+                        // have left something behind, then streams and sleeps.
+                        // The drain ends it in the worker's own sleep, which is
+                        // an internal function, and the worker must not mistake
+                        // that for a leak and retire itself in the middle of the
+                        // shutdown.
+            DrainKept::$held[] = str_repeat('k', 6 * 1024 * 1024);
             header('Content-Type: text/event-stream');
             for ($i = 0; ; $i++) {
                 echo "data: tick $i\n\n";

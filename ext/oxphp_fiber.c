@@ -236,6 +236,34 @@ static inline void oxphp_release_frame_owner(zend_execute_data *ex, uint32_t inf
     }
 }
 
+/* Raised when a bailout went through an internal function's frame, and read
+ * (and lowered) by the worker's serve loop at the next moment no request is in
+ * flight — see oxphp_fiber_take_internal_bailout. Per thread: the recovery and
+ * the loop that reads this run on the same worker thread. An async task thread
+ * has no such loop, so there it is raised for nobody to read, which costs
+ * nothing. */
+static __thread bool oxphp_internal_bailout_pending = false;
+
+bool oxphp_fiber_take_internal_bailout(void) {
+    bool pending = oxphp_internal_bailout_pending;
+    oxphp_internal_bailout_pending = false;
+    return pending;
+}
+
+/* Fibers this thread has created rather than taken from the free list. A fiber
+ * keeps its VM stack, its structure and its Fiber object in the heap until the
+ * scheduler is destroyed — a finished one goes back on the free list whole — so
+ * this only goes up while a worker serves. Per thread because the heap it is read
+ * against is: the serve loop compares it with the memory usage of its own thread.
+ * The task scheduler's creation site counts too, but task fibers only exist on
+ * async worker threads, and no serve loop runs on those to read the figure. */
+static __thread uint64_t oxphp_fibers_created = 0;
+
+uint64_t oxphp_fiber_pool_heap_bytes(void) {
+    return oxphp_fibers_created
+         * (ZEND_FIBER_VM_STACK_SIZE + sizeof(oxphp_request_fiber) + sizeof(zend_fiber));
+}
+
 /* Release what the frames the bailout abandoned were holding. Runs before the
  * rewind below, which frees the pages those frames stand on.
  *
@@ -270,10 +298,26 @@ static void oxphp_release_abandoned_frames(const oxphp_vm_stack_mark *mark) {
      * was taken from. A fatal reported from another fiber, or a bailout nothing
      * recorded a frame for, leaves a pointer that has nothing to do with these
      * frames, and freeing along it would be freeing live memory. */
+    bool through_internal = false;
     for (zend_execute_data *probe = ex; probe != mark->execute_data; probe = probe->prev_execute_data) {
         if (probe == NULL) {
             return;
         }
+        if (probe->func != NULL && !ZEND_USER_CODE(probe->func->type)) {
+            through_internal = true;
+        }
+    }
+
+    /* Noted here and not where an internal frame is released below: that release
+     * can run a destructor, a fatal in it leaves this walk for good, and the
+     * frames it had not reached yet — the internal one among them — would then
+     * have said nothing. What an internal function held in its own C locals is
+     * not on any frame and cannot be given back from here: usort() sorts a copy
+     * of the array, which keeps every refcounted element alive, and a call that
+     * never returns never swaps it in or frees it. Nothing here can say how much
+     * that was, so the serve loop is told and measures. */
+    if (through_internal) {
+        oxphp_internal_bailout_pending = true;
     }
 
     while (ex != mark->execute_data) {
@@ -779,6 +823,62 @@ void oxphp_discard_pending_exception(void) {
         }
         zend_clear_exception();
     }
+}
+
+/* ─── Cycle collection from the serve loop ─────────────── */
+
+/* Runs the cycle collector on the serve loop's own frame and answers whether it
+ * ran to its end.
+ *
+ * What the collector runs is userland: the __destruct of a cycle some request
+ * left behind. The frame beneath it is oxphp_worker() itself, an internal one,
+ * so an exception such a destructor throws is not handed to anything — it stays
+ * in EG(exception) until the loop returns, and oxphp_worker() returns with it,
+ * which skips the code after the call although the stub promises that code runs
+ * on every exit. A fatal in one (the memory limit is the likely one) is a
+ * bailout, and with nothing on the serve loop to catch it the engine takes the
+ * whole worker out through the entry script, past the cleanup that follows the
+ * loop and with the exit reason of a shutdown.
+ *
+ * Both are met here. The exception is dropped through the discard above, which
+ * keeps going while a destructor of the exception throws in its turn — a single
+ * zend_clear_exception() leaves that one standing. A fatal gets the recovery a
+ * request's fiber gets, and for the same reasons: what the engine and the
+ * destructor left behind is not something the entry script's shutdown can be
+ * run over. The observer end handlers its calls opened are still on the
+ * engine's chain, naming frames that are about to be given back, and the
+ * shutdown's first step walks that chain; a destructor that recursed past a page
+ * of the VM stack leaves the cursors on different pages, so the next call
+ * writes past the end of the first; and the two flags a bailout raises are
+ * still up.
+ *
+ * False means a fatal got in the way — either in the collection, which nothing
+ * can restart (the recovery says so in the log and schedules the exit itself),
+ * or in a destructor the discard ran. The caller retires the worker either way:
+ * the engine flags every live object as destructed on its way into a fatal, so
+ * what the worker holds is not what its code expects, and with no request in
+ * flight that costs nothing. */
+bool oxphp_serve_loop_collect_cycles(void) {
+    oxphp_vm_stack_mark mark;
+    oxphp_vm_stack_save(&mark);
+    bool completed = true;
+
+    zend_try {
+        gc_collect_cycles();
+    } zend_catch {
+        completed = false;
+        oxphp_recover_from_bailout(&mark);
+    } zend_end_try();
+
+    if (EG(exception)) {
+        zend_try {
+            oxphp_discard_pending_exception();
+        } zend_catch {
+            completed = false;
+            oxphp_recover_from_bailout(&mark);
+        } zend_end_try();
+    }
+    return completed;
 }
 
 /* ─── Stack Limit Helper ──────────────────────────────── */
@@ -2979,6 +3079,7 @@ oxphp_request_fiber *oxphp_scheduler_create_fiber(
     } else {
         /* Allocate new fiber + C stack (mmap — only happens once per fiber) */
         fiber = ecalloc(1, sizeof(oxphp_request_fiber));
+        oxphp_fibers_created++;
     }
 
     fiber->fiber_id = oxphp_next_fiber_id++;
@@ -5565,6 +5666,7 @@ int64_t oxphp_async_sched_spawn(void *op_array, void *static_vars,
         reused = true;
     } else {
         fiber = ecalloc(1, sizeof(oxphp_request_fiber));
+        oxphp_fibers_created++;
     }
 
     if (!reused) {

@@ -23,7 +23,7 @@ description: Reference for the OxPHP\Server\Worker class — a unified runtime h
 | `maxMemoryBytes(): int` | Configured memory cap in bytes. `0` means unlimited. |
 | `scheduleExit(): void` | Marks the worker for graceful exit after the current request completes. No-op in traditional mode. |
 | `isExitScheduled(): bool` | Returns `true` if `scheduleExit()` has been called for the current worker. Always `false` in traditional mode. |
-| `exitReason(): ?string` | Pending exit reason: `'scheduled'`, `'max_memory'`, `'error'`, or `null` when no exit is pending. Always `null` in traditional mode. |
+| `exitReason(): ?string` | Pending exit reason: `'scheduled'` (`scheduleExit()` was called, or the worker retired itself after a request ended with an internal function's call on its stack left it holding much more memory), `'max_memory'`, `'error'`, or `null` when no exit is pending. Always `null` in traditional mode. |
 | `serve(callable $h): void` | Enters the request loop. Throws `InvalidServeContextException` outside worker mode. |
 
 ## Mode matrix
