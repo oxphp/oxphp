@@ -94,7 +94,7 @@ Process-wide concurrent primitives so workers can coordinate mutable state witho
 ## Security
 
 - [Dot-Path Blocking](security/dot-path-blocking.md) — automatic blocking of hidden files and directories (`.env`, `.git/`, `.htaccess`)
-- [Trusted Proxies](security/trusted-proxies.md) — real client IP extraction from `Forwarded` (RFC 7239) and `X-Forwarded-*` headers with CIDR-based trust
+- [Trusted Proxies](security/trusted-proxies.md) — real client IP extraction from `Forwarded` (RFC 7239), `X-Forwarded-*` and, behind Cloudflare, `CF-Connecting-IP` headers with CIDR-based trust
 - [PHP Execution Deny-List](security/php-deny.md) — block `.php` execution at writable public paths (e.g. `/uploads/**`, or specific legacy scripts) to defeat uploaded-shell attacks on legacy apps
 - [Path Deny Rules](security/oxphpdeny.md) — a gitignore-style `.oxphpdeny` in `DOCUMENT_ROOT` keeps `vendor/`, dumps, backups and other files from being served, or hands their requests to the application
 - [Symlink Allow Paths](security/symlink-allow-paths.md) — opt-in allow-list for symlink targets outside `DOCUMENT_ROOT`; supports Laravel-style `storage:link` and shared asset volumes without weakening the default symlink-escape protection

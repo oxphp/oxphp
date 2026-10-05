@@ -58,7 +58,7 @@ When `TRUSTED_PROXIES` is configured and the request peer is in the trusted set,
 
 | Variable | Value when peer is trusted | Value otherwise |
 |----------|----------------------------|------------------|
-| `REMOTE_ADDR` | Rightmost untrusted address from `X-Forwarded-For` / `Forwarded` | Direct peer IP |
+| `REMOTE_ADDR` | Rightmost untrusted address from `X-Forwarded-For` / `Forwarded`; `CF-Connecting-IP` for a request whose forwarding chain shows it arrived from a Cloudflare edge when `TRUSTED_PROXIES` names `cloudflare` | Direct peer IP |
 | `REMOTE_PORT` | Client source port from `Forwarded: for=ip:port`, otherwise `0` | Direct peer port |
 | `HTTPS` | `"on"` when `X-Forwarded-Proto: https` | Set only when the peer connection is TLS |
 | `REQUEST_SCHEME` | `"https"` / `"http"` from `X-Forwarded-Proto` | Based on actual TLS state |
@@ -67,7 +67,7 @@ When `TRUSTED_PROXIES` is configured and the request peer is in the trusted set,
 
 The raw `HTTP_X_FORWARDED_FOR`, `HTTP_X_FORWARDED_PROTO`, `HTTP_X_FORWARDED_HOST`, `HTTP_X_FORWARDED_PORT`, and `HTTP_FORWARDED` keys remain in `$_SERVER` unchanged — both the rewritten values and the original headers are available.
 
-`REMOTE_PORT` is `"0"` behind a trusted proxy unless the proxy sends RFC 7239 `Forwarded: for=ip:port` — neither `X-Forwarded-For` nor the rightmost-non-trusted selection carry a client source port, so the synthetic value is zeroed rather than guessed.
+`REMOTE_PORT` is `"0"` behind a trusted proxy unless the proxy sends RFC 7239 `Forwarded: for=ip:port` — neither `X-Forwarded-For` nor the rightmost-non-trusted selection carry a client source port, so the synthetic value is zeroed rather than guessed. An address taken from `CF-Connecting-IP` carries no port either, so `REMOTE_PORT` is `"0"` then even when `Forwarded` has one.
 
 When `TRUSTED_PROXIES` is **not** set, no rewriting occurs and `REMOTE_ADDR` is always the direct peer — typically your load balancer, not the end client. Parsing `X-Forwarded-For` manually is error-prone (leftmost vs rightmost, no CIDR trust check); prefer configuring `TRUSTED_PROXIES`. See [Trusted Proxies](../security/trusted-proxies.md) for the trust algorithm and configuration syntax.
 

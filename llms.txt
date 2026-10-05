@@ -65,7 +65,7 @@
 - [Path Deny Rules (.oxphpdeny)](docs/security/oxphpdeny.md): Keep files in DOCUMENT_ROOT from being served — or hand their requests to the application — with a gitignore-style file read at startup.
 - [PHP Execution Deny-List](docs/security/php-deny.md): Block PHP execution at specific URI paths to harden legacy applications against uploaded PHP shells and unintended script exposure.
 - [Symlink Allow Paths](docs/security/symlink-allow-paths.md): Explicit allow-list for symlink targets outside DOCUMENT_ROOT — Laravel-style storage links, shared asset volumes, multi-tenant uploads.
-- [Trusted Proxies](docs/security/trusted-proxies.md): Configure OxPHP to extract the real client IP, protocol, and host from reverse proxy headers (Forwarded, X-Forwarded-For/Proto/Host).
+- [Trusted Proxies](docs/security/trusted-proxies.md): Configure OxPHP to extract the real client IP, protocol, and host from reverse proxy headers (Forwarded, X-Forwarded-For/Proto/Host, and CF-Connecting-IP behind Cloudflare).
 
 ## PHP
 
