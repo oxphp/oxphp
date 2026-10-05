@@ -109,6 +109,7 @@ mod tests {
             queue_wait_us: None,
             php_exec_us: None,
             shed_reason: None,
+            user_agent: None,
         };
 
         let result = handler.handle(&mut event);

@@ -39,6 +39,7 @@ Every access log entry is a single JSON line written to stdout:
     "status": 200,
     "duration_us": 1234,
     "remote_ip": "10.0.0.1",
+    "user_agent": "Mozilla/5.0 (X11; Linux x86_64; rv:131.0) Gecko/20100101 Firefox/131.0",
     "message": "request completed"
   }
 }
@@ -59,6 +60,7 @@ When W3C Trace Context is active, `trace_id` and `span_id` are included alongsid
     "status": 201,
     "duration_us": 8421,
     "remote_ip": "10.0.0.1",
+    "user_agent": "Mozilla/5.0 (X11; Linux x86_64; rv:131.0) Gecko/20100101 Firefox/131.0",
     "message": "request completed"
   }
 }
@@ -74,6 +76,7 @@ When W3C Trace Context is active, `trace_id` and `span_id` are included alongsid
 | `status` | number | HTTP response status code |
 | `duration_us` | number | Total request handling time in microseconds |
 | `remote_ip` | string | Client IP address (no port). When `TRUSTED_PROXIES` is configured, shows the real client IP extracted from forwarding headers; the proxy's IP only when they yield no address (see [Trusted Proxies](../security/trusted-proxies.md#client-ip-extraction)) |
+| `user_agent` | string | The request's `User-Agent` header, cut to 512 bytes, a `…(truncated)` marker included, when longer. Absent when the request carried none. Bytes that are not valid UTF-8 are replaced with U+FFFD |
 | `trace_id` | string | W3C trace ID (present only when `TRACE_CONTEXT=true`) |
 | `span_id` | string | W3C span ID (present only when `TRACE_CONTEXT=true`) |
 

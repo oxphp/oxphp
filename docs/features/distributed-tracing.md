@@ -126,6 +126,7 @@ When trace context is enabled, structured JSON access logs include `trace_id` an
     "status": 200,
     "duration_us": 1523,
     "remote_ip": "10.0.0.1",
+    "user_agent": "Mozilla/5.0 (X11; Linux x86_64; rv:131.0) Gecko/20100101 Firefox/131.0",
     "message": "request completed"
   }
 }
@@ -157,6 +158,7 @@ Exported spans include standard HTTP semantic convention attributes:
 | `url.path` | Request path |
 | `http.response.status_code` | Response status code |
 | `client.address` | Client IP address |
+| `user_agent.original` | The request's `User-Agent` header, cut to 512 bytes, a `…(truncated)` marker included, when longer. Absent when the request carried none. Bytes that are not valid UTF-8 are replaced with U+FFFD |
 | `server.address` | Server listen address |
 | `oxphp.request_id` | OxPHP request ID |
 | `http.request.body.size` | Request body size in bytes (if non-zero) |

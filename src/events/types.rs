@@ -1,8 +1,9 @@
+use std::borrow::Cow;
 use std::net::SocketAddr;
 use std::time::Duration;
 
 use http::request::Parts;
-use http::{Method, Response};
+use http::{HeaderValue, Method, Response};
 
 use super::Event;
 use crate::types::ResponseBody;
@@ -137,6 +138,40 @@ pub struct RequestComplete {
     /// Why admission refused the request, when it did. `None` for every
     /// response the request was not refused with.
     pub shed_reason: Option<crate::executor::admission::ShedReason>,
+    /// The request's `User-Agent` as the client sent it — the first field line
+    /// where there was more than one. Read it as text through
+    /// [`user_agent_text`].
+    pub user_agent: Option<HeaderValue>,
+}
+
+/// Byte cap for the text [`user_agent_text`] returns, the `…(truncated)`
+/// marker included. The value is the client's to choose and may run to the
+/// size of the whole request head, and it is written once per request into
+/// the access log, the trace span and the profiler's run index.
+pub const USER_AGENT_MAX_BYTES: usize = 512;
+
+/// A `User-Agent` value as text, at most [`USER_AGENT_MAX_BYTES`] long. Bytes
+/// that are not UTF-8 are replaced with U+FFFD rather than costing the whole
+/// value: a field value may carry them (RFC 9110 obs-text), and
+/// `HeaderValue::to_str` refuses anything but tab and visible ASCII. A longer
+/// value keeps its head and ends in `…(truncated)`. Only the head is decoded,
+/// so the bytes the replacement adds — up to three for one — never take the
+/// work past three times the cap.
+pub fn user_agent_text(value: &HeaderValue) -> Cow<'_, str> {
+    const TRUNCATED: &str = "…(truncated)";
+    let bytes = value.as_bytes();
+    let head = &bytes[..bytes.len().min(USER_AGENT_MAX_BYTES)];
+    let text = String::from_utf8_lossy(head);
+    if head.len() == bytes.len() && text.len() <= USER_AGENT_MAX_BYTES {
+        return text;
+    }
+    // Decoding never shortens, so `text` is longer than this; a character the
+    // cut of `head` split sits in its last three bytes, past it.
+    let mut end = USER_AGENT_MAX_BYTES - TRUNCATED.len();
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    Cow::Owned(format!("{}{TRUNCATED}", &text[..end]))
 }
 
 impl Event for RequestComplete {
@@ -255,5 +290,64 @@ pub struct MetricsCollected;
 impl Event for MetricsCollected {
     fn name(&self) -> &'static str {
         "service.metrics_collected"
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text(bytes: &[u8]) -> String {
+        user_agent_text(&HeaderValue::from_bytes(bytes).unwrap()).into_owned()
+    }
+
+    /// The 512 is the figure the documentation gives, written out rather than
+    /// read from the constant under test.
+    #[test]
+    fn user_agent_at_the_cap_is_kept_whole() {
+        let at_cap = "a".repeat(512);
+        assert_eq!(text(at_cap.as_bytes()), at_cap);
+    }
+
+    #[test]
+    fn user_agent_over_the_cap_keeps_its_head() {
+        let cut = text("a".repeat(513).as_bytes());
+        assert!(cut.len() <= 512, "{} bytes", cut.len());
+        assert_eq!(
+            cut,
+            format!("{}…(truncated)", "a".repeat(512 - "…(truncated)".len()))
+        );
+    }
+
+    /// Three hundred bytes are under the cap, but each becomes a three-byte
+    /// U+FFFD: the cap holds for the text, not for what the client sent.
+    #[test]
+    fn user_agent_grown_past_the_cap_by_replacement_is_cut() {
+        let cut = text(&[0xff; 300]);
+        assert!(cut.len() <= 512, "{} bytes", cut.len());
+        assert!(
+            cut.starts_with('\u{FFFD}') && cut.ends_with("…(truncated)"),
+            "{cut:?}"
+        );
+    }
+
+    /// A value the size of a whole request head comes out at the cap.
+    #[test]
+    fn user_agent_of_a_whole_request_head_is_cut() {
+        for byte in [b'a', 0xff] {
+            let cut = text(&vec![byte; 400_000]);
+            assert!(cut.len() <= 512, "{} bytes", cut.len());
+            assert!(cut.ends_with("…(truncated)"));
+        }
+    }
+
+    /// The cut lands inside a multi-byte character without splitting it.
+    #[test]
+    fn user_agent_cut_inside_a_character_keeps_it_whole_or_drops_it() {
+        let mut ua = "a".repeat(497).into_bytes();
+        ua.extend_from_slice("é".repeat(20).as_bytes());
+        let cut = text(&ua);
+        assert!(!cut.contains('\u{FFFD}'), "{cut:?}");
+        assert!(cut.ends_with("…(truncated)"));
     }
 }

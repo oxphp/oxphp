@@ -909,6 +909,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
 
         handler.handle(&view); // should not panic even without TracerProvider

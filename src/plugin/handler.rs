@@ -236,6 +236,7 @@ pub struct PluginCompleteView<'a> {
     /// Why admission refused the request — `None` unless it did. The same
     /// reasons `oxphp_admission_refused_total` is labelled with.
     pub shed_reason: Option<crate::executor::admission::ShedReason>,
+    user_agent: Option<&'a HeaderValue>,
 }
 
 impl<'a> PluginCompleteView<'a> {
@@ -255,6 +256,7 @@ impl<'a> PluginCompleteView<'a> {
         queue_wait_us: Option<u64>,
         php_exec_us: Option<u64>,
         shed_reason: Option<crate::executor::admission::ShedReason>,
+        user_agent: Option<&'a HeaderValue>,
     ) -> Self {
         Self {
             request_id,
@@ -271,6 +273,7 @@ impl<'a> PluginCompleteView<'a> {
             queue_wait_us,
             php_exec_us,
             shed_reason,
+            user_agent,
         }
     }
 
@@ -280,6 +283,14 @@ impl<'a> PluginCompleteView<'a> {
             .iter()
             .find(|(k, _)| k == key)
             .map(|(_, v)| v.as_str())
+    }
+
+    /// The request's `User-Agent` as text — the first field line where there
+    /// was more than one, with bytes that are not UTF-8 replaced by U+FFFD,
+    /// cut to 512 bytes as [`crate::events::user_agent_text`] cuts it. `None`
+    /// when the request carried none.
+    pub fn user_agent(&self) -> Option<std::borrow::Cow<'a, str>> {
+        self.user_agent.map(crate::events::user_agent_text)
     }
 }
 
