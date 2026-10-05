@@ -276,6 +276,14 @@ typedef struct {
     int last_error_lineno;
     zend_string *last_error_message;
     zend_string *last_error_file;
+#if PHP_VERSION_ID >= 80500
+    /* And the backtrace of its last fatal error, which error_get_last() reports
+     * beside it under 'trace' and which holds the arguments of every frame
+     * unless zend.exception_ignore_args is on. Owned while parked; IS_UNDEF
+     * when there is none — what the zeroed allocation of a fiber reads as, and
+     * what a restore or a teardown leaves behind for a fiber that is reused. */
+    zval last_fatal_error_backtrace;
+#endif
 
     /* This request's share of the profiler observer: the mode it is recording
      * under, its span counter, its truncation flag and the mirror of the frames
@@ -928,6 +936,14 @@ int     oxphp_async_sched_cancel(int64_t fiber_id);
  * memory. See the definition in oxphp_fiber.c for the whole argument. */
 #define OXPHP_EXCEPTION_DRAIN_LIMIT 16u
 void    oxphp_discard_pending_exception(void);
+
+#if PHP_VERSION_ID >= 80500
+/* Let go of the backtrace PHP 8.5 keeps of the last fatal error on this thread,
+ * which the engine frees, short of the next error, as a request is shut down —
+ * and a worker does not shut one down between requests. Taken out of the slot
+ * before it is destroyed. See the definition in oxphp_fiber.c. */
+void    oxphp_fatal_backtrace_release(void);
+#endif
 
 /* Run the cycle collector from the serve loop, with the recovery a fatal in a
  * destructor it runs needs. False: a fatal got in the way, retire the worker. */

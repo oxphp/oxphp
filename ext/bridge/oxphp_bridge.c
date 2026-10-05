@@ -4427,6 +4427,26 @@ void oxphp_bridge_clear_thrown_class(void) {
 #include "main/php_output.h"
 
 void oxphp_async_reset(void) {
+#if PHP_VERSION_ID >= 80500
+    /* The backtrace PHP 8.5 keeps of the last fatal, which error_get_last()
+     * reports beside the last error and which holds everything that fatal's
+     * frames were given. The task that raised it lets go of it as it ends; this
+     * is for one raised after that. First, so that the steps below clean up
+     * the exception, the last error and the unclean-shutdown flag a destructor
+     * it runs can leave, and under zend_try, so that a bailout from one has
+     * somewhere to land short of the caller — though the collector's guard
+     * that bailout raises stays up. Taken out of the slot before it is
+     * destroyed, as the extension does. */
+    if (!Z_ISUNDEF(EG(last_fatal_error_backtrace))) {
+        zend_try {
+            zval held;
+            ZVAL_COPY_VALUE(&held, &EG(last_fatal_error_backtrace));
+            ZVAL_UNDEF(&EG(last_fatal_error_backtrace));
+            zval_ptr_dtor(&held);
+        } zend_end_try();
+    }
+#endif
+
     /* Clear error state */
     CG(unclean_shutdown) = 0;
     if (EG(exception)) {

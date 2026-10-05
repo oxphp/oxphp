@@ -1027,6 +1027,39 @@ void oxphp_discard_pending_exception(void) {
     }
 }
 
+#if PHP_VERSION_ID >= 80500
+/* ─── Last fatal error's backtrace ─────────────────────── */
+
+/* From PHP 8.5 a fatal error raised with no exception in flight takes a
+ * backtrace of where it was raised, while fatal_error_backtraces is on (the
+ * default) — with the arguments of every frame, unless
+ * zend.exception_ignore_args is on — and error_get_last() reports it under
+ * 'trace' beside the last error. The engine keeps it on the thread and lets go
+ * of it when the next error is raised there or an uncaught exception is
+ * reported, when error_clear_last() is called, or as the executor is shut down
+ * at the end of a request. A worker shuts its executor down once, when it
+ * stops, and so does the thread that runs async tasks, so every place that
+ * ends or parks a request, or ends a task, has to do that part itself: left
+ * standing, the backtrace keeps alive everything the fatal's frames were
+ * given, and a request on the thread that reads error_get_last() is handed
+ * another request's call stack and arguments beside its own error.
+ *
+ * Taken out of the slot before it is destroyed. Destroying it can drop the last
+ * reference to what those frames were given, which runs destructors — user code
+ * that can raise an error, read error_get_last() or park — and every one of
+ * those has to find the slot already empty, not holding an array that is
+ * half way through being freed.
+ *
+ * SYNC: php-src/Zend/zend.c zend_error_zstr_at();
+ *       php-src/Zend/zend_execute_API.c zend_shutdown_executor_values() */
+void oxphp_fatal_backtrace_release(void) {
+    zval held;
+    ZVAL_COPY_VALUE(&held, &EG(last_fatal_error_backtrace));
+    ZVAL_UNDEF(&EG(last_fatal_error_backtrace));
+    zval_ptr_dtor(&held);
+}
+#endif
+
 /* ─── Cycle collection from the serve loop ─────────────── */
 
 /* Runs the cycle collector on the serve loop's own frame and answers whether it
@@ -1765,6 +1798,12 @@ static void oxphp_fiber_free_task_payload(oxphp_request_fiber *fiber) {
         zend_string_release(fiber->php_state.last_error_file);
         fiber->php_state.last_error_file = NULL;
     }
+#if PHP_VERSION_ID >= 80500
+    /* And the backtrace of its last fatal, with everything that fatal's frames
+     * were given. */
+    zval_ptr_dtor(&fiber->php_state.last_fatal_error_backtrace);
+    ZVAL_UNDEF(&fiber->php_state.last_fatal_error_backtrace);
+#endif
     /* And the shutdown functions it registered, with everything they were
      * holding — the closures, and the arguments they were registered with. A
      * fiber torn down while parked has no end of a request left to run them at,
@@ -2139,6 +2178,9 @@ typedef struct {
     int last_error_lineno;
     zend_string *last_error_message;
     zend_string *last_error_file;
+#if PHP_VERSION_ID >= 80500
+    zval last_fatal_error_backtrace;
+#endif
 } oxphp_ini_quiet;
 
 static void oxphp_ini_quiet_begin(oxphp_ini_quiet *q) {
@@ -2158,6 +2200,13 @@ static void oxphp_ini_quiet_begin(oxphp_ini_quiet *q) {
     PG(last_error_lineno) = 0;
     PG(last_error_message) = NULL;
     PG(last_error_file) = NULL;
+#if PHP_VERSION_ID >= 80500
+    /* And the backtrace of the last fatal beside it: any error a handler
+     * raises in here lets go of the one standing on the thread, whatever the
+     * level held down above, and a request's own would be gone on resume. */
+    ZVAL_COPY_VALUE(&q->last_fatal_error_backtrace, &EG(last_fatal_error_backtrace));
+    ZVAL_UNDEF(&EG(last_fatal_error_backtrace));
+#endif
 }
 
 /* Say that a directive would not move, where an operator will look: the
@@ -2178,6 +2227,14 @@ static inline void oxphp_ini_quiet_hold(void) {
 }
 
 static void oxphp_ini_quiet_end(oxphp_ini_quiet *q) {
+#if PHP_VERSION_ID >= 80500
+    /* A fatal a handler raised in here took a backtrace of its own. Let go of
+     * it while the window still holds, so that whatever that runs runs on the
+     * same terms as the handler that raised it, and before the last error is
+     * put back, so that an error it raises does not stand in its place. */
+    oxphp_fatal_backtrace_release();
+    ZVAL_COPY_VALUE(&EG(last_fatal_error_backtrace), &q->last_fatal_error_backtrace);
+#endif
     if (PG(last_error_message)) {
         zend_string_release(PG(last_error_message));
     }
@@ -2733,10 +2790,12 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
                 } else if (EG(exception)) {
                     /* A destroyed fiber is resumed with a graceful exit so it
                      * unwinds; that is the scheduler tearing this fiber down,
-                     * not an outcome of the task, so it is left pending for
-                     * zend_fiber_execute to consume rather than reported as a
-                     * result. exit()/die() raises UnwindExit instead, which IS
-                     * the task's outcome and is captured like any other. */
+                     * not an outcome of the task, so it is not taken as a
+                     * result. It is left pending until the late report below,
+                     * which consumes it without logging anything, and the park
+                     * after that sees the fiber destroyed and returns at once.
+                     * exit()/die() raises UnwindExit instead, which IS the
+                     * task's outcome and is captured like any other. */
                     if (!zend_is_graceful_exit(EG(exception))) {
                         task_capture_exception(fiber);
                     }
@@ -2770,6 +2829,34 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
             if (CG(unclean_shutdown)) {
                 oxphp_recover_from_bailout(&mark);
             }
+
+#if PHP_VERSION_ID >= 80500
+            /* And the backtrace of a fatal the task raised, with everything its
+             * frames were given: the thread runs other tasks after this one and
+             * shuts no request down between them, so short of the next error
+             * raised there nothing lets go of it while they keep the thread
+             * busy. Guarded as the free above is, for the same reason — what it
+             * frees can have a destructor left to run. */
+            if (!Z_ISUNDEF(EG(last_fatal_error_backtrace))) {
+                zend_try {
+                    oxphp_fatal_backtrace_release();
+                } zend_end_try();
+                if (CG(unclean_shutdown)) {
+                    oxphp_recover_from_bailout(&mark);
+                }
+            }
+#endif
+
+            /* Either free above can also leave an exception standing: a
+             * destructor that throws, run by what was let go of. Nothing catches
+             * it on the way — the loop's frame is no user code, so the engine
+             * leaves it pending rather than rethrowing it — and the scheduler
+             * drops whatever a parking fiber hands it, so unless it is reported
+             * here it is gone without a line in the log. Reported as the request
+             * branch reports one its shutdown window leaves; the flag that raises
+             * is a request's, and nothing reads it on a task. What the task
+             * itself returned or threw was taken above and stays its outcome. */
+            oxphp_report_late_exception(fiber, &mark);
 
             /* The task is over: release the socket streams it claimed, so a
              * sibling task waiting for one of them can go on. Same point, and
@@ -3191,6 +3278,44 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
             oxphp_report_late_exception(fiber, &mark);
         }
 
+#if PHP_VERSION_ID >= 80500
+        /* Let go of the backtrace of this request's last fatal where the engine
+         * lets go of it in any other SAPI: as the executor is shut down, after
+         * the shutdown functions, the final flush and the session write — all
+         * of which can still read it through error_get_last() — and before the
+         * ini directives are put back. Left standing it keeps everything the
+         * fatal's frames were given alive until another request starts or
+         * resumes on this thread, and the serve loop's check of heap growth,
+         * made once no request is in flight, comes before either and counts it
+         * as growth.
+         *
+         * That can drop the last reference to an object whose destructor has
+         * not run — a fatal a user error handler took over flags nothing, and
+         * neither does one displayed on a request already cancelled, whose
+         * display write bails out before the flag is set — so the release is
+         * guarded and filed as the session write is, and an exception the
+         * destructor throws is reported the same way. Parking is not blocked:
+         * the backtrace is off the thread before any of it is freed, so a
+         * destructor that suspends leaves nothing of it for the request served
+         * in the window. Before the claims are released, for the reason the
+         * session write is.
+         *
+         * SYNC: php-src/main/main.c php_request_shutdown() step 9;
+         *       php-src/Zend/zend_execute_API.c zend_shutdown_executor_values() */
+        if (!Z_ISUNDEF(EG(last_fatal_error_backtrace))) {
+            volatile bool bailed = false;
+            zend_try {
+                oxphp_fatal_backtrace_release();
+            } zend_catch {
+                bailed = true;
+            } zend_end_try();
+            if (bailed) {
+                oxphp_file_late_bailout(fiber, &mark, "bailout releasing a fatal error's backtrace");
+            }
+            oxphp_report_late_exception(fiber, &mark);
+        }
+#endif
+
         /* The request is over, so any socket stream this fiber claimed is free
          * for the next fiber that wants it. Here rather than in finalize because
          * this point is past every zend_try above and inside none of them: it is
@@ -3483,6 +3608,13 @@ void oxphp_fiber_save_php_state(oxphp_request_fiber *fiber) {
     PG(last_error_lineno) = 0;
     PG(last_error_message) = NULL;
     PG(last_error_file) = NULL;
+#if PHP_VERSION_ID >= 80500
+    /* With the backtrace of its last fatal, which error_get_last() reports
+     * beside the message. Taken here, ahead of the ini step below: anything a
+     * directive's handler raises on the way out would let go of it. */
+    ZVAL_COPY_VALUE(&fiber->php_state.last_fatal_error_backtrace, &EG(last_fatal_error_backtrace));
+    ZVAL_UNDEF(&EG(last_fatal_error_backtrace));
+#endif
 
     /* Step 1c: and the shutdown functions it registered, by the same move once
      * more. The registry is thread-wide, and the end of a request runs
@@ -3618,6 +3750,27 @@ void oxphp_fiber_save_php_state(oxphp_request_fiber *fiber) {
 }
 
 void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber) {
+#if PHP_VERSION_ID >= 80500
+    /* A fatal's backtrace standing on the thread here belongs to no request
+     * that is still running: every request takes its own with it when it parks
+     * and lets go of it as it ends, so this one was raised after that — late in
+     * a request's own end, or by PHP the worker ran outside any request, such as
+     * a destructor the deferred promise drain at the end of a tick reached. Let
+     * go of before anything of this request is installed, so that whatever its
+     * release runs does not run as part of this request.
+     *
+     * Unguarded, as the discard of a stale exception in
+     * oxphp_fiber_init_request_state() is, and with the same exposure. A fatal
+     * usually flags every live object as destructed before it bails out, and
+     * then letting go of what its frames were given runs no destructor. One a
+     * user error handler took over flags nothing, and neither does one whose
+     * message is displayed through a write that bails out first, as on a
+     * request already cancelled (see oxphp_recover_from_bailout()). Then a
+     * destructor can run here, and a fatal it raises ends the serve loop, as
+     * one raised by a stale exception's destructor does there. */
+    oxphp_fatal_backtrace_release();
+#endif
+
     /* Restore Rust TLS first (so ub_write goes to the right buffer) */
     oxphp_bridge_fiber_restore_ctx(fiber->fiber_id);
 
@@ -3764,6 +3917,16 @@ void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber) {
     fiber->php_state.ob_active = NULL;
     fiber->php_state.ob_running = NULL;
 
+#if PHP_VERSION_ID >= 80500
+    /* The top let go of the fatal's backtrace that stood here, but the steps
+     * since can run destructors — the output handlers and the superglobals
+     * given up above — and a fatal a user error handler took over in one of
+     * them leaves one of its own. Let go of that too, before the last error
+     * goes back, so that an error its release raises does not stand in its
+     * place. */
+    oxphp_fatal_backtrace_release();
+#endif
+
     /* And its last error back, giving up whatever stands in its place on the
      * same terms as the two above. */
     if (PG(last_error_message)) {
@@ -3780,6 +3943,11 @@ void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber) {
     fiber->php_state.last_error_lineno = 0;
     fiber->php_state.last_error_message = NULL;
     fiber->php_state.last_error_file = NULL;
+#if PHP_VERSION_ID >= 80500
+    /* And the backtrace of its last fatal, into the slot let go of above. */
+    ZVAL_COPY_VALUE(&EG(last_fatal_error_backtrace), &fiber->php_state.last_fatal_error_backtrace);
+    ZVAL_UNDEF(&fiber->php_state.last_fatal_error_backtrace);
+#endif
 
     /* And the shutdown functions it registered. Unlike the three above, nothing
      * stands in their place to be given up: a request on this thread has either
@@ -5546,6 +5714,20 @@ int oxphp_scheduler_tick(oxphp_fiber_scheduler *sched) {
          * a save handler can leave, so the arriving request does not start able
          * to read them as its own. */
         oxphp_session_release_if_idle(sched);
+
+#if PHP_VERSION_ID >= 80500
+        /* And the backtrace PHP 8.5 keeps of the last fatal, which
+         * error_get_last() reports beside the last error. Every request lets go
+         * of its own as it ends, so one standing here was raised after that —
+         * by a save handler the release above has just run, say, or by PHP the
+         * worker ran outside any request. Here for the reason the release above
+         * is: letting go of it can run a destructor, and what that writes or
+         * answers belongs to nobody only before prepare_request. The init below
+         * then clears the header, the exception and the last error one can
+         * leave. Unguarded, as the release at the top of
+         * oxphp_fiber_restore_php_state() is, and for the same reason. */
+        oxphp_fatal_backtrace_release();
+#endif
 
         oxphp_bridge_prepare_request();
 

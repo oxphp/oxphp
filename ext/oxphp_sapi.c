@@ -5897,6 +5897,25 @@ static void oxphp_soft_reset(void) {
         zend_ini_deactivate();
     } zend_end_try();
 
+#if PHP_VERSION_ID >= 80500
+    /* And the backtrace PHP 8.5 keeps of the last fatal, which error_get_last()
+     * reports beside the last error. A request lets go of its own as it ends;
+     * one standing here was raised after that — late in the request's own end,
+     * or by the session write or the ini rollback above — and the next request
+     * would start with it standing, keeping alive what its frames were given.
+     * Here, above the cleanups that follow, for the reason the rollback is:
+     * letting go of it can run a destructor, and the steps below clean up the
+     * header, the exception, the last error and the unclean-shutdown flag that
+     * can leave. Under zend_try for the same reason as well, and with the same
+     * gap: a bailout from that destructor lands here, but the collector's guard
+     * it raises stays up. */
+    if (!Z_ISUNDEF(EG(last_fatal_error_backtrace))) {
+        zend_try {
+            oxphp_fatal_backtrace_release();
+        } zend_end_try();
+    }
+#endif
+
     /* memory_limit is the one directive that restore cannot finish on its own.
      * Lowering the allocator's ceiling is refused outright while more than the
      * restored value is mapped, and at the deactivate stage that refusal is
