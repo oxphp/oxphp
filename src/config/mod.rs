@@ -1,3 +1,4 @@
+mod cpu;
 mod deny_file;
 mod env_bool;
 mod ignore_rules;
@@ -14,6 +15,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use crate::server::compression::{Coding, Levels};
+pub use cpu::{CpuCount, CpuSource};
 pub use deny_file::{DenyAction, DenyFile};
 #[allow(unused_imports)] // consumed by feature-gated plugins
 pub(crate) use env_bool::parse_bool_opt;
@@ -128,6 +130,10 @@ pub struct Config {
     pub worker_idle_timeout_seconds: u64,
     /// Effective number of Tokio runtime threads.
     pub tokio_workers: usize,
+    /// True if `tokio_workers` was auto-derived (env var unset, empty or not a number).
+    pub tokio_workers_auto: bool,
+    /// CPU count the unset `PHP_WORKERS` and `TOKIO_WORKERS` defaults are sized from.
+    pub cpu: CpuCount,
     /// Bounded channel capacity for PHP request queue.
     pub queue_capacity: usize,
     /// How long a request may wait for a free queue slot before it is shed
@@ -708,10 +714,8 @@ impl Config {
         let trace_context = parse_env_bool("TRACE_CONTEXT", false)?;
         let superglobals_enabled = parse_env_bool("SUPERGLOBALS_ENABLED", true)?;
 
-        let cpu = std::thread::available_parallelism()
-            .map(|n| n.get())
-            .unwrap_or(4);
-        let default_workers = (cpu / 2).max(1);
+        let cpu = cpu::detect();
+        let default_workers = (cpu.cpus / 2).max(1);
 
         let (worker_mode, worker_mode_auto) = match std::env::var("PHP_WORKERS") {
             Ok(val) if !val.is_empty() => {
@@ -727,10 +731,11 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(30);
 
-        let tokio_workers = std::env::var("TOKIO_WORKERS")
+        let tokio_workers_env = std::env::var("TOKIO_WORKERS")
             .ok()
-            .and_then(|v| v.parse::<usize>().ok())
-            .unwrap_or(default_workers);
+            .and_then(|v| v.parse::<usize>().ok());
+        let tokio_workers_auto = tokio_workers_env.is_none();
+        let tokio_workers = tokio_workers_env.unwrap_or(default_workers);
 
         let (queue_capacity, queue_wait_timeout_ms, queue_max_waiting, queue_max_waiting_bytes) =
             resolve_queue_env(worker_mode.worker_count(), max_connections)?;
@@ -774,6 +779,8 @@ impl Config {
             worker_mode_auto,
             worker_idle_timeout_seconds,
             tokio_workers,
+            tokio_workers_auto,
+            cpu,
             queue_capacity,
             queue_wait_timeout_ms,
             queue_max_waiting,
@@ -829,6 +836,12 @@ impl Config {
             worker_mode_auto: false,
             worker_idle_timeout_seconds: 30,
             tokio_workers: 1,
+            tokio_workers_auto: false,
+            cpu: CpuCount {
+                cpus: 1,
+                source: CpuSource::Host,
+                online: Some(1),
+            },
             queue_capacity: 128,
             queue_wait_timeout_ms: 1000,
             queue_max_waiting: 128,
@@ -860,6 +873,15 @@ impl Config {
             format!("{} (auto)", self.worker_mode)
         } else {
             self.worker_mode.to_string()
+        }
+    }
+
+    /// Human-readable Tokio thread count (e.g. "4", "4 (auto)").
+    pub fn tokio_workers_display(&self) -> String {
+        if self.tokio_workers_auto {
+            format!("{} (auto)", self.tokio_workers)
+        } else {
+            self.tokio_workers.to_string()
         }
     }
 
@@ -1267,6 +1289,30 @@ mod tests {
         });
         test_env::with_env(&[("MAX_CONNECTIONS", Some("500"))], || {
             assert_eq!(Config::from_env().unwrap().max_connections, 500);
+        });
+    }
+
+    #[test]
+    fn worker_counts_left_to_the_default_are_marked_auto() {
+        test_env::with_env(&[("PHP_WORKERS", None), ("TOKIO_WORKERS", None)], || {
+            let config = Config::from_env().unwrap();
+            let default = (config.cpu.cpus / 2).max(1);
+            assert_eq!(config.php_workers_display(), format!("{default} (auto)"));
+            assert_eq!(config.tokio_workers_display(), format!("{default} (auto)"));
+        });
+        test_env::with_env(
+            &[("PHP_WORKERS", Some("3")), ("TOKIO_WORKERS", Some("2"))],
+            || {
+                let config = Config::from_env().unwrap();
+                assert_eq!(config.php_workers_display(), "3");
+                assert_eq!(config.tokio_workers_display(), "2");
+            },
+        );
+        // An unparseable value falls back to the default, so it is marked as one.
+        test_env::with_env(&[("TOKIO_WORKERS", Some("two"))], || {
+            let config = Config::from_env().unwrap();
+            assert!(config.tokio_workers_auto);
+            assert_eq!(config.tokio_workers, (config.cpu.cpus / 2).max(1));
         });
     }
 

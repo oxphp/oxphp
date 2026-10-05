@@ -65,6 +65,19 @@ fn main() -> Result<(), types::BoxError> {
         }
     });
 
+    // A container held back only by a cgroup weight, or by a sandbox enforcing
+    // its plan from outside, sizes these defaults from every CPU visible to it.
+    // The pool's own startup line shows only the result; `cpu_source = "host"`
+    // is what tells that case apart.
+    tracing::info!(
+        cpus = config.cpu.cpus,
+        cpu_source = config.cpu.source.as_str(),
+        host_cpus = config.cpu.online,
+        php_workers = %config.php_workers_display(),
+        tokio_workers = %config.tokio_workers_display(),
+        "CPU count for default sizing"
+    );
+
     // ── Bind + privilege drop, while still single-threaded ──
     // Bind every listener now, before spawning anything (supervisor, executor
     // workers, Tokio runtime, async pool), so a privileged port (:80/:443) can
@@ -200,9 +213,7 @@ fn main() -> Result<(), types::BoxError> {
         Some(Arc::clone(&metrics)),
     );
 
-    let cpu = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(4);
+    let cpu = config.cpu.cpus;
     // Half the machine, because the other half belongs to the PHP worker pool:
     // its threads are not the runtime's, and the two sets compete for the same
     // cores. Widening the runtime to the full core count is a loss, not a gain,
