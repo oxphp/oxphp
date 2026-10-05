@@ -648,6 +648,7 @@ pub fn try_early_send() -> bool {
                 profile_tree: None, // early response — spans not finished yet
                 cancel_reason: unsafe { bindings::oxphp_bridge_get_cancel_reason() },
                 refused: false,
+                shed_reason: None,
             });
             true
         } else {
@@ -706,6 +707,7 @@ pub fn send_streaming_headers() -> bool {
                 profile_tree: None, // streaming — spans not finished yet
                 cancel_reason: 0,
                 refused: false,
+                shed_reason: None,
             });
             true
         } else {
@@ -3057,7 +3059,9 @@ fn continue_after_refusal(req: WorkerIncomingRequest) {
     });
     let _ = req
         .response_tx
-        .send(crate::types::ScriptResponse::overloaded());
+        .send(crate::types::ScriptResponse::overloaded(
+            crate::executor::admission::ShedReason::WaitTimeout,
+        ));
 }
 
 /// Answer a request the same way, when the client it was owed to has gone.
@@ -3262,6 +3266,7 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
                 profile_tree,
                 cancel_reason,
                 refused: false,
+                shed_reason: None,
             });
         }
     });

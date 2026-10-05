@@ -307,6 +307,45 @@ pub struct QueueSnapshot {
     pub wait_budget_ceiling_us: u64,
 }
 
+/// Refusals for overload, one figure per reason that answers 529.
+///
+/// Kept apart rather than summed because each reason points at a different
+/// knob, and a total cannot say which one an episode is about: a pool too
+/// slow for its budget, a waiting set full in places or in bytes, a queue
+/// full with no budget to wait at all.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OverloadRefusals {
+    pub queue_full: u64,
+    pub wait_timeout: u64,
+    pub waiting_full: u64,
+    pub waiting_bytes: u64,
+}
+
+impl OverloadRefusals {
+    pub fn total(&self) -> u64 {
+        self.queue_full + self.wait_timeout + self.waiting_full + self.waiting_bytes
+    }
+
+    /// What was refused since `earlier`, an older reading of the same counters.
+    pub fn since(&self, earlier: &Self) -> Self {
+        Self {
+            queue_full: self.queue_full.saturating_sub(earlier.queue_full),
+            wait_timeout: self.wait_timeout.saturating_sub(earlier.wait_timeout),
+            waiting_full: self.waiting_full.saturating_sub(earlier.waiting_full),
+            waiting_bytes: self.waiting_bytes.saturating_sub(earlier.waiting_bytes),
+        }
+    }
+}
+
+impl std::ops::AddAssign for OverloadRefusals {
+    fn add_assign(&mut self, other: Self) {
+        self.queue_full += other.queue_full;
+        self.wait_timeout += other.wait_timeout;
+        self.waiting_full += other.waiting_full;
+        self.waiting_bytes += other.waiting_bytes;
+    }
+}
+
 /// Reads [`QueueSnapshot`] off the live executor. Installed once by the
 /// executor that owns the queue; absent for executors that have none.
 type QueueProbe = Box<dyn Fn() -> QueueSnapshot + Send + Sync>;
@@ -833,18 +872,19 @@ impl Metrics {
     /// move during an ordinary restart, and a stall detector that counted them
     /// would call every teardown a stall.
     pub fn admission_refused_overload_total(&self) -> u64 {
-        crate::executor::admission::ShedReason::ALL
-            .iter()
-            .zip(self.admission_refusals.iter())
-            .filter(|(reason, _)| {
-                use crate::executor::admission::ShedReason as R;
-                matches!(
-                    reason,
-                    R::QueueFull | R::WaitTimeout | R::WaitingFull | R::WaitingBytes
-                )
-            })
-            .map(|(_, count)| count.load(Ordering::Relaxed))
-            .sum()
+        self.admission_refused_overload().total()
+    }
+
+    /// The same refusals, reason by reason.
+    pub fn admission_refused_overload(&self) -> OverloadRefusals {
+        use crate::executor::admission::ShedReason as R;
+        let count = |reason: R| self.admission_refusals[reason.index()].load(Ordering::Relaxed);
+        OverloadRefusals {
+            queue_full: count(R::QueueFull),
+            wait_timeout: count(R::WaitTimeout),
+            waiting_full: count(R::WaitingFull),
+            waiting_bytes: count(R::WaitingBytes),
+        }
     }
 
     /// Cumulative work the pool has got through, or `None` where the pool does
@@ -2102,6 +2142,18 @@ mod tests {
             }
         }
         assert_eq!(m.admission_refused_overload_total(), 1 + 2 + 4 + 8);
+        // And each reason is read from its own slot: the shedding log names
+        // them one by one, and a field fed from its neighbour's counter would
+        // send an operator to the wrong knob with the total still correct.
+        assert_eq!(
+            m.admission_refused_overload(),
+            OverloadRefusals {
+                queue_full: 1,
+                wait_timeout: 2,
+                waiting_full: 4,
+                waiting_bytes: 8,
+            }
+        );
     }
 
     #[test]

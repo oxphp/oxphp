@@ -202,7 +202,7 @@ fn shed_response(reason: ShedReason) -> ScriptResponse {
         ShedReason::QueueFull
         | ShedReason::WaitTimeout
         | ShedReason::WaitingFull
-        | ShedReason::WaitingBytes => ScriptResponse::overloaded(),
+        | ShedReason::WaitingBytes => ScriptResponse::overloaded(reason),
     }
 }
 
@@ -227,6 +227,7 @@ fn shutting_down_response() -> ScriptResponse {
         ],
         body: Bytes::from_static(b"Server is shutting down"),
         refused: true,
+        shed_reason: Some(ShedReason::ShuttingDown),
         ..Default::default()
     }
 }
@@ -241,6 +242,7 @@ fn pool_unavailable_response() -> ScriptResponse {
         )],
         body: Bytes::from_static(b"PHP worker pool unavailable"),
         refused: true,
+        shed_reason: Some(ShedReason::PoolUnavailable),
         ..Default::default()
     }
 }
@@ -790,8 +792,13 @@ mod tests {
         })
     }
 
-    fn assert_overloaded(resp: &ScriptResponse) {
+    fn assert_overloaded(resp: &ScriptResponse, reason: ShedReason) {
         assert_eq!(resp.status, 529, "backpressure should return 529");
+        assert_eq!(
+            resp.shed_reason,
+            Some(reason),
+            "and say which limit refused it"
+        );
         assert_eq!(resp.body, Bytes::from_static(b"Site is overloaded"));
         let retry_after = resp
             .headers
@@ -799,6 +806,15 @@ mod tests {
             .find(|(n, _)| n.as_str() == "retry-after");
         assert!(retry_after.is_some(), "should include Retry-After header");
         assert_eq!(retry_after.unwrap().1, "3");
+    }
+
+    /// Every refusal names its reason, teardown ones included: the status
+    /// alone cannot, since four of them share one.
+    #[test]
+    fn every_refusal_names_its_reason() {
+        for reason in ShedReason::ALL {
+            assert_eq!(shed_response(reason).shed_reason, Some(reason));
+        }
     }
 
     #[test]
@@ -810,7 +826,7 @@ mod tests {
         let executor = test_executor(0, 0);
 
         match executor.execute(make_request()) {
-            ExecuteResult::Rejected(resp) => assert_overloaded(&resp),
+            ExecuteResult::Rejected(resp) => assert_overloaded(&resp, ShedReason::QueueFull),
             _ => panic!("expected Rejected 529"),
         }
         // The shed must be countable — it is otherwise invisible server-side.
@@ -838,7 +854,7 @@ mod tests {
         let start = std::time::Instant::now();
         match executor.execute(make_request()) {
             ExecuteResult::Admitting(fut) => match fut.await {
-                Err(resp) => assert_overloaded(&resp),
+                Err(resp) => assert_overloaded(&resp, ShedReason::WaitTimeout),
                 Ok(_) => panic!("no slot ever freed — must shed"),
             },
             _ => panic!("expected Admitting once the queue is full"),
@@ -868,7 +884,7 @@ mod tests {
 
         match executor.execute(make_request()) {
             ExecuteResult::Admitting(fut) => match fut.await {
-                Err(resp) => assert_overloaded(&resp),
+                Err(resp) => assert_overloaded(&resp, ShedReason::WaitTimeout),
                 Ok(_) => panic!("no slot ever freed — must shed"),
             },
             _ => panic!("expected Admitting once the queue is full"),
@@ -947,7 +963,7 @@ mod tests {
         draining.cancel_state.set(CancelReason::Shutdown);
         match executor.execute(draining) {
             ExecuteResult::Admitting(fut) => match fut.await {
-                Err(resp) => assert_overloaded(&resp),
+                Err(resp) => assert_overloaded(&resp, ShedReason::WaitTimeout),
                 Ok(_) => panic!("no slot ever freed — must shed"),
             },
             _ => panic!("expected Admitting once the queue is full"),

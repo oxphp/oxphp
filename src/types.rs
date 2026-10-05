@@ -181,6 +181,14 @@ pub struct ScriptResponse {
     /// leave the histogram measuring failures alongside the queueing it is
     /// named for.
     pub refused: bool,
+    /// Why admission refused this request, on every answer counted in
+    /// `oxphp_admission_refused_total` and on nothing else — so a `529` the
+    /// application returned itself carries none.
+    ///
+    /// Travels with the answer because the answer is all that reaches the
+    /// dispatch side: overload is refused on the dispatch side and on worker
+    /// threads alike, and every one of those refusals answers the same `529`.
+    pub shed_reason: Option<crate::executor::admission::ShedReason>,
 }
 
 impl std::fmt::Debug for ScriptResponse {
@@ -209,6 +217,7 @@ impl Default for ScriptResponse {
             profile_tree: None,
             cancel_reason: 0,
             refused: false,
+            shed_reason: None,
         }
     }
 }
@@ -251,7 +260,10 @@ impl ScriptResponse {
     ///
     /// Lives here rather than beside the pool because the dispatch task
     /// answers with it too, and that task is compiled whether or not PHP is.
-    pub fn overloaded() -> Self {
+    ///
+    /// Takes the reason so that none of those paths can answer without
+    /// naming it.
+    pub fn overloaded(reason: crate::executor::admission::ShedReason) -> Self {
         Self {
             status: 529,
             headers: vec![
@@ -266,6 +278,7 @@ impl ScriptResponse {
             ],
             body: Bytes::from_static(b"Site is overloaded"),
             refused: true,
+            shed_reason: Some(reason),
             ..Default::default()
         }
     }

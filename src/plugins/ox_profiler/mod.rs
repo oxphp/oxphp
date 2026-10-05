@@ -967,6 +967,7 @@ mod tests {
                 Some(&tree),
                 None,
                 None,
+                None,
             );
 
             let meta = build_run_meta(&view, &tree, "req-1", ActivationSource::Header);
@@ -1003,6 +1004,7 @@ mod tests {
             metadata,
             &[],
             Some(&tree),
+            None,
             None,
             None,
         );

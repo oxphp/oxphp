@@ -604,6 +604,7 @@ impl PluginCompleteHandler for OtelCompleteHandler {
         let response_size = view.response_size;
         let queue_wait_us = view.queue_wait_us.map(|v| v as i64);
         let php_exec_us = view.php_exec_us.map(|v| v as i64);
+        let shed_reason = view.shed_reason;
 
         // Auto-capture the unhandled exception / fatal that failed a 5xx request,
         // so the root SERVER span carries it without any PHP-side integration.
@@ -684,6 +685,13 @@ impl PluginCompleteHandler for OtelCompleteHandler {
             // exception event's own `exception.type`. Use the status code string.
             if status_code >= 500 {
                 attributes.push(KeyValue::new("error.type", status_code.to_string()));
+            }
+            // Why admission refused the request, when it did. `error.type`
+            // stays the status code: the conventions allow either, and
+            // changing the value would move every grouping already built on
+            // it. A `529` the application returned itself carries no reason.
+            if let Some(reason) = shed_reason {
+                attributes.push(KeyValue::new("oxphp.shed_reason", reason.as_str()));
             }
 
             let status = if status_code >= 500 {
@@ -1038,6 +1046,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         handler.handle(&view); // should not panic
     }
@@ -1071,8 +1080,130 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         handler.handle(&view); // no start_us, no provider => should not panic
+    }
+
+    /// Keeps every span the provider ends, so a test can read what the handler
+    /// put on it. The SDK's own in-memory exporter sits behind a feature this
+    /// crate does not enable.
+    #[derive(Debug, Clone, Default)]
+    struct Captured(Arc<std::sync::Mutex<Vec<opentelemetry_sdk::trace::SpanData>>>);
+
+    impl opentelemetry_sdk::trace::SpanProcessor for Captured {
+        fn on_start(&self, _: &mut opentelemetry_sdk::trace::Span, _: &opentelemetry::Context) {}
+
+        fn on_end(&self, span: opentelemetry_sdk::trace::SpanData) {
+            self.0.lock().unwrap().push(span);
+        }
+
+        fn force_flush(&self) -> opentelemetry_sdk::error::OTelSdkResult {
+            Ok(())
+        }
+
+        fn shutdown_with_timeout(
+            &self,
+            _: std::time::Duration,
+        ) -> opentelemetry_sdk::error::OTelSdkResult {
+            Ok(())
+        }
+    }
+
+    /// The attributes of the one root span the handler builds for a request
+    /// that ended with `status`, refused by admission for `shed_reason`.
+    fn root_span_attributes(
+        status: u16,
+        shed_reason: Option<crate::executor::admission::ShedReason>,
+    ) -> Vec<KeyValue> {
+        let captured = Captured::default();
+        let provider = SdkTracerProvider::builder()
+            .with_span_processor(captured.clone())
+            .build();
+        let handler = OtelCompleteHandler {
+            provider: Arc::new(OnceLock::from(provider)),
+            server_address: String::new(),
+            message_max: 4096,
+            stacktrace_max: 8192,
+        };
+        let metadata = vec![
+            (
+                "trace_id".to_string(),
+                "4bf92f3577b34da6a3ce929d0e0e4736".to_string(),
+            ),
+            ("span_id".to_string(), "00f067aa0ba902b7".to_string()),
+            ("otel.start_us".to_string(), "1".to_string()),
+            ("trace_flags".to_string(), "01".to_string()),
+        ];
+        let view = PluginCompleteView::new(
+            "req1",
+            "GET",
+            "/slow",
+            status,
+            std::time::Duration::from_millis(10),
+            "127.0.0.1:8080".parse().unwrap(),
+            0,
+            0,
+            &metadata,
+            &[],
+            None,
+            None,
+            None,
+            shed_reason,
+        );
+        handler.handle(&view);
+
+        let mut spans = captured.0.lock().unwrap();
+        assert_eq!(spans.len(), 1, "one root span per request");
+        spans.pop().unwrap().attributes
+    }
+
+    fn attribute(attributes: &[KeyValue], key: &str) -> Option<String> {
+        attributes
+            .iter()
+            .find(|kv| kv.key.as_str() == key)
+            .map(|kv| kv.value.as_str().into_owned())
+    }
+
+    /// A refused request says why on its own span — the counter that knows is
+    /// on a listener an instance may not run — and `error.type` stays the
+    /// status code, so grouping already built on it does not move.
+    #[test]
+    fn a_refused_request_carries_its_reason_on_the_span() {
+        use crate::executor::admission::ShedReason;
+
+        let attributes = root_span_attributes(529, Some(ShedReason::WaitTimeout));
+        assert_eq!(
+            attribute(&attributes, "oxphp.shed_reason").as_deref(),
+            Some("wait_timeout"),
+            "{attributes:?}"
+        );
+        assert_eq!(
+            attribute(&attributes, "error.type").as_deref(),
+            Some("529"),
+            "{attributes:?}"
+        );
+
+        // Not only overload: a refusal during a drain names itself the same way.
+        let attributes = root_span_attributes(503, Some(ShedReason::ShuttingDown));
+        assert_eq!(
+            attribute(&attributes, "oxphp.shed_reason").as_deref(),
+            Some("shutting_down"),
+            "{attributes:?}"
+        );
+    }
+
+    /// A `529` the application answered with was never refused, and the span
+    /// must not say it was.
+    #[test]
+    fn an_application_529_carries_no_reason() {
+        let attributes = root_span_attributes(529, None);
+        assert_eq!(attribute(&attributes, "oxphp.shed_reason"), None);
+        assert_eq!(
+            attribute(&attributes, "error.type").as_deref(),
+            Some("529"),
+            "{attributes:?}"
+        );
     }
 
     #[test]

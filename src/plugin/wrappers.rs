@@ -147,6 +147,7 @@ impl<H: PluginCompleteHandler + 'static> EventHandler<RequestComplete>
                 event.profile_tree.as_ref(),
                 event.queue_wait_us,
                 event.php_exec_us,
+                event.shed_reason,
             );
             self.handler.handle(&view);
         }));
@@ -269,6 +270,7 @@ mod tests {
             profile_tree: None,
             queue_wait_us: None,
             php_exec_us: None,
+            shed_reason: None,
         };
         let result = EventHandler::<RequestComplete>::handle(&wrapper, &mut event);
         assert_eq!(result, Propagation::Continue);
@@ -375,8 +377,50 @@ mod tests {
             profile_tree: None,
             queue_wait_us: None,
             php_exec_us: None,
+            shed_reason: None,
         };
         EventHandler::<RequestComplete>::handle(&wrapper, &mut event);
         assert!(called.load(Ordering::SeqCst));
+    }
+
+    struct ShedReasonHandler {
+        seen: Arc<std::sync::Mutex<Option<crate::executor::admission::ShedReason>>>,
+    }
+    impl PluginCompleteHandler for ShedReasonHandler {
+        fn handle(&self, view: &PluginCompleteView) {
+            *self.seen.lock().unwrap() = view.shed_reason;
+        }
+    }
+
+    #[test]
+    fn test_complete_wrapper_passes_the_shed_reason() {
+        use crate::executor::admission::ShedReason;
+
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let wrapper = PluginCompleteWrapper {
+            handler: ShedReasonHandler {
+                seen: Arc::clone(&seen),
+            },
+            plugin_name: "test".into(),
+        };
+
+        let mut event = RequestComplete {
+            request_id: "req1".into(),
+            method: http::Method::GET,
+            path: "/test".into(),
+            status: 529,
+            duration: std::time::Duration::from_millis(5),
+            remote_addr: SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 8080),
+            request_body_size: 0,
+            response_size: 0,
+            metadata: Vec::new(),
+            php_errors: Vec::new(),
+            profile_tree: None,
+            queue_wait_us: None,
+            php_exec_us: None,
+            shed_reason: Some(ShedReason::WaitingBytes),
+        };
+        EventHandler::<RequestComplete>::handle(&wrapper, &mut event);
+        assert_eq!(*seen.lock().unwrap(), Some(ShedReason::WaitingBytes));
     }
 }
