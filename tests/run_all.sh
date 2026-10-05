@@ -211,6 +211,21 @@ if [[ " ${profiles[*]} " == *" fibers "* ]] && [ -z "$FILTER_SUITE" ] && [ -z "$
     done
 fi
 
+# What a worker script runs after its serve loop has been ended by a fatal error
+# runs where no request is left to report on it, so this one drives the
+# workertimer profile from outside too, after its suite has finished.
+if [[ " ${profiles[*]} " == *" workertimer "* ]] && [ -z "$FILTER_SUITE" ] && [ -z "$FILTER_TEST" ]; then
+    check=verify_worker_shutdown_is_timed_after_a_bailout
+    log_info "━━━ Standalone: ${check#verify_} ━━━"
+    emitted_before=$(wc -l < "$JSONL_FILE")
+    "${SCRIPT_DIR}/scripts/${check}.sh" --jsonl >> "$JSONL_FILE" || true
+    if [ "$(wc -l < "$JSONL_FILE")" -eq "$emitted_before" ]; then
+        log_error "${check}.sh produced no results — recording as a failure"
+        printf '{"test": "%s produced results", "group": "workertimer", "pass": false, "assertions": [], "error": "%s.sh emitted nothing", "meta": {}, "profile": "workertimer"}\n' \
+            "$check" "$check" >> "$JSONL_FILE"
+    fi
+fi
+
 END_TIME=$(date +%s)
 DURATION=$((END_TIME - START_TIME))
 

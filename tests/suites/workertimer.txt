@@ -1,0 +1,38 @@
+# profile: workertimer
+# description: max_execution_time per request on a worker that multiplexes requests — a request taken beside another gets its own limit, a limit ends only the request it belongs to, and a limit that runs out while its request is parked is a neutral deadline
+
+# A request taken by the event loop while another is in flight starts with its
+# own limit.
+workertimer/test_event_loop_request_has_its_own_deadline
+
+# A limit set by one request is not another's, and running out ends the one it
+# belongs to — here while that one is parked and the other is running.
+workertimer/test_deadline_ends_the_request_it_belongs_to
+
+# A request with no limit of its own — a stream that switched it off — is not
+# ended by the limit of the request beside it.
+workertimer/test_unbounded_request_is_not_ended_by_a_neighbours_limit
+
+# The edge every other worker profile already relies on: with nothing else in
+# flight, the limit a request starts with ends it.
+workertimer/test_blocking_request_is_ended_by_its_deadline >> ?action=trigger | GET | | 504
+workertimer/test_blocking_request_is_ended_by_its_deadline >> ?action=check
+
+# A request its limit has ended runs its shutdown functions under no limit,
+# including across a park.
+workertimer/test_timed_out_request_may_park_in_its_shutdown_function >> ?action=trigger | GET | | 504
+workertimer/test_timed_out_request_may_park_in_its_shutdown_function >> ?action=check
+
+# Late, because a breaker that counted these would retire the worker and every
+# line after it would run on a fresh one.
+workertimer/test_parked_deadline_is_neutral_for_the_breaker >> ?action=start
+workertimer/test_parked_deadline_is_neutral_for_the_breaker >> ?action=park | GET | | 504
+workertimer/test_parked_deadline_is_neutral_for_the_breaker >> ?action=park | GET | | 504
+workertimer/test_parked_deadline_is_neutral_for_the_breaker >> ?action=park | GET | | 504
+workertimer/test_parked_deadline_is_neutral_for_the_breaker >> ?action=check
+
+# After the breaker lines, because it recycles the worker on purpose: a request
+# whose limit is over while it is parked, cancelled there by the recycle, is
+# ended by the cancellation and runs all of its shutdown functions.
+workertimer/test_overdue_request_cancelled_by_a_recycle_runs_its_shutdown_functions >> ?action=trigger
+workertimer/test_overdue_request_cancelled_by_a_recycle_runs_its_shutdown_functions >> ?action=check

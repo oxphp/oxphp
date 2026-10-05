@@ -614,6 +614,16 @@ typedef struct _oxphp_request_fiber {
      * which tick happens to be running. */
     struct _oxphp_fiber_scheduler *owner_sched;
 
+    /* This request's max_execution_time. The engine's timer is one per thread,
+     * so each request keeps its own deadline here and the timer is armed with
+     * what is left of it only while the request runs, from the moment the
+     * scheduler switches into it until it parks or completes. Request fibers
+     * only; see oxphp_exec_timer_enter(). */
+    zend_long timeout_seconds;      /* the limit, as max_execution_time names it */
+    uint64_t exec_deadline_ns;      /* on the timer's clock; 0 = none, or already delivered */
+    bool exec_timeout_due;          /* ran out and the engine has not answered it yet:
+                                     * delivered the moment the request runs again */
+
     /* Linked list pointers for the scheduler's fiber list */
     struct _oxphp_request_fiber *next;
     struct _oxphp_request_fiber *prev;
@@ -647,6 +657,10 @@ typedef struct _oxphp_fiber_scheduler {
      * reads this directly so its breaker sees the requests that never suspend. */
     int consecutive_errors;
     uint64_t total_requests_done;
+
+    /* The max_execution_time every request starts with: what the worker's boot
+     * left it at. Taken by oxphp_scheduler_own_execution_timer(). */
+    zend_long timeout_baseline;
 
     /* Readiness backend for descriptor waits: one epoll instance per scheduler,
      * which is one per thread since both schedulers are thread-local, plus a
@@ -770,6 +784,18 @@ void oxphp_scheduler_start_fiber(oxphp_fiber_scheduler *sched, oxphp_request_fib
 /* Resume a fiber SUSPENDED mid-request, re-installing the state it saved. */
 void oxphp_scheduler_resume_fiber(oxphp_fiber_scheduler *sched, oxphp_request_fiber *fiber, zval *value);
 void oxphp_scheduler_finalize_fiber(oxphp_fiber_scheduler *sched, oxphp_request_fiber *fiber);
+
+/* Take the thread's max_execution_time timer for the requests the scheduler
+ * runs, each on a deadline of its own: what the boot left max_execution_time at
+ * becomes the limit every request starts with, and the timer the boot was
+ * running under is stopped. Called once, before the first request. */
+void oxphp_scheduler_own_execution_timer(oxphp_fiber_scheduler *sched);
+/* Give it back as the serve loop ends, armed for what follows as for a script. */
+void oxphp_scheduler_release_execution_timer(const oxphp_fiber_scheduler *sched);
+/* max_execution_time has been changed on a serving worker — set_time_limit(),
+ * ini_set(), ini_restore(). Inside a request, it is that request's limit and
+ * deadline that change; outside every request the timer is stopped again. */
+void oxphp_fiber_time_limit_changed(void);
 
 /* Start watching a fiber's descriptors, so the scheduler can resolve their
  * readiness while the fiber is suspended. Returns false when the set cannot be

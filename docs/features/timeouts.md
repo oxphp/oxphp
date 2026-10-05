@@ -13,7 +13,7 @@ Each request passes through these phases:
 
 1. **Connection accepted** — the header timeout starts. OxPHP waits for the client to send a complete set of HTTP headers.
 2. **Headers received** — the header timeout ends. The request is dispatched to a PHP worker.
-3. **PHP processes the request** — application code runs under PHP's own `max_execution_time`, armed as a per-thread POSIX timer. When the limit is reached, the request is cancelled and the unified `Request cancelled (timeout)` fatal fires. In worker mode the timer belongs to the worker thread rather than to each request, so a worker carrying several requests at once does not bound each of them — see [Worker Mode → Request Deadlines](worker-mode.md#request-deadlines).
+3. **PHP processes the request** — application code runs under PHP's own `max_execution_time`, armed as a per-thread POSIX timer. When the limit is reached, the request is cancelled and the unified `Request cancelled (timeout)` fatal fires. In worker mode each request keeps a limit of its own, including one the worker takes while it is carrying others, and a request suspended in a wait when its limit runs out is ended as it resumes — see [Worker Mode → Request Deadlines](worker-mode.md#request-deadlines).
 4. **Response sent** — on keep-alive connections, the cycle repeats from step 1.
 
 ```text

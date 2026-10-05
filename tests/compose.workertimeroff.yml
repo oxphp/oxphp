@@ -1,0 +1,35 @@
+# max_execution_time switched off on a worker, with max_input_time set: no request
+# may be ended by a time limit. One PHP worker, so the request under test runs on
+# the thread whose boot armed the timer.
+#
+# A profile of its own because both values come from php.ini
+# (workertimeroff.ini), and the workertimer profile needs a limit that is on.
+#
+# Standalone usage:
+#   docker compose -f compose.yml -f compose.workertimeroff.yml up
+services:
+  oxphp-workertimeroff:
+    build:
+      context: ..
+      dockerfile: docker/dev/Dockerfile
+      args:
+        PHP_VERSION:
+    ports:
+      - "80"
+    networks: [test-net]
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    environment:
+      INTERNAL_ADDR: 0.0.0.0:9090
+      WORKER_FILE: /var/www/html/worker/worker_entry.php
+      PHP_WORKERS: "1"
+    volumes:
+      - ../www:/var/www/html
+      - ./php:/var/www/html/public/tests
+      - ./fixtures/worker:/var/www/html/worker
+      - ./workertimeroff.ini:/usr/local/etc/php/conf.d/zz-workertimeroff.ini:ro
