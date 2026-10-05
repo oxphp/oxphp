@@ -237,6 +237,7 @@ pub async fn handle_request(
             profile_tree: None,
             queue_wait_us: None,
             php_exec_us: None,
+            shed_reason: None,
         };
         server.dispatcher.dispatch(&mut complete_event);
 
@@ -400,6 +401,7 @@ pub async fn handle_request(
         profile_tree: php_exec.profile_tree.take(),
         queue_wait_us: php_exec.queue_wait_us,
         php_exec_us: php_exec.php_exec_us,
+        shed_reason: php_exec.shed_reason,
     };
     server.dispatcher.dispatch(&mut complete_event);
 
@@ -469,6 +471,8 @@ struct PhpExecData {
     /// The cancel reason on the response the pool returned, for the abort
     /// guard to count. `None` on the paths that return no such response.
     cancel_reason: Option<u8>,
+    /// Why admission refused the request, when the answer says it did.
+    shed_reason: Option<crate::executor::admission::ShedReason>,
 }
 
 /// Wait for the pool's answer, and no longer than the request is allowed to
@@ -566,7 +570,9 @@ async fn await_queued(
     if wait_at_ceiling && crate::metrics::pool_starts() == starts_on_arrival {
         metrics.admission_wait_wasted();
     }
-    Ok(crate::types::ScriptResponse::overloaded())
+    Ok(crate::types::ScriptResponse::overloaded(
+        crate::executor::admission::ShedReason::WaitTimeout,
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -906,6 +912,7 @@ async fn dispatch_request(
                 php_errors: std::mem::take(&mut script_response.errors),
                 profile_tree: script_response.profile_tree.take(),
                 cancel_reason: Some(script_response.cancel_reason),
+                shed_reason: script_response.shed_reason,
                 ..exec_data
             };
 
@@ -1084,6 +1091,10 @@ mod tests {
         .expect("the deadline answered");
 
         assert_eq!(resp.status, 529);
+        assert_eq!(
+            resp.shed_reason,
+            Some(crate::executor::admission::ShedReason::WaitTimeout)
+        );
         assert!(rejected);
         let out = metrics.to_prometheus();
         assert!(out.contains("oxphp_admission_refused_total{reason=\"wait_timeout\"} 1"));

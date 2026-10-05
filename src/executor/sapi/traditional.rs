@@ -105,7 +105,9 @@ fn refuse_expired(wr: WorkerRequest, metrics: &crate::metrics::Metrics) {
     metrics.request_admission_refused(crate::executor::admission::ShedReason::WaitTimeout);
     let _ = wr
         .response_tx
-        .send(crate::types::ScriptResponse::overloaded());
+        .send(crate::types::ScriptResponse::overloaded(
+            crate::executor::admission::ShedReason::WaitTimeout,
+        ));
 }
 
 /// Answer a request whose client left while it waited, without running it.
@@ -704,5 +706,6 @@ fn execute_request(
         profile_tree,
         cancel_reason: request.cancel_state.get() as u8,
         refused: false,
+        shed_reason: None,
     })
 }

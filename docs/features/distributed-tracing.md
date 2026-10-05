@@ -161,6 +161,7 @@ Exported spans include standard HTTP semantic convention attributes:
 | `oxphp.request_id` | OxPHP request ID |
 | `http.request.body.size` | Request body size in bytes (if non-zero) |
 | `http.response.body.size` | Response body size in bytes (if non-zero) |
+| `oxphp.shed_reason` | Why admission refused the request, on a request it refused: `queue_full`, `wait_timeout`, `waiting_full` or `waiting_bytes` on a `529`, `shutting_down` on a `503`, `pool_unavailable` on a `500` — the values of the `reason` label on `oxphp_admission_refused_total`. Absent otherwise, including on a `529` the application returned itself |
 
 5xx responses are marked as error spans.
 

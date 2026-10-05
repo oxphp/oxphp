@@ -41,6 +41,10 @@ const SCAN_PERIOD: Duration = Duration::from_millis(5);
 /// How long a line is waited for before the test gives up on it.
 const PATIENCE: Duration = Duration::from_secs(20);
 
+const STARTED: &str = "has started shedding requests";
+const PERSISTING: &str = "is still shedding requests";
+const STOPPED: &str = "has stopped shedding requests";
+
 #[derive(Clone, Default)]
 struct Captured(Arc<Mutex<Vec<u8>>>);
 
@@ -64,6 +68,17 @@ impl Captured {
             std::thread::sleep(Duration::from_millis(10));
         }
     }
+}
+
+/// The one line of `log` that carries `message`.
+///
+/// Fields are read off their own line: the three lines share names like
+/// `refused`, and reading the last one written anywhere would let a field
+/// missing from this line be answered by another.
+fn line<'a>(log: &'a str, message: &str) -> &'a str {
+    log.lines()
+        .find(|line| line.contains(message))
+        .unwrap_or_else(|| panic!("no line {message:?} in the log: {log}"))
 }
 
 /// The numeric value logged under `name`, from the last line that carries it.
@@ -140,6 +155,26 @@ fn a_shedding_episode_starts_and_ends_in_the_log() {
     tracing::subscriber::set_global_default(subscriber).expect("first subscriber in this process");
 
     let metrics = shedding_metrics();
+
+    // Every reason a different number, and none of them a sum of the others,
+    // so a field that read another reason's slot — or a sum that took in a
+    // teardown reason — prints a figure that cannot be the right one.
+    //
+    // Counted before the supervisor exists, so all of them land in its first
+    // scan: the opening line is the one place their split is not a race.
+    for (reason, times) in [
+        (ShedReason::QueueFull, 3),
+        (ShedReason::WaitingFull, 5),
+        (ShedReason::WaitingBytes, 7),
+        // Neither is overload, and neither may reach any figure below.
+        (ShedReason::ShuttingDown, 11),
+        (ShedReason::PoolUnavailable, 13),
+    ] {
+        for _ in 0..times {
+            metrics.request_admission_refused(reason);
+        }
+    }
+
     let shutdown = Arc::new(AtomicBool::new(false));
     let supervisor = Supervisor::with_threshold(Arc::clone(&metrics), 60_000_000, SCAN_PERIOD);
     let handle = supervisor.spawn(Arc::clone(&shutdown));
@@ -156,7 +191,8 @@ fn a_shedding_episode_starts_and_ends_in_the_log() {
         metrics.request_admission_refused(ShedReason::WaitTimeout);
     }
 
-    let start = captured.wait_for("has started shedding requests");
+    let start = captured.wait_for(STARTED);
+    let opening = line(&start, STARTED);
     // `refused` is one scan's worth, and the scan boundary falls where it
     // falls: a supervisor that wakes in the middle of the loop above opens the
     // episode on the part it can see and folds the rest into the next scan.
@@ -164,10 +200,21 @@ fn a_shedding_episode_starts_and_ends_in_the_log() {
     // which it does not always — what the line has to carry is a count of this
     // scan's refusals, and the episode's own total is asserted on the closing
     // line, where it is not a race.
-    let refused = field(&start, "refused");
+    let refused = field(opening, "refused");
     assert!(
-        (1..=4_812).contains(&refused),
-        "the opening line has to say how much is being shed: {start}"
+        (15..=15 + 4_812).contains(&refused),
+        "the opening line has to say how much is being shed: {opening}"
+    );
+    // And why. The three counted before the first scan are exact here; the
+    // wait timeouts are whatever part of the loop that scan saw, which is the
+    // rest of `refused` and nothing else.
+    assert_eq!(field(opening, "refused_queue_full"), 3, "{opening}");
+    assert_eq!(field(opening, "refused_waiting_full"), 5, "{opening}");
+    assert_eq!(field(opening, "refused_waiting_bytes"), 7, "{opening}");
+    assert_eq!(
+        field(opening, "refused_wait_timeout"),
+        refused - 15,
+        "the reasons on the opening line have to add up to its `refused`: {opening}"
     );
     assert!(
         start.contains("\"queue_depth\":896")
@@ -182,23 +229,95 @@ fn a_shedding_episode_starts_and_ends_in_the_log() {
          cases the pair separates cannot be told apart: {start}"
     );
 
+    // The repeat is the line a production log keeps — the closing one is
+    // written below the level the published production configurations log
+    // at — so it has to say why on its own. It is due a minute of scans after
+    // the opening line and is written only on a scan that refuses, so keep
+    // refusing, a few scans apart: far inside the quiet minute that would end
+    // the episode instead.
+    let mut trickled = 0;
+    let deadline = Instant::now() + PATIENCE;
+    let repeat = loop {
+        metrics.request_admission_refused(ShedReason::WaitingBytes);
+        trickled += 1;
+        let log = captured.text();
+        if log.contains(PERSISTING) {
+            break log;
+        }
+        assert!(
+            !log.contains(STOPPED),
+            "the episode closed between two refusals {SCAN_PERIOD:?} × 5 apart: {log}"
+        );
+        assert!(
+            Instant::now() < deadline,
+            "waited {PATIENCE:?} for {PERSISTING:?} and the log holds: {log}"
+        );
+        std::thread::sleep(SCAN_PERIOD * 5);
+    };
+    let repeating = line(&repeat, PERSISTING);
+    // The loop above has long finished, so everything but the trickle is in.
+    // The trickle itself is counted up to whichever scan wrote the line.
+    assert_eq!(
+        field(repeating, "episode_refused_queue_full"),
+        3,
+        "{repeating}"
+    );
+    assert_eq!(
+        field(repeating, "episode_refused_wait_timeout"),
+        4_812,
+        "{repeating}"
+    );
+    assert_eq!(
+        field(repeating, "episode_refused_waiting_full"),
+        5,
+        "{repeating}"
+    );
+    let waiting_bytes = field(repeating, "episode_refused_waiting_bytes");
+    assert!(
+        (8..=7 + trickled).contains(&waiting_bytes),
+        "the trickle is waiting_bytes and nothing else: {repeating}"
+    );
+    assert_eq!(
+        field(repeating, "episode_refused"),
+        3 + 4_812 + 5 + waiting_bytes,
+        "the reasons on the repeat have to add up to its `episode_refused`: {repeating}"
+    );
+
     // Nothing more is refused, so the episode runs out its quiet minute — 60
     // scans — and closes itself.
-    let stop = captured.wait_for("has stopped shedding requests");
-    assert!(
-        stop.contains("\"episode_refused\":4812"),
-        "the closing line has to carry what the episode cost: {stop}"
+    let stop = captured.wait_for(STOPPED);
+    let closing = line(&stop, STOPPED);
+    assert_eq!(
+        field(closing, "episode_refused"),
+        3 + 4_812 + 5 + 7 + trickled,
+        "the closing line has to carry what the episode cost: {closing}"
+    );
+    assert_eq!(field(closing, "episode_refused_queue_full"), 3, "{closing}");
+    assert_eq!(
+        field(closing, "episode_refused_wait_timeout"),
+        4_812,
+        "{closing}"
+    );
+    assert_eq!(
+        field(closing, "episode_refused_waiting_full"),
+        5,
+        "{closing}"
+    );
+    assert_eq!(
+        field(closing, "episode_refused_waiting_bytes"),
+        7 + trickled,
+        "{closing}"
     );
 
     // One line each way, not one per refused request: at these rates a line
     // per refusal is itself an outage.
     assert_eq!(
-        stop.matches("has started shedding requests").count(),
+        stop.matches(STARTED).count(),
         1,
         "one opening line for the episode: {stop}"
     );
     assert_eq!(
-        stop.matches("has stopped shedding requests").count(),
+        stop.matches(STOPPED).count(),
         1,
         "one closing line for the episode: {stop}"
     );

@@ -36,6 +36,7 @@ impl ScriptExecutor for StubExecutor {
             profile_tree: None,
             cancel_reason: 0,
             refused: false,
+            shed_reason: None,
         })
     }
 

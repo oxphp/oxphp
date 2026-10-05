@@ -233,6 +233,9 @@ pub struct PluginCompleteView<'a> {
     pub queue_wait_us: Option<u64>,
     /// PHP script execution time (microseconds).
     pub php_exec_us: Option<u64>,
+    /// Why admission refused the request — `None` unless it did. The same
+    /// reasons `oxphp_admission_refused_total` is labelled with.
+    pub shed_reason: Option<crate::executor::admission::ShedReason>,
 }
 
 impl<'a> PluginCompleteView<'a> {
@@ -251,6 +254,7 @@ impl<'a> PluginCompleteView<'a> {
         profile_tree: Option<&'a std::sync::Arc<crate::profiling::SpanTree>>,
         queue_wait_us: Option<u64>,
         php_exec_us: Option<u64>,
+        shed_reason: Option<crate::executor::admission::ShedReason>,
     ) -> Self {
         Self {
             request_id,
@@ -266,6 +270,7 @@ impl<'a> PluginCompleteView<'a> {
             profile_tree,
             queue_wait_us,
             php_exec_us,
+            shed_reason,
         }
     }
 

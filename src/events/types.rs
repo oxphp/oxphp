@@ -134,6 +134,9 @@ pub struct RequestComplete {
     pub queue_wait_us: Option<u64>,
     /// PHP script execution time (microseconds).
     pub php_exec_us: Option<u64>,
+    /// Why admission refused the request, when it did. `None` for every
+    /// response the request was not refused with.
+    pub shed_reason: Option<crate::executor::admission::ShedReason>,
 }
 
 impl Event for RequestComplete {

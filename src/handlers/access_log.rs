@@ -95,6 +95,7 @@ mod tests {
             profile_tree: None,
             queue_wait_us: None,
             php_exec_us: None,
+            shed_reason: None,
         }
     }
 
