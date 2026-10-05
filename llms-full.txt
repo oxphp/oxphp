@@ -2686,7 +2686,7 @@ When W3C Trace Context is active, `trace_id` and `span_id` are included alongsid
 | `path` | string | Request URI path |
 | `status` | number | HTTP response status code |
 | `duration_us` | number | Total request handling time in microseconds |
-| `remote_ip` | string | Client IP address (no port). When `TRUSTED_PROXIES` is configured, shows the real client IP extracted from forwarding headers, not the proxy's IP |
+| `remote_ip` | string | Client IP address (no port). When `TRUSTED_PROXIES` is configured, shows the real client IP extracted from forwarding headers; the proxy's IP only when they yield no address (see [Trusted Proxies](../security/trusted-proxies.md#client-ip-extraction)) |
 | `trace_id` | string | W3C trace ID (present only when `TRACE_CONTEXT=true`) |
 | `span_id` | string | W3C span ID (present only when `TRACE_CONTEXT=true`) |
 
@@ -11901,6 +11901,8 @@ Walk right-to-left:
 
 This prevents spoofing via prepended values — an attacker can add fake IPs to the left, but the rightmost untrusted IP was set by the last trusted proxy in the chain.
 
+An entry may carry a port — `203.0.113.50:4711` or `[2001:db8::1]:4711`, the form some load balancers, Azure Application Gateway among them, write into `X-Forwarded-For` — and when the client address comes from such an entry, its port becomes `REMOTE_PORT`. The walk stops at an entry with no address or one that does not parse as an IP address (an empty element, `unknown`, an obfuscated RFC 7239 identifier), and at a header line OxPHP cannot read as text (one with a non-ASCII byte, for example). Nothing left of that point is used, since that part of the chain may be only what the client sent. The client address is the rightmost untrusted entry right of it; if every entry there is trusted, the leftmost of them; if there is none, the address is not rewritten and stays the connecting peer, port included.
+
 With the `cloudflare` keyword, a request whose forwarding chain shows it arrived from a Cloudflare edge takes its client address from the `CF-Connecting-IP` header instead — see [Behind a CDN and a Platform Load Balancer](#behind-a-cdn-and-a-platform-load-balancer).
 
 ## What Changes
@@ -11909,8 +11911,8 @@ When `TRUSTED_PROXIES` is configured and the connecting IP is trusted:
 
 | Component | Without trusted proxies | With trusted proxies |
 |-----------|------------------------|---------------------|
-| `$_SERVER['REMOTE_ADDR']` | Proxy IP | Real client IP |
-| `$_SERVER['REMOTE_PORT']` | Proxy source port | Client port from `Forwarded: for=ip:port`, otherwise `0` |
+| `$_SERVER['REMOTE_ADDR']` | Proxy IP | Real client IP; the proxy IP when the forwarding headers yield no address |
+| `$_SERVER['REMOTE_PORT']` | Proxy source port | Client port from an `ip:port` entry in `Forwarded` or `X-Forwarded-For`, otherwise `0`; the peer's port when the address is not rewritten |
 | `$_SERVER['HTTPS']` | Based on OxPHP's TLS config | From `Forwarded: proto=` or `X-Forwarded-Proto` |
 | `$_SERVER['REQUEST_SCHEME']` | `http` or `https` from TLS | From forwarded protocol |
 | `$_SERVER['SERVER_NAME']` | From `Host` header | From `Forwarded: host=` or `X-Forwarded-Host` |
@@ -11918,7 +11920,7 @@ When `TRUSTED_PROXIES` is configured and the connecting IP is trusted:
 | Rate limiting | Per-proxy IP | Per-client IP |
 | Access log | Proxy IP | Real client IP |
 
-`REMOTE_PORT` is `0` behind a proxy unless an RFC 7239 `Forwarded: for=ip:port` node carries the client's source port — `X-Forwarded-For` has no port field, so the rewritten value cannot be reconstructed and is zeroed instead of guessed. An address taken from `CF-Connecting-IP` has no port either, so `REMOTE_PORT` is `0` then too.
+When the client address is rewritten, `REMOTE_PORT` is the client's source port if the entry the address comes from carries one — an RFC 7239 `Forwarded: for="ip:port"` node, or an `ip:port` entry in `X-Forwarded-For` — and `0` otherwise: the port cannot be reconstructed, so it is zeroed instead of guessed. An address taken from `CF-Connecting-IP` has no port either, so `REMOTE_PORT` is `0` then too. When the headers yield no client address and the address is not rewritten, as described under [Client IP Extraction](#client-ip-extraction), `REMOTE_PORT` stays the connecting peer's port.
 
 ## `private` Networks
 
@@ -11965,7 +11967,7 @@ The hop where the walk stops is the connecting peer or an address one of your ow
 
 That includes `Forwarded`. OxPHP reads it in preference to `X-Forwarded-For`, and Cloudflare passes it on as the visitor sent it, since it is not one of the headers Cloudflare sets. A load balancer that maintains only `X-Forwarded-For` therefore has to remove `Forwarded` from the request; if it passes the header through, any client, through Cloudflare or not, chooses the address OxPHP sees, with or without the `cloudflare` keyword.
 
-`CF-Connecting-IP` is not read either when the walk reaches a hop whose address is missing or does not parse. A `Forwarded` or `X-Forwarded-For` line OxPHP cannot read as text (one with a non-ASCII byte, for example) is left out of the chain, for the walk and for the rightmost-non-trusted rule alike. A record one of your proxies puts on a line of its own survives this; a record it writes onto the same line as text the client sent is lost with that line, and what is left of the chain may then be only what the client sent.
+`CF-Connecting-IP` is not read either when the walk stops before it reaches a Cloudflare address — at an entry with no address or one that does not parse, or at a line OxPHP cannot read as text, as described under [Client IP Extraction](#client-ip-extraction). A record one of your proxies puts on a line of its own is not affected by an unreadable line the client sent before it. A record a proxy writes onto the same line as text the client sent is lost with that line; the walk then stops there, and the address comes from what your proxies recorded right of that line, or stays the connecting peer — not from anything the client sent.
 
 Cloudflare appends the address of whoever connected to it to `X-Forwarded-For`, so for an ordinary visitor both headers name the same client. They can differ for requests that Cloudflare Workers send to your origin, which also leave from Cloudflare's addresses, whichever account owns the Worker. Cloudflare's [HTTP headers reference](https://developers.cloudflare.com/fundamentals/reference/http-headers/) does not say what such a request may carry in `X-Forwarded-For`. For `CF-Connecting-IP` it does: a Worker can choose the value only for a request to a hostname in its own zone; for a hostname in another Cloudflare zone the header is the fixed address `2a06:98c0:3600::103`, and for a hostname not on Cloudflare it is the client's address, which the Worker cannot alter. Trusting the Cloudflare ranges still means trusting everything that leaves Cloudflare's network, not only your own zone; if the client address feeds a security decision, make the origin accept traffic from your zone only, by whatever means your platform offers.
 
@@ -14287,8 +14289,8 @@ When `TRUSTED_PROXIES` is configured and the request peer is in the trusted set,
 
 | Variable | Value when peer is trusted | Value otherwise |
 |----------|----------------------------|------------------|
-| `REMOTE_ADDR` | Rightmost untrusted address from `X-Forwarded-For` / `Forwarded`; `CF-Connecting-IP` for a request whose forwarding chain shows it arrived from a Cloudflare edge when `TRUSTED_PROXIES` names `cloudflare` | Direct peer IP |
-| `REMOTE_PORT` | Client source port from `Forwarded: for=ip:port`, otherwise `0` | Direct peer port |
+| `REMOTE_ADDR` | Rightmost untrusted address from `X-Forwarded-For` / `Forwarded`; `CF-Connecting-IP` for a request whose forwarding chain shows it arrived from a Cloudflare edge when `TRUSTED_PROXIES` names `cloudflare`; the direct peer when the forwarding headers yield no address | Direct peer IP |
+| `REMOTE_PORT` | Client source port from an `ip:port` entry in `Forwarded` or `X-Forwarded-For`, otherwise `0`; the peer's port when the address is not rewritten | Direct peer port |
 | `HTTPS` | `"on"` when `X-Forwarded-Proto: https` | Set only when the peer connection is TLS |
 | `REQUEST_SCHEME` | `"https"` / `"http"` from `X-Forwarded-Proto` | Based on actual TLS state |
 | `SERVER_NAME` | Host portion of `X-Forwarded-Host` | Host portion of the `Host` header |
@@ -14296,7 +14298,7 @@ When `TRUSTED_PROXIES` is configured and the request peer is in the trusted set,
 
 The raw `HTTP_X_FORWARDED_FOR`, `HTTP_X_FORWARDED_PROTO`, `HTTP_X_FORWARDED_HOST`, `HTTP_X_FORWARDED_PORT`, and `HTTP_FORWARDED` keys remain in `$_SERVER` unchanged — both the rewritten values and the original headers are available.
 
-`REMOTE_PORT` is `"0"` behind a trusted proxy unless the proxy sends RFC 7239 `Forwarded: for=ip:port` — neither `X-Forwarded-For` nor the rightmost-non-trusted selection carry a client source port, so the synthetic value is zeroed rather than guessed. An address taken from `CF-Connecting-IP` carries no port either, so `REMOTE_PORT` is `"0"` then even when `Forwarded` has one.
+When the client address is rewritten, `REMOTE_PORT` is the client's source port if the entry the address comes from carries one — an RFC 7239 `Forwarded: for="ip:port"` node, or an `ip:port` entry in `X-Forwarded-For` — and `"0"` otherwise: the value is zeroed rather than guessed. An address taken from `CF-Connecting-IP` carries no port either, so `REMOTE_PORT` is `"0"` then even when `Forwarded` has one. When the forwarding headers yield no client address (see [Trusted Proxies](../security/trusted-proxies.md#client-ip-extraction)), neither `REMOTE_ADDR` nor `REMOTE_PORT` is rewritten: both stay those of the direct peer.
 
 When `TRUSTED_PROXIES` is **not** set, no rewriting occurs and `REMOTE_ADDR` is always the direct peer — typically your load balancer, not the end client. Parsing `X-Forwarded-For` manually is error-prone (leftmost vs rightmost, no CIDR trust check); prefer configuring `TRUSTED_PROXIES`. See [Trusted Proxies](../security/trusted-proxies.md) for the trust algorithm and configuration syntax.
 
