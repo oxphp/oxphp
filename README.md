@@ -194,7 +194,7 @@ Full guide: [Profiling](docs/features/profiling.md).
 - **Custom error pages** — pre-loaded at startup, zero I/O on the hot path — see [Error pages](docs/features/error-pages.md)
 - **Graceful shutdown** — on SIGTERM/SIGINT in-flight requests get up to `DRAIN_TIMEOUT_SECONDS` to finish, then are cancelled — see [Graceful shutdown](docs/operations/graceful-shutdown.md)
 - **Path traversal protection** — symlink escape detection — see [Symlink allow paths](docs/security/symlink-allow-paths.md)
-- **Trusted proxy support** — real client IP extraction from `Forwarded` (RFC 7239) and `X-Forwarded-*` headers with CIDR-based trust — see [Trusted proxies](docs/security/trusted-proxies.md)
+- **Trusted proxy support** — real client IP extraction from `Forwarded` (RFC 7239), `X-Forwarded-*` and, behind Cloudflare, `CF-Connecting-IP` headers with CIDR-based trust — see [Trusted proxies](docs/security/trusted-proxies.md)
 - **Dot-path blocking** — returns 404 for hidden files (`.env`, `.git/`) with `.well-known` exception (RFC 8615) — see [Dot-path blocking](docs/security/dot-path-blocking.md)
 - **Privilege drop** — the container starts as root so it can bind port 80, and `oxphp` drops to `www-data` (UID 82) before handling any request; `--user` overrides the target
 

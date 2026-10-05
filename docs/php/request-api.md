@@ -381,7 +381,7 @@ foreach ($photos as $photo) {
 $request->ip(): string
 ```
 
-Returns the client IP address. When `TRUSTED_PROXIES` is configured and the request peer is in the trusted set, this is the rightmost untrusted address from `X-Forwarded-For` or RFC 7239 `Forwarded`. Otherwise it is the direct peer IP — typically your load balancer, not the end client.
+Returns the client IP address. When `TRUSTED_PROXIES` is configured and the request peer is in the trusted set, this is the rightmost untrusted address from `X-Forwarded-For` or RFC 7239 `Forwarded` — or, when `TRUSTED_PROXIES` names `cloudflare` and the forwarding chain shows the request arrived from a Cloudflare edge, the `CF-Connecting-IP` address. Otherwise it is the direct peer IP — typically your load balancer, not the end client.
 
 The raw `X-Forwarded-For` header remains available via `$request->header('X-Forwarded-For')` for advanced cases, but parsing it manually is rarely correct (leftmost vs rightmost, no CIDR trust check). Configure `TRUSTED_PROXIES` instead — see [Trusted Proxies](../security/trusted-proxies.md).
 

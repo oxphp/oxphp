@@ -7,37 +7,56 @@ use ipnet::{IpNet, Ipv4Net, Ipv6Net};
 /// from connections whose peer IP falls within a trusted CIDR range.
 #[derive(Debug, Clone)]
 pub struct TrustedProxyConfig {
+    /// The operator's own proxies: `private` and the listed CIDRs.
     networks: Vec<IpNet>,
+    /// Cloudflare's edge ranges when the spec names `cloudflare`, else empty.
+    cloudflare: Vec<IpNet>,
 }
 
 impl TrustedProxyConfig {
     /// Parse `TRUSTED_PROXIES` env var.
-    /// Accepts comma-separated CIDRs or the special value `"private"`.
+    /// Accepts a comma-separated mix of CIDRs, bare IPs and the keywords
+    /// `private` and `cloudflare`.
     /// Returns `None` if the variable is unset or empty.
-    /// Returns `Err` if the value contains unparseable CIDRs.
+    /// Returns `Err` if the value contains unparseable entries.
     pub fn from_env() -> Result<Option<Self>, String> {
         let val = match std::env::var("TRUSTED_PROXIES") {
             Ok(v) if !v.is_empty() => v,
             _ => return Ok(None),
         };
-        let networks = Self::parse(&val)?;
-        Ok(Some(Self { networks }))
+        Self::parse(&val).map(Some)
     }
 
     /// Construct from a spec string directly (for testing and programmatic use).
     pub fn from_spec(spec: &str) -> Self {
-        Self {
-            networks: Self::parse(spec).expect("invalid trusted proxy spec"),
-        }
+        Self::parse(spec).expect("invalid trusted proxy spec")
     }
 
-    /// Parse a trusted proxies spec string into a list of networks.
-    fn parse(val: &str) -> Result<Vec<IpNet>, String> {
-        let trimmed = val.trim();
-        if trimmed.eq_ignore_ascii_case("private") {
-            return Ok(Self::private_ranges());
+    /// Parse a trusted proxies spec string.
+    fn parse(val: &str) -> Result<Self, String> {
+        let mut networks = Vec::new();
+        let mut cloudflare = Vec::new();
+        for entry in val.split(',').map(str::trim).filter(|e| !e.is_empty()) {
+            if entry.eq_ignore_ascii_case("private") {
+                networks.extend(Self::private_ranges());
+            } else if entry.eq_ignore_ascii_case("cloudflare") {
+                cloudflare = Self::cloudflare_ranges();
+            } else {
+                let net = parse_cidr(entry, "TRUSTED_PROXIES").map_err(|e| {
+                    format!(
+                        "{e}; expected a CIDR, an IP address, or a keyword: private, cloudflare"
+                    )
+                })?;
+                networks.push(net);
+            }
         }
-        parse_cidr_list(trimmed, "TRUSTED_PROXIES")
+        if networks.is_empty() && cloudflare.is_empty() {
+            return Err("TRUSTED_PROXIES is set but contains no valid CIDRs".into());
+        }
+        Ok(Self {
+            networks,
+            cloudflare,
+        })
     }
 
     /// RFC-1918 + loopback + link-local for both IPv4 and IPv6.
@@ -57,9 +76,68 @@ impl TrustedProxyConfig {
         .collect()
     }
 
+    /// Cloudflare's edge ranges as published at https://www.cloudflare.com/ips/
+    /// on 2026-10-05. The list is compiled in and changes only with a release.
+    fn cloudflare_ranges() -> Vec<IpNet> {
+        [
+            "173.245.48.0/20",
+            "103.21.244.0/22",
+            "103.22.200.0/22",
+            "103.31.4.0/22",
+            "141.101.64.0/18",
+            "108.162.192.0/18",
+            "190.93.240.0/20",
+            "188.114.96.0/20",
+            "197.234.240.0/22",
+            "198.41.128.0/17",
+            "162.158.0.0/15",
+            "104.16.0.0/13",
+            "104.24.0.0/14",
+            "172.64.0.0/13",
+            "131.0.72.0/22",
+            "2400:cb00::/32",
+            "2606:4700::/32",
+            "2803:f800::/32",
+            "2405:b500::/32",
+            "2405:8100::/32",
+            "2a06:98c0::/29",
+            "2c0f:f248::/32",
+        ]
+        .iter()
+        .map(|s| s.parse().unwrap())
+        .collect()
+    }
+
     /// Check whether an IP address belongs to any trusted network.
     pub fn is_trusted(&self, ip: IpAddr) -> bool {
-        self.networks.iter().any(|net| net.contains(&ip))
+        self.networks.iter().any(|net| net.contains(&ip)) || self.is_cloudflare(ip)
+    }
+
+    /// Whether `ip` is a Cloudflare edge address. Always `false` unless the
+    /// spec names `cloudflare`.
+    pub fn is_cloudflare(&self, ip: IpAddr) -> bool {
+        self.cloudflare.iter().any(|net| net.contains(&ip))
+    }
+
+    /// Whether `ip` is one of the operator's own proxies: trusted, and not a
+    /// Cloudflare edge.
+    pub fn is_own_proxy(&self, ip: IpAddr) -> bool {
+        !self.is_cloudflare(ip) && self.networks.iter().any(|net| net.contains(&ip))
+    }
+}
+
+/// Parse one CIDR or bare IP; a bare IP becomes a host route (`/32` or
+/// `/128`). `var_name` appears only in the error message.
+fn parse_cidr(cidr: &str, var_name: &str) -> Result<IpNet, String> {
+    // Try CIDR first; fall back to bare IP → host route (/32 or /128).
+    // Keep the CIDR parse error to report *why* an entry was rejected.
+    match cidr.parse::<IpNet>() {
+        Ok(n) => Ok(n),
+        Err(e) => match cidr.parse::<IpAddr>() {
+            Ok(IpAddr::V4(a)) => Ok(IpNet::V4(Ipv4Net::new(a, 32).unwrap())),
+            Ok(IpAddr::V6(a)) => Ok(IpNet::V6(Ipv6Net::new(a, 128).unwrap())),
+            Err(_) => Err(format!("invalid CIDR in {var_name}: {cidr:?}: {e}")),
+        },
     }
 }
 
@@ -73,17 +151,7 @@ pub fn parse_cidr_list(val: &str, var_name: &str) -> Result<Vec<IpNet>, String> 
         if cidr.is_empty() {
             continue;
         }
-        // Try CIDR first; fall back to bare IP → host route (/32 or /128).
-        // Keep the CIDR parse error to report *why* an entry was rejected.
-        let net: IpNet = match cidr.parse::<IpNet>() {
-            Ok(n) => n,
-            Err(e) => match cidr.parse::<IpAddr>() {
-                Ok(IpAddr::V4(a)) => IpNet::V4(Ipv4Net::new(a, 32).unwrap()),
-                Ok(IpAddr::V6(a)) => IpNet::V6(Ipv6Net::new(a, 128).unwrap()),
-                Err(_) => return Err(format!("invalid CIDR in {var_name}: {cidr:?}: {e}")),
-            },
-        };
-        networks.push(net);
+        networks.push(parse_cidr(cidr, var_name)?);
     }
     if networks.is_empty() {
         return Err(format!("{var_name} is set but contains no valid CIDRs"));
@@ -230,25 +298,27 @@ mod tests {
 
     #[test]
     fn test_parse_single_cidr() {
-        let nets = TrustedProxyConfig::parse("10.0.0.0/8").unwrap();
+        let nets = TrustedProxyConfig::parse("10.0.0.0/8").unwrap().networks;
         assert_eq!(nets.len(), 1);
     }
 
     #[test]
     fn test_parse_multiple_cidrs() {
-        let nets = TrustedProxyConfig::parse("10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16").unwrap();
+        let nets = TrustedProxyConfig::parse("10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16")
+            .unwrap()
+            .networks;
         assert_eq!(nets.len(), 3);
     }
 
     #[test]
     fn test_parse_private() {
-        let nets = TrustedProxyConfig::parse("private").unwrap();
+        let nets = TrustedProxyConfig::parse("private").unwrap().networks;
         assert_eq!(nets.len(), 8);
     }
 
     #[test]
     fn test_parse_private_case_insensitive() {
-        let nets = TrustedProxyConfig::parse("PRIVATE").unwrap();
+        let nets = TrustedProxyConfig::parse("PRIVATE").unwrap().networks;
         assert_eq!(nets.len(), 8);
     }
 
@@ -268,13 +338,15 @@ mod tests {
 
     #[test]
     fn test_parse_ipv6_cidr() {
-        let nets = TrustedProxyConfig::parse("::1/128, fc00::/7").unwrap();
+        let nets = TrustedProxyConfig::parse("::1/128, fc00::/7")
+            .unwrap()
+            .networks;
         assert_eq!(nets.len(), 2);
     }
 
     #[test]
     fn test_parse_single_ip_becomes_host_cidr() {
-        let nets = TrustedProxyConfig::parse("10.0.0.1").unwrap();
+        let nets = TrustedProxyConfig::parse("10.0.0.1").unwrap().networks;
         assert_eq!(nets.len(), 1);
     }
 
@@ -310,5 +382,55 @@ mod tests {
         assert!(config.is_trusted("fd00::1".parse().unwrap()));
         assert!(!config.is_trusted("8.8.8.8".parse().unwrap()));
         assert!(!config.is_trusted("203.0.113.50".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_parse_private_combined_with_cidr() {
+        // A load balancer outside the private ranges (here shared address
+        // space) is added next to `private` instead of replacing it.
+        let config = TrustedProxyConfig::from_spec("private, 100.64.0.0/10");
+        assert!(config.is_trusted("10.0.0.1".parse().unwrap()));
+        assert!(config.is_trusted("100.127.3.4".parse().unwrap()));
+        assert!(!config.is_trusted("8.8.8.8".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_parse_cloudflare_preset() {
+        let config = TrustedProxyConfig::from_spec("cloudflare");
+        for addr in [
+            "104.23.1.2",
+            "172.68.134.13",
+            "162.158.22.233",
+            "141.101.70.1",
+            "108.162.200.1",
+            "2606:4700::1",
+        ] {
+            assert!(config.is_trusted(addr.parse().unwrap()), "{addr}");
+        }
+        // The preset is Cloudflare's edge and nothing else.
+        assert!(!config.is_trusted("10.0.0.1".parse().unwrap()));
+        assert!(!config.is_trusted("8.8.8.8".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_parse_cloudflare_preset_is_the_whole_published_list() {
+        // 15 IPv4 + 7 IPv6 ranges; the keyword adds no own-proxy networks.
+        let config = TrustedProxyConfig::parse("cloudflare").unwrap();
+        assert_eq!(config.cloudflare.len(), 22);
+        assert!(config.networks.is_empty());
+    }
+
+    #[test]
+    fn test_parse_keywords_case_insensitive_in_list() {
+        let config = TrustedProxyConfig::from_spec("Private, CLOUDFLARE");
+        assert!(config.is_trusted("10.0.0.1".parse().unwrap()));
+        assert!(config.is_trusted("104.16.0.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn test_parse_unknown_keyword_names_the_keywords() {
+        let err = TrustedProxyConfig::parse("private, cloudfare").unwrap_err();
+        assert!(err.contains("\"cloudfare\""), "{err}");
+        assert!(err.contains("private, cloudflare"), "{err}");
     }
 }
