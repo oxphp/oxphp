@@ -238,6 +238,11 @@ pub async fn handle_request(
             queue_wait_us: None,
             php_exec_us: None,
             shed_reason: None,
+            user_agent: received_event
+                .parts
+                .headers
+                .get(header::USER_AGENT)
+                .cloned(),
         };
         server.dispatcher.dispatch(&mut complete_event);
 
@@ -248,6 +253,9 @@ pub async fn handle_request(
     // Clone method (cheap enum copy) and path before parts are consumed
     let method = parts.method.clone();
     let path_str = parts.uri.path().to_string();
+    // The headers go to the executor with the request. Cloning the value
+    // shares its bytes rather than copying them.
+    let user_agent = parts.headers.get(header::USER_AGENT).cloned();
     crate::plugin::cookies::strip_plugin_cookies(&mut parts);
 
     // Per-request cancellation state. Worker holds one Arc (stashed in its
@@ -402,6 +410,7 @@ pub async fn handle_request(
         queue_wait_us: php_exec.queue_wait_us,
         php_exec_us: php_exec.php_exec_us,
         shed_reason: php_exec.shed_reason,
+        user_agent,
     };
     server.dispatcher.dispatch(&mut complete_event);
 

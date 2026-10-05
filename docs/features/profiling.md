@@ -605,6 +605,8 @@ every run no trigger admitted — a request that turned profiling on for itself
 with `OxPHP\Profile\start()`, and equally a plugin that selected full
 profiling on its own.
 
+`user_agent` is the request's `User-Agent` header, cut to 512 bytes, a `…(truncated)` marker included, when longer, with bytes that are not valid UTF-8 replaced with U+FFFD; it is `null` when the request carried none.
+
 `index.json` is parsed by `/__profiler/runs`, sorted newest-first and
 paginated via `?limit=N&offset=M`.
 

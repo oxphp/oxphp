@@ -605,6 +605,7 @@ impl PluginCompleteHandler for OtelCompleteHandler {
         let queue_wait_us = view.queue_wait_us.map(|v| v as i64);
         let php_exec_us = view.php_exec_us.map(|v| v as i64);
         let shed_reason = view.shed_reason;
+        let user_agent = view.user_agent().map(std::borrow::Cow::into_owned);
 
         // Auto-capture the unhandled exception / fatal that failed a 5xx request,
         // so the root SERVER span carries it without any PHP-side integration.
@@ -661,6 +662,9 @@ impl PluginCompleteHandler for OtelCompleteHandler {
                 KeyValue::new("oxphp.request_id", request_id),
                 KeyValue::new(semconv::SERVER_ADDRESS, server_address),
             ];
+            if let Some(ua) = user_agent {
+                attributes.push(KeyValue::new(semconv::USER_AGENT_ORIGINAL, ua));
+            }
             if request_body_size > 0 {
                 attributes.push(KeyValue::new(
                     "http.request.body.size",
@@ -1047,6 +1051,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         handler.handle(&view); // should not panic
     }
@@ -1081,6 +1086,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         );
         handler.handle(&view); // no start_us, no provider => should not panic
     }
@@ -1111,10 +1117,12 @@ mod tests {
     }
 
     /// The attributes of the one root span the handler builds for a request
-    /// that ended with `status`, refused by admission for `shed_reason`.
+    /// that ended with `status`, refused by admission for `shed_reason`, and
+    /// carried `user_agent`.
     fn root_span_attributes(
         status: u16,
         shed_reason: Option<crate::executor::admission::ShedReason>,
+        user_agent: Option<&http::HeaderValue>,
     ) -> Vec<KeyValue> {
         let captured = Captured::default();
         let provider = SdkTracerProvider::builder()
@@ -1150,6 +1158,7 @@ mod tests {
             None,
             None,
             shed_reason,
+            user_agent,
         );
         handler.handle(&view);
 
@@ -1172,7 +1181,7 @@ mod tests {
     fn a_refused_request_carries_its_reason_on_the_span() {
         use crate::executor::admission::ShedReason;
 
-        let attributes = root_span_attributes(529, Some(ShedReason::WaitTimeout));
+        let attributes = root_span_attributes(529, Some(ShedReason::WaitTimeout), None);
         assert_eq!(
             attribute(&attributes, "oxphp.shed_reason").as_deref(),
             Some("wait_timeout"),
@@ -1185,7 +1194,7 @@ mod tests {
         );
 
         // Not only overload: a refusal during a drain names itself the same way.
-        let attributes = root_span_attributes(503, Some(ShedReason::ShuttingDown));
+        let attributes = root_span_attributes(503, Some(ShedReason::ShuttingDown), None);
         assert_eq!(
             attribute(&attributes, "oxphp.shed_reason").as_deref(),
             Some("shutting_down"),
@@ -1197,12 +1206,68 @@ mod tests {
     /// must not say it was.
     #[test]
     fn an_application_529_carries_no_reason() {
-        let attributes = root_span_attributes(529, None);
+        let attributes = root_span_attributes(529, None, None);
         assert_eq!(attribute(&attributes, "oxphp.shed_reason"), None);
         assert_eq!(
             attribute(&attributes, "error.type").as_deref(),
             Some("529"),
             "{attributes:?}"
+        );
+    }
+
+    fn user_agent_attribute(user_agent: Option<&http::HeaderValue>) -> Option<String> {
+        attribute(
+            &root_span_attributes(200, None, user_agent),
+            semconv::USER_AGENT_ORIGINAL,
+        )
+    }
+
+    #[test]
+    fn root_span_carries_the_user_agent() {
+        let ua = http::HeaderValue::from_static("test-bot/1.0");
+        assert_eq!(
+            user_agent_attribute(Some(&ua)).as_deref(),
+            Some("test-bot/1.0")
+        );
+    }
+
+    /// The control: a request that sent none gets no attribute, rather than an
+    /// empty one that reads as "sent an empty header".
+    #[test]
+    fn root_span_without_a_user_agent_has_no_attribute() {
+        assert_eq!(user_agent_attribute(None), None);
+    }
+
+    /// The cap is the whole attribute, marker included: a value at the cap is
+    /// kept whole and one byte more is cut down to it. The 512 is the figure
+    /// the documentation gives, written out rather than read from the constant
+    /// under test.
+    #[test]
+    fn root_span_user_agent_is_capped() {
+        let at_cap = "a".repeat(512);
+        let ua = http::HeaderValue::from_str(&at_cap).unwrap();
+        assert_eq!(user_agent_attribute(Some(&ua)), Some(at_cap));
+
+        let over = "a".repeat(513);
+        let ua = http::HeaderValue::from_str(&over).unwrap();
+        let attr = user_agent_attribute(Some(&ua)).expect("a long user agent is cut, not dropped");
+        assert!(attr.len() <= 512, "{} bytes", attr.len());
+        assert!(attr.ends_with("…(truncated)"), "{attr:?}");
+        assert!(
+            attr.starts_with("aaaa"),
+            "the head is what is kept: {attr:?}"
+        );
+    }
+
+    /// A field value may carry bytes outside ASCII, which `to_str` refuses
+    /// outright. The span still gets the value, with what is not UTF-8
+    /// replaced.
+    #[test]
+    fn root_span_keeps_a_user_agent_that_is_not_ascii() {
+        let ua = http::HeaderValue::from_bytes(b"test-bot/1.0 \xff").unwrap();
+        assert_eq!(
+            user_agent_attribute(Some(&ua)).as_deref(),
+            Some("test-bot/1.0 \u{FFFD}")
         );
     }
 

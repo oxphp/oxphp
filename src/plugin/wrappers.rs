@@ -148,6 +148,7 @@ impl<H: PluginCompleteHandler + 'static> EventHandler<RequestComplete>
                 event.queue_wait_us,
                 event.php_exec_us,
                 event.shed_reason,
+                event.user_agent.as_ref(),
             );
             self.handler.handle(&view);
         }));
@@ -271,6 +272,7 @@ mod tests {
             queue_wait_us: None,
             php_exec_us: None,
             shed_reason: None,
+            user_agent: None,
         };
         let result = EventHandler::<RequestComplete>::handle(&wrapper, &mut event);
         assert_eq!(result, Propagation::Continue);
@@ -378,6 +380,7 @@ mod tests {
             queue_wait_us: None,
             php_exec_us: None,
             shed_reason: None,
+            user_agent: None,
         };
         EventHandler::<RequestComplete>::handle(&wrapper, &mut event);
         assert!(called.load(Ordering::SeqCst));
@@ -419,8 +422,71 @@ mod tests {
             queue_wait_us: None,
             php_exec_us: None,
             shed_reason: Some(ShedReason::WaitingBytes),
+            user_agent: None,
         };
         EventHandler::<RequestComplete>::handle(&wrapper, &mut event);
         assert_eq!(*seen.lock().unwrap(), Some(ShedReason::WaitingBytes));
+    }
+
+    struct UserAgentHandler {
+        seen: Arc<std::sync::Mutex<Option<String>>>,
+    }
+    impl PluginCompleteHandler for UserAgentHandler {
+        fn handle(&self, view: &PluginCompleteView) {
+            *self.seen.lock().unwrap() = view.user_agent().map(|ua| ua.into_owned());
+        }
+    }
+
+    /// What a complete handler reads as the request's `User-Agent`.
+    fn user_agent_seen_by_plugin(user_agent: Option<http::HeaderValue>) -> Option<String> {
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let wrapper = PluginCompleteWrapper {
+            handler: UserAgentHandler {
+                seen: Arc::clone(&seen),
+            },
+            plugin_name: "test".into(),
+        };
+        let mut event = RequestComplete {
+            request_id: "req1".into(),
+            method: http::Method::GET,
+            path: "/test".into(),
+            status: 200,
+            duration: std::time::Duration::from_millis(5),
+            remote_addr: SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 8080),
+            request_body_size: 0,
+            response_size: 0,
+            metadata: Vec::new(),
+            php_errors: Vec::new(),
+            profile_tree: None,
+            queue_wait_us: None,
+            php_exec_us: None,
+            shed_reason: None,
+            user_agent,
+        };
+        EventHandler::<RequestComplete>::handle(&wrapper, &mut event);
+        let seen = seen.lock().unwrap().clone();
+        seen
+    }
+
+    #[test]
+    fn test_complete_wrapper_passes_the_user_agent() {
+        assert_eq!(
+            user_agent_seen_by_plugin(Some(http::HeaderValue::from_static("test-bot/1.0"))),
+            Some("test-bot/1.0".to_string())
+        );
+        assert_eq!(user_agent_seen_by_plugin(None), None);
+    }
+
+    /// A field value may carry bytes outside ASCII, which `to_str` refuses
+    /// outright. The plugin still gets the value, with what is not UTF-8
+    /// replaced.
+    #[test]
+    fn test_complete_wrapper_user_agent_keeps_a_value_that_is_not_ascii() {
+        let value = http::HeaderValue::from_bytes(b"test-bot/1.0 \xff").unwrap();
+        assert!(value.to_str().is_err(), "the premise: to_str refuses it");
+        assert_eq!(
+            user_agent_seen_by_plugin(Some(value)),
+            Some("test-bot/1.0 \u{FFFD}".to_string())
+        );
     }
 }

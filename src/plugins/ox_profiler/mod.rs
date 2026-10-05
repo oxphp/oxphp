@@ -355,7 +355,7 @@ fn build_run_meta(
         method: view.method.to_string(),
         url: view.path.to_string(),
         status: view.status,
-        user_agent: None,
+        user_agent: view.user_agent().map(std::borrow::Cow::into_owned),
         client_ip: Some(view.remote_addr.ip().to_string()),
         source,
         span_count,
@@ -968,6 +968,7 @@ mod tests {
                 None,
                 None,
                 None,
+                None,
             );
 
             let meta = build_run_meta(&view, &tree, "req-1", ActivationSource::Header);
@@ -991,6 +992,13 @@ mod tests {
     }
 
     fn meta_from(metadata: &[(String, String)]) -> storage::RunMeta {
+        meta_from_request(metadata, None)
+    }
+
+    fn meta_from_request(
+        metadata: &[(String, String)],
+        user_agent: Option<&http::HeaderValue>,
+    ) -> storage::RunMeta {
         let tree = empty_tree();
         let view = PluginCompleteView::new(
             "6aad6572c21c00000014",
@@ -1007,6 +1015,7 @@ mod tests {
             None,
             None,
             None,
+            user_agent,
         );
         // The function the complete handler calls, not a copy of its body:
         // a copy would keep these tests green while the handler changed.
@@ -1052,6 +1061,25 @@ mod tests {
             "run_id should embed this request's id"
         );
         assert!(storage::disk::run_id_is_safe(&meta.run_id));
+    }
+
+    /// Every stored run records the client that made the request — the one a
+    /// trigger admitted and, with nothing recorded by a trigger, the one that
+    /// turned profiling on for itself.
+    #[test]
+    fn run_meta_records_the_user_agent() {
+        let ua = http::HeaderValue::from_static("test-bot/1.0");
+        let header = [(META_SOURCE.to_string(), "header".to_string())];
+        for metadata in [&header[..], &[]] {
+            let meta = meta_from_request(metadata, Some(&ua));
+            assert_eq!(
+                meta.user_agent.as_deref(),
+                Some("test-bot/1.0"),
+                "{:?} run",
+                meta.source
+            );
+        }
+        assert_eq!(meta_from_request(&[], None).user_agent, None);
     }
 
     #[test]
