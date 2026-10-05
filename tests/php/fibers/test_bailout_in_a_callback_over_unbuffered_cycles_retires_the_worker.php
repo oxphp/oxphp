@@ -16,6 +16,14 @@ declare(strict_types=1);
 
 require_once __DIR__ . '/bailout_leak_probe.php';
 
+// Kept out of the backtrace PHP 8.5 takes of a fatal, as on 8.4. With the
+// arguments in it, array_map()'s closure — and the cycles it holds — would be
+// held by that backtrace past the walk, and let go of only at the end of the
+// request, once the collector's guard is down again: each object then goes into
+// its buffer, the collection before the heap is read frees them, and nothing is
+// left to leak. The walk has to be what lets go of them.
+ini_set('zend.exception_ignore_args', '1');
+
 OxphpBailoutLeak::arm('unbuffered_cycles');
 OxphpBailoutLeak::mapUntilTimeout('unbuffered_cycles', false);
 
