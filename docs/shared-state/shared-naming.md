@@ -182,31 +182,18 @@ When proposing a new primitive, fill out this checklist before merging:
 - [ ] Domain-specific verbs (`evict`, `drain`, `flush`, etc.) appear
   only when no canonical entry in the cheat sheet covers the concept.
 
-## Observability names lag the PHP API
+## Observability names
 
 The operator-facing surface — Prometheus metric names and the JSON at
-`/__ox_shared/entry?id=<id>` — is a separate contract from the PHP API.
-Renaming it breaks dashboards and alert rules. To avoid silent
-inconsistency, the affected names are emitted **twice** for one
-release cycle:
-
-| Surface     | Deprecated (still emitted) | Canonical            |
-| ----------- | -------------------------- | -------------------- |
-| Prometheus  | `oxphp_shared_channel_pending` | `oxphp_shared_channel_count` |
-| Prometheus  | `oxphp_shared_pool_size`       | `oxphp_shared_pool_count`    |
-| JSON entry  | `Channel.pending`              | `Channel.count`             |
-| JSON entry  | `Pool.size`                    | `Pool.count`                |
-
-The deprecated metric `# HELP` lines carry a `(deprecated, removed in
-a future release; use *_count)` prefix, and the `ox_shared` plugin
-emits a startup `WARN` whenever introspection or metrics are enabled.
-With `SHARED_ENABLED=false` neither surface exists, so neither the
-deprecated names nor the warning appear.
-
-Migrate dashboards and alert rules to the `_count` names before the
-deprecation cycle closes. After removal, only the canonical names
-will be emitted, and Prometheus/Grafana panels referencing the old
-ones will start returning empty series.
+`/__ox_shared/entry?id=<id>` — is a separate contract from the PHP API,
+because renaming it breaks dashboards and alert rules. The element
+count of a Channel or a Pool is `oxphp_shared_channel_count` or
+`oxphp_shared_pool_count` on `/metrics`, and `count` in its
+`type_specific` JSON — for a Channel the number `Channel::count()`
+returns, for a Pool its live slots, the number
+`Pool::stats()->size()` returns. The earlier spellings —
+`oxphp_shared_channel_pending`, `oxphp_shared_pool_size`, and the JSON
+keys `pending` and `size` — are no longer emitted.
 
 ## Stability
 

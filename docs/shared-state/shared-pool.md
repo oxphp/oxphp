@@ -230,10 +230,10 @@ Exceptions thrown inside the factory propagate to the acquire caller unchanged a
 
 See [Shared Observability](shared-observability.md) for the full tour. Quick references:
 
-- `GET /__ox_shared/entry?id=N` exposes `{ type: "Pool", size, in_use, idle, waiting, max_size, idle_by_thread, rebalance_strategy }`.
+- `GET /__ox_shared/entry?id=N` exposes `type: "Pool"` and, under `type_specific`, `{ count, in_use, idle, waiting, max_size, idle_by_thread, rebalance_strategy }`.
 - `GET /__ox_shared/summary` includes a `Pool` bucket with `count`, `bytes`, and `ops`. Per-pool gauges like `waiting` and the `evicted_total` counter are exposed on `/metrics` (below), not aggregated in the summary.
 - Prometheus metrics per pool:
-  - `oxphp_shared_pool_size{pool_id="…"}`            — gauge, total slots (in-use + idle).
+  - `oxphp_shared_pool_count{pool_id="…"}`           — gauge, total slots (in-use + idle).
   - `oxphp_shared_pool_in_use{pool_id="…"}`          — gauge.
   - `oxphp_shared_pool_idle{pool_id="…"}`            — gauge.
   - `oxphp_shared_pool_waiting{pool_id="…"}`         — gauge, queued acquires.
@@ -241,7 +241,7 @@ See [Shared Observability](shared-observability.md) for the full tour. Quick ref
   - `oxphp_shared_pool_evicted_total{pool_id="…",reason="idle_timeout|evict|shutdown"}` — counter.
   - `oxphp_shared_pool_wait_seconds_*{pool_id="…"}`  — acquire-wait histogram (bucket / sum / count).
 
-Alert-worthy combinations: rising `waiting` with flat `size` means the pool is saturated and should be resized; rising `acquire_total{result="timeout"}` with normal `in_use` means the factory is slow (or blocking); rising `acquire_total{result="saturated"}` means callers keep hitting `tryAcquire` on a full pool (backpressure firing).
+Alert-worthy combinations: rising `waiting` with flat `count` means the pool is saturated and should be resized; rising `acquire_total{result="timeout"}` with normal `in_use` means the factory is slow (or blocking); rising `acquire_total{result="saturated"}` means callers keep hitting `tryAcquire` on a full pool (backpressure firing).
 
 ## When not to use
 

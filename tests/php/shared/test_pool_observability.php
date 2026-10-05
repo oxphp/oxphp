@@ -9,7 +9,7 @@
  *      non-blocking tryAcquire miss counts as `saturated`, not `timeout`.
  *   2. A user-driven `$pool->evict()` increments
  *      `oxphp_shared_pool_evicted_total{reason="evict"}`.
- *   3. The four gauges size / in_use / idle / waiting appear
+ *   3. The four gauges count / in_use / idle / waiting appear
  *      for every live Pool with the correct label.
  *   4. The wait histogram emits cumulative buckets + sum + count
  *      per Pool.
@@ -71,7 +71,7 @@ if ($metrics === false) { echo "FAIL: /metrics fetch failed\n"; exit; }
 
 // All seven metric series must appear for our pool id.
 $must_contain = [
-    "oxphp_shared_pool_size{pool_id=\"{$id}\"}",
+    "oxphp_shared_pool_count{pool_id=\"{$id}\"}",
     "oxphp_shared_pool_in_use{pool_id=\"{$id}\"}",
     "oxphp_shared_pool_idle{pool_id=\"{$id}\"}",
     "oxphp_shared_pool_waiting{pool_id=\"{$id}\"}",
@@ -120,7 +120,7 @@ if (!is_array($entry)) { echo "FAIL: entry JSON decode failed\n"; exit; }
 if (($entry['type'] ?? null) !== 'Pool') { echo "FAIL: wrong type in entry JSON\n"; exit; }
 $ts = $entry['type_specific'] ?? null;
 if (!is_array($ts)) { echo "FAIL: type_specific missing\n"; exit; }
-foreach (['max_size', 'size', 'in_use', 'idle', 'waiting', 'idle_by_thread', 'rebalance_strategy'] as $k) {
+foreach (['max_size', 'count', 'in_use', 'idle', 'waiting', 'idle_by_thread', 'rebalance_strategy'] as $k) {
     if (!array_key_exists($k, $ts)) {
         echo "FAIL: type_specific missing '$k'\n";
         exit;

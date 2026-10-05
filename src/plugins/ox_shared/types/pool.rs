@@ -795,7 +795,8 @@ impl SharedInner for PoolInner {
 
     fn debug_snapshot(&self) -> SharedValue {
         // Matches MapInner's pattern: expose the primary gauge as
-        // Long. /entry surfaces it as `type_specific.size`.
+        // Long. /preview renders it; /entry reads size() directly as
+        // `type_specific.count`.
         SharedValue::Long(self.size() as i64)
     }
 

@@ -45,7 +45,7 @@ foreach ([
 $t->assertSame('the internal server is serving', $status($internal . '/health'), 200);
 
 // No metrics collector means no `oxphp_shared_*` family anywhere in the
-// exposition, including the deprecated aliases the enabled build still emits.
+// exposition.
 $metrics = @file_get_contents($internal . '/metrics');
 $t->assertTrue('metrics endpoint reachable', is_string($metrics));
 if (is_string($metrics)) {

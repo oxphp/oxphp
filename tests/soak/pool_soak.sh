@@ -146,7 +146,7 @@ scrape_metrics() {
     waiting="$(sum_metric oxphp_shared_pool_waiting)"
     in_use="$(sum_metric oxphp_shared_pool_in_use)"
     idle="$(sum_metric oxphp_shared_pool_idle)"
-    size="$(sum_metric oxphp_shared_pool_size)"
+    size="$(sum_metric oxphp_shared_pool_count)"
 
     local ev_idle ev_shutdown ev_manual ev_dead
     ev_idle="$(sum_metric oxphp_shared_pool_evicted_total 'reason="idle_timeout"')"
