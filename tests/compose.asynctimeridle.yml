@@ -1,0 +1,38 @@
+# Async workers with a single worker and a short max_execution_time:
+# ASYNC_WORKERS=1, max_execution_time=3.
+#
+# The other half of compose.asynctimer.yml. A pool thread's execution timer is
+# armed by the one php_request_startup() it runs at server start and runs out
+# once; this is the half where it runs out with the pool idle, so that no task
+# is there to be ended and the firing passes unnoticed. What it leaves behind on
+# the thread — the PHP_CONNECTION_TIMEOUT bit php_on_timeout() raises from the
+# signal handler — is not cleared by anything on the task path, so a later task
+# reads it.
+#
+# Standalone usage:
+#   docker compose -f compose.yml -f compose.asynctimeridle.yml up
+services:
+  oxphp-asynctimeridle:
+    build:
+      context: ..
+      dockerfile: docker/dev/Dockerfile
+      args:
+        PHP_VERSION:
+    ports:
+      - "80"
+    networks: [test-net]
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    environment:
+      LOG_LEVEL: error
+      INTERNAL_ADDR: 0.0.0.0:9090
+      ASYNC_WORKERS: 1
+    volumes:
+      - ../www:/var/www/html
+      - ./php:/var/www/html/public/tests
+      - ./asynctimeridle.ini:/usr/local/etc/php/conf.d/zz-asynctimeridle.ini:ro

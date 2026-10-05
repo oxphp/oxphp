@@ -185,6 +185,18 @@ fn async_worker_thread(
         return;
     }
 
+    // That startup armed the engine's execution timer, with max_execution_time
+    // or, where a deployment sets one, max_input_time. This thread is not a
+    // request: it keeps the one request open for its whole life, so the timer
+    // would run out once and end whichever task was executing opcodes at that
+    // moment. Take it off before the thread can accept work, so that nothing it
+    // runs is ever under this deadline — once the timer has run out,
+    // PG(connection_status) holds a timeout bit that nothing on the task path
+    // clears. From here on the only thing that arms the thread's timer is the
+    // max_execution_time ini handler, which takes it straight back off for a
+    // pool thread; so this is the whole of what the thread ever carries.
+    unsafe { ffi::oxphp_async_drop_execution_timer() };
+
     // Capture this worker thread's &EG(vm_interrupt) so a CPU-bound task fiber
     // can be interrupted cross-thread by an awaiter that times out (Path B).
     // The address is stable for the thread's lifetime once the request is up.

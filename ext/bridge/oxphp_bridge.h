@@ -1374,6 +1374,7 @@ void     oxphp_bridge_timer_remove(uint64_t timer_id);
 
 /* Async worker state (no PHP types — safe without php.h) */
 void oxphp_async_reset(void);
+void oxphp_async_drop_execution_timer(void);
 void oxphp_bridge_set_async_worker(int is_async);
 int oxphp_bridge_is_async_worker(void);
 

@@ -1,0 +1,15 @@
+# profile: asynctimer
+# description: The async pool thread's execution timer, fired inside a task
+
+# Order matters for what this suite catches if the drop regresses, rather than
+# for a passing run. The thread has one execution timer and it is one-shot, so
+# the first test needs the firing that php_request_startup() armed still
+# pending; the two tests below it both call set_time_limit(), and on a build
+# that leaves the arm standing that call re-arms that same timer — timer_settime
+# replaces whatever was pending rather than adding to it — so either of them
+# spends the mark the first test looks for. Both have to come after.
+# Between those two the order is free — each arms its own limit and reads it
+# back from the task it armed it in.
+asynctimer/test_a_task_across_the_mark_survives
+asynctimer/test_a_task_time_limit_does_not_outlive_it
+asynctimer/test_a_siblings_time_limit_does_not_reach_a_task

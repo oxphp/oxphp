@@ -18,14 +18,14 @@ $t = new TestCase('shared_mysqli_close_under_parked_reader', 'hooksdb');
 // reader. The bound in this image is two seconds (default_socket_timeout), the
 // holder's query nine, so the give-up branch is the one taken here.
 //
-// That reading only holds while the two limits differ. This image starts with
-// max_execution_time at 0, which imposes no limit at all, so without the line
-// below default_socket_timeout would be both the smaller and the larger and the
-// timing check further down would pass even on a regression that started taking
-// the larger. A request limit of thirty seconds separates them again without
-// touching the startup value the rest of the profile is built on:
-// max_execution_time is read as the request currently has it, so the wait below
-// must still come out at two seconds and not at thirty.
+// That reading only holds while the two limits differ: were both two seconds,
+// the timing check further down would read the same on a regression that started
+// taking the larger. This image lowers default_socket_timeout and leaves
+// max_execution_time alone, so the two do differ — and the limit is pinned here
+// so that holds whatever the image starts it at, without touching the startup
+// value the rest of the image is built on. max_execution_time is read as the
+// request currently has it, so the wait below must still come out at two seconds
+// and not at thirty.
 set_time_limit(30);
 
 $task = oxphp_async(function (): array {
