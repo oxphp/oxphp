@@ -1794,9 +1794,19 @@ typedef enum {
 static int64_t oxphp_claim_budget_ns(void)
 {
     zend_long limits[2] = {
-        /* Current value, deliberately: set_time_limit() is how a request says how
-         * long it may run, and a wait inside it is bound by that. */
-        zend_ini_long("max_execution_time", sizeof("max_execution_time") - 1, 0),
+        /* The request's current limit, deliberately: set_time_limit() is how a
+         * request says how long it may run, and a wait inside it is bound by that.
+         * A serving worker reads it from the engine rather than from the directive,
+         * which on a worker carrying several requests is the worker's — the last
+         * value any of them set — while the engine holds the limit of the request
+         * that is running (see oxphp_exec_timer_enter(); on a build without a
+         * per-thread timer the two hold the same value). Anywhere else the
+         * directive is the one to read: an async task thread never executes a
+         * script, so the engine there still holds what request startup put in it,
+         * max_input_time when that is set, not max_execution_time. */
+        oxphp_serve_in_progress
+            ? EG(timeout_seconds)
+            : zend_ini_long("max_execution_time", sizeof("max_execution_time") - 1, 0),
         /* Startup value, equally deliberately. This one names the default deadline
          * of a socket *operation*, and waiting for a connection is not one — while
          * ini_set('default_socket_timeout', …) around a single fsockopen() or
@@ -5950,8 +5960,9 @@ static void oxphp_soft_reset(void) {
      * handler, and the 500 that comes back is blamed on an application that
      * never ran. The ceiling inside the drain matters more here too: the ini
      * rollback a few lines up disarms the execution timer and does not arm it
-     * again — step 5 below is what arms it — so this is the one discard with no
-     * deadline over it at all. */
+     * again — where the engine keeps a timer per thread, nothing arms it before
+     * the next request starts running, and elsewhere step 5 below is what does —
+     * so this is the one discard with no deadline over it at all. */
     oxphp_discard_pending_exception();
 
     /* 1. Output: discard all buffers, re-activate clean.
@@ -6010,13 +6021,19 @@ static void oxphp_soft_reset(void) {
     PG(last_error_lineno) = 0;
     PG(connection_status) = PHP_CONNECTION_NORMAL;
 
+#ifndef ZEND_MAX_EXECUTION_TIMERS
     /* 5. Reset execution timer (max_execution_time) to prevent timeout across
      * requests. After the ini rollback above, which restores the directive this
      * arms the timer with: OnUpdateTimeout disarms at the deactivate stage and
      * deliberately does not arm again, so that a restored value is not counting
      * down while the process sits idle. This is the call that arms it, with the
-     * value the rollback put back. */
+     * value the rollback put back.
+     *
+     * Only where the timer is not the thread's own. Where it is, every request
+     * gets a deadline of its own as the scheduler starts it, on either path —
+     * see oxphp_scheduler_own_execution_timer(). */
     zend_set_timeout(EG(timeout_seconds), /* reset_signals */ 0);
+#endif
 
     /* Note: the request's own input — its SAPI post state, its body and its
      * superglobals — is NOT built here. That runs inside the request's fiber,
@@ -6120,6 +6137,10 @@ static void oxphp_serve_loop(zend_fcall_info *fci, zend_fcall_info_cache *fcc)
     sched.shared_fci = fci;
     sched.shared_fcc = fcc;
 
+    /* After the baseline, so that a limit the boot script set is the one every
+     * request starts with. */
+    oxphp_scheduler_own_execution_timer(&sched);
+
     #define WORKER_GC_INTERVAL 100
     #define WORKER_MAX_CONSECUTIVE_ERRORS 3
     /* How much the heap may grow between two moments with no request in flight
@@ -6154,209 +6175,225 @@ static void oxphp_serve_loop(zend_fcall_info *fci, zend_fcall_info_cache *fcc)
     uint64_t served_at_start = ctx->requests_done;
     bool warmed_up = false;
 
-    while (1) {
-        /* Publish the fiber census from the loop, which keeps turning whatever
-         * happens to the requests, rather than from the end of a request, which
-         * is the event a jammed worker stops producing. Both branches below are
-         * reached through here, so the blocking branch — which by its own
-         * condition carries no fibers — publishes the zero that says this worker
-         * is idle instead of leaving its last event-loop reading standing. */
-        oxphp_bridge_report_request_fibers(sched.fiber_count);
-
-        if (sched.fiber_count == 0 && !oxphp_bridge_has_deferred_drains()) {
-            /* ── No active fibers and no deferred promise drains: block-wait
-             * for the next request. When deferred drains remain, fall through
-             * to the event-loop branch instead — its tick both accepts new
-             * requests and polls the drains, so a fire-and-forget promise left
-             * by the last request is reclaimed without waiting for the next
-             * one to arrive. ──────────────────────────────────────────── */
-
-            if (oxphp_bridge_worker_wait() != 0) {
-                ctx->exit_reason = 0;
-                break;
-            }
-
-            oxphp_soft_reset();
-
-            /* Increment counter at request START so requestCount() inside
-             * the handler observes the current request index (1-based). Also
-             * syncs ctx->requests_done on the fast path (was only synced on
-             * the event-loop path before — latent bug fix). */
-            sched.total_requests_done = oxphp_bridge_increment_requests_done();
-            ctx->requests_done = sched.total_requests_done;
-
-            /* Create or reuse a fiber for the request */
-            oxphp_request_fiber *fiber = oxphp_scheduler_create_fiber(&sched, fci, fcc);
-            if (!fiber) break;
-
-            /* The loop is about to disappear into the handler for as long as
-             * this request takes, and it is the only thing that publishes the
-             * census. Say what is being carried before going in, or a scrape
-             * taken during a slow request on an otherwise idle worker reads the
-             * zero this branch was entered with. */
+    zend_try {
+        while (1) {
+            /* Publish the fiber census from the loop, which keeps turning whatever
+             * happens to the requests, rather than from the end of a request, which
+             * is the event a jammed worker stops producing. Both branches below are
+             * reached through here, so the blocking branch — which by its own
+             * condition carries no fibers — publishes the zero that says this worker
+             * is idle instead of leaving its last event-loop reading standing. */
             oxphp_bridge_report_request_fibers(sched.fiber_count);
 
-            /* Fresh or recycled, a new request is always a start, never a resume. */
-            oxphp_scheduler_start_fiber(&sched, fiber);
+            if (sched.fiber_count == 0 && !oxphp_bridge_has_deferred_drains()) {
+                /* ── No active fibers and no deferred promise drains: block-wait
+                 * for the next request. When deferred drains remain, fall through
+                 * to the event-loop branch instead — its tick both accepts new
+                 * requests and polls the drains, so a fire-and-forget promise left
+                 * by the last request is reclaimed without waiting for the next
+                 * one to arrive. ──────────────────────────────────────────── */
 
-            if (fiber->completed) {
-                oxphp_scheduler_finalize_fiber(&sched, fiber);
+                if (oxphp_bridge_worker_wait() != 0) {
+                    ctx->exit_reason = 0;
+                    break;
+                }
+
+                oxphp_soft_reset();
+
+                /* Increment counter at request START so requestCount() inside
+                 * the handler observes the current request index (1-based). Also
+                 * syncs ctx->requests_done on the fast path (was only synced on
+                 * the event-loop path before — latent bug fix). */
+                sched.total_requests_done = oxphp_bridge_increment_requests_done();
+                ctx->requests_done = sched.total_requests_done;
+
+                /* Create or reuse a fiber for the request */
+                oxphp_request_fiber *fiber = oxphp_scheduler_create_fiber(&sched, fci, fcc);
+                if (!fiber) break;
+
+                /* The loop is about to disappear into the handler for as long as
+                 * this request takes, and it is the only thing that publishes the
+                 * census. Say what is being carried before going in, or a scrape
+                 * taken during a slow request on an otherwise idle worker reads the
+                 * zero this branch was entered with. */
+                oxphp_bridge_report_request_fibers(sched.fiber_count);
+
+                /* Fresh or recycled, a new request is always a start, never a resume. */
+                oxphp_scheduler_start_fiber(&sched, fiber);
+
+                if (fiber->completed) {
+                    oxphp_scheduler_finalize_fiber(&sched, fiber);
+                }
+
+            } else {
+                /* ── Event loop: active fibers exist ──────────────────────
+                 * Run one tick: accept new requests, check await results,
+                 * check timers, resume ready fibers. */
+
+                int rc = oxphp_scheduler_tick(&sched);
+                if (rc == -1) {
+                    ctx->exit_reason = 0; /* shutdown */
+                    break;
+                }
+
+                /* sched.total_requests_done is now mirrored from bridge state
+                 * at request entry inside oxphp_scheduler_tick; sync ctx for
+                 * the exit-condition check below. */
+                ctx->requests_done = sched.total_requests_done;
+
+                if (rc == 0) {
+                    /* No work done — pause briefly to avoid busy-wait. 100μs is
+                     * short enough for responsive SSE, long enough to avoid CPU
+                     * spin. When fibers are parked on sockets, spend that same
+                     * 100μs waiting on those descriptors instead of sleeping
+                     * blind, so a peer's reply resumes its fiber immediately
+                     * rather than on the next tick. */
+                    if (!oxphp_scheduler_io_backoff(&sched, 100000)) {
+                        usleep(100);
+                    }
+                }
             }
 
-        } else {
-            /* ── Event loop: active fibers exist ──────────────────────
-             * Run one tick: accept new requests, check await results,
-             * check timers, resume ready fibers. */
+            /* ── Check exit conditions ───────────────────────────────── */
 
-            int rc = oxphp_scheduler_tick(&sched);
-            if (rc == -1) {
-                ctx->exit_reason = 0; /* shutdown */
+            /* Read from the scheduler rather than from a copy of it. Both dispatch
+             * paths finalize through oxphp_scheduler_finalize_fiber(), which is
+             * where the count is kept, but only the event-loop branch below runs
+             * per-iteration bookkeeping — a worker serving requests that never
+             * suspend takes the branch above every time, so a local mirror of this
+             * would stay at its initial value for the life of the worker and the
+             * breaker would never fire for exactly the handler it exists to catch:
+             * one that fatals on every request without ever pausing. */
+            if (sched.consecutive_errors >= WORKER_MAX_CONSECUTIVE_ERRORS) {
+                ctx->exit_reason = 3;
+                break;
+            }
+            if (ctx->exit_scheduled) {
+                /* exit_reason was already set to 1 by oxphp_bridge_schedule_exit. */
+                break;
+            }
+            if (ctx->max_memory_bytes > 0 && zend_memory_usage(0) > ctx->max_memory_bytes) {
+                ctx->exit_reason = 2;
                 break;
             }
 
-            /* sched.total_requests_done is now mirrored from bridge state
-             * at request entry inside oxphp_scheduler_tick; sync ctx for
-             * the exit-condition check below. */
-            ctx->requests_done = sched.total_requests_done;
+            /* GC every N requests */
+            if (ctx->requests_done > 0 && (ctx->requests_done % WORKER_GC_INTERVAL) == 0) {
+                gc_collect_cycles();
+            }
 
-            if (rc == 0) {
-                /* No work done — pause briefly to avoid busy-wait. 100μs is
-                 * short enough for responsive SSE, long enough to avoid CPU
-                 * spin. When fibers are parked on sockets, spend that same
-                 * 100μs waiting on those descriptors instead of sleeping
-                 * blind, so a peer's reply resumes its fiber immediately
-                 * rather than on the next tick. */
-                if (!oxphp_scheduler_io_backoff(&sched, 100000)) {
-                    usleep(100);
+            /* A request ended with an internal function's call still on its stack
+             * may have left behind whatever that function was holding in its own
+             * locals — usort() sorts a copy of the array, and a copy keeps every
+             * element alive — and the walk after the bailout can neither see it nor
+             * say how much it was. Nor can it tell a function that was cut short from
+             * one that had already returned: the engine looks for a time limit before
+             * it takes a finished internal call off the stack, so a limit reached the
+             * moment after a database call returned finds that call's frame there,
+             * and the call's result stays too: in a temporary of the caller, which
+             * the walk does not free, when the result is used, and in the engine's
+             * own local, which nothing frees, when it is not. So the frame is a
+             * reason to look, and what decides is the heap: when a request went
+             * through one, it is compared with the last moment nothing was in flight,
+             * and a worker that grew past the threshold is retired. A large result
+             * is such growth, and retiring for it is right.
+             *
+             * Compared at such moments, not around the one request, because a worker
+             * runs requests alongside each other and the heap moves for all of them
+             * while one is parked. And a retire here takes no request with it, which
+             * a retire while another is parked would.
+             *
+             * Two windows are not judged, though the flag is taken from them so that
+             * it does not outlive them. The first, whose growth is the application
+             * warming up. And any while the server drains: the drain ends the requests
+             * it finds parked in the worker's own waits, which are internal functions,
+             * and the pool's monitor boots a replacement for a worker that exits until
+             * the shutdown itself begins, which is after the drain — so a worker
+             * retired here would be booted again in the middle of it.
+             *
+             * Two kinds of growth are not a leak and are taken out of the figure. The
+             * fibers the worker created in the stretch keep their stacks for as long
+             * as it lives, which for a worker that runs a couple of hundred requests
+             * at once is more than the threshold by itself. And objects that refer to
+             * themselves, which are garbage until the collector finds them: it runs
+             * here, for such a request only, before the heap is read. It finds those
+             * it already holds as possible roots. The engine raises the collector's
+             * guard for the whole of a bailout, and while it is up what the walk after
+             * it lets go of is not buffered, so a cycle that only that walk released
+             * stays — a leak in the proper sense, which nothing frees and which is
+             * counted. The baseline can hold garbage that an earlier stretch left and
+             * this collection frees, which takes that much off the growth shown, so a
+             * leak that small can go unseen. */
+            if (sched.fiber_count == 0) {
+                bool bailed_in_internal = oxphp_fiber_take_internal_bailout();
+                bool judged = bailed_in_internal && warmed_up && !oxphp_bridge_is_draining();
+                /* Stack buffer and the SAPI's logger, not php_log_err(): that one
+                 * builds its line from the heap when error_log names a file, the
+                 * heap has just grown and may be at its limit, and a bailout from
+                 * here would take the whole serve loop with it. */
+                char msg[320];
+                if (judged && !oxphp_serve_loop_collect_cycles()) {
+                    snprintf(msg, sizeof(msg),
+                             "oxphp: worker %d retiring: a destructor ended in a fatal "
+                             "error while the cycle collector ran, or while an "
+                             "exception one of them threw was dropped, after a request "
+                             "that ended with an internal function's call on its stack",
+                             oxphp_bridge_get_worker_id());
+                    if (sapi_module.log_message != NULL) {
+                        sapi_module.log_message(msg, LOG_NOTICE);
+                    }
+                    oxphp_bridge_schedule_exit();
+                    break;
+                }
+                uint64_t heap = zend_memory_usage(0);
+                uint64_t pool = oxphp_fiber_pool_heap_bytes();
+                uint64_t pool_grown = pool - quiet_pool;
+                if (judged
+                    && heap > quiet_heap + pool_grown + OXPHP_BAILOUT_LEAK_RETIRE_BYTES) {
+                    snprintf(msg, sizeof(msg),
+                             "oxphp: worker %d retiring: the heap grew %" PRIu64
+                             " bytes, not counting the fibers it created, since the "
+                             "worker last had no request in flight, and a request in "
+                             "that time was ended with an internal function's call on "
+                             "its stack, which may have kept what it held",
+                             oxphp_bridge_get_worker_id(),
+                             heap - quiet_heap - pool_grown);
+                    if (sapi_module.log_message != NULL) {
+                        sapi_module.log_message(msg, LOG_NOTICE);
+                    }
+                    oxphp_bridge_schedule_exit();
+                    break;
+                }
+                quiet_heap = heap;
+                quiet_pool = pool;
+                if (ctx->requests_done > served_at_start) {
+                    warmed_up = true;
                 }
             }
         }
 
-        /* ── Check exit conditions ───────────────────────────────── */
-
-        /* Read from the scheduler rather than from a copy of it. Both dispatch
-         * paths finalize through oxphp_scheduler_finalize_fiber(), which is
-         * where the count is kept, but only the event-loop branch below runs
-         * per-iteration bookkeeping — a worker serving requests that never
-         * suspend takes the branch above every time, so a local mirror of this
-         * would stay at its initial value for the life of the worker and the
-         * breaker would never fire for exactly the handler it exists to catch:
-         * one that fatals on every request without ever pausing. */
-        if (sched.consecutive_errors >= WORKER_MAX_CONSECUTIVE_ERRORS) {
-            ctx->exit_reason = 3;
-            break;
-        }
-        if (ctx->exit_scheduled) {
-            /* exit_reason was already set to 1 by oxphp_bridge_schedule_exit. */
-            break;
-        }
-        if (ctx->max_memory_bytes > 0 && zend_memory_usage(0) > ctx->max_memory_bytes) {
-            ctx->exit_reason = 2;
-            break;
-        }
-
-        /* GC every N requests */
-        if (ctx->requests_done > 0 && (ctx->requests_done % WORKER_GC_INTERVAL) == 0) {
-            gc_collect_cycles();
-        }
-
-        /* A request ended with an internal function's call still on its stack
-         * may have left behind whatever that function was holding in its own
-         * locals — usort() sorts a copy of the array, and a copy keeps every
-         * element alive — and the walk after the bailout can neither see it nor
-         * say how much it was. Nor can it tell a function that was cut short from
-         * one that had already returned: the engine looks for a time limit before
-         * it takes a finished internal call off the stack, so a limit reached the
-         * moment after a database call returned finds that call's frame there,
-         * and the call's result stays too: in a temporary of the caller, which
-         * the walk does not free, when the result is used, and in the engine's
-         * own local, which nothing frees, when it is not. So the frame is a
-         * reason to look, and what decides is the heap: when a request went
-         * through one, it is compared with the last moment nothing was in flight,
-         * and a worker that grew past the threshold is retired. A large result
-         * is such growth, and retiring for it is right.
-         *
-         * Compared at such moments, not around the one request, because a worker
-         * runs requests alongside each other and the heap moves for all of them
-         * while one is parked. And a retire here takes no request with it, which
-         * a retire while another is parked would.
-         *
-         * Two windows are not judged, though the flag is taken from them so that
-         * it does not outlive them. The first, whose growth is the application
-         * warming up. And any while the server drains: the drain ends the requests
-         * it finds parked in the worker's own waits, which are internal functions,
-         * and the pool's monitor boots a replacement for a worker that exits until
-         * the shutdown itself begins, which is after the drain — so a worker
-         * retired here would be booted again in the middle of it.
-         *
-         * Two kinds of growth are not a leak and are taken out of the figure. The
-         * fibers the worker created in the stretch keep their stacks for as long
-         * as it lives, which for a worker that runs a couple of hundred requests
-         * at once is more than the threshold by itself. And objects that refer to
-         * themselves, which are garbage until the collector finds them: it runs
-         * here, for such a request only, before the heap is read. It finds those
-         * it already holds as possible roots. The engine raises the collector's
-         * guard for the whole of a bailout, and while it is up what the walk after
-         * it lets go of is not buffered, so a cycle that only that walk released
-         * stays — a leak in the proper sense, which nothing frees and which is
-         * counted. The baseline can hold garbage that an earlier stretch left and
-         * this collection frees, which takes that much off the growth shown, so a
-         * leak that small can go unseen. */
-        if (sched.fiber_count == 0) {
-            bool bailed_in_internal = oxphp_fiber_take_internal_bailout();
-            bool judged = bailed_in_internal && warmed_up && !oxphp_bridge_is_draining();
-            /* Stack buffer and the SAPI's logger, not php_log_err(): that one
-             * builds its line from the heap when error_log names a file, the
-             * heap has just grown and may be at its limit, and a bailout from
-             * here would take the whole serve loop with it. */
-            char msg[320];
-            if (judged && !oxphp_serve_loop_collect_cycles()) {
-                snprintf(msg, sizeof(msg),
-                         "oxphp: worker %d retiring: a destructor ended in a fatal "
-                         "error while the cycle collector ran, or while an "
-                         "exception one of them threw was dropped, after a request "
-                         "that ended with an internal function's call on its stack",
-                         oxphp_bridge_get_worker_id());
-                if (sapi_module.log_message != NULL) {
-                    sapi_module.log_message(msg, LOG_NOTICE);
-                }
-                oxphp_bridge_schedule_exit();
-                break;
-            }
-            uint64_t heap = zend_memory_usage(0);
-            uint64_t pool = oxphp_fiber_pool_heap_bytes();
-            uint64_t pool_grown = pool - quiet_pool;
-            if (judged
-                && heap > quiet_heap + pool_grown + OXPHP_BAILOUT_LEAK_RETIRE_BYTES) {
-                snprintf(msg, sizeof(msg),
-                         "oxphp: worker %d retiring: the heap grew %" PRIu64
-                         " bytes, not counting the fibers it created, since the "
-                         "worker last had no request in flight, and a request in "
-                         "that time was ended with an internal function's call on "
-                         "its stack, which may have kept what it held",
-                         oxphp_bridge_get_worker_id(),
-                         heap - quiet_heap - pool_grown);
-                if (sapi_module.log_message != NULL) {
-                    sapi_module.log_message(msg, LOG_NOTICE);
-                }
-                oxphp_bridge_schedule_exit();
-                break;
-            }
-            quiet_heap = heap;
-            quiet_pool = pool;
-            if (ctx->requests_done > served_at_start) {
-                warmed_up = true;
-            }
-        }
-    }
-
-    /* Cleanup. The loop above leaves the moment it sees an exit condition, so
-     * requests this worker was multiplexing can still be parked here: end them
-     * first, each into its own response, while the state they parked with is
-     * still theirs to be given back. Then finalize whatever is left. */
-    oxphp_scheduler_retire_fibers(&sched);
-    oxphp_scheduler_destroy(&sched);
-    zend_fcc_dtor(fcc);
+        /* Cleanup. The loop above leaves the moment it sees an exit condition, so
+         * requests this worker was multiplexing can still be parked here: end them
+         * first, each into its own response, while the state they parked with is
+         * still theirs to be given back. Then finalize whatever is left. */
+        oxphp_scheduler_retire_fibers(&sched);
+        oxphp_scheduler_destroy(&sched);
+        zend_fcc_dtor(fcc);
+    } zend_catch {
+        /* A fatal error raised between two requests' slices — by a destructor
+         * the cycle collector runs, say, or by an output handler the reset ends —
+         * is raised where no request is left to end, and leaves by a long jump.
+         * What follows it is the worker script's own shutdown, which runs the
+         * script's shutdown functions and the output handlers still open before
+         * it stops the script's timer. (Not the destructors of the objects alive
+         * at the fatal error: it marks them all destructed.) That timer is the
+         * one the requests have been sharing, disarmed between their slices, so
+         * without this they would run with no limit at all. Only the timer is put
+         * back on this path; the cleanup above is not run. */
+        oxphp_scheduler_release_execution_timer(&sched);
+        zend_bailout();
+    } zend_end_try();
+    oxphp_scheduler_release_execution_timer(&sched);
 }
 
 /* ─── Native plugin function dispatch ─────────────────────── */
@@ -8343,27 +8380,28 @@ static int oxphp_mark_cancelled_bailout(oxphp_cancel_reason_t reason) {
     return 1;
 }
 
-/* Own the max_execution_time ini handler so future revisions can
- * extend its behaviour without surgical patches. Today this is a thin
- * pass-through; worker-mode and the STARTUP/DEACTIVATE stages are
- * explicit early-exits so the hook is ready for later mirror logic. */
+/* Wrap the max_execution_time ini handler, which is what set_time_limit(),
+ * ini_set() and ini_restore() all reach, so that a serving worker hears of a
+ * new limit: a worker's requests each keep a deadline of their own rather than
+ * the thread's one timer, and the request that changed its limit has to have
+ * its deadline moved with it (see oxphp_fiber_time_limit_changed()). Everywhere
+ * else this is a pass-through. */
 static PHP_INI_MH((*orig_OnUpdateTimeout)) = NULL;
 
 static PHP_INI_MH(oxphp_OnUpdateTimeout)
 {
-    /* Run upstream first — it updates EG(timeout_seconds) and (re)arms
-     * SIGALRM via zend_set_timeout. We never replace its behaviour. */
+    /* Run upstream first — it updates EG(timeout_seconds) and (re)arms the
+     * engine's timer via zend_set_timeout. We never replace its behaviour. */
     int rc = orig_OnUpdateTimeout(entry, new_value, mh_arg1, mh_arg2,
                                   mh_arg3, stage);
 
-    if (oxphp_bridge_is_worker_mode()) {
-        return rc;
+    /* The engine arms the timer at every stage but startup and deactivate, and
+     * of those only the runtime one reaches a serving worker: OxPHP applies no
+     * per-directory, per-host or .htaccess ini. The deactivate stage is the
+     * worker putting its ini back between requests, which never arms it. */
+    if (rc == SUCCESS && stage == PHP_INI_STAGE_RUNTIME && oxphp_serve_in_progress) {
+        oxphp_fiber_time_limit_changed();
     }
-    if (stage == PHP_INI_STAGE_STARTUP || stage == PHP_INI_STAGE_DEACTIVATE) {
-        return rc;
-    }
-    /* Reserved for future mirror logic. SIGALRM is the source of truth;
-     * the interrupt handler converts EG(timed_out) into CancelReason. */
     return rc;
 }
 

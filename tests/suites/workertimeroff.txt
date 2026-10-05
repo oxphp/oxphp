@@ -1,0 +1,6 @@
+# profile: workertimeroff
+# description: max_execution_time switched off on a worker, with max_input_time set — the timer request startup armed for the worker's boot does not end a request
+
+# First, so the request is in flight when the boot's timer would run out.
+workertimer/test_request_with_no_limit_is_not_ended_by_the_boot_timer >> ?action=trigger
+workertimer/test_request_with_no_limit_is_not_ended_by_the_boot_timer >> ?action=check

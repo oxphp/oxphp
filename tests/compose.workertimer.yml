@@ -1,0 +1,50 @@
+# max_execution_time in worker mode with requests multiplexed on one worker: one
+# PHP worker so every request lands on the same thread, runtime hooks on so a
+# request can park and let the worker take the next one beside it.
+#
+# A profile of its own because the limit comes from php.ini (workertimer.ini),
+# and that applies to every test in the profile. Two seconds keeps a request
+# that runs on the baseline short enough to wait for; any other worker profile
+# would have to budget for it in every test that runs longer than that.
+#
+# Standalone usage:
+#   docker compose -f compose.yml -f compose.workertimer.yml up
+services:
+  oxphp-workertimer:
+    build:
+      context: ..
+      dockerfile: docker/dev/Dockerfile
+      args:
+        PHP_VERSION:
+    ports:
+      - "80"
+    networks: [test-net]
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    environment:
+      # warn, not error: a deadline counted against the worker is logged at warn
+      # as a failed request, and the retire that follows the third one too. At
+      # error a run of this suite would show the breaker test failing without the
+      # lines that say why.
+      LOG_LEVEL: warn
+      INTERNAL_ADDR: 0.0.0.0:9090
+      WORKER_FILE: /var/www/html/worker/worker_entry.php
+      PHP_WORKERS: "1"
+      ASYNC_WORKERS: 1
+      RUNTIME_HOOKS: "1"
+      # A worker the server retires is replaced only after the replacement has
+      # booted the entry file, and with one worker nobody serves in between: the
+      # request that follows a retire has to be allowed to wait for it, where the
+      # 1 s default would refuse it with a queue refusal that reads exactly like
+      # the retire not having happened.
+      QUEUE_WAIT_TIMEOUT_MS: "10000"
+    volumes:
+      - ../www:/var/www/html
+      - ./php:/var/www/html/public/tests
+      - ./fixtures/worker:/var/www/html/worker
+      - ./workertimer.ini:/usr/local/etc/php/conf.d/zz-workertimer.ini:ro

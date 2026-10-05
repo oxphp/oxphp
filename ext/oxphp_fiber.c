@@ -43,6 +43,7 @@
 #include <sys/timerfd.h> /* periodic timer that bounds an idle wait inside epoll */
 #include <errno.h>  /* EINTR from the readiness wait */
 #include <stdatomic.h> /* one-shot flag for the readiness-wait failure log */
+#include <signal.h>  /* sig_atomic_t: the timeout handler runs in signal context */
 
 /* ─── TLS: current fiber pointer ───────────────────────── */
 
@@ -345,6 +346,8 @@ void oxphp_fiber_record_cancel_bailout_frame(void) {
     }
 }
 
+static void oxphp_exec_timer_minit(void);
+
 void oxphp_fiber_minit(void) {
     if (!oxphp_next_error_cb) {
         oxphp_next_error_cb = zend_error_cb;
@@ -354,6 +357,8 @@ void oxphp_fiber_minit(void) {
          * not turn on the observation of calls. */
         zend_observer_fiber_destroy_register(oxphp_fiber_hand_on_bailout_frame);
     }
+
+    oxphp_exec_timer_minit();
 
     memset(&oxphp_fiber_loop_fn, 0, sizeof(oxphp_fiber_loop_fn));
     oxphp_fiber_loop_fn.type = ZEND_INTERNAL_FUNCTION;
@@ -2052,11 +2057,14 @@ static void oxphp_capture_unhandled(zend_object *ex) {
  * max_execution_time is a timer, and there is one per thread: its handler stops
  * the timer whenever the value moves and starts it again unless the move is a
  * restore, so putting it back on every park would stop the running deadline and
- * applying it again on every resume would restart it, each time any request
- * suspends. memory_limit is the ceiling of the thread's one heap, and
- * lowering it is refused outright while more than the new value is mapped — as
- * it is whenever a neighbour holds memory. opcache.enable has a rule of its own,
- * see oxphp_ini_keep_opcache_disabled().
+ * applying it again on every resume would restart it from the whole limit, each
+ * time the request suspends. What a request's limit is and when it runs out is
+ * kept with the request instead, apart from the directive (see
+ * oxphp_exec_timer_enter()), so the directive itself stays where the last
+ * change left it — which is what ini_get() reports. memory_limit is the ceiling
+ * of the thread's one heap, and lowering it is refused outright while more than
+ * the new value is mapped — as it is whenever a neighbour holds memory.
+ * opcache.enable has a rule of its own, see oxphp_ini_keep_opcache_disabled().
  *
  * session.* settings are the configuration of the session module, whose state
  * is one per thread and shared by the requests that overlap on it (see
@@ -4605,6 +4613,266 @@ void oxphp_fiber_init_request_state(void) {
     PG(last_error_lineno) = 0;
 }
 
+/* ─── Execution deadlines ──────────────────────────────── */
+
+/* max_execution_time, per request, on a worker that runs several at once.
+ *
+ * The engine keeps one timer per thread and arms it for the whole of a request,
+ * which a worker multiplexing requests on its thread does not have: a request
+ * taken while another is parked would run on whatever is left of the other's
+ * timer, and the timer firing would end whichever request happened to be running
+ * and raise the timeout bit in that one's connection status. So every request
+ * keeps its own deadline, counted in wall time from when it was taken — as the
+ * engine's timer is, on the builds that have one per thread — and the thread's
+ * timer is armed with what is left of it only for as long as that request runs:
+ * from the switch into it until it parks or completes. Between slices the timer
+ * is not armed, so it can only ever fire into the request it was armed for.
+ *
+ * A deadline that passes while its request is parked is delivered when the
+ * request next runs, and ends it as soon as the call it was parked in returns:
+ * the request comes back to its own state, with its own connection status, and
+ * is ended there as the engine would have ended it. Delivering it earlier would
+ * mean waking the request wherever it waits. The one resume that delivers
+ * nothing is the server's own cancellation of a parked request (a recycle, a
+ * drain past its deadline): that cancellation ends it, and the spent limit is
+ * dropped rather than left pending through the cancellation's bailout.
+ *
+ * Only on builds with ZEND_MAX_EXECUTION_TIMERS — what configure picks by default
+ * for a thread-safe build on Linux or FreeBSD — where the timer is the thread's
+ * own. Elsewhere the worker keeps the one timer it has
+ * always had, armed when the worker takes a request with nothing else running. */
+#ifdef ZEND_MAX_EXECUTION_TIMERS
+
+/* The request whose slice is running on this thread: the one the timer is armed
+ * for, when it is armed. NULL between slices and outside the serve loop. */
+static __thread oxphp_request_fiber *oxphp_timer_owner = NULL;
+
+/* Raised by the engine's timeout handler, which runs in signal context, and
+ * lowered whenever a deadline is armed. What tells a deadline the engine has
+ * already answered from one whose signal never arrived — see
+ * oxphp_exec_timer_leave(). */
+static __thread volatile sig_atomic_t oxphp_timer_fired = 0;
+
+static void (*oxphp_next_on_timeout)(int seconds) = NULL;
+
+static void oxphp_on_timeout(int seconds) {
+    oxphp_timer_fired = 1;
+    if (oxphp_next_on_timeout) {
+        oxphp_next_on_timeout(seconds);
+    }
+}
+
+/* The clock the engine's timer counts on.
+ *
+ * SYNC: php-src Zend/zend_max_execution_timer.c ZEND_MAX_EXECUTION_TIMERS_CLOCK */
+#ifdef __FreeBSD__
+# define OXPHP_EXEC_TIMER_CLOCK CLOCK_MONOTONIC
+#else
+# define OXPHP_EXEC_TIMER_CLOCK CLOCK_BOOTTIME
+#endif
+
+static uint64_t oxphp_exec_now_ns(void) {
+    struct timespec ts;
+    clock_gettime(OXPHP_EXEC_TIMER_CLOCK, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+}
+
+/* The deadline a limit of `seconds` sets from now. 0 for no deadline: the engine
+ * arms nothing for a limit of zero or less, nor for one past 999999999 seconds,
+ * which it disarms instead of passing to the kernel. */
+static uint64_t oxphp_exec_deadline_after(zend_long seconds) {
+    if (seconds <= 0 || seconds > 999999999) {
+        return 0;
+    }
+    return oxphp_exec_now_ns() + (uint64_t)seconds * 1000000000ULL;
+}
+
+/* Arm the thread's timer to fire in `ns` nanoseconds, or disarm it for 0. `left`,
+ * when given, receives what the timer had left before the call: zero when it was
+ * not armed, or had already fired. Nanoseconds rather than the engine's whole
+ * seconds, because what is left of a deadline is rarely a whole number of them.
+ *
+ * SYNC: php-src Zend/zend_max_execution_timer.c zend_max_execution_timer_settime() */
+static void oxphp_exec_timer_set(uint64_t ns, struct itimerspec *left) {
+    struct itimerspec its;
+    memset(&its, 0, sizeof(its));
+    if (left) {
+        memset(left, 0, sizeof(*left));
+    }
+    /* Not created yet, or already deleted. */
+    if (!EG(pid)) {
+        return;
+    }
+    its.it_value.tv_sec = (time_t)(ns / 1000000000ULL);
+    its.it_value.tv_nsec = (long)(ns % 1000000000ULL);
+    /* The result is not checked, though the engine raises a fatal error on it.
+     * timer_settime() fails only for a timer this thread does not have — not
+     * created yet or already deleted, which the check above rules out, or
+     * created in the parent of a forked child, where there is nothing to arm —
+     * or for a nanosecond field out of range, which the division rules out. A
+     * fatal error raised from here, between two requests' slices, would have no
+     * request to end. */
+    timer_settime(EG(max_execution_timer_timer), 0, &its, left);
+}
+
+/* A new request on `fiber`: its limit is the one every request starts with, and
+ * its deadline counts from now. */
+static void oxphp_exec_timer_begin(const oxphp_fiber_scheduler *sched,
+                                   oxphp_request_fiber *fiber) {
+    fiber->timeout_seconds = sched->timeout_baseline;
+    fiber->exec_deadline_ns = oxphp_exec_deadline_after(sched->timeout_baseline);
+    fiber->exec_timeout_due = false;
+}
+
+/* About to switch into `fiber`, with its state already installed. */
+static void oxphp_exec_timer_enter(oxphp_request_fiber *fiber) {
+    /* What the engine names in its fatal, and what it disarms on when the limit
+     * is changed — this request's, not the last one to change it. */
+    EG(timeout_seconds) = fiber->timeout_seconds;
+    oxphp_timer_fired = 0;
+    /* A timeout raised while no request was running is none of theirs: leave
+     * hands a request's own back to it as due, so one still raised here came
+     * from no deadline of this request. */
+    zend_atomic_bool_store_ex(&EG(timed_out), false);
+
+    if (fiber->exec_timeout_due || fiber->exec_deadline_ns != 0) {
+        uint64_t now = oxphp_exec_now_ns();
+        if (fiber->exec_timeout_due || now >= fiber->exec_deadline_ns) {
+            fiber->exec_timeout_due = false;
+            fiber->exec_deadline_ns = 0;
+            if (fiber->drain_kill) {
+                /* Resumed only to be cancelled: a recycle or a shutdown got
+                 * there first, and the suspend point bails out of its wait
+                 * before the request runs another opcode. Fired here, the
+                 * timeout would still be pending after that bailout and end the
+                 * request's first shutdown function instead, skipping the rest.
+                 * The cancellation stands, the shutdown functions run, and with
+                 * the limit spent they run without one. */
+            } else {
+                /* Out of time before it runs: fire now, as the engine's handler
+                 * does, so the first thing the request does is end. The timeout
+                 * bit lands in its own connection status, which is the one
+                 * installed.
+                 *
+                 * SYNC: php-src Zend/zend_execute_API.c zend_timeout_handler(), ZTS */
+                if (zend_on_timeout) {
+                    zend_on_timeout(EG(timeout_seconds));
+                }
+                zend_atomic_bool_store_ex(&EG(timed_out), true);
+                zend_atomic_bool_store_ex(&EG(vm_interrupt), true);
+            }
+        } else {
+            oxphp_exec_timer_set(fiber->exec_deadline_ns - now, NULL);
+        }
+    }
+
+    oxphp_timer_owner = fiber;
+}
+
+/* Back from `fiber`, which has parked or completed, before anything else runs. */
+static void oxphp_exec_timer_leave(oxphp_request_fiber *fiber) {
+    oxphp_timer_owner = NULL;
+
+    const bool armed = fiber->exec_deadline_ns != 0;
+    struct itimerspec left;
+    memset(&left, 0, sizeof(left));
+    if (armed) {
+        oxphp_exec_timer_set(0, &left);
+    }
+
+    if (zend_atomic_bool_load_ex(&EG(timed_out))) {
+        /* Ran out and parked before the engine got to answer it. Taken off the
+         * thread, where the next request to run would answer it instead, and
+         * delivered when this one runs again. vm_interrupt is left alone: other
+         * reasons share it, and one raised for nothing costs a pass through
+         * the interrupt handler. */
+        zend_atomic_bool_store_ex(&EG(timed_out), false);
+        fiber->exec_deadline_ns = 0;
+        fiber->exec_timeout_due = true;
+    } else if (!armed || left.it_value.tv_sec != 0 || left.it_value.tv_nsec != 0) {
+        /* Nothing armed, or still counting: the deadline stands. */
+    } else if (oxphp_timer_fired) {
+        /* Fired and answered. */
+        fiber->exec_deadline_ns = 0;
+    } else {
+        /* Fired while the timer was being disarmed, and the signal never came:
+         * a kernel may drop the signal of a timer that is set again after the
+         * signal was queued, so the engine never heard of it. (One that does
+         * not drop it delivers it on the way out of timer_settime(), and the
+         * engine's handler raises EG(timed_out) as well as the flag, so the
+         * first branch catches it, not the one above.) Delivered when the
+         * request runs again. */
+        fiber->exec_deadline_ns = 0;
+        fiber->exec_timeout_due = true;
+    }
+}
+
+void oxphp_fiber_time_limit_changed(void) {
+    oxphp_request_fiber *fiber = oxphp_timer_owner;
+    if (fiber == NULL) {
+        /* Changed outside every request — by a save handler or a destructor the
+         * scheduler runs between them. Such code runs without a deadline, and
+         * the engine has just armed the timer, which would otherwise fire into
+         * whichever request runs next. */
+        oxphp_exec_timer_set(0, NULL);
+        return;
+    }
+    /* The engine has armed the timer for the new limit already; this keeps the
+     * deadline it started, for the slices after this one. */
+    fiber->timeout_seconds = EG(timeout_seconds);
+    fiber->exec_deadline_ns = oxphp_exec_deadline_after(EG(timeout_seconds));
+    oxphp_timer_fired = 0;
+}
+
+void oxphp_scheduler_own_execution_timer(oxphp_fiber_scheduler *sched) {
+    sched->timeout_baseline = EG(timeout_seconds);
+    oxphp_timer_owner = NULL;
+    /* The timer the request startup armed for the boot script would fire into
+     * whichever request is running when it runs out. Stopped directly, because
+     * zend_unset_timeout() stops it only while the limit is not zero: with
+     * max_input_time set, request startup arms the timer for that, and a
+     * max_execution_time of zero then sets the limit to zero at the start of the
+     * script without stopping it — a worker with no limit at all would still
+     * have a request ended max_input_time after its boot. */
+    oxphp_exec_timer_set(0, NULL);
+    zend_atomic_bool_store_ex(&EG(timed_out), false);
+}
+
+void oxphp_scheduler_release_execution_timer(const oxphp_fiber_scheduler *sched) {
+    /* What runs after the loop — the worker script's own code past the call
+     * that served, or its shutdown when a fatal error has ended the loop — is a
+     * script again, under the limit the requests started with, counted from
+     * here. Stopped first rather than assumed stopped: the engine's call arms
+     * the timer for a limit above zero but leaves it as it is for a zero one,
+     * so a worker with no limit would otherwise keep whatever deadline was armed
+     * when the loop ended. */
+    oxphp_exec_timer_set(0, NULL);
+    zend_set_timeout(sched->timeout_baseline, /* reset_signals */ 0);
+}
+
+static void oxphp_exec_timer_minit(void) {
+    if (!oxphp_next_on_timeout) {
+        oxphp_next_on_timeout = zend_on_timeout;
+        zend_on_timeout = oxphp_on_timeout;
+    }
+}
+
+#else /* !ZEND_MAX_EXECUTION_TIMERS */
+
+static inline void oxphp_exec_timer_begin(const oxphp_fiber_scheduler *sched,
+                                          oxphp_request_fiber *fiber) {
+    (void)sched;
+    (void)fiber;
+}
+static inline void oxphp_exec_timer_enter(oxphp_request_fiber *fiber) { (void)fiber; }
+static inline void oxphp_exec_timer_leave(oxphp_request_fiber *fiber) { (void)fiber; }
+void oxphp_fiber_time_limit_changed(void) {}
+void oxphp_scheduler_own_execution_timer(oxphp_fiber_scheduler *sched) { (void)sched; }
+void oxphp_scheduler_release_execution_timer(const oxphp_fiber_scheduler *sched) { (void)sched; }
+static inline void oxphp_exec_timer_minit(void) {}
+
+#endif /* ZEND_MAX_EXECUTION_TIMERS */
+
 /* ─── Start / Resume / Finalize ────────────────────────── */
 
 /* Hand a NEW request to `fiber` — either a fresh fiber whose coroutine starts at
@@ -4628,7 +4896,10 @@ void oxphp_scheduler_start_fiber(oxphp_fiber_scheduler *sched, oxphp_request_fib
     void *saved_stack_limit = EG(stack_limit);
     oxphp_fiber_install_stack_limits(fiber);
 
+    oxphp_exec_timer_begin(sched, fiber);
+    oxphp_exec_timer_enter(fiber);
     oxphp_fiber_enter(fiber, NULL);
+    oxphp_exec_timer_leave(fiber);
 
     EG(stack_base) = saved_stack_base;
     EG(stack_limit) = saved_stack_limit;
@@ -4669,7 +4940,9 @@ void oxphp_scheduler_resume_fiber(oxphp_fiber_scheduler *sched, oxphp_request_fi
     void *saved_stack_limit = EG(stack_limit);
     oxphp_fiber_install_stack_limits(fiber);
 
+    oxphp_exec_timer_enter(fiber);
     oxphp_fiber_enter(fiber, value);
+    oxphp_exec_timer_leave(fiber);
 
     EG(stack_base) = saved_stack_base;
     EG(stack_limit) = saved_stack_limit;
