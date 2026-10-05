@@ -26,14 +26,17 @@ impl EventHandler<RequestReceived> for TrustedProxyHandler {
             .metadata
             .push(("peer_addr".into(), event.remote_addr.to_string()));
 
-        // Collect all Forwarded header values (RFC 7230 §3.2.2: may span multiple lines)
+        // Collect all Forwarded header values (RFC 7230 §3.2.2: may span multiple lines).
+        // A line that is not readable text counts as an empty one: a hop
+        // without an address, which the walk does not get past. It still
+        // makes `Forwarded` the header the chain is read from.
         let forwarded_combined: Option<String> = {
             let values: Vec<&str> = event
                 .parts
                 .headers
                 .get_all("forwarded")
                 .iter()
-                .filter_map(|v| v.to_str().ok())
+                .map(|v| v.to_str().unwrap_or(""))
                 .collect();
             if values.is_empty() {
                 None
@@ -64,23 +67,24 @@ impl EventHandler<RequestReceived> for TrustedProxyHandler {
                     .push(("forwarded_host".into(), host.to_string()));
             }
         } else {
-            // Collect all X-Forwarded-For values (may span multiple header lines)
+            // Collect all X-Forwarded-For values (may span multiple header
+            // lines); an unreadable line counts as an empty one, as above.
             let xff_values: Vec<&str> = event
                 .parts
                 .headers
                 .get_all("x-forwarded-for")
                 .iter()
-                .filter_map(|v| v.to_str().ok())
+                .map(|v| v.to_str().unwrap_or(""))
                 .collect();
-            // X-Forwarded-For carries no source port, so every node pairs
-            // with `None` and the rewritten REMOTE_PORT stays 0.
+            // A node may carry the source port the way a `Forwarded` node does
+            // (`ip:port`, `[ipv6]:port`); some load balancers write it.
             chain = if xff_values.is_empty() {
                 Chain::default()
             } else {
                 xff_values
                     .join(", ")
                     .split(',')
-                    .map(|s| s.trim().parse().ok().map(|ip| (ip, None)))
+                    .map(|s| parse_forwarded_for(s.trim()))
                     .collect()
             };
 
@@ -140,14 +144,14 @@ impl EventHandler<RequestReceived> for TrustedProxyHandler {
 impl TrustedProxyHandler {
     /// The client address: `CF-Connecting-IP` when the request came through a
     /// Cloudflare edge and carries a usable one, otherwise rightmost-non-trusted
-    /// over the parsed hops.
+    /// over the hops right of the last break. `None` leaves the peer in place.
     fn resolve_client(
         &self,
         peer: IpAddr,
         headers: &http::HeaderMap,
         chain: &Chain,
     ) -> Option<(IpAddr, Option<u16>)> {
-        if self.came_through_cloudflare(peer, chain.unbroken_tail()) {
+        if self.came_through_cloudflare(peer, &chain.hops) {
             if let Some(ip) = cf_connecting_ip(headers) {
                 return Some((ip, None));
             }
@@ -170,7 +174,7 @@ impl TrustedProxyHandler {
 
     /// Rightmost-non-trusted selection over a forwarding chain. The trust check
     /// uses only the IP (`.0`); the optional source port rides along so the
-    /// caller can recover `REMOTE_PORT` from an RFC 7239 `for=ip:port` node.
+    /// caller can recover `REMOTE_PORT` from an `ip:port` node.
     fn extract_client_ip(&self, chain: &[(IpAddr, Option<u16>)]) -> Option<(IpAddr, Option<u16>)> {
         if chain.is_empty() {
             return None;
@@ -187,19 +191,10 @@ impl TrustedProxyHandler {
 /// A forwarding chain as read from `Forwarded` or `X-Forwarded-For`.
 #[derive(Debug, Default)]
 struct Chain {
-    /// The hops whose address parsed, leftmost first.
+    /// The hops right of the last one whose address is missing or did not
+    /// parse, leftmost first — as far as a walk from the peer can vouch for.
+    /// What lies left of such a hop may be only what the client sent.
     hops: Vec<(IpAddr, Option<u16>)>,
-    /// How many of `hops` come after the rightmost hop whose address is
-    /// missing or did not parse; all of them when there is no such hop.
-    unbroken: usize,
-}
-
-impl Chain {
-    /// The hops right of the last one that is missing or did not parse —
-    /// as far as a walk from the peer can vouch for.
-    fn unbroken_tail(&self) -> &[(IpAddr, Option<u16>)] {
-        &self.hops[self.hops.len() - self.unbroken..]
-    }
 }
 
 impl FromIterator<Option<(IpAddr, Option<u16>)>> for Chain {
@@ -207,11 +202,8 @@ impl FromIterator<Option<(IpAddr, Option<u16>)>> for Chain {
         let mut chain = Chain::default();
         for hop in iter {
             match hop {
-                Some(hop) => {
-                    chain.hops.push(hop);
-                    chain.unbroken += 1;
-                }
-                None => chain.unbroken = 0,
+                Some(hop) => chain.hops.push(hop),
+                None => chain.hops.clear(),
             }
         }
         chain
@@ -270,9 +262,10 @@ fn parse_forwarded(value: &str) -> Vec<ForwardedEntry<'_>> {
         .collect()
 }
 
-/// Parse a single RFC 7239 `for=` node value into its IP and optional source
-/// port. Handles `[ipv6]:port`, `[ipv6]`, bare ipv6, `ipv4:port` and bare ipv4.
-/// A port of `0` (or an unparseable port) is normalized to `None`.
+/// Parse a single RFC 7239 `for=` node value or `X-Forwarded-For` entry into
+/// its IP and optional source port. Handles `[ipv6]:port`, `[ipv6]`, bare
+/// ipv6, `ipv4:port` and bare ipv4. A port of `0` (or an unparseable port) is
+/// normalized to `None`.
 fn parse_forwarded_for(val: &str) -> Option<(IpAddr, Option<u16>)> {
     let val = val.trim_matches('"').trim();
     // Bracketed IPv6 literal, optionally followed by `:port`.
@@ -681,34 +674,51 @@ mod tests {
     }
 
     #[test]
-    fn test_handler_xff_port_suffix_entry_ignored() {
-        // X-Forwarded-For entries with a `:port` suffix are not parsed as IPs
-        // (XFF carries bare addresses — matches nginx/Caddy `real_ip`). The lone
-        // unparseable entry is dropped, so remote_addr is NOT rewritten and
-        // stays the trusted peer.
-        let handler = TrustedProxyHandler::new(make_config("10.0.0.0/8"));
-        let mut event =
-            make_event_with_headers(trusted_addr(), vec![("x-forwarded-for", "1.2.3.4:5678")]);
-        let peer = event.remote_addr;
-        handler.handle(&mut event);
-        assert_eq!(event.remote_addr, peer);
+    fn test_handler_xff_hop_with_port_is_read() {
+        // Azure Application Gateway writes X-Forwarded-For as a list of
+        // `IP:port`. Its record of the client is read, port included, rather
+        // than skipped in favour of the entry the client wrote further left.
+        let handler = TrustedProxyHandler::new(make_config("private"));
+        for (xff, client) in [
+            ("1.2.3.4:5678", "1.2.3.4:5678"),
+            ("1.2.3.4, 203.0.113.9:4444", "203.0.113.9:4444"),
+            ("1.2.3.4, [2001:db8::9]:4444", "[2001:db8::9]:4444"),
+        ] {
+            let mut event = make_event_with_headers(trusted_addr(), vec![("x-forwarded-for", xff)]);
+            handler.handle(&mut event);
+            assert_eq!(event.remote_addr, client.parse().unwrap(), "{xff}");
+        }
     }
 
     #[test]
-    fn test_handler_xff_port_suffix_node_skipped_in_chain() {
-        // A port-suffixed (unparseable) XFF node does not poison the chain: the
-        // rightmost untrusted parseable address is still selected.
-        let handler = TrustedProxyHandler::new(make_config("10.0.0.0/8"));
+    fn test_handler_unparseable_hop_stops_rightmost_non_trusted() {
+        // Nothing the walk reaches before the hop that does not parse is
+        // untrusted, and it cannot vouch for what lies left of that hop, so
+        // the address is not rewritten.
+        let handler = TrustedProxyHandler::new(make_config("private"));
         let mut event = make_event_with_headers(
             trusted_addr(),
-            vec![("x-forwarded-for", "1.2.3.4:5678, 203.0.113.50")],
+            vec![("x-forwarded-for", "1.2.3.4, garbage")],
+        );
+        handler.handle(&mut event);
+        assert_eq!(event.remote_addr, trusted_addr());
+    }
+
+    #[test]
+    fn test_handler_trusted_hops_right_of_a_break_give_the_leftmost_of_them() {
+        // As in a chain of trusted hops only, the leftmost hop the walk can
+        // vouch for is taken: the one right of the break — not the client's
+        // entry left of it, and not the peer.
+        let handler = TrustedProxyHandler::new(make_config("private"));
+        let mut event = make_event_with_headers(
+            trusted_addr(),
+            vec![("x-forwarded-for", "1.2.3.4, garbage, 10.0.0.5")],
         );
         handler.handle(&mut event);
         assert_eq!(
             event.remote_addr.ip(),
-            "203.0.113.50".parse::<IpAddr>().unwrap()
+            "10.0.0.5".parse::<IpAddr>().unwrap()
         );
-        assert_eq!(event.remote_addr.port(), 0);
     }
 
     #[test]
@@ -875,12 +885,9 @@ mod tests {
     }
 
     #[test]
-    fn test_handler_unparseable_hop_stops_the_cloudflare_walk() {
-        // The load balancer wrote the client's address with a port, which
-        // does not parse; the Cloudflare address left of it is the client's
-        // own. The walk cannot vouch for anything past an unparseable hop, so
-        // it stops there and CF-Connecting-IP is not read. Rightmost-non-
-        // trusted then sees only trusted parsed nodes and keeps the leftmost.
+    fn test_handler_cdn_bypass_through_a_port_writing_lb_ignores_cf_connecting_ip() {
+        // The load balancer records the client with its port; that record is
+        // what the walk reaches, and it is not a Cloudflare edge.
         let handler = TrustedProxyHandler::new(make_config("private,cloudflare"));
         let mut event = make_event_with_headers(
             trusted_addr(),
@@ -890,10 +897,25 @@ mod tests {
             ],
         );
         handler.handle(&mut event);
-        assert_eq!(
-            event.remote_addr.ip(),
-            "104.16.0.1".parse::<IpAddr>().unwrap()
+        assert_eq!(event.remote_addr, "203.0.113.9:4444".parse().unwrap());
+    }
+
+    #[test]
+    fn test_handler_unparseable_hop_stops_the_cloudflare_walk() {
+        // The Cloudflare address left of the hop that does not parse is the
+        // client's own. Neither the walk to the edge nor rightmost-non-trusted
+        // reaches past that hop: CF-Connecting-IP is not read and the client's
+        // entry is not taken either.
+        let handler = TrustedProxyHandler::new(make_config("private,cloudflare"));
+        let mut event = make_event_with_headers(
+            trusted_addr(),
+            vec![
+                ("x-forwarded-for", "104.16.0.1, garbage"),
+                cf_header("198.51.100.7"),
+            ],
         );
+        handler.handle(&mut event);
+        assert_eq!(event.remote_addr, trusted_addr());
     }
 
     /// An event whose header `name` carries `lines` as separate lines; a line
@@ -957,18 +979,61 @@ mod tests {
     }
 
     #[test]
-    fn test_chain_keeps_only_parsed_hops() {
+    fn test_handler_unreadable_xff_line_is_a_break() {
+        // The load balancer appended its record to the line that holds the
+        // client's non-ASCII byte, so the record is lost with the line; the
+        // line left of it is the client's.
+        let handler = TrustedProxyHandler::new(make_config("private"));
+        let mut event =
+            event_with_raw_lines("x-forwarded-for", &[b"1.2.3.4", b"\x80, 203.0.113.9"]);
+        handler.handle(&mut event);
+        assert_eq!(event.remote_addr, trusted_addr());
+    }
+
+    #[test]
+    fn test_handler_unreadable_forwarded_line_is_a_break() {
+        let handler = TrustedProxyHandler::new(make_config("private"));
+        let mut event = event_with_raw_lines(
+            "forwarded",
+            &[b"for=6.6.6.6", b"for=7.7.7.7\x80", b"for=10.0.0.5"],
+        );
+        handler.handle(&mut event);
+        assert_eq!(
+            event.remote_addr.ip(),
+            "10.0.0.5".parse::<IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn test_handler_unreadable_forwarded_line_keeps_forwarded_the_source() {
+        // A request that carries Forwarded is read from Forwarded, even when
+        // no line of it is readable text. Falling back to X-Forwarded-For
+        // would let a client behind a proxy that maintains only Forwarded
+        // choose its address there.
+        let handler = TrustedProxyHandler::new(make_config("private"));
+        let mut event = event_with_raw_lines("forwarded", &[b"for=203.0.113.9\x80"]);
+        event
+            .parts
+            .headers
+            .append("x-forwarded-for", http::HeaderValue::from_static("6.6.6.6"));
+        handler.handle(&mut event);
+        assert_eq!(event.remote_addr, trusted_addr());
+    }
+
+    #[test]
+    fn test_chain_keeps_only_the_hops_right_of_the_last_break() {
         let a = ip("192.0.2.1");
         let b = (ip("192.0.2.2").0, Some(80));
         let c = ip("192.0.2.3");
         let chain: Chain = [Some(a), None, Some(b), Some(c)].into_iter().collect();
-        assert_eq!(chain.hops, [a, b, c]);
-        assert_eq!(chain.unbroken_tail(), [b, c]);
+        assert_eq!(chain.hops, [b, c]);
+
+        let chain: Chain = [Some(a), Some(b), None].into_iter().collect();
+        assert!(chain.hops.is_empty());
 
         // Hops that do not parse take no room, however many there are.
         let chain: Chain = std::iter::repeat_n(None, 10_000).collect();
         assert_eq!(chain.hops.capacity(), 0);
-        assert!(chain.unbroken_tail().is_empty());
     }
 
     #[test]
