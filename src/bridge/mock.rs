@@ -518,6 +518,7 @@ pub unsafe fn oxphp_create_borrow_proxy(_dst: *mut c_void, _promise_id: u64) {}
 
 // Async worker
 pub unsafe fn oxphp_async_reset() {}
+pub unsafe fn oxphp_async_drop_execution_timer() {}
 pub unsafe fn oxphp_bridge_set_async_worker(_is_async: c_int) {}
 pub unsafe fn oxphp_bridge_is_async_worker() -> c_int {
     0

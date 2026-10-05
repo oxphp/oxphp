@@ -137,7 +137,7 @@ If both old and new are set, `ENTRY_FILE` / `WORKER_MODE_ENABLED` win. Migrate a
 | `HEADER_TIMEOUT_SECONDS` | `5` | Maximum seconds to receive HTTP headers after connection (Slowloris protection) |
 | `DRAIN_TIMEOUT_SECONDS` | `25` | Maximum seconds to wait for in-flight connections during graceful shutdown |
 
-PHP execution time is bounded by PHP's own `max_execution_time` ini directive (and `set_time_limit()` at runtime), not an OxPHP env var.
+PHP execution time is bounded by PHP's own `max_execution_time` ini directive (and `set_time_limit()` at runtime), not an OxPHP env var. That bound does not reach an async task: a thread of the `ASYNC_WORKERS` pool holds no execution deadline, so neither the directive nor `set_time_limit()` limits what a task dispatched with `oxphp_async()` runs. Bound such a task with the timeout argument of `oxphp_async_await()` instead — see [Async promises](../features/async-promises.md#limitations).
 
 ## Rate Limiting
 

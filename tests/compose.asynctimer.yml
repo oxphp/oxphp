@@ -1,0 +1,37 @@
+# Async workers with a single worker and a short max_execution_time, so the
+# engine's per-thread execution timer can be caught in the act: ASYNC_WORKERS=1,
+# max_execution_time=10.
+#
+# A pool thread runs one php_request_startup() for its whole life, and that is
+# what arms the thread's execution timer. The timer is one-shot, so a container
+# gets exactly one firing — here, with the limit at ten seconds, late enough
+# that a test can still hold a task across it. The test asserts that rather than
+# assuming it. The idle half of the same firing is the asynctimeridle profile.
+#
+# Standalone usage:
+#   docker compose -f compose.yml -f compose.asynctimer.yml up
+services:
+  oxphp-asynctimer:
+    build:
+      context: ..
+      dockerfile: docker/dev/Dockerfile
+      args:
+        PHP_VERSION:
+    ports:
+      - "80"
+    networks: [test-net]
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    environment:
+      LOG_LEVEL: error
+      INTERNAL_ADDR: 0.0.0.0:9090
+      ASYNC_WORKERS: 1
+    volumes:
+      - ../www:/var/www/html
+      - ./php:/var/www/html/public/tests
+      - ./asynctimer.ini:/usr/local/etc/php/conf.d/zz-asynctimer.ini:ro

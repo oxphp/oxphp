@@ -374,6 +374,7 @@ extern "C" {
 
     // Async worker
     pub fn oxphp_async_reset();
+    pub fn oxphp_async_drop_execution_timer();
     pub fn oxphp_bridge_set_async_worker(is_async: c_int);
     pub fn oxphp_bridge_is_async_worker() -> c_int;
 

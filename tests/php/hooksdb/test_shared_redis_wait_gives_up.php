@@ -59,14 +59,13 @@ $previous = ini_get('default_socket_timeout');
 ini_set('default_socket_timeout', '1');
 
 // And the bound has to be the smaller of the two limits that impose one, which
-// only says something where the two differ. This image starts with
-// max_execution_time at 0 — the profile's Dockerfile says why — so on its own
-// default_socket_timeout is both the smaller and the larger, and a regression
-// that started taking the larger would pass here unseen. A request limit of
-// thirty seconds separates them again without touching the startup value the
-// rest of the profile is built on: max_execution_time is read as the request
-// currently has it, so the wait below must still come out at two seconds and not
-// at thirty.
+// only says something where the two differ: were both two seconds, a regression
+// that started taking the larger would read the same and pass unseen. This image
+// lowers default_socket_timeout and leaves max_execution_time alone, so the two
+// do differ — and the limit is pinned here so that holds whatever the image
+// starts it at, without touching the startup value the rest of the image is
+// built on. max_execution_time is read as the request currently has it, so the
+// wait below must still come out at two seconds and not at thirty.
 set_time_limit(30);
 
 $thrown = '';

@@ -4469,9 +4469,48 @@ void oxphp_async_reset(void) {
         zend_string_release(PG(last_error_file));
         PG(last_error_file) = NULL;
     }
+}
 
-    /* Reset execution timer */
-    zend_set_timeout(0, 0);
+/* Take the engine's execution deadline off this thread.
+ *
+ * max_execution_time is one timer per thread, and an async pool thread is not a
+ * request: it runs one php_request_startup() for its whole life, and whatever
+ * that call armed would otherwise run out once, in the middle of whichever task
+ * happened to be executing opcodes at that moment. set_time_limit() inside a
+ * task arms the same single timer, so a limit one task sets lands on whichever
+ * task is executing when it runs out — the one after it, or a sibling that was
+ * already running when the limit was set, or one that set no limit at all.
+ *
+ * The order of the two statements is the whole point, and it is the engine's own:
+ * OnUpdateTimeout — what set_time_limit() and ini_set() go through — calls
+ * zend_unset_timeout() before it writes the new limit, so that its disarm reads
+ * the old one. On both of the POSIX timer paths, which are the ones built here,
+ * zend_unset_timeout() disarms under `if (EG(timeout_seconds))`, so the field
+ * must still hold the value the timer was armed with. Zeroing first is what makes
+ * `zend_set_timeout(0, 0)` unable to disarm: it writes the field before anything
+ * else, and the path that would reach the timer is itself taken only
+ * `if (seconds > 0)`, so the live timer stays.
+ *
+ * What a timer that has run out leaves behind is not all undoable from here:
+ * php_on_timeout() ORs PHP_CONNECTION_TIMEOUT into PG(connection_status), and
+ * nothing on the task path puts that field back. So the callers take the timer
+ * off at the two moments it can become armed — once the thread's own startup
+ * returns, and from the max_execution_time ini handler — rather than waiting
+ * for the next task boundary, by which time a task has already been ended.
+ *
+ * Writing the field afterwards is not bookkeeping for its own sake. Zero is the
+ * engine's own encoding for "no execution deadline" — it is what a CLI process
+ * runs under — so the field is left saying what is true of the thread, instead
+ * of standing as a record of a deadline nothing is counting down. Note it is
+ * not what ini_get('max_execution_time') reads: that returns the directive's
+ * own string, which zend_alter_ini_entry_ex() commits once the ini handler has
+ * returned success, and which nothing here puts back. So on a pool thread the
+ * value set_time_limit() was given still reads back, while the deadline it
+ * asked for does not exist.
+ */
+void oxphp_async_drop_execution_timer(void) {
+    zend_unset_timeout();
+    EG(timeout_seconds) = 0;
 }
 
 /* === Async Promise: Fixup run_time_cache for cross-thread execution === */

@@ -1,0 +1,10 @@
+# profile: asynctimeridle
+# description: A pool thread's execution timer, fired while the pool was idle
+
+# One test. The thread's timer is one-shot, and this test makes the idle stretch
+# it has to fire in — inside its own request, between two tasks it dispatches
+# itself — so where the firing falls relative to the profile's first request is
+# not relied on. A test added here still has to come after it: one that holds a
+# task on the pool across the mark spends the firing on that task, which is the
+# asynctimer profile's case and not this one.
+asynctimeridle/test_pool_thread_carries_no_execution_timer

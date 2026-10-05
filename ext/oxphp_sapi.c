@@ -1790,7 +1790,14 @@ typedef enum {
  * timeout at all asks to wait forever. A deployment that configures neither ini
  * lands on 30s rather than on the fallback below: a server SAPI adds no ini
  * defaults of its own, so both stand at the engine's — 30 and 60. The 60 below is
- * for the deployment that disables both. */
+ * for the deployment that disables both.
+ *
+ * On an async pool thread the directive is the whole of it: that thread holds no
+ * execution deadline, so what bounds the wait is the value the directive carries
+ * rather than a deadline anything is counting down. A task that lowers it with
+ * set_time_limit() therefore shortens this wait for the tasks that follow it on
+ * the same thread too, since the entry is rolled back at the end of a request and
+ * that thread's request does not end. */
 static int64_t oxphp_claim_budget_ns(void)
 {
     zend_long limits[2] = {
@@ -1801,9 +1808,10 @@ static int64_t oxphp_claim_budget_ns(void)
          * value any of them set — while the engine holds the limit of the request
          * that is running (see oxphp_exec_timer_enter(); on a build without a
          * per-thread timer the two hold the same value). Anywhere else the
-         * directive is the one to read: an async task thread never executes a
-         * script, so the engine there still holds what request startup put in it,
-         * max_input_time when that is set, not max_execution_time. */
+         * directive is the one to read: an async pool thread never executes a
+         * script and is left holding no execution deadline at all, so the
+         * engine's field there is zero — reading it would lift this bound
+         * rather than set one. */
         oxphp_serve_in_progress
             ? EG(timeout_seconds)
             : zend_ini_long("max_execution_time", sizeof("max_execution_time") - 1, 0),
@@ -8381,17 +8389,22 @@ static int oxphp_mark_cancelled_bailout(oxphp_cancel_reason_t reason) {
 }
 
 /* Wrap the max_execution_time ini handler, which is what set_time_limit(),
- * ini_set() and ini_restore() all reach, so that a serving worker hears of a
- * new limit: a worker's requests each keep a deadline of their own rather than
- * the thread's one timer, and the request that changed its limit has to have
- * its deadline moved with it (see oxphp_fiber_time_limit_changed()). Everywhere
- * else this is a pass-through. */
+ * ini_set() and ini_restore() all reach, so that a thread which does not count
+ * its limit down off the engine's one per-thread timer still hears of a new
+ * one. A serving worker gives each of its requests a deadline of its own, and
+ * the request that changed its limit has to have that deadline moved with it
+ * (see oxphp_fiber_time_limit_changed()). An async pool thread keeps no
+ * deadline at all, so the timer upstream just armed comes straight back off.
+ * Everywhere else this is a pass-through. */
 static PHP_INI_MH((*orig_OnUpdateTimeout)) = NULL;
 
 static PHP_INI_MH(oxphp_OnUpdateTimeout)
 {
     /* Run upstream first — it updates EG(timeout_seconds) and (re)arms the
-     * engine's timer via zend_set_timeout. We never replace its behaviour. */
+     * engine's timer via zend_set_timeout. None of that is skipped; for a pool
+     * thread the second branch below then takes the timer it armed straight
+     * back off, so what is left there is the directive updated and no deadline
+     * armed. */
     int rc = orig_OnUpdateTimeout(entry, new_value, mh_arg1, mh_arg2,
                                   mh_arg3, stage);
 
@@ -8401,6 +8414,33 @@ static PHP_INI_MH(oxphp_OnUpdateTimeout)
      * worker putting its ini back between requests, which never arms it. */
     if (rc == SUCCESS && stage == PHP_INI_STAGE_RUNTIME && oxphp_serve_in_progress) {
         oxphp_fiber_time_limit_changed();
+    }
+
+    /* Neither stage reaches the branch below as the code stands, and neither
+     * check is what keeps it from doing so. The startup stage runs for every
+     * directive on every new ZTS thread, from zend_new_thread_end_handler via
+     * zend_ini_refresh_caches — which is inside the ts_resource_ex() call that
+     * a pool thread makes before it marks itself one, so the flag the branch
+     * reads is still 0 there. These checks say instead what the branch would
+     * mean per stage, so that none of it rests on that initialisation order.
+     * At startup upstream only records EG(timeout_seconds), for the thread's
+     * own request startup to arm with later; zeroing the field there would
+     * mean the timer is never armed at all, which is a different design and
+     * not this one. At the deactivate stage upstream disarms and deliberately
+     * does not re-arm, so there would be nothing to take off. */
+    if (stage == PHP_INI_STAGE_STARTUP || stage == PHP_INI_STAGE_DEACTIVATE) {
+        return rc;
+    }
+    if (oxphp_bridge_is_async_worker()) {
+        /* An execution timer is the thread's, not the task's: the engine keeps
+         * one per thread, and a pool thread runs every task of its life inside
+         * the single request it opened at startup. So a limit set from inside
+         * one task would be counted down against whichever task happens to be
+         * executing opcodes when it runs out — including a task that set no
+         * limit and a task that was already running when this one armed. There
+         * is no per-task deadline for upstream to arm here, so the thread keeps
+         * none: a task bounds itself through the await it is driven by. */
+        oxphp_async_drop_execution_timer();
     }
     return rc;
 }
