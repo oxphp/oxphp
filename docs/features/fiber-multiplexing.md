@@ -173,7 +173,7 @@ $users = oxphp_async_await($promise);
 
 Fiber C stacks are allocated once and reused across requests. When a fiber finishes handling a request, it is not destroyed — it suspends back to the scheduler and is added to a free list. The next request reuses the existing C stack, avoiding expensive memory allocation.
 
-PHP VM stacks (used for function call frames) are allocated fresh per request and freed when the handler returns.
+PHP VM stacks (used for function call frames) are kept the same way: each fiber's is allocated when the fiber first starts and reused by every request it serves. A request whose call chain outgrows it gets further pages, which are given back when those calls end.
 
 ## Docker Example
 
@@ -238,13 +238,15 @@ With worker mode already on, the call is somewhere a fiber switch is refused or 
 
 ### High memory usage with many concurrent requests
 
-Each fiber uses a C stack (default 8 MiB, configured by PHP's `fiber.stack_size` ini setting) plus a PHP VM stack per request. With 256 concurrent fibers, worst-case C stack memory is 2 GiB per worker thread.
+Each fiber runs on a C stack of its own, sized by PHP's `fiber.stack_size` ini setting — 2 MiB on 64-bit platforms when the setting is left unset — plus a PHP VM stack of its own. At the limit of 256 fibers per worker thread that comes to 512 MiB of C stack per thread, but as address space mapped from the operating system rather than memory in use: a page of a fiber's stack becomes resident only once code running on that fiber reaches it. A worker keeps every fiber it creates, stacks included, until it exits, and reuses them for later requests — so a fiber whose request once recursed deeply keeps those pages for as long as the worker lives.
 
-**Fix:** Reduce `fiber.stack_size` in `php.ini` if your application does not use deep recursion:
+**Fix:** If no request needs a deeper C stack than the size you pick, lower `fiber.stack_size` in `php.ini` to cap how much of its stack any one fiber can hold:
 
 ```ini
 fiber.stack_size = 512K
 ```
+
+That also shrinks the address space, to 128 MiB per worker thread at the fiber limit. Resident memory falls only where a request would have gone deeper than the new size — and that request now fails instead: the call that would go deeper throws `Error: Maximum call stack size of … bytes … reached`.
 
 ## Limitations
 
