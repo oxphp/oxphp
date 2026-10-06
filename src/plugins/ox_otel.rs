@@ -240,22 +240,33 @@ impl OtelPlugin {
                     .unwrap_or_else(|_| "http://localhost:4317".into());
                 let use_tls = Self::endpoint_uses_tls(&endpoint);
 
+                // Attach TLS only for https endpoints. tonic builds the TLS
+                // connector eagerly when the channel is built, and
+                // with_native_roots() loads the system trust store there — so
+                // attaching it to a plaintext http:// endpoint would make the
+                // build fail with NativeCertsNotFound on a host without a CA
+                // store (e.g. a minimal image lacking ca-certificates), silently
+                // disabling all trace export. Gating on the scheme keeps
+                // plaintext working everywhere. Native roots = the system trust
+                // store (rustls-native-certs).
+                let tls = use_tls.then(|| ClientTlsConfig::new().with_native_roots());
+                let channel =
+                    export::grpc_channel(endpoint.clone(), timeout, tls).map_err(|e| {
+                        // tonic's error prints only its kind; the cause is its source.
+                        let reason = e
+                            .source()
+                            .map_or_else(|| e.to_string(), |s| format!("{e}: {s}"));
+                        PluginError::Config(format!("OTLP gRPC exporter for {endpoint}: {reason}"))
+                    })?;
+
+                // Given a channel, the exporter ignores its own endpoint,
+                // timeout and TLS settings. The timeout is still set, to the one
+                // the channel was built with, as the exporter's documentation
+                // asks.
                 let mut builder = opentelemetry_otlp::SpanExporter::builder()
                     .with_tonic()
-                    .with_endpoint(endpoint)
+                    .with_channel(channel)
                     .with_timeout(timeout);
-
-                // Attach TLS only for https endpoints. tonic builds the TLS
-                // connector eagerly inside build(), and with_native_roots() loads
-                // the system trust store there — so attaching it to a plaintext
-                // http:// endpoint would make build() fail with NativeCertsNotFound
-                // on a host without a CA store (e.g. a minimal image lacking
-                // ca-certificates), silently disabling all trace export. Gating on
-                // the scheme keeps plaintext working everywhere. Native roots =
-                // the system trust store (rustls-native-certs).
-                if use_tls {
-                    builder = builder.with_tls_config(ClientTlsConfig::new().with_native_roots());
-                }
 
                 if !headers.is_empty() {
                     let mut metadata = tonic::metadata::MetadataMap::new();
@@ -1668,8 +1679,8 @@ mod tests {
         // environment-independent — unlike an https:// build, whose eager
         // with_native_roots() load depends on the host trust store, so that path is
         // left to the live smoke and is not asserted here. The scheme *decision* is
-        // covered by test_endpoint_uses_tls_scheme_gate above. build() is lazy
-        // (connect_lazy), so no collector is contacted.
+        // covered by test_endpoint_uses_tls_scheme_gate above. The channel
+        // connects lazily, so no collector is contacted.
 
         // A Tokio runtime context is required: SdkTracerProvider::build() starts
         // a BatchSpanProcessor that spawns a background task.
