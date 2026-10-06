@@ -6280,9 +6280,15 @@ static void oxphp_serve_loop(zend_fcall_info *fci, zend_fcall_info_cache *fcc)
                 /* exit_reason was already set to 1 by oxphp_bridge_schedule_exit. */
                 break;
             }
-            if (ctx->max_memory_bytes > 0 && zend_memory_usage(0) > ctx->max_memory_bytes) {
-                ctx->exit_reason = 2;
-                break;
+            if (ctx->max_memory_bytes > 0) {
+                /* Kept for the worker's exit line: the usage the cap was compared
+                 * with, not whatever the heap holds once the loop has unwound. */
+                uint64_t usage = zend_memory_usage(0);
+                if (usage > ctx->max_memory_bytes) {
+                    ctx->exit_memory_bytes = usage;
+                    ctx->exit_reason = 2;
+                    break;
+                }
             }
 
             /* GC every N requests */

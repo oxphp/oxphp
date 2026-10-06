@@ -1011,6 +1011,7 @@ mod tests {
             while keep_running && !flag.load(Ordering::Relaxed) {
                 std::thread::sleep(WORKER_RETIRE_POLL);
             }
+            pool::WorkerExit::Ended
         });
         if !keep_running {
             // `is_finished` is about the thread's closure having returned, so
@@ -1107,6 +1108,71 @@ mod tests {
             let _ = worker.handle.join();
         }
         drop(workers);
+    }
+
+    /// A pool entry whose thread has already ended, the way `end` ends it.
+    fn finished_worker(id: usize, end: fn() -> pool::WorkerExit) -> ManagedWorker {
+        let handle = std::thread::spawn(end);
+        while !handle.is_finished() {
+            std::thread::yield_now();
+        }
+        ManagedWorker {
+            id,
+            handle,
+            shutdown: Arc::new(AtomicBool::new(false)),
+            last_active: Arc::new(crate::executor::idle_clock::LastActive::now()),
+        }
+    }
+
+    #[test]
+    fn reaping_tells_a_recycled_worker_from_a_dead_one() {
+        // The pool's scan read every finished thread as a dead worker, so a
+        // worker that recycled on its memory ceiling or on a scheduled exit was
+        // reported at warn exactly as one that had crashed — and at the log
+        // level production runs at, that warning was all that was left of it.
+        // A thread that panicked past its own guard joins as an error, and is a
+        // death whatever it was doing.
+        //
+        // Ids past the end of the worker registry: reaping wipes each finished
+        // worker's registry slot, and the registry is one table for the whole
+        // test binary, whose slots other tests fill and then assert on. An id
+        // with no slot makes that wipe a no-op.
+        const BASE: usize = 1000;
+        let mut workers = vec![
+            finished_worker(BASE, || pool::WorkerExit::Recycled),
+            finished_worker(BASE + 1, || pool::WorkerExit::Ended),
+            managed_worker(BASE + 2, true),
+            finished_worker(BASE + 3, || {
+                panic!("a worker thread dying past its own guard")
+            }),
+        ];
+        let mut free_ids = std::collections::VecDeque::new();
+
+        let reaped = pool::reap_finished(&mut workers, &mut free_ids);
+
+        assert_eq!(
+            reaped,
+            pool::Reaped {
+                dead: 2,
+                recycled: 1
+            },
+            "one recycle, and two deaths: the breaker-or-crash exit and the panic"
+        );
+        assert_eq!(
+            workers.iter().map(|w| w.id).collect::<Vec<_>>(),
+            vec![BASE + 2],
+            "only the running worker stays in the pool"
+        );
+        assert_eq!(
+            free_ids,
+            [BASE, BASE + 1, BASE + 3],
+            "every finished worker's slot goes back for its replacement, recycled or dead"
+        );
+
+        for worker in workers.drain(..) {
+            worker.shutdown.store(true, Ordering::Relaxed);
+            let _ = worker.handle.join();
+        }
     }
 
     fn make_request() -> ScriptRequest {

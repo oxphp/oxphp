@@ -1,0 +1,29 @@
+# profile: recycle
+# description: Worker-mode planned recycles — passing WORKER_MAX_MEMORY_MIB and Worker::scheduleExit() are logged as recycles with their reason, not as dead workers
+
+# Order is the test. Each line is one request to a single worker, so a probe
+# that reports requestCount() == 1 is reporting a worker that booted after the
+# lines above it ran. The `log ~` lines send no request: each searches only what
+# the latest block of requests above it wrote — the lines since the last blank
+# line before them — so each block answers for its own lines.
+
+recycle/test_recycle_baseline
+
+# A worker that passes its memory ceiling is recycled after the request that
+# took it there. The probe settles that it happened and why; the log lines are
+# what an operator meets. The worker's own line names the reason in words with
+# the two numbers it compared, and the pool's line is the one for a recycle: a
+# build that still read a finished thread as a dead one writes "Dead workers
+# detected" instead and has no line to match the last needle.
+recycle/test_recycle_grow
+recycle/test_recycle_after_memory
+log ~Worker mode thread recycled
+log ~"reason":"max_memory"
+log ~"max_memory_bytes":16777216
+log ~Recycled workers detected
+
+# The same for an exit the handler asked for.
+recycle/test_recycle_schedule
+recycle/test_recycle_after_scheduled
+log ~"reason":"scheduled"
+log ~Recycled workers detected

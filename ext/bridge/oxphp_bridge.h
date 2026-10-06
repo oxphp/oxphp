@@ -91,6 +91,11 @@ typedef struct {
     /** Exit reason for worker mode (0=shutdown, 1=scheduled, 2=max_memory, 3=error). */
     uint8_t exit_reason;
 
+    /** PHP memory usage the serve loop measured when it ended the worker for
+     *  passing max_memory_bytes. Set together with exit_reason 2 and meaningful
+     *  only alongside it. */
+    uint64_t exit_memory_bytes;
+
     /** Whether Worker::scheduleExit() has been called for this worker.
      *  Once true, the worker loop exits after the current request completes. */
     bool exit_scheduled;
@@ -1326,6 +1331,10 @@ uint64_t oxphp_bridge_get_rss_bytes(void);
 
 /** Configured per-worker memory cap in bytes (0 = unlimited). */
 uint64_t oxphp_bridge_get_max_memory_bytes(void);
+
+/** PHP memory usage that ended this worker for passing its cap, as the serve
+ *  loop measured it. Meaningful only when the exit reason is 2, max_memory. */
+uint64_t oxphp_bridge_get_exit_memory_bytes(void);
 
 /** Check if the current handler invocation failed (fatal error/bailout). */
 bool oxphp_bridge_get_handler_failed(void);

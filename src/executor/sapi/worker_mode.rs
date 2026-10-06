@@ -13,7 +13,7 @@ use crate::metrics::{WorkerMetrics, WorkerStats};
 use crate::php::{bindings, sapi};
 use crate::types::ScriptResponse;
 
-use super::pool::WorkerRequest;
+use super::pool::{WorkerExit, WorkerRequest};
 use super::traditional::WorkerLoopMode;
 
 /// Configuration for worker mode threads.
@@ -41,12 +41,14 @@ pub(super) fn spawn_worker_mode(
     loop_mode: WorkerLoopMode,
     config: Arc<WorkerModeConfig>,
     metrics: WorkerModeMetrics,
-) -> std::thread::JoinHandle<()> {
+) -> std::thread::JoinHandle<WorkerExit> {
     std::thread::Builder::new()
         .name(format!("php-worker-{id}"))
         .spawn(move || {
-            worker_mode_thread(id, rx, shutdown, last_active, loop_mode, config, metrics);
+            let exit =
+                worker_mode_thread(id, rx, shutdown, last_active, loop_mode, config, metrics);
             super::pool::release_worker_thread(id);
+            exit
         })
         .expect("failed to spawn PHP worker mode thread")
 }
@@ -62,7 +64,7 @@ fn worker_mode_thread(
     loop_mode: WorkerLoopMode,
     config: Arc<WorkerModeConfig>,
     metrics: WorkerModeMetrics,
-) {
+) -> WorkerExit {
     let WorkerModeMetrics {
         stats,
         worker: worker_metrics,
@@ -155,7 +157,7 @@ fn worker_mode_thread(
 
     if unsafe { bindings::php_request_startup() } != 0 {
         tracing::error!(worker = %thread_name, "php_request_startup() failed in worker mode");
-        return;
+        return WorkerExit::Ended;
     }
 
     // OPcache RINIT consumed request_time during php_request_startup. The
@@ -239,17 +241,69 @@ fn worker_mode_thread(
     // taken out of service because three requests in a row came apart. It sat on
     // INFO, which the production configurations in the documentation raise past,
     // and that is how a rotating pool came to be observable only as a counter.
-    if exit_reason == 3 {
-        tracing::warn!(
+    //
+    // A recycle names its reason in the words the recycle metric uses for it,
+    // and a memory recycle carries the two numbers the serve loop compared, so
+    // the line says whether the worker crept past its ceiling or one request
+    // took it far beyond.
+    match exit_reason {
+        3 => tracing::warn!(
             worker = %thread_name,
             exit_reason = exit_reason,
+            reason = "error",
             "Worker mode thread retired after consecutive request failures"
-        );
-    } else {
-        tracing::info!(
+        ),
+        2 => tracing::info!(
+            worker = %thread_name,
+            exit_reason = exit_reason,
+            reason = "max_memory",
+            memory_bytes = unsafe { bindings::oxphp_bridge_get_exit_memory_bytes() },
+            max_memory_bytes = unsafe { bindings::oxphp_bridge_get_max_memory_bytes() },
+            "Worker mode thread recycled"
+        ),
+        1 => tracing::info!(
+            worker = %thread_name,
+            exit_reason = exit_reason,
+            reason = "scheduled",
+            "Worker mode thread recycled"
+        ),
+        _ => tracing::info!(
             worker = %thread_name,
             exit_reason = exit_reason,
             "Worker mode thread stopped"
-        );
+        ),
+    }
+
+    worker_exit_for(exit_reason)
+}
+
+/// What the pool is told about a worker-mode thread that left its loop with
+/// `exit_reason`. Only the two exits the worker chose are a recycle; the
+/// breaker's retirement and anything unplanned — a worker script that
+/// returned without serving, a fatal in its bootstrap — are reported there as
+/// a worker that died.
+fn worker_exit_for(exit_reason: u8) -> WorkerExit {
+    if matches!(exit_reason, 1 | 2) {
+        WorkerExit::Recycled
+    } else {
+        WorkerExit::Ended
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_chosen_exit_is_a_recycle() {
+        // 1 is a scheduled exit and 2 the memory ceiling: both the worker's own
+        // choice. 3 is the consecutive-error breaker. 0 is a thread that ended
+        // with no reason set: a shutdown or a retirement, which the pool's scan
+        // never sees, or a worker script that returned without serving, which
+        // it does.
+        assert!(matches!(worker_exit_for(1), WorkerExit::Recycled));
+        assert!(matches!(worker_exit_for(2), WorkerExit::Recycled));
+        assert!(matches!(worker_exit_for(3), WorkerExit::Ended));
+        assert!(matches!(worker_exit_for(0), WorkerExit::Ended));
     }
 }

@@ -19,7 +19,7 @@ use crate::php::sapi::Pickup;
 use crate::php::{bindings, sapi};
 use crate::types::{ScriptRequest, ScriptResponse};
 
-use super::pool::WorkerRequest;
+use super::pool::{WorkerExit, WorkerRequest};
 
 thread_local! {
     /// Whether &EG(vm_interrupt) has been captured for this traditional
@@ -45,12 +45,17 @@ pub(super) fn spawn_worker(
     last_active: Arc<LastActive>,
     loop_mode: WorkerLoopMode,
     metrics: Arc<crate::metrics::Metrics>,
-) -> std::thread::JoinHandle<()> {
+) -> std::thread::JoinHandle<WorkerExit> {
     std::thread::Builder::new()
         .name(format!("php-worker-{id}"))
         .spawn(move || {
             worker_thread(id, rx, shutdown, last_active, loop_mode, metrics);
             super::pool::release_worker_thread(id);
+            // A traditional worker has no recycle of its own: it leaves its
+            // loop on a panic, when the pool retires it, or when its channel
+            // closes at shutdown, and of those the pool's scan sees only the
+            // panic.
+            WorkerExit::Ended
         })
         .expect("failed to spawn PHP worker thread")
 }
