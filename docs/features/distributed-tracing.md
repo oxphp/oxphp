@@ -509,6 +509,21 @@ curl -s http://localhost:9090/config | jq '.plugins'
 
 **Fix:** Ensure `OTEL_ENABLED=true` and the `OTEL_EXPORTER_OTLP_ENDPOINT` points to the correct collector address.
 
+### Span export errors in the log
+
+OxPHP sends spans to the collector in batches. Over gRPC (`OTEL_EXPORTER_OTLP_PROTOCOL=grpc`, the default) it logs a failed export on its own lines, with `plugin` set to `otel`:
+
+- `WARN` `OTLP span export failed, retrying once` — the first attempt failed fast, without an answer from the collector, and is being retried. Fields: `spans` (batch size), `error`.
+- `ERROR` `OTLP span export failed, the batch is dropped` — the export failed for good, and its spans are not sent again. Fields: `spans`, `retried`, `error`.
+
+Every `ERROR` line comes with a second one, written by the OpenTelemetry library, for the same failed export. Its `message` is empty, and the cause is in `error`:
+
+```json
+{"level":"ERROR","fields":{"message":"","name":"BatchSpanProcessor.ExportError","error":"Operation failed: code: 'Unknown error', message: \"transport error\", source: ..."}}
+```
+
+A `WARN` line with no `ERROR` line after it means the retry delivered the batch. The collector's own error answers, such as `code: 'The request does not have valid authentication credentials'` for a rejected API key, are not retried: they come as a single `ERROR` line with `retried` set to `false`. `ConnectionReset` or `connection closed` in `error` points at a connection that something between OxPHP and the collector, such as a load balancer or NAT, dropped while it sat idle. [OpenTelemetry Export Metrics](../operations/metrics.md#opentelemetry-export-metrics) counts the failed exports, their spans, and the retries, and explains when an export is retried.
+
 ### High sampling volume in production
 
 Exporting every span is expensive at high traffic volumes.

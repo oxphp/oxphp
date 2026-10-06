@@ -20,6 +20,10 @@ use crate::plugin::handler::{
 };
 use crate::plugin::{Plugin, PluginContext, PluginError, PluginHealth};
 
+mod export;
+
+use export::{ExportStats, RetryingExporter};
+
 /// OpenTelemetry plugin — exports HTTP server spans via OTLP.
 ///
 /// Feature-gated behind `plugin-otel`. Reads standard `OTEL_*` env vars
@@ -30,6 +34,7 @@ pub struct OtelPlugin {
     enabled: bool,
     provider: Arc<OnceLock<SdkTracerProvider>>,
     server_address: String,
+    export_stats: Arc<ExportStats>,
 }
 
 impl Default for OtelPlugin {
@@ -44,6 +49,7 @@ impl OtelPlugin {
             enabled: false,
             provider: Arc::new(OnceLock::new()),
             server_address: String::new(),
+            export_stats: Arc::new(ExportStats::default()),
         }
     }
 
@@ -256,6 +262,12 @@ impl OtelPlugin {
             }
         };
 
+        let exporter = RetryingExporter::new(
+            exporter,
+            self.export_stats.clone(),
+            export::retry_within(timeout),
+        );
+
         let provider = SdkTracerProvider::builder()
             .with_batch_exporter(exporter)
             .with_sampler(sampler)
@@ -329,6 +341,9 @@ impl Plugin for OtelPlugin {
 
         // Share SdkTracerProvider with other plugins (e.g. APM)
         ctx.register_service("otel.provider", Box::new(self.provider.clone()));
+
+        let export_stats = self.export_stats.clone();
+        ctx.register_metrics(move |out: &mut String| export_stats.collect(out));
 
         // Byte caps for the auto-captured root-span exception event. Read the
         // same bare `OTEL_APM_*_MAX_BYTES` knobs as the APM child-span path so a
@@ -899,7 +914,9 @@ mod tests {
         assert!(get("exception.line").is_none());
     }
 
-    fn init_otel_plugin(plugin: &mut OtelPlugin) -> HashMap<String, serde_json::Value> {
+    /// Run `plugin.init` against a scratch context and return the config it
+    /// exposed and the text its metrics collectors render.
+    fn init_otel_plugin(plugin: &mut OtelPlugin) -> (HashMap<String, serde_json::Value>, String) {
         let mut dispatcher = EventDispatcher::new();
         let mut services: HashMap<String, Box<dyn std::any::Any + Send + Sync>> = HashMap::new();
         let mut config_values = HashMap::new();
@@ -935,7 +952,11 @@ mod tests {
         );
         plugin.init(&mut ctx).unwrap();
         drop(ctx);
-        config_values
+        let mut metrics = String::new();
+        for collector in &metrics_collectors {
+            collector.collect(&mut metrics);
+        }
+        (config_values, metrics)
     }
 
     #[test]
@@ -943,13 +964,34 @@ mod tests {
         let vars = [("OTEL_ENABLED", None)];
         with_env(&vars, || {
             let mut plugin = OtelPlugin::new();
-            let config = init_otel_plugin(&mut plugin);
+            let (config, metrics) = init_otel_plugin(&mut plugin);
 
             assert_eq!(plugin.name(), "otel");
             assert_eq!(plugin.version(), "0.1.0");
             assert!(!plugin.enabled);
             assert_eq!(config.get("enabled"), Some(&serde_json::json!(false)));
             assert_eq!(plugin.health(), PluginHealth::Ok);
+            assert_eq!(metrics, "", "a disabled plugin exports nothing to count");
+        });
+    }
+
+    #[test]
+    fn test_enabled_plugin_registers_export_metrics() {
+        let vars = [("OTEL_ENABLED", Some("true")), ("LISTEN_ADDR", None)];
+        with_env(&vars, || {
+            let mut plugin = OtelPlugin::new();
+            let (_, metrics) = init_otel_plugin(&mut plugin);
+
+            for name in [
+                "oxphp_otel_export_failures_total",
+                "oxphp_otel_export_failed_spans_total",
+                "oxphp_otel_export_retries_total",
+            ] {
+                assert!(
+                    metrics.lines().any(|l| l == format!("{name} 0")),
+                    "missing {name} in:\n{metrics}"
+                );
+            }
         });
     }
 
