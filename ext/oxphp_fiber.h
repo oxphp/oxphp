@@ -451,9 +451,10 @@ typedef struct _oxphp_request_fiber {
      * exactly once, there.
      * NULL until then, which is how the switch wrappers tell a fresh fiber from
      * one that has run — see oxphp_fiber_install_stack_limits, which every path
-     * into a fiber calls. Only under ZEND_CHECK_STACK_LIMIT does the engine set
-     * or read the bounds; without it both stay NULL and the install never
-     * fires. */
+     * into a fiber calls. Only under ZEND_CHECK_STACK_LIMIT does the engine
+     * initialize, set or read the bounds; without it the copy is whatever the
+     * thread's globals happened to hold, and putting it back is harmless
+     * because nothing reads it. */
     void *saved_stack_base;
     void *saved_stack_limit;
 
