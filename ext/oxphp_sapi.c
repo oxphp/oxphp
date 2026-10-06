@@ -8344,9 +8344,9 @@ static int oxphp_mark_cancelled_bailout(oxphp_cancel_reason_t reason) {
      * that was not. Its loop is bounded by the client it is writing to and by
      * nothing else — the reason that ends it is the only reason it ever ends,
      * so declining to end it here pins the worker thread for the life of the
-     * process. A stream therefore keeps the ending it has always had, which
-     * is also what this project documents for it: check connection_aborted()
-     * and return, or accept that the ending will not run your `finally`.
+     * process. A stream is therefore still ended here, which is also what
+     * this project documents for it: the flush that finds its client gone
+     * does not return, and a `finally` around it does not run.
      *
      * Unless the stream asked otherwise. ignore_user_abort(true) is how a script
      * says it has a bound of its own and means to outlive its client, in every

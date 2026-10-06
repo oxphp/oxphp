@@ -79,6 +79,15 @@ input/test_php_input_multipart_empty | POST | -F "field=value" | |
 worker/test_upload_tmp_cleaned_after_request >> ?phase=upload | POST | -F "doc=@$FIXTURES_DIR/small.txt" | |
 worker/test_upload_tmp_cleaned_after_request >> ?phase=check
 
+# The disconnect idiom the SSE guide shows, as cancel/ runs it outside worker
+# mode: a stream is stopped at the flush that finds its client gone in worker
+# mode too, unless it called ignore_user_abort(true). Placed ahead of the
+# uncaught-exception pairs below because it reads a destructor.
+cancel/test_sse_loop_exit_on_disconnect >> ?action=trigger&ignore=0 | GET | --max-time 0.3 -o /dev/null | 0
+cancel/test_sse_loop_exit_on_disconnect >> ?action=check&ignore=0
+cancel/test_sse_loop_exit_on_disconnect >> ?action=trigger&ignore=1 | GET | --max-time 0.3 -o /dev/null | 0
+cancel/test_sse_loop_exit_on_disconnect >> ?action=check&ignore=1
+
 # Three pairs about how a worker discards an uncaught exception, kept together
 # and kept late in the file. Late, because on a build that discards it the wrong
 # way round the throwing half raises a core error, and that flags every live
