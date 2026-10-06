@@ -38,19 +38,30 @@ pub(super) fn retry_within(timeout: Duration) -> Duration {
     (timeout / 2).min(RETRY_WITHIN_MAX)
 }
 
-/// Whether a failed gRPC export ended without an answer from the collector:
-/// its connection broke, closed, or could not be made.
+/// Whether a failed export ended without an answer from the collector: its
+/// connection broke, closed, or could not be made.
 ///
-/// The exporter hands the error back only as the text of tonic's `Status`.
-/// tonic gives a status a source only when the request failed below gRPC, and
-/// prints the transport error after `source:`. A status the collector answered
-/// with — in its trailers, or inferred from the HTTP status of a proxy in
-/// between — has none. The OTLP specification forbids retrying most of those
-/// answers, and the delay a throttling collector asks for travels in the
-/// status details, which the text leaves out. Should a tonic upgrade change
-/// the text, retries stop rather than spread to those answers.
+/// Both exporters hand the error back only as text. Over gRPC it is the text
+/// of tonic's `Status`. tonic gives a status a source only when the request
+/// failed below gRPC, and prints the transport error after `source:`. A status
+/// the collector answered with — in its trailers, or inferred from the HTTP
+/// status of a proxy in between — has none. Over HTTP it is reqwest's error,
+/// printed with `{:?}`. A request that got no response has the error of the
+/// hyper-util client underneath after `source:`. An error status the collector,
+/// or a load balancer in front of it, answered with is `kind: Status(..)` with
+/// no source, and an attempt that ran out of time has `TimedOut` there instead.
+/// A forward proxy (`HTTPS_PROXY`) that refuses to open a tunnel to the
+/// collector fails the connect, and is retried like any other connection that
+/// could not be made.
+///
+/// The OTLP specification forbids retrying most of those answers, and the
+/// delay a throttling collector asks for travels where the text leaves it out:
+/// in the gRPC status details, or in the `Retry-After` header. Should an
+/// upgrade of tonic, reqwest or hyper-util change the text, retries stop
+/// rather than spread to those answers.
 fn collector_did_not_answer(error: &str) -> bool {
     error.contains("source: tonic::transport::Error(")
+        || error.contains("source: hyper_util::client::legacy::Error(")
 }
 
 /// Counters for `/metrics`, written by the batch processor's export thread and
@@ -181,7 +192,7 @@ mod tests {
     use std::sync::Mutex;
 
     use bytes::Bytes;
-    use http_body_util::{BodyExt, StreamBody};
+    use http_body_util::{BodyExt, Empty, StreamBody};
     use hyper::body::{Frame, Incoming};
     use hyper::service::service_fn;
     use hyper_util::rt::{TokioExecutor, TokioIo};
@@ -485,7 +496,99 @@ mod tests {
         );
     }
 
-    // ─── End to end: the real OTLP gRPC exporter behind the batch processor ─
+    // ─── End to end: the real OTLP exporters behind the batch processor ───
+
+    /// The two transports `OTEL_EXPORTER_OTLP_PROTOCOL` selects.
+    #[derive(Debug, Clone, Copy)]
+    enum Protocol {
+        Grpc,
+        Http,
+    }
+
+    impl Protocol {
+        const BOTH: [Protocol; 2] = [Protocol::Grpc, Protocol::Http];
+
+        fn name(self) -> &'static str {
+            match self {
+                Protocol::Grpc => "grpc",
+                Protocol::Http => "http/protobuf",
+            }
+        }
+
+        /// A collector that accepts every export over this transport, and
+        /// counts them.
+        async fn ok_server(self) -> (SocketAddr, Arc<AtomicUsize>) {
+            match self {
+                Protocol::Grpc => grpc_ok_server().await,
+                Protocol::Http => {
+                    let (addr, calls, _) = http_server(200).await;
+                    (addr, calls)
+                }
+            }
+        }
+    }
+
+    /// One request the HTTP collector was sent.
+    #[derive(Debug)]
+    struct Received {
+        method: String,
+        path: String,
+        content_type: String,
+        body: Bytes,
+    }
+
+    /// An OTLP/HTTP endpoint that answers every request with `status` and an
+    /// empty body, records what it was sent, and counts the requests. The
+    /// exporter reads nothing from an answer but its status.
+    async fn http_server(status: u16) -> (SocketAddr, Arc<AtomicUsize>, Arc<Mutex<Vec<Received>>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let (counted, recorded) = (calls.clone(), received.clone());
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let (calls, received) = (counted.clone(), recorded.clone());
+                tokio::spawn(async move {
+                    let service = service_fn(move |req: hyper::Request<Incoming>| {
+                        let (calls, received) = (calls.clone(), received.clone());
+                        async move {
+                            let method = req.method().to_string();
+                            let path = req.uri().path().to_string();
+                            let content_type = req
+                                .headers()
+                                .get("content-type")
+                                .and_then(|v| v.to_str().ok())
+                                .unwrap_or_default()
+                                .to_string();
+                            let body = match req.into_body().collect().await {
+                                Ok(collected) => collected.to_bytes(),
+                                Err(_) => Bytes::new(),
+                            };
+                            received.lock().unwrap().push(Received {
+                                method,
+                                path,
+                                content_type,
+                                body,
+                            });
+                            calls.fetch_add(1, Ordering::SeqCst);
+                            Ok::<_, Infallible>(
+                                hyper::Response::builder()
+                                    .status(status)
+                                    .header("content-type", "application/x-protobuf")
+                                    .body(Empty::<Bytes>::new())
+                                    .unwrap(),
+                            )
+                        }
+                    });
+                    let _ = hyper::server::conn::http1::Builder::new()
+                        .serve_connection(TokioIo::new(stream), service)
+                        .await;
+                });
+            }
+        });
+        (addr, calls, received)
+    }
 
     /// A gRPC endpoint that answers every unary call with an empty message and
     /// `grpc-status: 0`, and counts the calls. That is all the OTLP trace
@@ -627,14 +730,15 @@ mod tests {
     }
 
     /// Build the plugin's provider exactly as `on_ready` does, exporting over
-    /// gRPC to `endpoint`.
+    /// `protocol` to `endpoint`.
     fn provider_for(
         plugin: &OtelPlugin,
+        protocol: Protocol,
         endpoint: SocketAddr,
     ) -> opentelemetry_sdk::trace::SdkTracerProvider {
         let endpoint = format!("http://{endpoint}");
         let vars = [
-            ("OTEL_EXPORTER_OTLP_PROTOCOL", Some("grpc")),
+            ("OTEL_EXPORTER_OTLP_PROTOCOL", Some(protocol.name())),
             ("OTEL_EXPORTER_OTLP_ENDPOINT", Some(endpoint.as_str())),
             ("OTEL_EXPORTER_OTLP_TIMEOUT", None),
             ("OTEL_EXPORTER_OTLP_HEADERS", None),
@@ -648,49 +752,97 @@ mod tests {
     }
 
     #[test]
-    fn a_reset_on_a_stale_connection_is_retried_and_delivered() {
+    fn an_export_over_http_reaches_the_collector() {
         let rt = runtime();
-        let (collector, calls) = rt.block_on(grpc_ok_server());
-        let proxy = rt.block_on(Proxy::start(collector));
+        let (collector, calls, received) = rt.block_on(http_server(200));
         let _guard = rt.enter();
         let plugin = OtelPlugin::new();
-        let provider = provider_for(&plugin, proxy.addr);
+        let provider = provider_for(&plugin, Protocol::Http, collector);
 
-        end_span(&provider, "before");
-        provider.force_flush().expect("first export");
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            1,
-            "first export reached the collector"
-        );
-        assert_eq!(proxy.accepted(), 1);
+        // Two exports in a row: the second goes out only if the batch
+        // processor's thread survived the first.
+        for (n, name) in [(1, "first"), (2, "second")] {
+            end_span(&provider, name);
+            let flushed = provider.force_flush();
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                n,
+                "export {n} never reached the collector (flush: {flushed:?})"
+            );
+            assert!(flushed.is_ok(), "export {n}: {flushed:?}");
+        }
+        for (request, name) in received.lock().unwrap().iter().zip(["first", "second"]) {
+            assert_eq!(request.method, "POST");
+            assert_eq!(
+                request.path, "/v1/traces",
+                "OTEL_EXPORTER_OTLP_ENDPOINT is a base URL, traces go to v1/traces under it"
+            );
+            assert_eq!(request.content_type, "application/x-protobuf");
+            assert!(
+                request
+                    .body
+                    .windows(name.len())
+                    .any(|w| w == name.as_bytes()),
+                "span {name} is not in the body of its export"
+            );
+        }
+        assert_eq!(counters(&plugin.export_stats), (0, 0, 0));
+        // Shutting down ends the batch processor's thread, which drops the
+        // exporter there, and the HTTP client in it joins its own runtime
+        // thread as it goes; `shutdown` returns once the processor's thread
+        // has ended.
+        let shut_down = provider.shutdown();
+        assert!(shut_down.is_ok(), "{shut_down:?}");
+    }
 
-        // The connection the exporter holds is now dead on the far side, and
-        // the exporter does not know it yet.
-        proxy.forget();
-        end_span(&provider, "after");
-        let flushed = provider.force_flush();
+    #[test]
+    fn a_reset_on_a_stale_connection_is_retried_and_delivered() {
+        for protocol in Protocol::BOTH {
+            let rt = runtime();
+            let (collector, calls) = rt.block_on(protocol.ok_server());
+            let proxy = rt.block_on(Proxy::start(collector));
+            let _guard = rt.enter();
+            let plugin = OtelPlugin::new();
+            let provider = provider_for(&plugin, protocol, proxy.addr);
 
-        let stats = &plugin.export_stats;
-        assert_eq!(
-            calls.load(Ordering::SeqCst),
-            2,
-            "the batch exported over the forgotten connection never reached the collector \
-             (flush: {flushed:?})"
-        );
-        assert_eq!(
-            stats.retries.load(Ordering::SeqCst),
-            1,
-            "the export over the forgotten connection did not fail — the scenario did not happen"
-        );
-        assert_eq!(
-            proxy.accepted(),
-            2,
-            "the retry went out on a new connection"
-        );
-        assert_eq!(stats.failures.load(Ordering::SeqCst), 0);
-        assert!(flushed.is_ok(), "{flushed:?}");
-        let _ = provider.shutdown();
+            end_span(&provider, "before");
+            let flushed = provider.force_flush();
+            assert!(flushed.is_ok(), "{protocol:?}: first export: {flushed:?}");
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                1,
+                "{protocol:?}: first export reached the collector"
+            );
+            assert_eq!(proxy.accepted(), 1, "{protocol:?}");
+
+            // The connection the exporter holds is now dead on the far side,
+            // and the exporter does not know it yet.
+            proxy.forget();
+            end_span(&provider, "after");
+            let flushed = provider.force_flush();
+
+            let stats = &plugin.export_stats;
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                2,
+                "{protocol:?}: the batch exported over the forgotten connection never reached \
+                 the collector (flush: {flushed:?})"
+            );
+            assert_eq!(
+                stats.retries.load(Ordering::SeqCst),
+                1,
+                "{protocol:?}: the export over the forgotten connection did not fail — the \
+                 scenario did not happen"
+            );
+            assert_eq!(
+                proxy.accepted(),
+                2,
+                "{protocol:?}: the retry went out on a new connection"
+            );
+            assert_eq!(stats.failures.load(Ordering::SeqCst), 0, "{protocol:?}");
+            assert!(flushed.is_ok(), "{protocol:?}: {flushed:?}");
+            let _ = provider.shutdown();
+        }
     }
 
     #[test]
@@ -704,7 +856,7 @@ mod tests {
             let (collector, calls) = rt.block_on(grpc_server(status));
             let _guard = rt.enter();
             let plugin = OtelPlugin::new();
-            let provider = provider_for(&plugin, collector);
+            let provider = provider_for(&plugin, Protocol::Grpc, collector);
 
             end_span(&provider, "rejected");
             let flushed = provider.force_flush();
@@ -725,37 +877,70 @@ mod tests {
     }
 
     #[test]
+    fn an_error_status_over_http_is_not_retried() {
+        // 401, as for a wrong API key, which the OTLP specification forbids
+        // retrying, and 429 and 503, which it allows, after the delay a
+        // `Retry-After` header asks for — a header the exporter's error does
+        // not carry.
+        for status in [401, 429, 503] {
+            let rt = runtime();
+            let (collector, calls, _) = rt.block_on(http_server(status));
+            let _guard = rt.enter();
+            let plugin = OtelPlugin::new();
+            let provider = provider_for(&plugin, Protocol::Http, collector);
+
+            end_span(&provider, "rejected");
+            let flushed = provider.force_flush();
+
+            assert!(flushed.is_err(), "HTTP {status}: {flushed:?}");
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                1,
+                "the collector answered HTTP {status} and was sent the batch again"
+            );
+            assert_eq!(
+                counters(&plugin.export_stats),
+                (1, 1, 0),
+                "HTTP {status}: (failures, failed_spans, retries)"
+            );
+            let _ = provider.shutdown();
+        }
+    }
+
+    #[test]
     fn an_export_that_fails_twice_is_counted_with_its_spans() {
-        let rt = runtime();
-        // A collector that resets every connection it accepts. It keeps the
-        // port, so no other test can take it while this one runs.
-        let collector = rt.block_on(async {
-            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
-            let addr = listener.local_addr().unwrap();
-            tokio::spawn(async move {
-                while let Ok((stream, _)) = listener.accept().await {
-                    let _ = stream.set_zero_linger();
-                }
+        for protocol in Protocol::BOTH {
+            let rt = runtime();
+            // A collector that resets every connection it accepts. It keeps the
+            // port, so no other test can take it while this one runs.
+            let collector = rt.block_on(async {
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let addr = listener.local_addr().unwrap();
+                tokio::spawn(async move {
+                    while let Ok((stream, _)) = listener.accept().await {
+                        let _ = stream.set_zero_linger();
+                    }
+                });
+                addr
             });
-            addr
-        });
-        let _guard = rt.enter();
-        let plugin = OtelPlugin::new();
-        let provider = provider_for(&plugin, collector);
+            let _guard = rt.enter();
+            let plugin = OtelPlugin::new();
+            let provider = provider_for(&plugin, protocol, collector);
 
-        end_span(&provider, "one");
-        end_span(&provider, "two");
-        let flushed = provider.force_flush();
+            end_span(&provider, "one");
+            end_span(&provider, "two");
+            let flushed = provider.force_flush();
 
-        assert!(
-            flushed.is_err(),
-            "the SDK still sees the lost batch as an error"
-        );
-        assert_eq!(
-            counters(&plugin.export_stats),
-            (1, 2, 1),
-            "(failures, failed_spans, retries)"
-        );
-        let _ = provider.shutdown();
+            assert!(
+                flushed.is_err(),
+                "{protocol:?}: the SDK still sees the lost batch as an error"
+            );
+            assert_eq!(
+                counters(&plugin.export_stats),
+                (1, 2, 1),
+                "{protocol:?}: (failures, failed_spans, retries)"
+            );
+            let _ = provider.shutdown();
+        }
     }
 }

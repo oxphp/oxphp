@@ -130,7 +130,11 @@ opentelemetry-otlp = { version = "0.31", default-features = false, features = [
     "http-proto",       # HTTP/protobuf transport
     "trace",            # SpanExporter — the only signal this plugin emits
     "internal-logs",    # otel self-diagnostics (channel/handshake debug lines)
-    "reqwest-client",   # selects the async reqwest client build path
+    # The blocking reqwest client: the batch span processor exports from its
+    # own thread, outside any Tokio runtime, and the async client panics there.
+    # Never add reqwest-client next to it: with both, opentelemetry-otlp builds
+    # no HTTP client at all and every http/protobuf exporter fails to build.
+    "reqwest-blocking-client",
     "reqwest-rustls",   # → reqwest/rustls-tls-native-roots
     "tls-roots",        # → tls (tonic/tls-ring) + tonic/tls-native-roots
 ], optional = true }
