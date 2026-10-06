@@ -1678,10 +1678,11 @@ unsafe extern "C" fn oxphp_deactivate() -> c_int {
 // ─── Output Capture ─────────────────────────────────────────
 
 /// Check if the Tokio receiver was dropped (client disconnected / timeout fired).
-/// Sets the bridge cancellation flag so the C-level deadline check triggers bailout,
-/// and marks `PG(connection_status) |= PHP_CONNECTION_ABORTED` so portable PHP
-/// code using `connection_aborted()` can break out of streaming loops cleanly
-/// before the next flush bailout. Only logs once per request.
+/// Records `CLIENT_ABORT` in the bridge cancellation cell and raises the interrupt.
+/// `oxphp_bridge_flush` checks the cell again once `oxphp_flush` returns, so the
+/// flush that found the client gone is where the request learns of it — where
+/// `connection_aborted()` becomes true and the cancellation is acted on (see
+/// `oxphp_mark_cancelled_bailout`), not a later flush. Only logs once per request.
 ///
 /// Probes both channels:
 /// - `EARLY_TX`: present until `send_streaming_headers()` consumes it (covers

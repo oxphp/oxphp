@@ -31,3 +31,15 @@ cancel/test_client_abort_ends_at_next_write >> ?action=trigger&mode=stream | GET
 cancel/test_client_abort_ends_at_next_write >> ?action=check&mode=stream
 cancel/test_client_abort_ends_at_next_write >> ?action=trigger&mode=open | GET | --max-time 0.3 -o /dev/null | 0
 cancel/test_client_abort_ends_at_next_write >> ?action=check&mode=open
+
+# The disconnect idiom the SSE guide shows, a `while (!connection_aborted())`
+# loop around a flush. As it is, the flush that finds the client gone stops the
+# script: the loop condition is not reached and `finally` does not run, while
+# shutdown functions and destructors do, each group up to the first one that
+# writes output, which is stopped as well. After ignore_user_abort(true) the flush
+# returns, the loop leaves through its condition, running its `finally`, and
+# every shutdown function and destructor runs to its end.
+cancel/test_sse_loop_exit_on_disconnect >> ?action=trigger&ignore=0 | GET | --max-time 0.3 -o /dev/null | 0
+cancel/test_sse_loop_exit_on_disconnect >> ?action=check&ignore=0
+cancel/test_sse_loop_exit_on_disconnect >> ?action=trigger&ignore=1 | GET | --max-time 0.3 -o /dev/null | 0
+cancel/test_sse_loop_exit_on_disconnect >> ?action=check&ignore=1

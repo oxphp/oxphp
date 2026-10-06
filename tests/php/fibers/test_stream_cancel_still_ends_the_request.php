@@ -19,16 +19,16 @@ require_once __DIR__ . '/write_cancel_probe.php';
 // A stream was not going to finish. Its loop runs until the client it writes to
 // goes away, and that is its only bound — the same grace applied here does not
 // delay an ending, it removes the only one there is, and the worker thread is
-// held for the life of the process. So this shape keeps the ending it has
-// always had, which is also the contract the streaming documentation states:
-// check connection_aborted() and return, or accept an ending that will not run
-// your `finally`.
+// held for the life of the process. So this shape is still ended, which is also
+// the contract the streaming documentation states: unless the script called
+// ignore_user_abort(true), the flush that finds the client gone does not
+// return, and a `finally` around it does not run.
 //
 // Two ways there, one per stage. A stream whose headers are still unsent at the
 // park is marked cancelled as its client leaves, and it is the write it resumes
 // into that ends it. One that has sent them — every real event stream — is no
 // longer watched for its client leaving, and it is the flush that finds the
-// client gone and interrupts it.
+// client gone and ends it.
 //
 // Both edges are read. The request has to reach the write, or a run in which it
 // never resumed out of its park would pass without testing anything; and it
