@@ -23,10 +23,12 @@ ignore-build-dependencies = true
 ignore-dev-dependencies = true
 ignore-transitive-dependencies = false
 
-# Match the release image targets.
+# Match the published image targets (Alpine: musl, Debian: gnu).
 targets = [
     "x86_64-unknown-linux-musl",
     "aarch64-unknown-linux-musl",
+    "x86_64-unknown-linux-gnu",
+    "aarch64-unknown-linux-gnu",
 ]
 
 # zstd-sys declares only the license of its Rust bindings (MIT OR Apache-2.0),

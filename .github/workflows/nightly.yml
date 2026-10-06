@@ -51,19 +51,40 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        php: ["8.4", "8.5"]
+        arch: [amd64, arm64]
+        variant: [alpine, trixie]
         include:
-          - { php: "8.4", arch: amd64, runner: ubuntu-24.04 }
-          - { php: "8.4", arch: arm64, runner: ubuntu-24.04-arm }
-          - { php: "8.5", arch: amd64, runner: ubuntu-24.04 }
-          - { php: "8.5", arch: arm64, runner: ubuntu-24.04-arm }
+          - { arch: amd64, runner: ubuntu-24.04 }
+          - { arch: arm64, runner: ubuntu-24.04-arm }
+          - { variant: alpine, base: alpine3.23, dockerfile: docker/release/alpine/Dockerfile, suffix: "" }
+          - { variant: trixie, base: trixie, dockerfile: docker/release/debian/Dockerfile, suffix: "-trixie" }
 
     runs-on: ${{ matrix.runner }}
 
     permissions:
+      actions: read
       contents: read
       packages: write
 
     steps:
+      # A re-run of a run that a newer one has superseded would put its
+      # images back over that run's, and `changes` would leave them there for
+      # as long as main stays put. The first attempt is not checked: a newer
+      # run can then only be waiting behind this one in the concurrency
+      # group, and the check would stop this run for it.
+      - name: Stop a re-run once a newer nightly run exists
+        if: github.run_attempt != '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          NEWEST=$(gh run list -R "$GITHUB_REPOSITORY" --workflow nightly.yml \
+            --limit 1 --json databaseId -q '.[0].databaseId')
+          if [[ "$NEWEST" != "$GITHUB_RUN_ID" ]]; then
+            echo "::error::run $NEWEST of this workflow is newer than this one; re-running this one would put its images back over that run's. Dispatch a new run instead."
+            exit 1
+          fi
+
       - name: Checkout
         uses: actions/checkout@v5
 
@@ -83,9 +104,10 @@ jobs:
         id: php_patch
         env:
           PHP_MINOR: ${{ matrix.php }}
+          BASE_TAG: ${{ matrix.base }}
           ARCH: ${{ matrix.arch }}
         run: |
-          BASE="php:${PHP_MINOR}-zts-alpine3.23"
+          BASE="php:${PHP_MINOR}-zts-${BASE_TAG}"
           docker pull --platform "linux/${ARCH}" "$BASE"
           PATCH=$(docker run --rm --platform "linux/${ARCH}" "$BASE" php -r 'echo PHP_VERSION;')
           if [[ ! "$PATCH" =~ ^${PHP_MINOR}\.[0-9]+$ ]]; then
@@ -108,18 +130,20 @@ jobs:
         uses: docker/build-push-action@v7
         with:
           context: .
-          file: docker/release/alpine/Dockerfile
+          file: ${{ matrix.dockerfile }}
           platforms: linux/${{ matrix.arch }}
           load: true
           push: false
           provenance: false
+          # BASE_IMAGE is the tag the patch was resolved from above, so the
+          # smoke test expects the version the build is based on.
           build-args: |
             PHP_VERSION=${{ matrix.php }}
-            ALPINE_VERSION=3.23
+            BASE_IMAGE=php:${{ matrix.php }}-zts-${{ matrix.base }}
             OXPHP_VERSION=${{ steps.version.outputs.version }}
           tags: oxphp:ci
-          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.CACHE_IMAGE }}:php${{ matrix.php }}-nightly-${{ matrix.arch }}
-          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.CACHE_IMAGE }}:php${{ matrix.php }}-nightly-${{ matrix.arch }},mode=max,image-manifest=true,oci-mediatypes=true
+          cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.CACHE_IMAGE }}:php${{ matrix.php }}-nightly${{ matrix.suffix }}-${{ matrix.arch }}
+          cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.CACHE_IMAGE }}:php${{ matrix.php }}-nightly${{ matrix.suffix }}-${{ matrix.arch }},mode=max,image-manifest=true,oci-mediatypes=true
 
       - name: Smoke test
         env:
@@ -129,41 +153,120 @@ jobs:
       - name: Tag and push
         env:
           PHP_MINOR: ${{ matrix.php }}
+          SUFFIX: ${{ matrix.suffix }}
           ARCH: ${{ matrix.arch }}
         run: |
-          TAG="${REGISTRY}/${IMAGE_NAME}:php${PHP_MINOR}-nightly-${ARCH}"
+          TAG="${REGISTRY}/${IMAGE_NAME}:php${PHP_MINOR}-nightly${SUFFIX}-${ARCH}"
           docker tag oxphp:ci "$TAG"
           docker push "$TAG"
+          DIGEST=$(docker buildx imagetools inspect "$TAG" --format '{{.Manifest.Digest}}')
+          if [[ ! "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::could not read the digest of $TAG just pushed: '$DIGEST'"
+            exit 1
+          fi
+          mkdir -p /tmp/built && echo "${REGISTRY}/${IMAGE_NAME}@${DIGEST}" > "/tmp/built/${ARCH}"
 
+      # Tells the manifest job that this cell was pushed in this run, and
+      # which image it pushed, by digest: the manifest is then made of what
+      # this run pushed, whatever has happened to the per-arch tags since.
+      # overwrite: upload-artifact fails on a name that already exists, which
+      # a re-run can meet. Kept for one day: a re-run needs the records only
+      # until the next run exists, and from then on it stops at the check at
+      # the top of this job.
+      - name: Record the pushed cell
+        uses: actions/upload-artifact@v6
+        with:
+          name: nightly-built-${{ matrix.php }}-${{ matrix.variant }}-${{ matrix.arch }}
+          path: /tmp/built/${{ matrix.arch }}
+          retention-days: 1
+          overwrite: true
+
+  # Runs after a partly failed build too: each (PHP, variant) pair gets its
+  # manifest when both of its arches were pushed in this run, so a failed
+  # Debian cell does not hold back the Alpine manifests, nor 8.5 hold back 8.4.
   manifest:
     needs: build
+    if: ${{ !cancelled() && needs.build.result != 'skipped' }}
     strategy:
       fail-fast: false
       matrix:
         php: ["8.4", "8.5"]
+        variant: [alpine, trixie]
+        include:
+          - { variant: alpine, suffix: "" }
+          - { variant: trixie, suffix: "-trixie" }
     runs-on: ubuntu-24.04
     permissions:
+      actions: read
       contents: read
       packages: write
     steps:
+      # Same check as at the top of the build job, needed here as well:
+      # re-running a failed cell re-runs the manifest of every pair, and the
+      # records of the cells that passed on the first attempt are still here.
+      - name: Stop a re-run once a newer nightly run exists
+        if: github.run_attempt != '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          NEWEST=$(gh run list -R "$GITHUB_REPOSITORY" --workflow nightly.yml \
+            --limit 1 --json databaseId -q '.[0].databaseId')
+          if [[ "$NEWEST" != "$GITHUB_RUN_ID" ]]; then
+            echo "::error::run $NEWEST of this workflow is newer than this one; re-running this one would put its images back over that run's. Dispatch a new run instead."
+            exit 1
+          fi
+
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v4
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Each record is a file named after its arch that holds the pushed
+      # image by digest. merge-multiple keeps them flat in /tmp/built however
+      # many were found; a pair with none pushed downloads nothing, which the
+      # check below reads as "not pushed".
+      - name: Download the cells of this pair pushed in this run
+        uses: actions/download-artifact@v7
+        with:
+          pattern: nightly-built-${{ matrix.php }}-${{ matrix.variant }}-*
+          path: /tmp/built
+          merge-multiple: true
 
       - name: Create php-specific multi-arch manifest
         env:
           PHP_MINOR: ${{ matrix.php }}
+          VARIANT: ${{ matrix.variant }}
+          SUFFIX: ${{ matrix.suffix }}
+          BUILD_RESULT: ${{ needs.build.result }}
         run: |
+          for arch in amd64 arm64; do
+            if [[ ! -f "/tmp/built/${arch}" ]]; then
+              # Every cell succeeded, so the record should be here: either the
+              # download failed, or this is a re-run and the record of a cell
+              # that passed on an earlier attempt has expired.
+              if [[ "$BUILD_RESULT" == success ]]; then
+                echo "::error::no record of the php${PHP_MINOR} ${VARIANT} ${arch} cell although the build succeeded: the download failed, or the record, kept for one day, has expired"
+                exit 1
+              fi
+              echo "::warning::no record that php${PHP_MINOR} ${VARIANT} ${arch} was pushed in this run; php${PHP_MINOR}-nightly${SUFFIX} is left as it was"
+              exit 0
+            fi
+          done
           docker buildx imagetools create \
-            -t "${REGISTRY}/${IMAGE_NAME}:php${PHP_MINOR}-nightly" \
-            "${REGISTRY}/${IMAGE_NAME}:php${PHP_MINOR}-nightly-amd64" \
-            "${REGISTRY}/${IMAGE_NAME}:php${PHP_MINOR}-nightly-arm64"
+            -t "${REGISTRY}/${IMAGE_NAME}:php${PHP_MINOR}-nightly${SUFFIX}" \
+            "$(cat /tmp/built/amd64)" \
+            "$(cat /tmp/built/arm64)"
 
   alias:
     needs: manifest
+    # Not the default success(), which also looks past `manifest` at a failed
+    # build cell. Re-pointing an alias at a php-tag the manifest job left as it
+    # was changes nothing; until php8.4-nightly-trixie has been published once,
+    # the nightly-trixie step fails instead, in a run a build cell has already
+    # turned red.
+    if: ${{ !cancelled() && needs.manifest.result == 'success' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -176,11 +279,18 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # `:nightly` resolves to the current default PHP minor. Bump
-      # alongside the `ARG PHP_VERSION` default in
-      # docker/release/alpine/Dockerfile when promoting a new minor.
+      # `:nightly` and `:nightly-trixie` resolve to the current default PHP
+      # minor. Bump both alongside the `ARG PHP_VERSION` defaults in
+      # docker/release/alpine/Dockerfile and docker/release/debian/Dockerfile
+      # when promoting a new minor.
       - name: Alias nightly -> php8.4-nightly
         run: |
           docker buildx imagetools create \
             -t "${REGISTRY}/${IMAGE_NAME}:nightly" \
             "${REGISTRY}/${IMAGE_NAME}:php8.4-nightly"
+
+      - name: Alias nightly-trixie -> php8.4-nightly-trixie
+        run: |
+          docker buildx imagetools create \
+            -t "${REGISTRY}/${IMAGE_NAME}:nightly-trixie" \
+            "${REGISTRY}/${IMAGE_NAME}:php8.4-nightly-trixie"

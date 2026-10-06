@@ -157,7 +157,7 @@ docker build --target dev -t myapp:dev .
 docker build --target prod -t myapp:prod .
 ```
 
-> **Note:** The `dev` target is based on `php:8.4-zts-alpine` (swap `8.4` for `8.5` to match an OxPHP `:*-php8.5*` tag) with OxPHP copied in, giving you full access to PHP CLI and Composer. The `prod` target is based on the OxPHP image directly, keeping the production image small.
+> **Note:** The `dev` target is based on `php:8.4-zts-alpine` (swap `8.4` for `8.5` to match an OxPHP `:*-php8.5*` tag; with a `-trixie` tag, base the stages on `php:<minor>-zts-trixie` and use `apt-get`, see [Debian (glibc) Image](installation.md#debian-glibc-image)) with OxPHP copied in, giving you full access to PHP CLI and Composer. The `prod` target is based on the OxPHP image directly, keeping the production image small.
 
 ## Installing PHP Extensions in Production
 
@@ -177,7 +177,7 @@ COPY --chown=www-data:www-data . /var/www/html/public
 CMD ["oxphp"]
 ```
 
-`--chown=www-data:www-data` on the `COPY` is important: files are owned by `www-data` (uid 82) inside the image, so an orchestrator-level `--user www-data` drop lands on a webroot the unprivileged process can read and (where needed) write to.
+`--chown=www-data:www-data` on the `COPY` is important: files are owned by `www-data` (uid 82, or 33 in the Debian image) inside the image, so an orchestrator-level `--user www-data` drop lands on a webroot the unprivileged process can read and (where needed) write to.
 
 The container starts as root, and `oxphp serve` then drops to `www-data` by default before serving any traffic (see the security note below). Pin the identity explicitly at the orchestrator level if you want a specific uid or a non-`www-data` user.
 
@@ -236,7 +236,7 @@ You can still pin the runtime identity explicitly at the orchestrator level — 
 
 When you start the container as non-root this way, OxPHP is already unprivileged and the default self-drop is a no-op — but the process then cannot bind ports below 1024 (see [Run as non-root on port 80](#run-as-non-root-on-port-80-serve---user) to keep a privileged bind *and* non-root serving). To deliberately keep serving as root, pass `oxphp serve --user=root`.
 
-The `www-data` user (uid 82, gid 82) is pre-created by the base image, and `/var/www/html` is chowned to it at build time, so any of these drop paths — including the default self-drop — lands on a readable webroot.
+The `www-data` user (uid/gid 82; 33 in the [Debian image](installation.md#debian-glibc-image), where `runAsUser` and `runAsGroup` above become `33`) is pre-created by the base image, and `/var/www/html` is chowned to it at build time, so any of these drop paths — including the default self-drop — lands on a readable webroot.
 
 > CLI invocations like `docker run … php artisan migrate` run the `php` binary directly, not `oxphp serve`/`run`, so they do **not** self-drop — they run as the container's start user (root by default). Use Docker's `--user` for those, as shown above.
 
