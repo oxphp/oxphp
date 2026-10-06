@@ -104,7 +104,7 @@ to turn that into production insight.
 |------|------|------------------|
 | `Off` | Default. No plugin asked for profiling. | Nothing. Zero overhead. |
 | `ApmOnly` | `plugin-apm` is enabled but no profiler trigger matched. | Only APM's explicit hooks: `#[Trace]`, PDO/cURL emitters, `oxphp_apm_*()`. |
-| `ProfileAll` | A profiler trigger matched (or `OxPHP\Profile\start()` was called). | **Every** PHP function call via the Observer API plus everything APM collects. |
+| `ProfileAll` | A profiler trigger matched (or `OxPHP\Profile\start()` was called while the profiler is enabled). | **Every** PHP function call via the Observer API plus everything APM collects. |
 
 `ProfileAll` supersedes `ApmOnly`: when both plugins are enabled and a
 trigger matches, a single shared `Arc<SpanTree>` is used — no double
@@ -258,7 +258,8 @@ environment:
 
 All functions live in the `OxPHP\Profile` namespace. They are always safe
 to call: if profiling isn't active for the current request, mutators are
-safe no-ops and `is_active()` returns `false`.
+safe no-ops and `is_active()` returns `false`. With the profiler disabled
+(`PROFILER_ENABLED`), `start()` does nothing either.
 
 ### 7.1. Explicit capture around a region
 
@@ -333,7 +334,7 @@ if (OxPHP\Profile\is_active()) {
 }
 ```
 
-Two TLS reads, no FFI. Safe to call in hot code.
+Two TLS reads. Safe to call in hot code.
 
 ---
 
@@ -1207,7 +1208,8 @@ use function OxPHP\Profile\{start, stop, mark, is_active};
 
 $t = new TestCase('profile_smoke', 'my-app');
 
-// Enable the profiler manually (no trigger needed to test the SDK).
+// Turn profiling on from PHP — no trigger needed to test the SDK, but the
+// profiler must be enabled (PROFILER_ENABLED=true), or start() does nothing.
 $t->assertFalse('initially not active', is_active());
 start();
 $t->assertTrue('active after start', is_active());

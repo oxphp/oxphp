@@ -1,0 +1,7 @@
+# profile: decorators
+# description: Profiler PHP SDK with the profiler compiled in but turned off
+
+# OxPHP\Profile\start() must not turn is_active() on while PROFILER_ENABLED is
+# unset — the profiler's observer is not registered then, so the profiler would
+# record nothing.
+profiler/test_start_noop_when_disabled

@@ -18,13 +18,12 @@ use crate::profiling::{
     ProfilingMode, PROFILING_CONTEXT,
 };
 
-/// Register the seven PHP SDK function symbols. The `_enabled` flag
-/// is plumbed for parity with `ox_apm::php_sdk` but currently unused
-/// — per spec §6 the SDK functions have no token check, and they
-/// degrade to no-ops naturally when no profile is active.
+/// Register the seven PHP SDK function symbols. `enabled` is the
+/// profiler's `PROFILER_ENABLED` switch; only `start()` reads it (see
+/// its handler). None of the functions checks a token.
 pub fn register_functions(
     ctx: &mut PluginContext,
-    _enabled: bool,
+    enabled: bool,
 ) -> Result<(), crate::plugin::PluginError> {
     // OxPHP\Profile\is_active(): bool — true iff bridge mode is
     // PROFILE_ALL and not paused. Two TLS reads, no FFI hop into
@@ -45,9 +44,17 @@ pub fn register_functions(
     // reset() clears any spans already collected — this matches the
     // spec invariant that mode is set at most once per request,
     // either by the trigger at RINIT or here from PHP.
+    //
+    // A no-op while the profiler is disabled: the profiler's C
+    // observer is registered only under PROFILER_ENABLED, so the
+    // profiler would capture nothing, and raising the mode anyway
+    // would make is_active() report a profile that does not exist.
     ctx.function("OxPHP\\Profile\\start")
         .returns(PhpType::Void)
-        .handler(|_call: &mut NativeCall| {
+        .handler(move |_call: &mut NativeCall| {
+            if !enabled {
+                return Ok(());
+            }
             set_profiling_mode(ProfilingMode::ProfileAll);
             set_profiling_paused(false);
             PROFILING_CONTEXT.with(|cell| {
