@@ -601,6 +601,7 @@ namespace OxPHP\Http {
         /**
          * Get a single uploaded file by field name.
          * For array fields (name="photos[]"), returns the first file.
+         * Returns a new object on every call, even for the same field.
          *
          * @return UploadedFileInterface|null The file or null if not found
          */
@@ -611,6 +612,7 @@ namespace OxPHP\Http {
          *
          * Without argument: all files as a flat UploadedFileInterface[] array.
          * With name: all files for that field (supports name="photos[]").
+         * Builds new objects on every call.
          *
          * @param string|null $name Field name filter, or null for all
          * @return UploadedFileInterface[]
@@ -691,8 +693,11 @@ namespace OxPHP\Http {
      *
      * type() detects MIME from file contents (magic bytes), not from the
      * client-provided Content-Type which can be spoofed. The detected type
-     * is cached on first call. moveTo() automatically calls type() before
-     * moving to ensure the cache is populated.
+     * is kept on the object type() was called on. Request::file() and
+     * Request::files() return new objects on every call, and each of them
+     * reads the file again on its first type() call, so hold the object if
+     * you need the type more than once. moveTo() calls type() before moving,
+     * so the object that moved the file still reports its type afterwards.
      */
     interface UploadedFileInterface
     {
@@ -705,8 +710,13 @@ namespace OxPHP\Http {
         /**
          * MIME type detected from file contents (magic bytes).
          *
-         * Cached on first call. Returns "application/octet-stream" if
-         * detection fails. moveTo() auto-calls type() before moving.
+         * The first call reads the file and keeps the result on this object;
+         * later calls return it without reading again. Returns
+         * "application/octet-stream" if detection fails — including on an
+         * object whose first call comes after moveTo() has moved the file,
+         * where mime_content_type() also raises a warning for the missing
+         * file. Under an error handler that turns warnings into exceptions,
+         * that call throws instead of returning.
          */
         public function type(): string;
 
@@ -725,8 +735,9 @@ namespace OxPHP\Http {
         /**
          * Move the uploaded file to a destination path.
          *
-         * Automatically calls type() before moving to cache MIME detection.
-         * Returns false if the file is not valid or the move fails.
+         * Calls type() before moving, so type() on this object still answers
+         * after the move. Returns false if the file is not valid or the move
+         * fails.
          *
          * @param string $path Destination file path
          * @return bool true on success

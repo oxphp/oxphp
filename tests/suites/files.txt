@@ -14,3 +14,4 @@ files/test_object_file_move | POST | -F "doc=@$FIXTURES_DIR/small.txt" | |
 files/test_object_files_array_integrity | POST | -F "photos[]=@$FIXTURES_DIR/small.txt" -F "photos[]=@$FIXTURES_DIR/small.txt" | |
 files/test_object_file_assoc | POST | -F "docs[passport]=@$FIXTURES_DIR/small.txt" -F "docs[license]=@$FIXTURES_DIR/small.txt" | |
 files/test_object_file_nofile | POST | -F "avatar=@/dev/null;filename=" | |
+files/test_object_file_type_lives_on_the_object | POST | -F "doc=@$FIXTURES_DIR/small.txt" | |

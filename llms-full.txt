@@ -12353,6 +12353,8 @@ $request->files(?string $name = null): array
 | `$request->files()` | All uploaded files as a flat array of `UploadedFileInterface` |
 | `$request->files('photos')` | All files for the `photos` field (supports `name="photos[]"`) |
 
+Both build new `UploadedFileInterface` objects on every call. Two `file('avatar')` calls return two objects for the same uploaded file, and a type one of them has detected with `type()` is not known to the other. Keep the object you got if you need it more than once, as the example below does.
+
 ```php
 <?php
 $avatar = $request->file('avatar');
@@ -12513,12 +12515,12 @@ interface UploadedFileInterface
 |--------|-------------|
 | `name()` | Original filename sent by the client |
 | `clientType()` | MIME type declared by the client — do not trust this value for security decisions |
-| `type()` | MIME type determined from the file's actual contents using magic byte detection. Returns `"application/octet-stream"` when the type cannot be determined. Cached on first call. |
+| `type()` | MIME type determined from the file's actual contents using magic byte detection. Returns `"application/octet-stream"` when the type cannot be determined. The first call reads the file and keeps the result on this object; later calls on it return that result without reading the file again. An object from another `file()` or `files()` call reads the file again on its own first call. |
 | `size()` | File size in bytes |
 | `tmpPath()` | Path to the temporary file on disk |
 | `error()` | One of the `UPLOAD_ERR_*` constants |
 | `isValid()` | `true` when `error()` is `UPLOAD_ERR_OK` |
-| `moveTo(path)` | Moves the file to `$path`. Calls `type()` before moving. Returns `false` if the file is invalid or the move fails. |
+| `moveTo(path)` | Moves the file to `$path`. Calls `type()` before moving, so `type()` on this object still answers after the move. An object whose `type()` was not called before the move — one fetched again with `file()`, for instance — finds no file: `mime_content_type()` raises a warning for the missing file, and its `type()` returns `"application/octet-stream"` — or throws, under an error handler that turns warnings into exceptions. Returns `false` if the file is invalid or the move fails. |
 
 Always check `isValid()` before using an uploaded file. Use `type()` rather than `clientType()` when making security-sensitive decisions:
 
