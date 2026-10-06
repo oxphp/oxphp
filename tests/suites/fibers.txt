@@ -112,3 +112,11 @@ fibers/test_bailout_in_a_callback_over_buffered_cycles_keeps_the_worker | GET | 
 fibers/test_bailout_in_a_callback_over_buffered_cycles_keeps_the_worker_probe
 fibers/test_bailout_in_a_callback_over_unbuffered_cycles_retires_the_worker | GET | | 504 |
 fibers/test_bailout_in_a_callback_over_unbuffered_cycles_retires_the_worker_probe
+
+# How close to the end of its C stack a request or a task may recurse before the
+# engine throws. The second line drives an internal function that uses a lot of
+# stack into the last level the check lets through; if the limit loses its
+# reserve, that takes the server down rather than failing alone, so it stays
+# last.
+fibers/test_stack_limit_is_the_engines
+fibers/test_stack_heavy_call_at_the_limit_is_an_error

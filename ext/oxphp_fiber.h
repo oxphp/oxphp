@@ -446,11 +446,14 @@ typedef struct _oxphp_request_fiber {
     zend_fcall_info *fci;
     zend_fcall_info_cache *fcc;
 
-    /* This fiber's C-stack bounds, estimated from the stack pointer at coroutine
-     * entry (the fiber stack struct is opaque) and written exactly once, there.
+    /* This fiber's C-stack bounds, as zend_fiber_execute set them for the stack
+     * zend_fiber_start allocated, recorded at coroutine entry and written
+     * exactly once, there.
      * NULL until then, which is how the switch wrappers tell a fresh fiber from
      * one that has run — see oxphp_fiber_install_stack_limits, which every path
-     * into a fiber calls. */
+     * into a fiber calls. Only under ZEND_CHECK_STACK_LIMIT does the engine set
+     * or read the bounds; without it both stay NULL and the install never
+     * fires. */
     void *saved_stack_base;
     void *saved_stack_limit;
 
