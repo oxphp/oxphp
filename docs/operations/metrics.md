@@ -235,6 +235,20 @@ These metrics require `ASYNC_WORKERS` set to a non-zero value, and each has its 
 | `oxphp_async_tasks_in_flight_limit` | gauge | Maximum concurrent async tasks (`ASYNC_MAX_FIBERS × ASYNC_WORKERS`) |
 | `oxphp_async_output_discarded_bytes_total` | counter | Bytes of async-task output discarded at worker idle (an `echo` in an async task has no client to receive it) |
 
+## OpenTelemetry Export Metrics
+
+These metrics require `OTEL_ENABLED=true`. They count the batches of spans OxPHP sends to the OTLP collector over gRPC (`OTEL_EXPORTER_OTLP_PROTOCOL=grpc`, the default) — the request spans, and the APM spans when the APM plugin is on. With `http/protobuf` they stay at zero.
+
+| Metric | Type | Description |
+|--------|------|-------------|
+| `oxphp_otel_export_failures_total` | counter | Span exports that failed — after the retry, where one was made. Their spans are not sent again |
+| `oxphp_otel_export_failed_spans_total` | counter | Spans carried by those failed exports |
+| `oxphp_otel_export_retries_total` | counter | Exports retried once because the first attempt failed fast, without an answer from the collector |
+
+An export is retried once when its first attempt fails within half of `OTEL_EXPORTER_OTLP_TIMEOUT`, and at most one second, without an answer from the collector: the connection was reset or closed, or could not be made — most often because a load balancer or NAT dropped it while it sat idle between exports. An error status the collector answers with, such as a rejected API key or throttling, is not retried: the OTLP specification forbids retrying most of them, and the exporter does not pass on the delay a throttling collector asks for. A retry that delivers the batch is counted only in `oxphp_otel_export_retries_total`. An attempt that runs into the export timeout is not retried, so a slow collector is not sent the same batch twice. When the collector did receive the first attempt before the connection broke, the retry delivers those spans a second time. For the same reason, an export counted as failed may still have reached the collector.
+
+Spans the tracer drops before export, because its queue (`OTEL_BSP_MAX_QUEUE_SIZE`, 2048 spans by default) is full, are not counted here.
+
 ## Grafana Dashboard Tips
 
 The following PromQL queries are useful for building dashboards:
