@@ -2170,9 +2170,12 @@ namespace OxPHP\Profile {
     /**
      * Whether profiling is actively capturing spans for this request.
      *
-     * Returns true only when the profiler is enabled *and* a profile is
-     * active (triggered by cookie / header / query / sample rate) and not
-     * paused. Cheap: two thread-local reads, no FFI hop.
+     * Returns true when a profile is active for this request — turned on by
+     * a trigger (cookie / header / query / sample rate) or by {@see start()}
+     * — and not paused by {@see pause()} / {@see stop()}. With the profiler
+     * disabled (`PROFILER_ENABLED`) triggers are not checked and start()
+     * does nothing, so neither turns a profile on. Cheap: two thread-local
+     * reads.
      *
      * Use to gate expensive profile-only instrumentation (custom metrics,
      * debug-only attributes).
@@ -2191,6 +2194,10 @@ namespace OxPHP\Profile {
      * profile was already running in a lower-detail mode, the span buffer
      * is reset (mid-request upgrade invariant). Call at most once per
      * request — the trigger at RINIT is the preferred entry point.
+     *
+     * No-op while the profiler is disabled (`PROFILER_ENABLED`): the profiler
+     * records nothing then, so it does not make {@see is_active()} return
+     * true.
      */
     function start(): void {}
 

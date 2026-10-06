@@ -918,7 +918,7 @@ oxphp_apm_end($spanId);
 OxPHP\Profile\is_active(): bool
 ```
 
-Returns `true` when profile capture is currently active for this request — i.e. the profiler has been triggered (by header, cookie, query parameter, or sample rate) and capture has not been paused via [`pause()`](#oxphpprofilepause).
+Returns `true` when profile capture is currently active for this request — i.e. a trigger turned it on (header, cookie, query parameter, or sample rate) or the script called [`start()`](#oxphpprofilestart), and capture is not paused by [`pause()`](#oxphpprofilepause) or [`stop()`](#oxphpprofilestop). With the profiler disabled (`PROFILER_ENABLED`), triggers are not checked and `start()` does nothing, so neither turns capture on.
 
 Useful for guarding expensive instrumentation that should only run when profiling is on.
 
@@ -942,6 +942,8 @@ OxPHP\Profile\start(): void
 ```
 
 Programmatically enables profile capture for the remainder of the current request, even if no trigger fired at RINIT. Sets profiling mode to `PROFILE_ALL` and clears the paused flag.
+
+Does nothing while the profiler is disabled (`PROFILER_ENABLED`): the profiler records no function calls then, so the call neither turns capture on nor makes [`is_active()`](#oxphpprofileis_active) return `true`.
 
 If a profile was already active in a different mode, this call promotes it — any spans already collected in the lower mode are discarded so the captured profile is internally consistent. Use this when you want to opt a specific code path into profiling without relying on triggers.
 
