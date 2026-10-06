@@ -265,7 +265,7 @@ A coding is offered when `COMPRESSION_ENCODINGS` lists it **and** its level is n
 |----------|---------|-------------|
 | `OTEL_ENABLED` | `false` | Enable OpenTelemetry span export. Automatically sets `TRACE_CONTEXT=true`. Boolean — see [Boolean values](#boolean-values) |
 | `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` | Export protocol: `grpc` or `http/protobuf` |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` (gRPC) or `http://localhost:4318` (HTTP) | OTLP collector endpoint |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` (gRPC) or `http://localhost:4318` (HTTP) | OTLP collector endpoint. With `http/protobuf`, a base URL: spans are sent to `/v1/traces` under it |
 | `OTEL_EXPORTER_OTLP_TIMEOUT` | `10000` | Export timeout in milliseconds |
 | `OTEL_EXPORTER_OTLP_HEADERS` | *(unset)* | Authentication headers: `key=value,key2=value2` |
 | `OTEL_SERVICE_NAME` | `oxphp` | Service name in exported spans |

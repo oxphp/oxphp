@@ -237,7 +237,7 @@ These metrics require `ASYNC_WORKERS` set to a non-zero value, and each has its 
 
 ## OpenTelemetry Export Metrics
 
-These metrics require `OTEL_ENABLED=true`. They count the batches of spans OxPHP sends to the OTLP collector over gRPC (`OTEL_EXPORTER_OTLP_PROTOCOL=grpc`, the default) — the request spans, and the APM spans when the APM plugin is on. With `http/protobuf` they stay at zero.
+These metrics require `OTEL_ENABLED=true`. They count the batches of spans OxPHP sends to the OTLP collector — the request spans, and the APM spans when the APM plugin is on.
 
 | Metric | Type | Description |
 |--------|------|-------------|

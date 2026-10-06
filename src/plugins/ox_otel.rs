@@ -179,6 +179,21 @@ impl OtelPlugin {
             .is_some_and(|(scheme, _)| scheme.eq_ignore_ascii_case("https"))
     }
 
+    /// The URL the HTTP exporter posts traces to. `OTEL_EXPORTER_OTLP_ENDPOINT`
+    /// is a base URL, and the OTLP specification sends traces to `v1/traces`
+    /// under it. The exporter appends that path itself only to the endpoint it
+    /// takes from `OTEL_EXPORTER_OTLP_ENDPOINT` or to its own default, never to
+    /// one passed to `with_endpoint`, so it is appended here the way the
+    /// exporter appends it: after a slash the base already ends in, or after
+    /// one added when it does not.
+    fn http_traces_url(base: &str) -> String {
+        if base.ends_with('/') {
+            format!("{base}v1/traces")
+        } else {
+            format!("{base}/v1/traces")
+        }
+    }
+
     /// Initialize the SdkTracerProvider with OTLP exporter.
     fn init_provider(&self) -> Result<SdkTracerProvider, PluginError> {
         let protocol =
@@ -205,7 +220,7 @@ impl OtelPlugin {
 
                 let mut builder = opentelemetry_otlp::SpanExporter::builder()
                     .with_http()
-                    .with_endpoint(endpoint)
+                    .with_endpoint(Self::http_traces_url(&endpoint))
                     .with_timeout(timeout);
 
                 if !headers.is_empty() {
@@ -1624,6 +1639,24 @@ mod tests {
         assert!(!OtelPlugin::endpoint_uses_tls("http://localhost:4317"));
         assert!(!OtelPlugin::endpoint_uses_tls("grpc://collector:4317"));
         assert!(!OtelPlugin::endpoint_uses_tls("localhost:4317")); // no scheme
+    }
+
+    #[test]
+    fn test_http_traces_url_appends_the_signal_path_to_the_base() {
+        for (base, url) in [
+            ("http://localhost:4318", "http://localhost:4318/v1/traces"),
+            ("http://localhost:4318/", "http://localhost:4318/v1/traces"),
+            (
+                "https://otlp.example.com/otlp",
+                "https://otlp.example.com/otlp/v1/traces",
+            ),
+            (
+                "https://otlp.example.com/otlp/",
+                "https://otlp.example.com/otlp/v1/traces",
+            ),
+        ] {
+            assert_eq!(OtelPlugin::http_traces_url(base), url, "base {base}");
+        }
     }
 
     #[test]

@@ -40,7 +40,7 @@ The OTel plugin is a compile-time feature (`plugin-otel`). When enabled, it auto
 |----------|---------|-------------|
 | `OTEL_ENABLED` | `false` | Enable the OpenTelemetry plugin. Boolean — see [Boolean values](../operations/configuration.md#boolean-values) |
 | `OTEL_EXPORTER_OTLP_PROTOCOL` | `grpc` | Export protocol: `grpc` or `http/protobuf` |
-| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` (gRPC) or `http://localhost:4318` (HTTP) | OTLP collector endpoint. An `https://` URL is exported over TLS on both transports, verified against the system trust store (the runtime image must ship a CA bundle such as `ca-certificates` — the official image installs it); custom CA bundles and mTLS are not yet supported |
+| `OTEL_EXPORTER_OTLP_ENDPOINT` | `http://localhost:4317` (gRPC) or `http://localhost:4318` (HTTP) | OTLP collector endpoint. With `http/protobuf` this is the collector's base URL, and spans are sent to `/v1/traces` under it, as the OTLP specification prescribes: `http://collector:4318` sends to `http://collector:4318/v1/traces`. An `https://` URL is exported over TLS on both transports, verified against the system trust store (the runtime image must ship a CA bundle such as `ca-certificates` — the official image installs it); custom CA bundles and mTLS are not yet supported |
 | `OTEL_EXPORTER_OTLP_TIMEOUT` | `10000` | Export timeout in milliseconds |
 | `OTEL_EXPORTER_OTLP_HEADERS` | *(unset)* | Authentication headers: `key=value,key2=value2` |
 | `OTEL_SERVICE_NAME` | `oxphp` | Service name in exported spans |
@@ -511,18 +511,24 @@ curl -s http://localhost:9090/config | jq '.plugins'
 
 ### Span export errors in the log
 
-OxPHP sends spans to the collector in batches. Over gRPC (`OTEL_EXPORTER_OTLP_PROTOCOL=grpc`, the default) it logs a failed export on its own lines, with `plugin` set to `otel`:
+OxPHP sends spans to the collector in batches. It logs a failed export on its own lines, with `plugin` set to `otel`:
 
 - `WARN` `OTLP span export failed, retrying once` — the first attempt failed fast, without an answer from the collector, and is being retried. Fields: `spans` (batch size), `error`.
 - `ERROR` `OTLP span export failed, the batch is dropped` — the export failed for good, and its spans are not sent again. Fields: `spans`, `retried`, `error`.
 
-Every `ERROR` line comes with a second one, written by the OpenTelemetry library, for the same failed export. Its `message` is empty, and the cause is in `error`:
+Every `ERROR` line comes with a second one, written by the OpenTelemetry library, for the same failed export. Its `message` is empty, and the cause is in `error` — over gRPC:
 
 ```json
 {"level":"ERROR","fields":{"message":"","name":"BatchSpanProcessor.ExportError","error":"Operation failed: code: 'Unknown error', message: \"transport error\", source: ..."}}
 ```
 
-A `WARN` line with no `ERROR` line after it means the retry delivered the batch. The collector's own error answers, such as `code: 'The request does not have valid authentication credentials'` for a rejected API key, are not retried: they come as a single `ERROR` line with `retried` set to `false`. `ConnectionReset` or `connection closed` in `error` points at a connection that something between OxPHP and the collector, such as a load balancer or NAT, dropped while it sat idle. [OpenTelemetry Export Metrics](../operations/metrics.md#opentelemetry-export-metrics) counts the failed exports, their spans, and the retries, and explains when an export is retried.
+and over `http/protobuf`:
+
+```json
+{"level":"ERROR","fields":{"message":"","name":"BatchSpanProcessor.ExportError","error":"Operation failed: reqwest::Error { kind: Request, url: \"http://collector:4318/v1/traces\", source: ... }"}}
+```
+
+A `WARN` line with no `ERROR` line after it means the retry delivered the batch. The collector's own error answers are not retried: they come as a single `ERROR` line with `retried` set to `false`. A rejected API key reads `code: 'The request does not have valid authentication credentials'` over gRPC and `kind: Status(401, None)` over `http/protobuf`. `ConnectionReset` in `error` — or `connection closed` over gRPC and `IncompleteMessage` over `http/protobuf` — points at a connection that something between OxPHP and the collector, such as a load balancer or NAT, dropped while it sat idle. [OpenTelemetry Export Metrics](../operations/metrics.md#opentelemetry-export-metrics) counts the failed exports, their spans, and the retries, and explains when an export is retried.
 
 ### High sampling volume in production
 
