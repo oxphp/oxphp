@@ -2,10 +2,13 @@
 # CI runs the same in .github/workflows/pr.yml (job: licenses).
 
 [graph]
-# Only enforce on targets the release image actually ships on.
+# Only enforce on targets the published images actually ship on: musl for
+# the Alpine image, gnu for the Debian one.
 targets = [
     { triple = "x86_64-unknown-linux-musl" },
     { triple = "aarch64-unknown-linux-musl" },
+    { triple = "x86_64-unknown-linux-gnu" },
+    { triple = "aarch64-unknown-linux-gnu" },
 ]
 
 [licenses]

@@ -21,11 +21,36 @@ The image includes:
 - **PHP ZTS runtime** — 8.4 or 8.5, depending on the tag pulled; thread-safe PHP for multi-worker execution
 - **OxPHP PHP extension** (`oxphp_sapi.so`) — provides `oxphp_request_id()`, `oxphp_server_info()`, `oxphp_worker()`, and other built-in functions
 - **Bridge library** (`liboxphp_bridge.so`) — connects the Rust server to the PHP runtime
-- **Alpine Linux** base — minimal runtime footprint
-- **No `USER` directive** — the image **starts** as **root** (matching `nginx:alpine` / `php-fpm:alpine` / `frankenphp:alpine`) so it can bind privileged ports, but `oxphp serve`/`run` then drop to **`www-data`** by default before serving, so traffic is not handled as root out of the box. The `www-data` user (UID 82, GID 82) is pre-created and `/var/www/html` is chowned to it at build time. Pin the runtime identity explicitly at the orchestrator level for a specific uid or extra defense-in-depth:
+- **Alpine Linux** base — minimal runtime footprint (a Debian build is published nightly, see [Debian (glibc) Image](#debian-glibc-image))
+- **No `USER` directive** — the image **starts** as **root** (matching `nginx:alpine` / `php-fpm:alpine` / `frankenphp:alpine`) so it can bind privileged ports, but `oxphp serve`/`run` then drop to **`www-data`** by default before serving, so traffic is not handled as root out of the box. The `www-data` user (UID 82, GID 82; 33 in the Debian image) is pre-created and `/var/www/html` is chowned to it at build time. Pin the runtime identity explicitly at the orchestrator level for a specific uid or extra defense-in-depth:
   - `docker run --user www-data ghcr.io/oxphp/oxphp:0.12.0`
   - Compose: `services.app.user: www-data`
   - Kubernetes: `securityContext.runAsUser: 82`
+
+### Debian (glibc) Image
+
+The nightly pipeline also publishes the same server built on Debian trixie instead of Alpine: `ghcr.io/oxphp/oxphp:nightly-trixie` (PHP 8.4), `:php8.4-nightly-trixie` and `:php8.5-nightly-trixie`, for `linux/amd64` and `linux/arm64`. Tagged releases are Alpine only. Nightly tags are built from `main` on nights when it has moved since the last fully successful run, and carry no stability promise. A night on which the Debian build fails leaves `:nightly-trixie` and `:php<minor>-nightly-trixie` at the last build that succeeded, so they can trail `:nightly`.
+
+It spends less CPU per request, for two reasons:
+
+- **Thread-local storage.** Thread-safe PHP reaches the engine's per-thread state through a thread-local pointer. Built against musl, PHP leaves that pointer on the global-dynamic TLS model, so code in `libphp.so` reaches it through a call into the TLS runtime; against glibc it uses initial-exec, a load relative to the thread pointer.
+- **Allocator.** musl's allocator, which extensions and libraries such as libpq use beside PHP's own memory manager, maps fresh memory for libpq's query results and unmaps it when they are freed. On x86-64 that costs TLB shootdowns across the server's threads.
+
+CPU time of the OxPHP container per response, Debian image against Alpine image: same OxPHP revision and PHP 8.5 patch, a Yii3 application under `wrk -c64`, median of six alternating runs. Each row was measured on one host: x86-64 on a 16-vCPU cloud VM (AMD EPYC 9575F), arm64 under Docker Desktop on Apple silicon. Postgres' own CPU is not included.
+
+| | Yii3 page | Page reading Postgres |
+|---|---|---|
+| x86-64, classic mode | −18.9% | −14.1% |
+| x86-64, worker mode | −18.1% | −18.6% |
+| arm64, classic mode | −8.5% | −9.0% |
+
+What changes for a Dockerfile built on it:
+
+- Packages come from `apt-get update && apt-get install -y --no-install-recommends`, not `apk`, and under Debian names: for example `libicu-dev` and `libpq-dev` to build `intl` and `pdo_pgsql`, `libicu76` and `libpq5` at runtime.
+- Build extensions in a `php:<minor>-zts-trixie` stage: a `.so` built against musl in a `-zts-alpine` stage is not compatible with this image, nor the reverse.
+- `www-data` is UID/GID 33, not 82: `securityContext.runAsUser: 33`, and anything chowned by number has to use 33.
+- There is no `wget`; `curl` is there. A health check written for the Alpine image as `wget --spider http://localhost:9090/health` becomes `curl -fsS -o /dev/null http://localhost:9090/health`.
+- The image is larger: the PHP base is about 170–180 MiB compressed, against about 45–50 MiB for Alpine.
 
 ### Image Structure
 
@@ -78,7 +103,7 @@ The `oxphp` binary links to `libphp.so` and `liboxphp_bridge.so`. The PHP extens
 
 ### Minimal Dockerfile
 
-The base image `php:8.4-zts-alpine3.23` (or `php:8.5-zts-alpine3.23`) already contains `libphp.so` and all its dependencies. Match the PHP minor in your `FROM` to the OxPHP tag you copy from. You only need to copy the three OxPHP artifacts:
+The base image `php:8.4-zts-alpine3.23` (or `php:8.5-zts-alpine3.23`) already contains `libphp.so` and all its dependencies. Match the PHP minor in your `FROM` to the OxPHP tag you copy from, and the C library too: artifacts from a `-trixie` tag go onto `php:<minor>-zts-trixie`, not onto an Alpine base. You only need to copy the three OxPHP artifacts:
 
 ```dockerfile
 FROM php:8.4-zts-alpine3.23

@@ -1,7 +1,8 @@
 # The compiler CI checks against. It is the compiler that builds the
-# published image: the release Dockerfile installs Rust from Alpine's
-# package repository (Alpine 3.23 ships 1.91.1), where rustup is absent
-# and this file is ignored. It is also the MSRV (`rust-version` in
+# published images: the Alpine release Dockerfile installs Rust from
+# Alpine's package repository (Alpine 3.23 ships 1.91.1), where rustup is
+# absent and this file is ignored; the Debian one installs `channel` from
+# this file through rustup. It is also the MSRV (`rust-version` in
 # Cargo.toml). Without a pin, CI follows the runner's floating stable and
 # a new clippy lint turns every PR red regardless of what the PR changes.
 #
