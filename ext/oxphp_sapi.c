@@ -6346,6 +6346,30 @@ static void oxphp_serve_loop(zend_fcall_info *fci, zend_fcall_info_cache *fcc)
                  * heap has just grown and may be at its limit, and a bailout from
                  * here would take the whole serve loop with it. */
                 char msg[320];
+                /* An error reported past memory_limit left the allocator counting
+                 * more than the limit as in use even after its caches were handed
+                 * back, so memory_limit cannot be put back in force, and as a rule
+                 * this worker enforces no limit at all — see
+                 * oxphp_fiber_heap_back_under_limit(). What is still counted is
+                 * memory something holds, which the worker cannot make it let go
+                 * of; a fresh worker starts without it. Not only once warmed up,
+                 * as the checks below are: a worker with no limit is a danger
+                 * from its first request. Ahead of the cycle collection below,
+                 * which runs destructors, and so would run them with no limit.
+                 * The limit is put back whenever it can be, but the worker is not
+                 * retired while the server drains, for the reason given above. */
+                if (!oxphp_fiber_heap_back_under_limit() && !oxphp_bridge_is_draining()) {
+                    snprintf(msg, sizeof(msg),
+                             "oxphp: worker %d retiring: more than memory_limit is still "
+                             "in use after an error reported past the limit, so the "
+                             "limit cannot be put back in force",
+                             oxphp_bridge_get_worker_id());
+                    if (sapi_module.log_message != NULL) {
+                        sapi_module.log_message(msg, LOG_NOTICE);
+                    }
+                    oxphp_bridge_schedule_exit();
+                    break;
+                }
                 if (judged && !oxphp_serve_loop_collect_cycles()) {
                     snprintf(msg, sizeof(msg),
                              "oxphp: worker %d retiring: a destructor ended in a fatal "

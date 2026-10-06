@@ -729,6 +729,13 @@ void oxphp_fiber_record_cancel_bailout_frame(void);
  * some. */
 bool oxphp_fiber_take_internal_bailout(void);
 
+/* Put memory_limit back in force on this thread after an error was reported
+ * past it, which can leave the allocator enforcing no limit at all. True when
+ * the limit is in force; false when more than it is still in use after the
+ * allocator's caches were handed back — memory something still holds. See
+ * the definition in oxphp_fiber.c. */
+bool oxphp_fiber_heap_back_under_limit(void);
+
 /* How much heap the fibers this thread has created hold for as long as the
  * scheduler lives: a stack, a structure and an object each. Only goes up. What
  * the worker's heap grew by in a stretch, less what this grew by in it, is what

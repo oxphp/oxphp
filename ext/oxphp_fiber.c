@@ -297,7 +297,57 @@ static void oxphp_fiber_hand_on_bailout_frame(zend_fiber_context *destroying) {
     oxphp_bailout_frame.frame = EG(current_execute_data);
 }
 
+/* Raised by an error reported while the allocator has memory_limit set aside to
+ * report one — "Allowed memory size ... exhausted", or "Out of memory" when the
+ * system refuses — and lowered by oxphp_fiber_heap_back_under_limit() once the
+ * limit is in force again. Per thread, as the heap is.
+ *
+ * Everything the engine allocates to report that error is allocated with the
+ * limit set aside, and from PHP 8.5, unless fatal_error_backtraces is off,
+ * that includes a backtrace of every frame on the stack, which after a runaway
+ * recursion can be larger than the limit itself. Freeing it takes little off
+ * what the allocator counts as in use: most of it is small blocks, whose pages
+ * stay with their size class until the allocator's caches are collected.
+ * While that count is above the limit, the room left under the limit, an
+ * unsigned difference, wraps, and the allocator refuses nothing. The engine
+ * resets the count as it shuts a request down; a worker shuts none down, and
+ * nor does a thread of the async pool.
+ *
+ * SYNC: php-src/Zend/zend_alloc.c zend_mm_safe_error() and the limit checks in
+ *       zend_mm_alloc_pages(), zend_mm_alloc_huge(), zend_mm_realloc_huge() */
+static __thread bool oxphp_heap_past_limit = false;
+
+bool oxphp_fiber_heap_back_under_limit(void) {
+    if (!oxphp_heap_past_limit) {
+        return true;
+    }
+    /* Collect the allocator's caches — pages and chunks nothing uses any more —
+     * which lowers the count, then set the limit again, which also hands back
+     * the chunks the allocator keeps in reserve where that is enough, and is
+     * refused while more than the limit is still counted. Where handing those
+     * chunks back is what brings the count under memory_limit, that call
+     * succeeds without setting the limit, and the one in force can be lower
+     * than memory_limit's value: PHP 8.5 takes a memory_limit above
+     * max_memory_limit as max_memory_limit without setting it, and putting
+     * back a limit a request lowered is refused, and its value taken all the
+     * same, while more than that value is counted. Set a second time, it is
+     * set: nothing is counted above it any more.
+     * Allocator calls only — no user code runs, so nothing here can bail out.
+     * SYNC: php-src/Zend/zend_alloc.c zend_mm_gc(), zend_set_memory_limit();
+     *       php-src/main/main.c OnChangeMemoryLimit() */
+    zend_mm_gc(zend_mm_get_heap());
+    if (zend_set_memory_limit((size_t)PG(memory_limit)) == FAILURE) {
+        return false;
+    }
+    zend_set_memory_limit((size_t)PG(memory_limit));
+    oxphp_heap_past_limit = false;
+    return true;
+}
+
 static void oxphp_bailout_frame_cb(int type, zend_string *file, const uint32_t line, zend_string *message) {
+    if (zend_alloc_in_memory_limit_error_reporting()) {
+        oxphp_heap_past_limit = true;
+    }
     if (type & OXPHP_BAILOUT_ERROR_TYPES) {
         if (!(type & E_DONT_BAIL)) {
             oxphp_fatal_bailed = true;
@@ -2845,6 +2895,12 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
             }
 #endif
 
+            /* And memory_limit put back in force if an error reported past it
+             * took it out, as the request branch below does at its own end. A
+             * task thread has no serve loop to retire it when that cannot be
+             * done; the end of its next task tries again. */
+            oxphp_fiber_heap_back_under_limit();
+
             /* Either free above can also leave an exception standing: a
              * destructor that throws, run by what was let go of. Nothing catches
              * it on the way — the loop's frame is no user code, so the engine
@@ -3313,6 +3369,17 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
             oxphp_report_late_exception(fiber, &mark);
         }
 #endif
+
+        /* With that backtrace gone, memory_limit can be put back in force if an
+         * error reported past it took it out — see oxphp_heap_past_limit. At the
+         * end of every request, not once the worker has nothing in flight: the
+         * requests it serves in between would run with no limit at all. One that
+         * ends while the request that failed is still ending — parked in one of
+         * its shutdown functions, say — finds that backtrace still held and
+         * cannot; the failing request's own end is the one that can. Where even
+         * that cannot, the serve loop retires the worker once it has nothing in
+         * flight. */
+        oxphp_fiber_heap_back_under_limit();
 
         /* The request is over, so any socket stream this fiber claimed is free
          * for the next fiber that wants it. Here rather than in finalize because
