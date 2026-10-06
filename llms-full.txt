@@ -9821,7 +9821,7 @@ Semantics worth noting:
 
 ## Observability
 
-The internal server (default `INTERNAL_ADDR=127.0.0.1:9090`) exposes channels in the generic shared-registry endpoints:
+The [internal server](../features/internal-server.md) exposes channels in the generic shared-registry endpoints. It starts only when `INTERNAL_ADDR` is set (for example `INTERNAL_ADDR=127.0.0.1:9090`); without it neither these endpoints nor `/metrics` below are reachable:
 
 - **`GET /__ox_shared/summary`** includes a `Channel` bucket with `count`, `bytes`, and `ops`.
 - **`GET /__ox_shared/entries`** lists registry entries with their IDs (accepts a `limit` query parameter).
