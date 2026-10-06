@@ -35,7 +35,7 @@
 #include "ext/session/php_session.h" /* PS(): session state is per thread, not per request */
 #include "ext/standard/basic_functions.h"
 #include "ext/standard/php_fopen_wrappers.h" /* php_stream_php_wrapper: php://input makes bodies */
-#include <unistd.h> /* sysconf(_SC_PAGESIZE) for fiber stack limits */
+#include <unistd.h> /* close/read for the epoll and timerfd descriptors */
 #include <string.h> /* strdup/strndup/strstr for async-task exception capture */
 #include <time.h>   /* clock_gettime/CLOCK_MONOTONIC for per-call await deadlines */
 #include <poll.h>   /* struct pollfd: how a waiter states its interest and reads the outcome */
@@ -1123,22 +1123,8 @@ bool oxphp_serve_loop_collect_cycles(void) {
 
 /* ─── Stack Limit Helper ──────────────────────────────── */
 
-/* zend_fiber_stack is an opaque (incomplete) type — we cannot access its
- * fields. Instead, we estimate the stack boundaries from the fiber's
- * configured stack size and the address of a local variable on the fiber's
- * C stack. Called from the coroutine entry point. */
-static inline void oxphp_fiber_set_stack_limits_from_sp(void *stack_local, size_t stack_size) {
-    size_t page_size = (size_t)sysconf(_SC_PAGESIZE);
-    uintptr_t sp = (uintptr_t)stack_local;
-
-    /* Round up to page boundary for base (top of stack) */
-    EG(stack_base) = (void *)((sp + page_size - 1) & ~(page_size - 1));
-    /* limit = base - usable_size + guard page */
-    EG(stack_limit) = (void *)((uintptr_t)EG(stack_base) - stack_size + page_size);
-}
-
 /* Install a fiber's C-stack bounds before switching into it, from the copy its
- * coroutine measured at entry (NULL = a fresh fiber, which measures its own on
+ * coroutine recorded at entry (NULL = a fresh fiber, which records its own on
  * the way in). Called on every path into a fiber so they all read alike.
  *
  * The engine carries these two across a switch itself, but only under
@@ -2715,9 +2701,13 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
     oxphp_fiber_starting = NULL;
     ZEND_ASSERT(fiber != NULL);
 
-    /* Set stack overflow detection limits ONCE (C stack is reused) */
-    int stack_anchor;
-    oxphp_fiber_set_stack_limits_from_sp(&stack_anchor, EG(fiber_stack_size));
+    /* Record this fiber's C-stack bounds ONCE (the C stack is reused). Under
+     * ZEND_CHECK_STACK_LIMIT, zend_fiber_execute has just set them for the
+     * stack zend_fiber_start allocated for this fiber, with the limit
+     * zend.reserved_stack_size above its bottom: internal code keeps using
+     * the stack after the last check, and that reserve is what keeps it off
+     * the guard page. In a build without ZEND_CHECK_STACK_LIMIT nothing in
+     * the engine reads either field. */
     fiber->saved_stack_base = EG(stack_base);
     fiber->saved_stack_limit = EG(stack_limit);
 
