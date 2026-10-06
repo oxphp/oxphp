@@ -1,0 +1,56 @@
+# Worker mode's planned recycles: a worker that passes WORKER_MAX_MEMORY_MIB, and
+# one whose handler calls Worker::scheduleExit(). Both end the worker on purpose,
+# and the server has to say so as a recycle with its reason — not report the
+# thread to the operator as one that died.
+#
+# A profile of its own because two of its blocks end the worker they run on: in
+# any other worker profile that would reset the persistent state the
+# neighbouring tests are there to assert. Being alone also lets the assertions
+# be absolute — nothing else in this profile recycles a worker, so each
+# reason's counter in oxphp_worker_recycles_by_reason_total is exactly what the
+# blocks above it caused.
+#
+# Standalone usage:
+#   docker compose -f compose.yml -f compose.recycle.yml up
+services:
+  oxphp-recycle:
+    build:
+      context: ..
+      dockerfile: docker/dev/Dockerfile
+      args:
+        PHP_VERSION:
+    ports:
+      - "80"
+    networks: [test-net]
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    environment:
+      # info, not warn: a planned recycle is written at info by design, and the
+      # lines this profile asserts are those. What it tells apart is which of
+      # the pool's two lines a recycle produces — the info one for a recycle, or
+      # the warn one for a thread that died — and only the first is evidence;
+      # the runner can assert that a line is there, not that one is missing.
+      LOG_LEVEL: info
+      INTERNAL_ADDR: 0.0.0.0:9090
+      WORKER_FILE: /var/www/html/worker/worker_entry.php
+      # One worker, so the request after a recycle is answered by the
+      # replacement and its requestCount() says so.
+      PHP_WORKERS: "1"
+      # Low enough that one request can pass it on purpose, high enough that
+      # the worker entry's own footprint stays well below it — the baseline
+      # probe checks the second half.
+      WORKER_MAX_MEMORY_MIB: "16"
+      # The replacement is spawned on the pool's next 500 ms scan and then boots
+      # the entry file, with nobody serving in the meantime. The request that
+      # follows a recycle has to be allowed to wait for it; the 1 s default would
+      # refuse it, and a refusal there reads like the recycle having failed.
+      QUEUE_WAIT_TIMEOUT_MS: "10000"
+    volumes:
+      - ../www:/var/www/html
+      - ./php:/var/www/html/public/tests
+      - ./fixtures/worker:/var/www/html/worker

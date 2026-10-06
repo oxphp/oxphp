@@ -2107,6 +2107,7 @@ void oxphp_bridge_set_worker_mode(uint64_t max_memory_mib) {
     ctx.max_memory_bytes = max_memory_mib * 1024 * 1024;  /* pre-compute to avoid per-request mul */
     ctx.requests_done = 0;
     ctx.exit_reason = 0;
+    ctx.exit_memory_bytes = 0;
     ctx.exit_scheduled = false;
 }
 
@@ -2374,6 +2375,10 @@ bool oxphp_bridge_get_handler_failed(void) {
 
 uint64_t oxphp_bridge_get_max_memory_bytes(void) {
     return ctx.max_memory_bytes;
+}
+
+uint64_t oxphp_bridge_get_exit_memory_bytes(void) {
+    return ctx.exit_memory_bytes;
 }
 
 /* ── Bailout wrapper ── */

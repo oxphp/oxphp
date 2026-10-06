@@ -19,12 +19,31 @@ use super::worker_mode::{spawn_worker_mode, WorkerModeConfig, WorkerModeMetrics}
 /// Alias for the channel message type used in both traditional and worker modes.
 pub(super) type WorkerRequest = WorkerIncomingRequest;
 
+/// How a worker thread says it ended, returned from the thread and read by the
+/// pool when it finds the thread finished.
+///
+/// The reason a worker-mode thread left its loop lives in the bridge's
+/// thread-local state, which the pool's scan cannot read; the thread's return
+/// value carries it to the scan without adding any state the two share.
+pub(super) enum WorkerExit {
+    /// The worker left its loop on purpose: it passed `WORKER_MAX_MEMORY_MIB`,
+    /// or an exit was scheduled — by `Worker::scheduleExit()` or by the runtime
+    /// itself, which logs why when it does. Reported as a recycle, not a death.
+    Recycled,
+    /// Every other end. The scan never sees an end it asked for — a retired
+    /// worker leaves the list before it finishes, and shutdown ends workers
+    /// only after the scan has stopped — so this is a worker that died: the
+    /// consecutive-error breaker, a panic, a failed startup, a worker script
+    /// that returned without serving.
+    Ended,
+}
+
 /// Per-worker state for the managed worker pool.
 pub(super) struct ManagedWorker {
     /// Not read at runtime; kept so debug-printing `workers` shows which ID each slot holds.
     #[allow(dead_code)]
     pub id: usize,
-    pub handle: std::thread::JoinHandle<()>,
+    pub handle: std::thread::JoinHandle<WorkerExit>,
     pub shutdown: Arc<AtomicBool>,
     pub last_active: Arc<LastActive>,
 }
@@ -116,6 +135,43 @@ fn clear_worker_slot(id: usize) {
     }
 }
 
+/// Finished workers taken out of the pool by [`reap_finished`], by how they ended.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct Reaped {
+    /// Workers that died — logged as a warning.
+    pub dead: usize,
+    /// Workers that recycled on purpose — logged as information.
+    pub recycled: usize,
+}
+
+/// Take every finished worker out of `workers`, return its slot id to
+/// `free_ids`, wipe its registry slot, and count it by how it ended. Shared by
+/// the static monitor and the dynamic scale manager, so the two read a finished
+/// thread the same way.
+///
+/// The join does not wait: once `is_finished()` has said so, the standard
+/// library documents that `join` returns without blocking for any significant
+/// time. A thread that panicked past its own guard joins as an error and counts
+/// as dead.
+pub(super) fn reap_finished(
+    workers: &mut Vec<ManagedWorker>,
+    free_ids: &mut VecDeque<usize>,
+) -> Reaped {
+    let mut reaped = Reaped {
+        dead: 0,
+        recycled: 0,
+    };
+    for w in workers.extract_if(.., |w| w.handle.is_finished()) {
+        free_ids.push_back(w.id);
+        clear_worker_slot(w.id);
+        match w.handle.join() {
+            Ok(WorkerExit::Recycled) => reaped.recycled += 1,
+            Ok(WorkerExit::Ended) | Err(_) => reaped.dead += 1,
+        }
+    }
+    reaped
+}
+
 /// Bundles the parameters every spawn call needs, regardless of model.
 pub(super) struct SpawnArgs {
     pub id: usize,
@@ -147,7 +203,7 @@ pub(super) enum SpawnStrategy {
 }
 
 impl SpawnStrategy {
-    pub(super) fn spawn(&self, args: SpawnArgs) -> std::thread::JoinHandle<()> {
+    pub(super) fn spawn(&self, args: SpawnArgs) -> std::thread::JoinHandle<WorkerExit> {
         match self {
             Self::Traditional {
                 loop_mode,
@@ -252,16 +308,7 @@ pub(super) async fn run_worker_monitor(
         }
 
         let mut guard = workers.lock().unwrap();
-        let before = guard.len();
-        guard.retain(|w| {
-            let alive = !w.handle.is_finished();
-            if !alive {
-                free_ids.push_back(w.id);
-                clear_worker_slot(w.id);
-            }
-            alive
-        });
-        let dead = before - guard.len();
+        let Reaped { dead, recycled } = reap_finished(&mut guard, &mut free_ids);
 
         if dead > 0 {
             tracing::warn!(
@@ -269,6 +316,14 @@ pub(super) async fn run_worker_monitor(
                 remaining = guard.len(),
                 target,
                 "Dead workers detected, respawning"
+            );
+        }
+        if recycled > 0 {
+            tracing::info!(
+                recycled,
+                remaining = guard.len(),
+                target,
+                "Recycled workers detected"
             );
         }
 
@@ -281,12 +336,13 @@ pub(super) async fn run_worker_monitor(
         for _ in 0..to_spawn {
             let shutdown = Arc::new(AtomicBool::new(false));
             let last_active = Arc::new(LastActive::now());
-            // Free-list invariant: every spawn matches a prior death,
-            // and the initial pool occupies 0..target — so on the first
-            // respawn iteration, free_ids holds exactly `dead` IDs.
+            // Free-list invariant: every spawn matches a prior death or
+            // recycle, and the initial pool occupies 0..target — so on the
+            // first respawn iteration, free_ids holds exactly
+            // `dead + recycled` IDs.
             let id = free_ids
                 .pop_front()
-                .expect("free-id underflow: spawning more workers than have died");
+                .expect("free-id underflow: spawning more workers than have ended");
             let handle = strategy.spawn(SpawnArgs {
                 id,
                 rx: request_rx.clone(),
@@ -325,7 +381,7 @@ pub(super) async fn run_scale_manager(
     let idle_timeout_ms = idle_timeout_seconds * 1000;
     // Free-list of slot IDs in `0..max`. Initial pool occupied 0..min,
     // so the headroom IDs `min..max` are immediately available for
-    // scale-up; respawn / scale-down feed dead IDs back to the front.
+    // scale-up; respawn / scale-down feed ended workers' IDs to the back.
     // Bounded to max workers ⇒ slot tables (WORKERS / metrics) always
     // index into a real slot.
     let mut free_ids: VecDeque<usize> = (min..max).collect();
@@ -339,23 +395,18 @@ pub(super) async fn run_scale_manager(
         let mut workers_guard = workers.lock().unwrap();
         let now = now_millis();
 
-        let before = workers_guard.len();
-        workers_guard.retain(|w| {
-            let alive = !w.handle.is_finished();
-            if !alive {
-                free_ids.push_back(w.id);
-                clear_worker_slot(w.id);
-            }
-            alive
-        });
-        let dead = before - workers_guard.len();
+        let Reaped { dead, recycled } = reap_finished(&mut workers_guard, &mut free_ids);
         let total = workers_guard.len();
 
         if dead > 0 {
             tracing::warn!(dead, remaining = total, "Dead workers detected, respawning");
         }
+        if recycled > 0 {
+            tracing::info!(recycled, remaining = total, "Recycled workers detected");
+        }
 
-        // Respawn to maintain minimum (unconditional — dead worker recovery).
+        // Respawn to maintain minimum (unconditional — recovery from dead and
+        // recycled workers).
         // Compute the count, drop the Mutex, spawn OS threads outside the lock,
         // then re-acquire — pthread_create must not run under `workers`.
         let to_spawn_min = min.saturating_sub(workers_guard.len());

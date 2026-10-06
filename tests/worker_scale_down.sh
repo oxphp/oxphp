@@ -160,10 +160,10 @@ RETIRE_LINE="$(printf '%s\n' "$LOGS" | grep '"message":"Scale-down: retired work
 	|| { bad "scale-down never fired — every worker that served still looks busy"; printf '%s\n' "$LOGS" | tail -20; exit 1; }
 
 # "Worker mode thread stopped" is the last line a worker-mode thread prints
-# before returning, and it predates this scenario — so its absence here means
-# the thread is still running, not that the build lacks the line. Before
-# SIGTERM, the only thing that can produce it is a retirement the thread
-# honoured.
+# before returning when it was not recycled (a recycle writes a line of its
+# own instead), and it predates this scenario — so its absence here means the
+# thread is still running, not that the build lacks the line. Before SIGTERM,
+# the only thing that can produce it is a retirement the thread honoured.
 printf '%s' "$LOGS" | grep -q "Worker mode thread stopped" \
 	&& ok "retired worker thread actually stopped" \
 	|| bad "retired worker thread never stopped — it is still on the request channel"

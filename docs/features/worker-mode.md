@@ -116,6 +116,8 @@ What none of this does is diagnose a worker that has wedged rather than failed: 
 
 When a worker is recycled, that worker's loop ends and its replacement re-executes the outer scope of the worker script. Workers are OS threads inside the single OxPHP process rather than separate processes, so nothing the operating system sees restarts and `getmypid()` returns the same value in every worker, before and after. Whether a replacement arrives at once depends on the pool: a static pool (`PHP_WORKERS=N`) refills to `N` on its next scan, so the replacement is one-for-one, while a dynamic pool (`PHP_WORKERS=MIN:MAX`) refills only to `MIN` — a worker recycled above the minimum leaves the pool one smaller until ordinary scale-up grows it again. For memory-based and scheduled exit, the current request completes normally before the worker exits. For error-based recycling, the worker exits after the failed request.
 
+A memory-based or scheduled recycle is logged at `INFO`: the worker writes `Worker mode thread recycled` with `reason` set to the label `oxphp_worker_recycles_by_reason_total` counts it under — `max_memory`, together with `memory_bytes` (the usage that passed the limit) and `max_memory_bytes` (the limit), or `scheduled`, which covers `Worker::scheduleExit()` and the recycles the worker schedules for itself — and the pool follows with `Recycled workers detected`. A worker recycled after consecutive errors is logged at `WARN` as `Worker mode thread retired after consecutive request failures`, and the pool reports it, like any worker thread that ends without choosing to, as `Dead workers detected, respawning`. So at `LOG_LEVEL=warn` a recycle on `WORKER_MAX_MEMORY_MIB` or on `Worker::scheduleExit()` leaves no line of its own: a worker that recycles on memory often is a leak worth chasing, and the place to see that is the rate of `oxphp_worker_recycles_by_reason_total{reason="max_memory"}`.
+
 Retirement is not recycling and is not counted as such. A dynamic pool retiring an idle worker (see [Dynamic Pool](../architecture/overview.md#dynamic-pool)) also ends that worker's loop and also runs the code after `oxphp_worker()`, but it is scaling down rather than replacing: nothing is spawned to replace it, neither `oxphp_worker_recycles_total` nor `oxphp_worker_recycles_by_reason_total` moves, and it is `oxphp_workers_retired_total` that counts it instead. Application teardown placed after `oxphp_worker()` therefore runs on a healthy, serving pool as well — see [`oxphp_worker()`](../php/functions.md#oxphp_worker).
 
 Other requests the same worker was serving concurrently — suspended in `oxphp_async_await()`, `oxphp_sleep()`, or a socket wait under `RUNTIME_HOOKS` — do not get to finish: each is cancelled where it is suspended and answered with `503 Service Unavailable` and a `Retry-After`, after running its own shutdown functions. Recycling is therefore visible to clients whose requests happen to be in flight, which is worth knowing when choosing `WORKER_MAX_MEMORY_MIB` or calling `scheduleExit()` on a worker that serves concurrent requests. A full server shutdown is different: there, in-flight requests get the drain window to finish normally.
@@ -156,6 +158,12 @@ Variables defined inside the `oxphp_worker()` callback are cleaned up by PHP's g
 The worker memory limit is checked after each request using PHP's reported memory usage. If your bootstrap phase allocates a large amount of memory (e.g. loading a large cache), the initial memory footprint may already be close to the limit.
 
 **Fix:** Increase `WORKER_MAX_MEMORY_MIB` or defer large allocations to the first request.
+
+**Check:** At `LOG_LEVEL=info`, each such recycle logs the usage that passed the limit as `memory_bytes`, next to the limit as `max_memory_bytes`. Every earlier check found the usage within the limit, so the difference between the two is at most what the worker grew by since the last check before it: a small one fits gradual growth, a large one a single jump. On a worker that recycles after its first request, that jump includes everything the bootstrap allocated.
+
+```bash
+docker logs <container> 2>&1 | grep '"reason":"max_memory"'
+```
 
 ### Worker recycles immediately (error limit)
 

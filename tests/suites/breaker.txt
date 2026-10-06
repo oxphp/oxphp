@@ -28,9 +28,12 @@ breaker/test_breaker_trips_at_threshold
 # retire is written at warn so that this profile's log level keeps it. A `log ~`
 # line searches only what the latest block of requests above it wrote — the
 # lines since the last blank line before them — so each block answers for its
-# own lines.
+# own lines. The pool reads the retired thread as a dead one, at warn as well:
+# a planned recycle is told apart from a death, and this is the half of that
+# distinction that must stay an alarm.
 log ~oxphp: worker 0 request failed (bailout in the handler) — 3 in a row
 log ~Worker mode thread retired after consecutive request failures
+log ~Dead workers detected, respawning
 
 # An uncaught application exception is not a handler defect: the request ends
 # with a clean unwind and a 500, and the worker that served it is healthy. Three

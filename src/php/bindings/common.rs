@@ -405,6 +405,7 @@ extern "C" {
     pub fn oxphp_bridge_increment_requests_done() -> u64;
     pub fn oxphp_bridge_get_rss_bytes() -> u64;
     pub fn oxphp_bridge_get_max_memory_bytes() -> u64;
+    pub fn oxphp_bridge_get_exit_memory_bytes() -> u64;
 
     // ─── Worker unhandled-exception capture ─────────────
     pub fn oxphp_bridge_pop_unhandled_class(out_len: *mut usize) -> *mut c_char;
