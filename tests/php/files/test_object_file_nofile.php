@@ -19,7 +19,7 @@ $t->assertSame('error() is UPLOAD_ERR_NO_FILE', $f->error(), UPLOAD_ERR_NO_FILE)
 $t->assertSame('size() is 0', $f->size(), 0);
 
 // type() must fall back cleanly for an empty upload, not throw ValueError from
-// mime_content_type('') — moveTo() pre-caches the MIME and would otherwise blow up.
+// mime_content_type('').
 $t->assertSame('type() falls back to octet-stream for an empty upload', $f->type(), 'application/octet-stream');
 
 $dest = '/tmp/oxphp_uf_nofile_' . uniqid('', true);

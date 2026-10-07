@@ -1,0 +1,9 @@
+# profile: fileinfo_off
+# description: UploadedFile without mime_content_type() (ext/fileinfo missing or disabled)
+
+# The line OxPHP logs about the missing function, once per process, comes from
+# the first type() call that would read a file — the test above it in the block.
+fileinfo_off/test_object_file_without_fileinfo | POST | -F "doc=@$FIXTURES_DIR/small.txt" | |
+log ~oxphp: mime_content_type() is not available (ext/fileinfo is not loaded or the function is disabled)
+
+fileinfo_off/test_object_file_nofile_without_fileinfo | POST | -F "avatar=@/dev/null;filename=" | |

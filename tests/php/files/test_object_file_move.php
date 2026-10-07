@@ -19,10 +19,32 @@ $t->assertTrue('destination exists after move', is_file($dest));
 $content = is_file($dest) ? file_get_contents($dest) : '';
 $t->assertSame('moved content matches the upload', $content, 'hello world');
 
-// The temp file no longer exists after the move; type() can only still report
-// the real MIME because moveTo() detected and cached it before calling
-// move_uploaded_file(). Without that pre-cache it would fall back here.
-$t->assertNotEqual('type() returns the detected MIME after move (cached)', $f->type(), 'application/octet-stream');
+$tmp = $f->tmpPath();
+$t->assertFalse('the upload is no longer registered after the move', is_uploaded_file($tmp));
+
+// moveTo() does not detect the type; the object that moved the file reads it at
+// the destination on its first type() call. Changing the file there before that
+// call shows which file is read.
+file_put_contents($dest, "GIF89a\x01\x00\x01\x00\x80\x00\x00");
+$t->assertSame('type() reads the file at the destination after the move', $f->type(), 'image/gif');
+
+// Only a successful move points type() at the destination. A second object for
+// the same upload cannot move it again — it is no longer registered — and still
+// reads the temporary file, which is gone, rather than what is at $dest.
+$g = $req->file('doc');
+$warnings = [];
+set_error_handler(static function (int $errno, string $errstr) use (&$warnings): bool {
+    $warnings[] = $errstr;
+    return true;
+}, E_WARNING);
+$movedAgain = $g->moveTo($dest);
+$other = $g->type();
+restore_error_handler();
+
+$t->assertFalse('a second move of the same upload fails', $movedAgain);
+$t->assertSame('a failed move leaves type() on the temporary file', $other, 'application/octet-stream');
+$t->assertCount('only detection of the missing temporary file warned', $warnings, 1);
+$t->assertMatch('the warning comes from mime_content_type()', $warnings[0] ?? '', '/^mime_content_type\(/');
 
 if (is_file($dest)) {
     unlink($dest);

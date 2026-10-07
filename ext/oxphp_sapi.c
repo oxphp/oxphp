@@ -13,6 +13,7 @@
 #include "main/php_main.h"
 #include "main/php_ini.h"
 #include "ext/standard/basic_functions.h"
+#include "ext/standard/php_filestat.h"
 #include "ext/json/php_json.h"
 #include "ext/spl/spl_exceptions.h"
 #include "ext/session/php_session.h"
@@ -947,16 +948,42 @@ ZEND_METHOD(OxPHP_Http_UploadedFile, type) {
     if (cached && Z_TYPE_P(cached) == IS_STRING) {
         RETURN_COPY(cached);
     }
+    /* Read the file where moveTo() put it, once it has; the temporary file is
+     * gone by then. */
+    zval *path = zend_read_property(oxphp_http_uploaded_file_ce, Z_OBJ_P(ZEND_THIS),
+        "_movedTo", sizeof("_movedTo")-1, 1, NULL);
+    if (!path || Z_TYPE_P(path) != IS_STRING) {
+        path = zend_read_property(oxphp_http_uploaded_file_ce, Z_OBJ_P(ZEND_THIS),
+            "tmpPath", sizeof("tmpPath")-1, 1, NULL);
+    }
     /* Use mime_content_type() for magic-bytes detection. Skip it for an empty
      * tmpPath (e.g. an UPLOAD_ERR_NO_FILE entry): mime_content_type('') throws a
      * ValueError, so fall straight through to the default below instead. */
-    zval *tmp_path = zend_read_property(oxphp_http_uploaded_file_ce, Z_OBJ_P(ZEND_THIS),
-        "tmpPath", sizeof("tmpPath")-1, 1, NULL);
-    if (tmp_path && Z_TYPE_P(tmp_path) == IS_STRING && Z_STRLEN_P(tmp_path) > 0) {
+    if (path && Z_TYPE_P(path) == IS_STRING && Z_STRLEN_P(path) > 0) {
+        /* Without ext/fileinfo, or with the function in disable_functions, it
+         * is not in the function table and calling it would throw "Invalid
+         * callback". Say what is missing instead, on every call: unlike the
+         * fallback after a failed detection below, this one is not kept, so no
+         * later call returns it quietly as if it had been detected. OxPHP's
+         * own line explaining it is logged once per process; the warning
+         * itself is reported on every call like any other. */
+        if (!zend_hash_str_exists(EG(function_table), ZEND_STRL("mime_content_type"))) {
+            static atomic_flag logged = ATOMIC_FLAG_INIT;
+            if (!atomic_flag_test_and_set(&logged)) {
+                php_log_err("oxphp: mime_content_type() is not available (ext/fileinfo is "
+                            "not loaded or the function is disabled); "
+                            "OxPHP\\Http\\UploadedFile::type() returns "
+                            "application/octet-stream without detecting the type");
+            }
+            php_error_docref(NULL, E_WARNING, "mime_content_type() is not available "
+                "(ext/fileinfo is not loaded or the function is disabled); "
+                "returning application/octet-stream");
+            RETURN_STRING("application/octet-stream");
+        }
         zval func_name, retval;
         ZVAL_STRING(&func_name, "mime_content_type");
         zval args[1];
-        ZVAL_COPY(&args[0], tmp_path);
+        ZVAL_COPY(&args[0], path);
         if (call_user_function(NULL, NULL, &func_name, &retval, 1, args) == SUCCESS
             && Z_TYPE(retval) == IS_STRING) {
             zend_update_property(oxphp_http_uploaded_file_ce, Z_OBJ_P(ZEND_THIS),
@@ -1017,11 +1044,9 @@ ZEND_METHOD(OxPHP_Http_UploadedFile, moveTo) {
         Z_PARAM_STR(destination)
     ZEND_PARSE_PARAMETERS_END();
 
-    /* Call type() to cache MIME before moving */
-    zval tmp_retval;
-    zend_call_method_with_0_params(Z_OBJ_P(ZEND_THIS), oxphp_http_uploaded_file_ce,
-        NULL, "type", &tmp_retval);
-    zval_ptr_dtor(&tmp_retval);
+    /* No type detection here: moveTo() does what move_uploaded_file() does,
+     * and nothing else that could fail or throw. If this object keeps no type
+     * yet, type() reads the file at the destination recorded below instead. */
 
     /* Check isValid */
     zval *err = zend_read_property(oxphp_http_uploaded_file_ce, Z_OBJ_P(ZEND_THIS),
@@ -1033,6 +1058,17 @@ ZEND_METHOD(OxPHP_Http_UploadedFile, moveTo) {
     /* Call move_uploaded_file() */
     zval *tmp_path = zend_read_property(oxphp_http_uploaded_file_ce, Z_OBJ_P(ZEND_THIS),
         "tmpPath", sizeof("tmpPath")-1, 1, NULL);
+    /* The upload's inode, to tell after the move whether the rename moved
+     * this file or a copy wrote a new one. */
+    zend_stat_t tmp_st;
+    bool tmp_known = Z_TYPE_P(tmp_path) == IS_STRING
+        && php_sys_stat(Z_STRVAL_P(tmp_path), &tmp_st) == 0;
+    /* Where the rename puts the file, expanded by the same working directory
+     * it uses. Not after the call: move_uploaded_file() sets the mode of the
+     * renamed file, a failure there warns, and the error handler may change
+     * the working directory, as may another request on this thread while the
+     * handler waits. CWD_EXPAND leaves the realpath cache alone. */
+    char *lexical = expand_filepath_with_mode(ZSTR_VAL(destination), NULL, NULL, 0, CWD_EXPAND);
     zval func_name, retval;
     ZVAL_STRING(&func_name, "move_uploaded_file");
     zval args[2];
@@ -1043,7 +1079,62 @@ ZEND_METHOD(OxPHP_Http_UploadedFile, moveTo) {
     zval_ptr_dtor(&args[0]);
     zval_ptr_dtor(&args[1]);
     if (rc == SUCCESS && Z_TYPE(retval) == IS_TRUE) {
+        /* Record where the file is now, as an absolute path wherever it is a
+         * local file: type() opens it later through PHP's streams, which read
+         * a relative name starting with "data:" (a client's file name, say) as
+         * a data: URL, and the working directory may differ by then, since PHP
+         * changes it back before shutdown functions and destructors run.
+         *
+         * move_uploaded_file() first renames to the destination taken as a
+         * local path, expanded with ".." by name and no symlinks followed, so
+         * the upload's own inode is found there. Only when the rename fails
+         * does it copy, opening the destination through its stream wrapper:
+         * a local path goes to whichever wrapper is registered as file:// —
+         * PHP's own, or one the application put in its place that hands the
+         * path on to it — and is resolved through the realpath cache,
+         * following symlinks before "..", so the copy may write elsewhere
+         * than the rename would have; a data: URL takes no writes, so only an
+         * empty upload gets moved there and nothing is written anywhere, and
+         * with nothing recorded type() reads the temporary file the move
+         * removed, not a file that already had the destination's name; any
+         * other wrapper is read back through itself. Unlike rename(),
+         * move_uploaded_file() leaves the realpath cache alone, which may
+         * still resolve the destination to what the rename replaced (a
+         * symlink, say), so clear it as rename() does, once the copy's
+         * destination is resolved. */
+        char *local = NULL;
+        bool as_given = false;
+        zend_stat_t st;
+        if (lexical && tmp_known && php_sys_stat(lexical, &st) == 0
+                && st.st_dev == tmp_st.st_dev && st.st_ino == tmp_st.st_ino) {
+            local = lexical;
+            lexical = NULL;
+        } else {
+            const char *open_path;
+            php_stream_wrapper *wrapper = php_stream_locate_url_wrapper(ZSTR_VAL(destination), &open_path, 0);
+            if (wrapper && wrapper == zend_hash_str_find_ptr(php_stream_get_url_stream_wrappers_hash(),
+                    "file", sizeof("file")-1)) {
+                local = expand_filepath(open_path, NULL);
+            } else if (wrapper != &php_stream_rfc2397_wrapper) {
+                as_given = true;
+            }
+        }
+        php_clear_stat_cache(1, NULL, 0);
+        if (local) {
+            zend_update_property_string(oxphp_http_uploaded_file_ce, Z_OBJ_P(ZEND_THIS),
+                "_movedTo", sizeof("_movedTo")-1, local);
+            efree(local);
+        } else if (as_given) {
+            zend_update_property_str(oxphp_http_uploaded_file_ce, Z_OBJ_P(ZEND_THIS),
+                "_movedTo", sizeof("_movedTo")-1, destination);
+        }
+        if (lexical) {
+            efree(lexical);
+        }
         RETURN_TRUE;
+    }
+    if (lexical) {
+        efree(lexical);
     }
     RETURN_FALSE;
 }
@@ -9080,6 +9171,8 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
             "error", sizeof("error")-1, 4 /* UPLOAD_ERR_NO_FILE */, ZEND_ACC_PROTECTED);
         zend_declare_property_null(oxphp_http_uploaded_file_ce,
             "_type", sizeof("_type")-1, ZEND_ACC_PROTECTED);
+        zend_declare_property_null(oxphp_http_uploaded_file_ce,
+            "_movedTo", sizeof("_movedTo")-1, ZEND_ACC_PROTECTED);
     }
 
     /* OxPHP\Shared\Shareable interface is registered earlier in MINIT

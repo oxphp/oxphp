@@ -1,0 +1,33 @@
+# mime_content_type() unavailable — what OxPHP\Http\UploadedFile does without
+# ext/fileinfo.
+#
+# fileinfo_off.ini lists the function in disable_functions, which takes it out
+# of the function table the same way a build without ext/fileinfo leaves it out.
+# LOG_LEVEL is warn so the line the server logs about it stays visible.
+#
+# Standalone usage:
+#   docker compose -f compose.yml -f compose.fileinfo_off.yml up
+services:
+  oxphp-fileinfo_off:
+    build:
+      context: ..
+      dockerfile: docker/dev/Dockerfile
+      args:
+        PHP_VERSION:
+    ports:
+      - "80"
+    networks: [test-net]
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    environment:
+      LOG_LEVEL: warn
+      INTERNAL_ADDR: 0.0.0.0:9090
+    volumes:
+      - ../www:/var/www/html
+      - ./php:/var/www/html/public/tests
+      - ./fileinfo_off.ini:/usr/local/etc/php/conf.d/zz-fileinfo_off.ini:ro
