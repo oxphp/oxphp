@@ -24,7 +24,7 @@ Most applications move without code changes. The default mode runs each request 
 **3. Translate the configuration.** The image loads no `php.ini`. Keep your PHP settings (`memory_limit`, `upload_max_filesize`, OPcache, …) in a file of your own anywhere in the project, for example `docker/php.ini`, and copy it into the image's PHP config directory — a path inside the container, not in your project:
 
 ```dockerfile
-FROM ghcr.io/oxphp/oxphp:0.12.0
+FROM ghcr.io/oxphp/oxphp:0.13.0
 
 COPY docker/php.ini /usr/local/etc/php/conf.d/zz-app.ini
 COPY --chown=www-data:www-data . /var/www/html/public

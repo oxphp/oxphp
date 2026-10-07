@@ -4,6 +4,8 @@ All notable changes to OxPHP are documented in this file.
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-10-08
+
 ### Migration from 0.12.0
 
 **A `DOCUMENT_ROOT` reached through a release symlink (`/app/current/public`) now answers `404` for static files read from disk and for PHP scripts once `current` is switched, until the server restarts.** The root is resolved once at startup, and static files and PHP scripts are now checked against it every time they are opened. Paths requested before the switch used to keep being served, because the routing layer had cached its verdict for them; files served from the in-memory cache still answer with the bytes they hold. Point `DOCUMENT_ROOT` at a path that does not change across releases, or restart the server as part of the switch.
@@ -1198,6 +1200,7 @@ and built-in observability.
 | `WORKER_MAX_MEMORY_MIB` | `0` (unlimited) | Max worker memory before restart |
 | `EXECUTOR` | `sapi` | Executor type: sapi/stub |
 
+[0.13.0]: https://github.com/oxphp/oxphp/releases/tag/v0.13.0
 [0.12.0]: https://github.com/oxphp/oxphp/releases/tag/v0.12.0
 [0.11.0]: https://github.com/oxphp/oxphp/releases/tag/v0.11.0
 [0.10.0]: https://github.com/oxphp/oxphp/releases/tag/v0.10.0
