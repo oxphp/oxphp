@@ -8,8 +8,8 @@ require_once __DIR__ . '/../test_helper.php';
 // uploaded file. file() and files() expand the $_FILES entry into new objects on
 // every call, so each object starts without a type and reads the file itself on
 // its first type() call. Two consequences are pinned here: a second object reads
-// the file again, and once moveTo() has moved the file only the objects that
-// detected before the move still know its type. Sent via curl as
+// the file again, and once moveTo() has moved the file the other objects that
+// did not detect before the move find no file. Sent via curl as
 // -F "doc=@small.txt" (contents "hello world").
 $t = new TestCase('object_file_type_lives_on_the_object', 'files');
 

@@ -696,8 +696,8 @@ namespace OxPHP\Http {
      * is kept on the object type() was called on. Request::file() and
      * Request::files() return new objects on every call, and each of them
      * reads the file again on its first type() call, so hold the object if
-     * you need the type more than once. moveTo() calls type() before moving,
-     * so the object that moved the file still reports its type afterwards.
+     * you need the type more than once. After moveTo(), the object that moved
+     * the file reads it at its new path if type() was not called on it before.
      */
     interface UploadedFileInterface
     {
@@ -711,12 +711,23 @@ namespace OxPHP\Http {
          * MIME type detected from file contents (magic bytes).
          *
          * The first call reads the file and keeps the result on this object;
-         * later calls return it without reading again. Returns
-         * "application/octet-stream" if detection fails — including on an
-         * object whose first call comes after moveTo() has moved the file,
-         * where mime_content_type() also raises a warning for the missing
-         * file. Under an error handler that turns warnings into exceptions,
-         * that call throws instead of returning.
+         * later calls return it without reading again. If this object's first
+         * call comes after a successful moveTo() on it, that call reads the
+         * file at the destination. Returns "application/octet-stream" if
+         * detection fails, and keeps that answer too, also after a call that
+         * threw instead (see below): later calls return it without a warning.
+         * Detection fails, for one, on another object for the same upload
+         * whose first call comes after the move, where mime_content_type() also
+         * raises a warning for the missing file.
+         *
+         * Detection needs mime_content_type() from ext/fileinfo. Without it —
+         * the extension not loaded, or the function listed in
+         * disable_functions — every call that would read the file raises a
+         * warning and returns "application/octet-stream" without keeping it;
+         * OxPHP also logs one line about it per process.
+         *
+         * Under an error handler that turns warnings into exceptions, a call
+         * that warns throws instead of returning.
          */
         public function type(): string;
 
@@ -735,9 +746,18 @@ namespace OxPHP\Http {
         /**
          * Move the uploaded file to a destination path.
          *
-         * Calls type() before moving, so type() on this object still answers
-         * after the move. Returns false if the file is not valid or the move
-         * fails.
+         * Moves it with move_uploaded_file() and does not detect its type. If
+         * type() was not called on this object before the move, it reads the
+         * file at $path afterwards: for a local path, the moved file, by the
+         * absolute path the move put it at, whatever the working directory is
+         * later; for a stream-wrapper URL, whatever the wrapper returns when the
+         * URL is opened again — "application/octet-stream" where it cannot
+         * open the URL for reading or stat it. For such destinations, call
+         * type() before moveTo(). A data: URL is never decoded: the move
+         * renames to it as a local file name, which type() reads, or, where
+         * that fails, copies to the URL, which takes no writes — only an empty
+         * upload gets through, with nothing written, and type() finds no file.
+         * Returns false if the file is not valid or the move fails.
          *
          * @param string $path Destination file path
          * @return bool true on success
