@@ -65,7 +65,19 @@ impl AsyncWorkerPool {
             let handle = std::thread::Builder::new()
                 .name(format!("async-worker-{id}"))
                 .spawn(move || {
-                    async_worker_thread(id, rx, shutdown, metrics);
+                    let interrupt = Arc::new(crate::php::worker_registry::InterruptTarget::new());
+                    async_worker_thread(id, rx, shutdown, metrics, &interrupt);
+                    // An awaiter — an HTTP worker, or another pool thread for a
+                    // nested task — can outlive this thread, still hold a task
+                    // it ran and kick it; withdraw the address and wait those
+                    // kicks out before the memory it names is freed. Without
+                    // the release, a PHP thread spawned after this one is
+                    // joined can be handed its recycled id, and TSRM then frees
+                    // these resources from that thread — which crashes the
+                    // process from PHP 8.6 on, where the allocator's globals
+                    // are native thread-local storage.
+                    interrupt.retire();
+                    crate::executor::sapi::release_php_thread();
                 })
                 .unwrap_or_else(|e| panic!("Failed to spawn async worker {id}: {e}"));
 
@@ -142,6 +154,7 @@ fn async_worker_thread(
     rx: crossbeam_channel::Receiver<AsyncTask>,
     shutdown: Arc<AtomicBool>,
     metrics: Option<Arc<Metrics>>,
+    interrupt: &Arc<crate::php::worker_registry::InterruptTarget>,
 ) {
     use crate::async_types::AsyncResult;
     use crate::bridge::ffi;
@@ -200,10 +213,10 @@ fn async_worker_thread(
     // Capture this worker thread's &EG(vm_interrupt) so a CPU-bound task fiber
     // can be interrupted cross-thread by an awaiter that times out (Path B).
     // The address is stable for the thread's lifetime once the request is up.
-    let worker_interrupt_addr = unsafe {
+    unsafe {
         ffi::oxphp_capture_vm_interrupt();
-        ffi::oxphp_bridge_vm_interrupt_addr() as usize
-    };
+        interrupt.publish(ffi::oxphp_bridge_vm_interrupt_addr());
+    }
 
     tracing::info!(worker = %thread_name, "Async worker thread started");
 
@@ -433,18 +446,15 @@ fn async_worker_thread(
                     std::ptr::null_mut()
                 };
 
-                // Publish this worker's interrupt address into the shared cancel
-                // state so a timed-out awaiter can break into this fiber if it
-                // goes CPU-bound (Path B). `cancel_cell` is a stable pointer into
+                // Hand this worker's interrupt target to the shared cancel state
+                // so a timed-out awaiter can break into this fiber if it goes
+                // CPU-bound (Path B). `cancel_cell` is a stable pointer into
                 // that same allocation — the scheduler stores it on the fiber and
                 // the interrupt handler reads it to decide whether to unwind. The
                 // allocation outlives the fiber via InFlight (inserted below).
-                // Release: publishes the address to the awaiter's Acquire load
-                // in kick_worker_interrupt, so a timed-out awaiter never reads a
-                // stale 0 and skips the kick on weakly-ordered hardware.
-                task.cancelled
-                    .worker_interrupt
-                    .store(worker_interrupt_addr, Ordering::Release);
+                // Each task's cancel state is new and picked up once, so the set
+                // cannot find it already filled.
+                let _ = task.cancelled.worker_interrupt.set(Arc::clone(interrupt));
                 let cancel_cell = &task.cancelled.cancelled as *const std::sync::atomic::AtomicBool
                     as *mut c_void;
 

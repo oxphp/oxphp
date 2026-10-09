@@ -5,29 +5,31 @@
 // executes the closures and returns results).
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicUsize};
-use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, OnceLock};
+
+use crate::php::worker_registry::InterruptTarget;
 
 /// Shared cancellation state for a single async task, reachable from both the
 /// originating PHP worker (the awaiter) and the async worker running the task.
 ///
 /// `cancelled` carries the cancel intent: the awaiter sets it true when it gives
 /// up (await timeout). A SUSPENDED fiber is reached via the async worker's
-/// scheduler loop (it polls this flag). `worker_interrupt` carries the address
-/// of the running worker's `EG(vm_interrupt)` (as `usize`, 0 until the task is
-/// picked up): the awaiter writes the interrupt cross-thread so a CPU-bound
-/// fiber — which the scheduler loop cannot reach — is broken out of at the next
-/// opcode boundary and unwound by the interrupt handler.
+/// scheduler loop (it polls this flag). `worker_interrupt` names the running
+/// worker's `EG(vm_interrupt)` (unset until the task is picked up): the awaiter
+/// kicks it cross-thread so a CPU-bound fiber — which the scheduler loop cannot
+/// reach — is broken out of at the next opcode boundary and unwound by the
+/// interrupt handler.
 pub struct CancelShared {
     pub cancelled: AtomicBool,
-    pub worker_interrupt: AtomicUsize,
+    pub worker_interrupt: OnceLock<Arc<InterruptTarget>>,
 }
 
 impl CancelShared {
     pub fn new() -> Self {
         Self {
             cancelled: AtomicBool::new(false),
-            worker_interrupt: AtomicUsize::new(0),
+            worker_interrupt: OnceLock::new(),
         }
     }
 }
