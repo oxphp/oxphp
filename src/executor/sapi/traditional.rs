@@ -49,8 +49,8 @@ pub(super) fn spawn_worker(
     std::thread::Builder::new()
         .name(format!("php-worker-{id}"))
         .spawn(move || {
+            let _release = super::pool::ReleaseWorkerThread(id);
             worker_thread(id, rx, shutdown, last_active, loop_mode, metrics);
-            super::pool::release_worker_thread(id);
             // A traditional worker has no recycle of its own: it leaves its
             // loop on a panic, when the pool retires it, or when its channel
             // closes at shutdown, and of those the pool's scan sees only the
@@ -579,6 +579,9 @@ fn execute_request(
             ..Default::default()
         });
     }
+    // Until php_request_shutdown() below, a panic that unwinds this frame ends
+    // the process instead of reaching the catch_unwind in worker_thread.
+    let request_open = crate::executor::AbortOnUnwind("with a PHP request open");
 
     // Shared\Pool idle-timeout eviction check. Runs here — after PHP
     // request startup, before the user script — because `$destroy`
@@ -606,6 +609,7 @@ fn execute_request(
             libc::close(raw_fd);
             bindings::php_request_shutdown(std::ptr::null_mut());
         }
+        drop(request_open);
         return Some(ScriptResponse {
             status: 500,
             body: Bytes::from_static(b"Internal Server Error"),
@@ -636,6 +640,7 @@ fn execute_request(
     unsafe {
         bindings::php_request_shutdown(std::ptr::null_mut());
     }
+    drop(request_open);
 
     // If the response was already sent early (finish_request or streaming), we're done.
     // Clear buffers to drop STREAM_TX (closes channel → ends stream on client side).

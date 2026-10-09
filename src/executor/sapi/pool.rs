@@ -78,8 +78,9 @@ fn worker_busy(id: usize) -> bool {
         .is_some_and(|slot| slot.active_requests.load(Ordering::Relaxed) > 0)
 }
 
-/// Last step of every PHP worker thread, after its loop has returned and its
-/// final request is shut down: unpublish the slot's `EG(vm_interrupt)`
+/// Last step of every PHP worker thread, taken by [`ReleaseWorkerThread`] once
+/// the thread's body has returned or unwound, with no request open on it:
+/// unpublish the slot's `EG(vm_interrupt)`
 /// address, wait out any cross-thread kick still writing through it, close the
 /// thread's persistent resources, then release its TSRM resources with
 /// `ts_free_thread()`.
@@ -104,6 +105,20 @@ pub(super) fn release_worker_thread(id: usize) {
         slot.retire_interrupt();
     }
     release_php_thread();
+}
+
+/// Runs [`release_worker_thread`] when a worker thread's body ends, whether it
+/// returns or a panic unwinds it, so a worker thread that panics outside a
+/// request is released instead of leaked. A panic with a request open never
+/// gets this far: `AbortOnUnwind` ends the process first. The guard is built
+/// before the body's `ts_resource_ex()`, and nothing the body runs ahead of
+/// that call can panic, so it never releases a thread without a TSRM entry.
+pub(super) struct ReleaseWorkerThread(pub(super) usize);
+
+impl Drop for ReleaseWorkerThread {
+    fn drop(&mut self) {
+        release_worker_thread(self.0);
+    }
 }
 
 /// Close the calling thread's persistent resources and release its TSRM

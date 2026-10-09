@@ -66,7 +66,12 @@ impl AsyncWorkerPool {
                 .name(format!("async-worker-{id}"))
                 .spawn(move || {
                     let interrupt = Arc::new(crate::php::worker_registry::InterruptTarget::new());
+                    // The thread keeps a single request open until it exits,
+                    // and nothing replaces a pool thread that is gone, so a
+                    // panic that unwinds it ends the process.
+                    let abort_on_panic = crate::executor::AbortOnUnwind("in the async pool");
                     async_worker_thread(id, rx, shutdown, metrics, &interrupt);
+                    drop(abort_on_panic);
                     // An awaiter — an HTTP worker, or another pool thread for a
                     // nested task — can outlive this thread, still hold a task
                     // it ran and kick it; withdraw the address and wait those

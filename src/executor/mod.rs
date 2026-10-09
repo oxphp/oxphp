@@ -125,3 +125,85 @@ pub fn create_executor(config: &Config, metrics: Arc<Metrics>) -> Box<dyn Script
         }
     }
 }
+
+/// Ends the process when a panic unwinds the thread while this guard is alive.
+///
+/// A PHP thread holds one while a PHP request is open on it, from a successful
+/// `php_request_startup()` to `php_request_shutdown()`. A panic that unwinds
+/// out of that window is not recovered from. Shutting the request down would
+/// call back into the Rust state the panic abandoned: RSHUTDOWN, the output and
+/// header callbacks, the error callback, and any native function a shutdown
+/// function or destructor calls all reach it. Releasing the thread's TSRM entry
+/// with the request still open would leave behind what only that shutdown
+/// tears down, the engine's execution timer among them. An async pool thread
+/// holds one for its whole body, since nothing would replace it.
+///
+/// Only a panic in the thread's own Rust frames gets this far. One raised in a
+/// callback PHP makes into Rust aborts at that callback's `extern "C"`
+/// boundary first.
+///
+/// Dropped with no panic in flight it does nothing: a return from inside the
+/// window still has to shut the request down first.
+#[cfg_attr(not(feature = "php"), allow(dead_code))]
+pub(crate) struct AbortOnUnwind(pub(crate) &'static str);
+
+impl Drop for AbortOnUnwind {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            // Written straight to stderr: the log writer hands lines to a
+            // background thread, and abort() discards what it has not written.
+            let thread = std::thread::current();
+            eprintln!(
+                "oxphp: thread '{}' panicked {}; aborting",
+                thread.name().unwrap_or("<unnamed>"),
+                self.0
+            );
+            std::process::abort();
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AbortOnUnwind;
+
+    const CHILD: &str = "OXPHP_TEST_ABORT_ON_UNWIND_CHILD";
+
+    #[test]
+    fn abort_on_unwind_aborts_a_thread_that_panics_under_it() {
+        if std::env::var_os(CHILD).is_some() {
+            let _guard = AbortOnUnwind("under the guard");
+            panic!("unwinding through the guard");
+        }
+        // The abort takes the whole process with it, so the panic runs in a
+        // copy of this test binary. --nocapture: captured output would go down
+        // with the process.
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "executor::tests::abort_on_unwind_aborts_a_thread_that_panics_under_it",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        use std::os::unix::process::ExitStatusExt;
+        assert_eq!(out.status.signal(), Some(libc::SIGABRT), "{stderr}");
+        assert!(
+            stderr.contains("panicked under the guard; aborting"),
+            "{stderr}"
+        );
+    }
+
+    #[test]
+    fn abort_on_unwind_lets_a_thread_go_once_it_is_dropped() {
+        drop(AbortOnUnwind("under the guard"));
+        let joined = std::thread::spawn(|| {
+            drop(AbortOnUnwind("under the guard"));
+            panic!("after the guard");
+        })
+        .join();
+        assert!(joined.is_err());
+    }
+}
