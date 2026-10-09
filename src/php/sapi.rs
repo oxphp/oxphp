@@ -266,6 +266,8 @@ thread_local! {
 
     /// Pre-fetched async results waiting to be consumed by `take_ready_result`.
     /// Populated by `await_is_ready` when a non-blocking poll finds a completed promise.
+    /// An await unwound between that poll and its take leaves its entry behind;
+    /// the promise cleanups discard it (see `take_ready_results`).
     static READY_RESULTS: RefCell<HashMap<u64, AsyncResult>>
         = RefCell::new(HashMap::new());
 }
@@ -3820,6 +3822,22 @@ pub fn take_ready_result(promise_id: u64) -> Option<AsyncResult> {
     READY_RESULTS.with(|m| m.borrow_mut().remove(&promise_id))
 }
 
+/// Remove the pre-fetched results of `ids` (every one for `None`) for a promise
+/// cleanup to discard. They are left there by an await the drain unwound as it
+/// resumed: the scheduler's poll had already moved the result out of
+/// `PROMISE_MAP`, so no other cleanup reaches it. The caller drops them after
+/// the borrow — a `keepalive` can release the last `Shared\*` reference, and
+/// that can run PHP code.
+fn take_ready_results(ids: Option<&[u64]>) -> Vec<AsyncResult> {
+    READY_RESULTS.with(|m| {
+        let mut m = m.borrow_mut();
+        match ids {
+            Some(ids) => ids.iter().filter_map(|id| m.remove(id)).collect(),
+            None => m.drain().map(|(_, result)| result).collect(),
+        }
+    })
+}
+
 /// C-callable callback for non-blocking await poll.
 /// Returns 1 if the promise result is ready, 0 if not.
 ///
@@ -5138,6 +5156,13 @@ unsafe fn cleanup_promise(id: u64) {
 /// # Safety
 /// Called from C FFI (RSHUTDOWN).
 unsafe extern "C" fn cleanup_outstanding_promises_callback() {
+    let prefetched = take_ready_results(None);
+    if !prefetched.is_empty() {
+        tracing::debug!(
+            count = prefetched.len(),
+            "Discarded async results an unwound await never took"
+        );
+    }
     let ids = outstanding_promise_ids();
     // Forget all ownership records — including stale ones for fully-consumed
     // promises. Nothing outlives a thread-wide drain.
@@ -5150,6 +5175,10 @@ unsafe extern "C" fn cleanup_outstanding_promises_callback() {
     // completion before this thread began tearing down (blocking is fine here —
     // the thread is exiting and nothing else shares it).
     flush_deferred_drains();
+    // Last, as in `cleanup_promises_for_fiber_callback`, though here only for
+    // symmetry: `php_request_shutdown` has cleared the executing frame before
+    // any RSHUTDOWN, so releasing a pool skips its `$destroy`.
+    drop(prefetched);
 }
 
 /// Worker-mode per-request callback: clean up promises owned by the request
@@ -5175,6 +5204,14 @@ unsafe extern "C" fn cleanup_promises_for_fiber_callback(fiber_id: u64) {
     if owned.is_empty() {
         return;
     }
+    let prefetched = take_ready_results(Some(&owned));
+    if !prefetched.is_empty() {
+        tracing::debug!(
+            count = prefetched.len(),
+            fiber_id,
+            "Discarded async results an unwound await never took"
+        );
+    }
     // Keep only ids still present in a promise map — a record whose promise
     // was fully consumed carries nothing to drain.
     let live: Vec<u64> = owned
@@ -5185,21 +5222,22 @@ unsafe extern "C" fn cleanup_promises_for_fiber_callback(fiber_id: u64) {
                 || PROMISE_STRANDED.with(|m| m.borrow().contains_key(id))
         })
         .collect();
-    if live.is_empty() {
-        return;
+    if !live.is_empty() {
+        tracing::warn!(
+            count = live.len(),
+            fiber_id,
+            "Deferring cleanup of non-awaited async promises"
+        );
+        // Defer instead of block_on'ing on the worker thread: finalize returns
+        // immediately and the scheduler tick reclaims each promise once its task
+        // settles. Worker mode keeps the request heap alive across handlers, so the
+        // unfreeze can safely happen after the response is sent.
+        for id in live {
+            defer_promise_drain(id);
+        }
     }
-    tracing::warn!(
-        count = live.len(),
-        fiber_id,
-        "Deferring cleanup of non-awaited async promises"
-    );
-    // Defer instead of block_on'ing on the worker thread: finalize returns
-    // immediately and the scheduler tick reclaims each promise once its task
-    // settles. Worker mode keeps the request heap alive across handlers, so the
-    // unfreeze can safely happen after the response is sent.
-    for id in live {
-        defer_promise_drain(id);
-    }
+    // Last, so PHP code a `keepalive` runs as it goes cannot skip the drains.
+    drop(prefetched);
 }
 
 /// Cancel and drain a batch of promises: signal cancellation, wait for each
@@ -5895,6 +5933,134 @@ mod tests {
             taken.exception_message.as_deref(),
             Some("promise channel closed unexpectedly")
         );
+    }
+
+    /// What a `ReleaseProbe` saw at the moment it was released.
+    #[derive(Default)]
+    struct ProbeSeen {
+        released: std::sync::atomic::AtomicBool,
+        /// `READY_RESULTS` could be borrowed: the release ran after the borrow.
+        map_free: std::sync::atomic::AtomicBool,
+        /// Its promise's captures were already released: the release ran last.
+        captures_released: std::sync::atomic::AtomicBool,
+    }
+
+    /// Stands in for the `Shared\*` pins a result's keepalive carries.
+    /// Releasing a pinned entry can run PHP code: code that awaits borrows
+    /// `READY_RESULTS`, and code that bails out skips whatever the cleanup had
+    /// left to do.
+    struct ReleaseProbe {
+        id: u64,
+        seen: std::sync::Arc<ProbeSeen>,
+    }
+
+    impl ReleaseProbe {
+        fn new(id: u64) -> (Self, std::sync::Arc<ProbeSeen>) {
+            let seen = std::sync::Arc::new(ProbeSeen::default());
+            let probe = Self {
+                id,
+                seen: seen.clone(),
+            };
+            (probe, seen)
+        }
+    }
+
+    impl Drop for ReleaseProbe {
+        fn drop(&mut self) {
+            use std::sync::atomic::Ordering::SeqCst;
+            // try_with: a probe that is never released by a cleanup is dropped
+            // with the thread's TLS, where `with` would panic.
+            let map_free = READY_RESULTS
+                .try_with(|m| m.try_borrow_mut().is_ok())
+                .unwrap_or(false);
+            let captures_released = PROMISE_CLEANUP
+                .try_with(|m| m.try_borrow().is_ok_and(|m| !m.contains_key(&self.id)))
+                .unwrap_or(false);
+            self.seen.map_free.store(map_free, SeqCst);
+            self.seen.captures_released.store(captures_released, SeqCst);
+            self.seen.released.store(true, SeqCst);
+        }
+    }
+
+    /// Register promise `id` as created by fiber `owner`, settle it, and let
+    /// the scheduler's poll pre-fetch the result into `READY_RESULTS` — where
+    /// an await leaves it when its fiber is unwound on resume (a drain kill)
+    /// instead of going on to take it.
+    fn prefetch_owned(id: u64, owner: u64, keepalive: Option<Box<dyn std::any::Any + Send>>) {
+        // Ownership is first-writer-wins, so this record survives the one
+        // store_promise would take from the (absent) current fiber.
+        PROMISE_OWNER.with(|m| m.borrow_mut().insert(id, owner));
+        let (tx, rx) = tokio::sync::oneshot::channel::<AsyncResult>();
+        store_promise(id, rx, std::sync::Arc::new(CancelShared::new()));
+        // An `oxphp_async()` promise also holds its captures until its cleanup.
+        store_promise_cleanup(id, PromiseCleanup::new());
+        tx.send(AsyncResult {
+            success: true,
+            serialized_value: std::ptr::null_mut(),
+            serialized_value_len: 0,
+            exception_class: None,
+            exception_message: None,
+            keepalive,
+        })
+        .unwrap();
+        assert!(await_is_ready(id));
+    }
+
+    #[test]
+    fn fiber_cleanup_discards_its_own_prefetched_results_only() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (probe, seen) = ReleaseProbe::new(91_000_001);
+        prefetch_owned(91_000_001, 7, Some(Box::new(probe)));
+        prefetch_owned(91_000_002, 8, None);
+
+        unsafe { cleanup_promises_for_fiber_callback(7) };
+
+        assert!(
+            seen.released.load(SeqCst),
+            "the finished fiber's pre-fetched result must be released by its cleanup"
+        );
+        assert!(
+            seen.map_free.load(SeqCst),
+            "the result must be released after the READY_RESULTS borrow ends"
+        );
+        assert!(
+            seen.captures_released.load(SeqCst),
+            "the result must be released after its promise's captures"
+        );
+        assert!(take_ready_result(91_000_001).is_none());
+        assert!(
+            take_ready_result(91_000_002).is_some(),
+            "a sibling fiber's pre-fetched result is not this cleanup's to discard"
+        );
+    }
+
+    #[test]
+    fn thread_wide_cleanup_discards_every_prefetched_result() {
+        use std::sync::atomic::Ordering::SeqCst;
+        let (probe_a, seen_a) = ReleaseProbe::new(92_000_001);
+        let (probe_b, seen_b) = ReleaseProbe::new(92_000_002);
+        prefetch_owned(92_000_001, 7, Some(Box::new(probe_a)));
+        // Owner 0: created outside a request fiber (worker boot code).
+        prefetch_owned(92_000_002, 0, Some(Box::new(probe_b)));
+
+        unsafe { cleanup_outstanding_promises_callback() };
+
+        for seen in [&seen_a, &seen_b] {
+            assert!(
+                seen.released.load(SeqCst),
+                "every pre-fetched result must be released before the thread's PHP state goes"
+            );
+            assert!(
+                seen.map_free.load(SeqCst),
+                "the result must be released after the READY_RESULTS borrow ends"
+            );
+            assert!(
+                seen.captures_released.load(SeqCst),
+                "the result must be released after its promise's captures"
+            );
+        }
+        assert!(take_ready_result(92_000_001).is_none());
+        assert!(take_ready_result(92_000_002).is_none());
     }
 
     #[test]

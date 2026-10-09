@@ -35,6 +35,13 @@
 # itself begins. That the replacement comes up is not asserted: the container is
 # gone within a second of the stream's end, before the monitor's next tick.
 #
+# Scenario H (a settled await in a drained stream's cleanup): the soft sweep
+# ends a stream, and its shutdown function awaits a promise that has already
+# settled. The drain's mark is still set, so the await is unwound at its resume
+# — after the scheduler's poll fetched the result for it, before the await took
+# it. The request's own promise cleanup must discard that result instead of
+# leaving it to the worker thread's exit.
+#
 # NOT wired into run_all.sh or CI (like tests/cli_run.sh) — run manually after
 # touching the drain machinery (fiber sweep, cancel plumbing, drain latches).
 #
@@ -53,6 +60,7 @@ DRAIN_D="drain_d_$$"
 DRAIN_E="drain_e_$$"
 DRAIN_F="drain_f_$$"
 DRAIN_G="drain_g_$$"
+DRAIN_H="drain_h_$$"
 # Ephemeral free port unless the caller pins one via PORT=.
 PORT="${PORT:-$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')}"
 PASS=0
@@ -63,13 +71,13 @@ ok()   { printf '  \033[32mPASS\033[0m %s\n' "$1"; PASS=$((PASS + 1)); }
 bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$1"; FAIL=$((FAIL + 1)); }
 
 cleanup() {
-	docker rm -f "$DRAIN_A" "$DRAIN_B" "$DRAIN_C" "$DRAIN_D" "$DRAIN_E" "$DRAIN_F" "$DRAIN_G" >/dev/null 2>&1
+	docker rm -f "$DRAIN_A" "$DRAIN_B" "$DRAIN_C" "$DRAIN_D" "$DRAIN_E" "$DRAIN_F" "$DRAIN_G" "$DRAIN_H" >/dev/null 2>&1
 	rm -rf "$TMP"
 }
 trap cleanup EXIT
 
 start_container() {
-	# start_container <name> <drain_timeout_seconds>
+	# start_container <name> <drain_timeout_seconds> [log_level]
 	#
 	# `QUEUE_WAIT_TIMEOUT_MS` is raised well past any drain window on purpose:
 	# these scenarios park requests behind a handler that monopolises the
@@ -90,7 +98,7 @@ start_container() {
 		-e ASYNC_WORKERS=2 \
 		-e DRAIN_TIMEOUT_SECONDS="$2" \
 		-e QUEUE_WAIT_TIMEOUT_MS=120000 \
-		-e LOG_LEVEL=info \
+		-e LOG_LEVEL="${3:-info}" \
 		-p ${PORT}:80 \
 		-v "$FIX:/var/www/html:ro" \
 		"$IMAGE" >/dev/null || return 1
@@ -454,6 +462,64 @@ printf '%s' "$LOGS_G" | grep -q "retiring: the heap grew" \
 	|| bad "G: exit took ${ELAPSED}s"
 
 docker rm -f "$DRAIN_G" >/dev/null 2>&1
+
+# ── Scenario H: a settled await in a drained stream's cleanup ─
+# The sweep ends the stream; its shutdown function waits natively until the
+# task has settled and then awaits it. The await parks with the drain's mark
+# still set, the next tick's poll finds the promise ready and moves its result
+# out of the promise map, and the resume unwinds the await before it takes the
+# result. The request's own promise cleanup must discard it as the request ends,
+# rather than leave it to the cleanup of the whole thread. Debug level, where
+# each cleanup reports what it discarded — the request's with its fiber_id.
+if start_container "$DRAIN_H" 30 debug; then
+	ok "H: container up"
+else
+	bad "H: container failed to start"; docker logs "$DRAIN_H" 2>&1 | tail -5; exit 1
+fi
+
+curl -N -s --max-time 40 "http://localhost:${PORT}/awaitcleanup" > "$TMP/h1" 2>&1 &
+for _ in $(seq 1 10); do
+	grep -q "tick 0" "$TMP/h1" 2>/dev/null && break
+	sleep 0.5
+done
+grep -q "tick 0" "$TMP/h1" \
+	&& ok "H: the stream is running" \
+	|| bad "H: the stream never started"
+sleep 1
+
+docker kill -s TERM "$DRAIN_H" >/dev/null
+ELAPSED=$(wait_exit_seconds "$DRAIN_H" 25)
+
+LOGS_H="$(docker logs "$DRAIN_H" 2>&1)"
+# The premise, step by step: the drain ended the stream, its cleanup got as far
+# as the await, and the await was unwound instead of answered.
+printf '%s' "$LOGS_H" | grep -q "Request cancelled (shutdown)" \
+	&& ok "H: the drain ended the stream" \
+	|| bad "H: the stream was not ended by the drain"
+
+printf '%s' "$LOGS_H" | grep -q "awaitcleanup-start" \
+	&& ok "H: its shutdown function ran" \
+	|| bad "H: its shutdown function never ran"
+
+printf '%s' "$LOGS_H" | grep -q "awaitcleanup-done" \
+	&& bad "H: the await returned — the drain did not unwind it at its resume" \
+	|| ok "H: the await was unwound at its resume"
+
+# The mechanism: a result is still waiting to be taken when the fiber is
+# finalised only if the poll fetched it for the unwound await, and only a
+# cleanup that discards it says so. The fiber_id tells the request's cleanup
+# from the thread's, which logs the same line without one.
+printf '%s' "$LOGS_H" | grep "Discarded async results an unwound await never took" \
+	| grep -E 'count=1|"count":1' | grep -q 'fiber_id' \
+	&& ok "H: the request's cleanup discarded the result the poll fetched" \
+	|| bad "H: the request's cleanup did not discard the result the poll fetched"
+
+STATUS_H=$(docker inspect -f '{{.State.ExitCode}}' "$DRAIN_H" 2>/dev/null)
+[ "$STATUS_H" = "0" ] \
+	&& ok "H: exited with status 0, ${ELAPSED}s after SIGTERM" \
+	|| bad "H: exit status $STATUS_H"
+
+docker rm -f "$DRAIN_H" >/dev/null 2>&1
 
 echo
 echo "== result: $PASS passed, $FAIL failed =="
