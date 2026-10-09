@@ -12,6 +12,7 @@ services:
       dockerfile: docker/dev/Dockerfile
       args:
         PHP_VERSION:
+        BASE_IMAGE:
         CARGO_FEATURES: "plugin-apm,plugin-async,plugin-shared,decorator-test"
     ports:
       - "80"
