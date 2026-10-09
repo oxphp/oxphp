@@ -45,10 +45,8 @@ pub(super) fn spawn_worker_mode(
     std::thread::Builder::new()
         .name(format!("php-worker-{id}"))
         .spawn(move || {
-            let exit =
-                worker_mode_thread(id, rx, shutdown, last_active, loop_mode, config, metrics);
-            super::pool::release_worker_thread(id);
-            exit
+            let _release = super::pool::ReleaseWorkerThread(id);
+            worker_mode_thread(id, rx, shutdown, last_active, loop_mode, config, metrics)
         })
         .expect("failed to spawn PHP worker mode thread")
 }
@@ -159,6 +157,7 @@ fn worker_mode_thread(
         tracing::error!(worker = %thread_name, "php_request_startup() failed in worker mode");
         return WorkerExit::Ended;
     }
+    let request_open = crate::executor::AbortOnUnwind("with a PHP request open");
 
     // OPcache RINIT consumed request_time during php_request_startup. The
     // worker boot phase that follows (until oxphp_worker() enters its
@@ -172,6 +171,10 @@ fn worker_mode_thread(
     // 5. Execute worker file — this enters oxphp_worker() loop.
     //    The loop blocks on recv() inside worker_wait_callback.
     //    Returns when shutdown or limits reached.
+    //    Nothing in the closure is expected to panic: a panic inside a
+    //    callback PHP makes into Rust aborts at that callback's own boundary.
+    //    A panic this does catch has stopped unwinding, so `request_open`
+    //    stays inert and the request is shut down below as usual.
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let script_path_str = config.entry_file.to_str().unwrap_or("");
         let script_path = CString::new(script_path_str).unwrap_or_default();
@@ -233,6 +236,7 @@ fn worker_mode_thread(
         bindings::oxphp_bridge_set_request_time(shutdown_secs);
         bindings::php_request_shutdown(std::ptr::null_mut());
     }
+    drop(request_open);
     sapi::clear_request_data();
 
     // The consecutive-error retirement is the one exit an operator has to be
