@@ -4174,20 +4174,15 @@ unsafe fn set_bridge_internal_error(message: &str) {
 /// fiber never returns to that loop. Kicking the worker's `EG(vm_interrupt)`
 /// cross-thread breaks it out at the next opcode boundary; the interrupt
 /// handler then throws into the matching fiber (per-fiber `cancel_cell`),
-/// unwinding it. `worker_interrupt == 0` means the task hasn't been picked up
-/// by a worker yet — nothing is running to interrupt, so this is a no-op.
+/// unwinding it. An unset `worker_interrupt` means the task hasn't been picked
+/// up by a worker yet — nothing is running to interrupt, so this is a no-op; so
+/// is a kick after that worker has retired its address on the way out.
 ///
 /// # Safety
 /// Calls into the C bridge; must run on a PHP thread.
 unsafe fn kick_worker_interrupt(cancelled: &CancelShared) {
-    // Acquire pairs with the worker's Release store of this address (async
-    // pool, task pickup): once we observe a non-zero address, the publish is
-    // visible — no stale 0 read past the synchronization on weak hardware.
-    let addr = cancelled
-        .worker_interrupt
-        .load(std::sync::atomic::Ordering::Acquire);
-    if addr != 0 {
-        crate::bridge::ffi::oxphp_bridge_request_interrupt_at(addr as *mut c_void);
+    if let Some(target) = cancelled.worker_interrupt.get() {
+        target.kick();
     }
 }
 

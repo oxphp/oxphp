@@ -103,7 +103,15 @@ pub(super) fn release_worker_thread(id: usize) {
     {
         slot.retire_interrupt();
     }
-    // SAFETY: called on the worker thread itself, once, after its last PHP
+    release_php_thread();
+}
+
+/// Close the calling thread's persistent resources and release its TSRM
+/// resources: the tail of `release_worker_thread`, shared with the async pool's
+/// threads. Each caller has already withdrawn every address into this thread's
+/// globals that another thread could still write through.
+pub(crate) fn release_php_thread() {
+    // SAFETY: called on the PHP thread itself, once, after its last PHP
     // request has shut down; the list is destroyed immediately before the TSRM
     // block that holds it is freed, and nothing on this thread touches PHP
     // afterwards.

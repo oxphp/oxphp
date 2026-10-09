@@ -64,26 +64,73 @@ impl WorkerSlot {
     /// Both sides use SeqCst: the argument needs the store of null and the
     /// increment ordered against each other's loads.
     pub(crate) fn kick(&self) {
-        self.kicks_in_progress.fetch_add(1, Ordering::SeqCst);
-        raise_interrupt(self.interrupt_flag_ptr.load(Ordering::SeqCst));
-        self.kicks_in_progress.fetch_sub(1, Ordering::Release);
+        kick_through(&self.interrupt_flag_ptr, &self.kicks_in_progress);
     }
 
     /// Unpublish this slot's interrupt address and wait until no kick can
     /// still write through it. Called by the worker itself as its thread
     /// ends, before `ts_free_thread()` releases the memory the address names.
     pub fn retire_interrupt(&self) {
-        self.interrupt_flag_ptr
-            .store(std::ptr::null_mut(), Ordering::SeqCst);
-        while self.kicks_in_progress.load(Ordering::SeqCst) != 0 {
-            std::hint::spin_loop();
-        }
+        retire_through(&self.interrupt_flag_ptr, &self.kicks_in_progress);
     }
 }
 
 impl Default for WorkerSlot {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// The `EG(vm_interrupt)` address of one async pool thread. The thread hands
+/// it to every task it picks up, so an awaiter that gives up on a task can
+/// break it out of a CPU-bound loop cross-thread. The awaiter (an HTTP worker,
+/// or another pool thread for a nested task) can outlive the thread, which
+/// frees the memory the address names with `ts_free_thread()` as it ends, so
+/// the address is kicked and retired under the same protocol as a
+/// `WorkerSlot`'s.
+// Only the async pool and the await path use it, both behind the `php` feature.
+#[cfg_attr(not(feature = "php"), allow(dead_code))]
+pub struct InterruptTarget {
+    addr: AtomicPtr<u8>,
+    kicks_in_progress: AtomicUsize,
+}
+
+#[cfg_attr(not(feature = "php"), allow(dead_code))]
+impl InterruptTarget {
+    pub(crate) fn new() -> Self {
+        Self {
+            addr: AtomicPtr::new(std::ptr::null_mut()),
+            kicks_in_progress: AtomicUsize::new(0),
+        }
+    }
+
+    /// Publish the owning thread's `EG(vm_interrupt)` address. Called once, by
+    /// that thread, before it hands this target to any task.
+    pub(crate) fn publish(&self, addr: *mut u8) {
+        self.addr.store(addr, Ordering::SeqCst);
+    }
+
+    /// Same contract as `WorkerSlot::kick`.
+    pub(crate) fn kick(&self) {
+        kick_through(&self.addr, &self.kicks_in_progress);
+    }
+
+    /// Same contract as `WorkerSlot::retire_interrupt`.
+    pub(crate) fn retire(&self) {
+        retire_through(&self.addr, &self.kicks_in_progress);
+    }
+}
+
+fn kick_through(addr: &AtomicPtr<u8>, kicks_in_progress: &AtomicUsize) {
+    kicks_in_progress.fetch_add(1, Ordering::SeqCst);
+    raise_interrupt(addr.load(Ordering::SeqCst));
+    kicks_in_progress.fetch_sub(1, Ordering::Release);
+}
+
+fn retire_through(addr: &AtomicPtr<u8>, kicks_in_progress: &AtomicUsize) {
+    addr.store(std::ptr::null_mut(), Ordering::SeqCst);
+    while kicks_in_progress.load(Ordering::SeqCst) != 0 {
+        std::hint::spin_loop();
     }
 }
 
@@ -208,7 +255,8 @@ pub fn busy_workers() -> usize {
 }
 
 /// Raise Zend's `vm_interrupt` at `interrupt_addr` (a worker's
-/// `&EG(vm_interrupt)` byte, published in its slot). No-op on null.
+/// `&EG(vm_interrupt)` byte, published in its slot or, for an async pool
+/// thread, in its `InterruptTarget`). No-op on null.
 fn raise_interrupt(interrupt_addr: *mut u8) {
     if interrupt_addr.is_null() {
         return;
@@ -216,8 +264,8 @@ fn raise_interrupt(interrupt_addr: *mut u8) {
     // SAFETY: cross-thread Zend interrupt pattern. Routed through the bridge
     // so the underlying `zend_atomic_bool` is mutated via
     // `zend_atomic_bool_store_ex`, not aliased as a plain `uint8_t*`. The
-    // byte lives until its worker calls `ts_free_thread()`, which it does
-    // only after `WorkerSlot::retire_interrupt` has waited out every kick.
+    // byte lives until its thread calls `ts_free_thread()`, which it does
+    // only after `retire_through` has waited out every kick.
     unsafe {
         crate::bridge::ffi::oxphp_bridge_request_interrupt_at(
             interrupt_addr as *mut std::os::raw::c_void,
@@ -431,6 +479,35 @@ mod tests {
         );
 
         slot.kicks_in_progress.fetch_sub(1, Ordering::SeqCst);
+        retiring.join().unwrap();
+    }
+
+    #[test]
+    fn interrupt_target_retire_waits_out_a_kick_in_progress() {
+        // An async pool thread frees the memory its target names right after
+        // retire returns, while an awaiter on another thread may be kicking it.
+        // Covers the retire side only: the kick's increment-before-load order
+        // needs a controlled interleaving, which no test here has.
+        let target = Arc::new(InterruptTarget::new());
+        let mut flag = 0u8;
+        target.publish(&mut flag as *mut u8);
+        target.kicks_in_progress.fetch_add(1, Ordering::SeqCst);
+
+        let retiring = {
+            let target = Arc::clone(&target);
+            std::thread::spawn(move || target.retire())
+        };
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(
+            !retiring.is_finished(),
+            "retire returned with a kick still in progress"
+        );
+        assert!(
+            target.addr.load(Ordering::SeqCst).is_null(),
+            "the address must be withdrawn before the wait, so no new kick can load it"
+        );
+
+        target.kicks_in_progress.fetch_sub(1, Ordering::SeqCst);
         retiring.join().unwrap();
     }
 }
