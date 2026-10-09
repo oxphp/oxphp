@@ -133,6 +133,31 @@ oxphp_worker(function () {
             }
             // unreachable
 
+        case '/awaitcleanup': // stream ended by the soft drain whose shutdown
+                              // function then awaits a promise that has already
+                              // settled. The drain's mark is still set, so the
+                              // await is unwound again at its resume — after the
+                              // scheduler's poll has fetched the result for it,
+                              // and before the await takes it.
+            $p = oxphp_async(function (): string {
+                return 'settled';
+            });
+            register_shutdown_function(function () use ($p) {
+                error_log('awaitcleanup-start');
+                // Native wait: the task settles before the await below parks,
+                // so the next scheduler tick finds it ready.
+                usleep(300000);
+                oxphp_async_await($p);
+                error_log('awaitcleanup-done');
+            });
+            header('Content-Type: text/event-stream');
+            for ($i = 0; ; $i++) {
+                echo "data: tick $i\n\n";
+                oxphp_stream_flush();
+                oxphp_sleep(0.5);
+            }
+            // unreachable
+
         case '/short': // ordinary request: native blocking sleep, no flush
             usleep((int)($_GET['ms'] ?? 3000) * 1000);
             echo 'short-done';

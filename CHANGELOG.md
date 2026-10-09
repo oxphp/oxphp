@@ -4,6 +4,10 @@ All notable changes to OxPHP are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **Worker mode with `ASYNC_WORKERS` set: during a graceful shutdown, a value that a drained request's shutdown function was waiting for is no longer held until the worker thread exits.** A request the drain ends still runs its shutdown functions, and one that waits there — in `oxphp_async_await()`, `oxphp_async_await_all()` or a blocking `send` or `recv` on a `Shared\Channel` — is ended again as soon as it resumes. Where the value it was waiting for had arrived by then, nothing released it until the worker thread exited, after PHP had freed that thread's state, and a `Shared\*` object that came with the value was kept alive until that moment. Such a value is now released when the request it belongs to ends — the one that called `oxphp_async()` for a task, the one waiting for a `Shared\Channel` — or, for a task the worker's bootstrap script started, when the worker stops; either way while PHP's state for the thread is still there.
+
 ## [0.13.0] - 2026-10-08
 
 ### Migration from 0.12.0
