@@ -2973,7 +2973,11 @@ int oxphp_file_handle_init_fd(void *file_handle, int fd, const char *path) {
     handle->filename = zend_string_init(path, strlen(path), 0);
     handle->opened_path = zend_string_init(path, strlen(path), 0);
     handle->handle.stream.handle = stream;
+#if PHP_VERSION_ID >= 80600
+    handle->handle.stream.reader = (zend_stream_reader_t)php_stream_read;
+#else
     handle->handle.stream.reader = (zend_stream_reader_t)_php_stream_read;
+#endif
     handle->handle.stream.fsizer = oxphp_script_stream_fsizer;
     handle->handle.stream.closer = oxphp_script_stream_closer;
     handle->handle.stream.isatty = 0;

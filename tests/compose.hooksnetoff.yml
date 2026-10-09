@@ -28,6 +28,7 @@ services:
       dockerfile: docker/dev/Dockerfile
       args:
         PHP_VERSION:
+        BASE_IMAGE:
     depends_on:
       hooksnetoff-netpeer:
         condition: service_healthy

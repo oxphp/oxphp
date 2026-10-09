@@ -30,6 +30,7 @@ services:
       dockerfile: docker/dev/Dockerfile
       args:
         PHP_VERSION:
+        BASE_IMAGE:
     depends_on:
       hooksclassic-netpeer:
         condition: service_healthy
