@@ -12,6 +12,8 @@ on:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: oxphp/oxphp
+  DOCKERHUB_REGISTRY: docker.io
+  DOCKERHUB_IMAGE_NAME: oxphp/oxphp
 
 permissions:
   contents: read
@@ -109,6 +111,13 @@ jobs:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.DOCKERHUB_REGISTRY }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
 
       - name: Resolve upstream base image digest
         id: base_digest
@@ -209,9 +218,11 @@ jobs:
           ALPINE_VER: ${{ matrix.alpine }}
           ARCH: ${{ matrix.arch }}
         run: |
-          TAG="${REGISTRY}/${IMAGE_NAME}:${OXPHP_VER}-php${PHP_MINOR}-alpine${ALPINE_VER}-${ARCH}"
-          docker tag oxphp:ci "$TAG"
-          docker push "$TAG"
+          for PREFIX in "${REGISTRY}/${IMAGE_NAME}" "${DOCKERHUB_REGISTRY}/${DOCKERHUB_IMAGE_NAME}"; do
+            TAG="${PREFIX}:${OXPHP_VER}-php${PHP_MINOR}-alpine${ALPINE_VER}-${ARCH}"
+            docker tag oxphp:ci "$TAG"
+            docker push "$TAG"
+          done
 
       - name: Push arch-specific patch-pinned tag
         if: steps.decide.outputs.skip != 'true'
@@ -221,9 +232,11 @@ jobs:
           ALPINE_VER: ${{ matrix.alpine }}
           ARCH: ${{ matrix.arch }}
         run: |
-          TAG="${REGISTRY}/${IMAGE_NAME}:${OXPHP_VER}-php${PHP_PATCH}-alpine${ALPINE_VER}-${ARCH}"
-          docker tag oxphp:ci "$TAG"
-          docker push "$TAG"
+          for PREFIX in "${REGISTRY}/${IMAGE_NAME}" "${DOCKERHUB_REGISTRY}/${DOCKERHUB_IMAGE_NAME}"; do
+            TAG="${PREFIX}:${OXPHP_VER}-php${PHP_PATCH}-alpine${ALPINE_VER}-${ARCH}"
+            docker tag oxphp:ci "$TAG"
+            docker push "$TAG"
+          done
 
       - name: Record PHP patch for downstream jobs
         if: steps.decide.outputs.skip != 'true'
@@ -346,6 +359,13 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.DOCKERHUB_REGISTRY }}
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
       - name: Download PHP patch artifacts
         uses: actions/download-artifact@v7
         with:
@@ -378,10 +398,12 @@ jobs:
           PHP_MINOR: ${{ matrix.php }}
           ALPINE_VER: ${{ matrix.alpine }}
         run: |
-          docker buildx imagetools create \
-            -t "${REGISTRY}/${IMAGE_NAME}:${OXPHP_VER}-php${PHP_MINOR}-alpine${ALPINE_VER}" \
-            "${REGISTRY}/${IMAGE_NAME}:${OXPHP_VER}-php${PHP_MINOR}-alpine${ALPINE_VER}-amd64" \
-            "${REGISTRY}/${IMAGE_NAME}:${OXPHP_VER}-php${PHP_MINOR}-alpine${ALPINE_VER}-arm64"
+          for PREFIX in "${REGISTRY}/${IMAGE_NAME}" "${DOCKERHUB_REGISTRY}/${DOCKERHUB_IMAGE_NAME}"; do
+            docker buildx imagetools create \
+              -t "${PREFIX}:${OXPHP_VER}-php${PHP_MINOR}-alpine${ALPINE_VER}" \
+              "${PREFIX}:${OXPHP_VER}-php${PHP_MINOR}-alpine${ALPINE_VER}-amd64" \
+              "${PREFIX}:${OXPHP_VER}-php${PHP_MINOR}-alpine${ALPINE_VER}-arm64"
+          done
 
       - name: Create patch-pinned multi-arch manifest
         env:
@@ -390,10 +412,12 @@ jobs:
           PHP_PATCH: ${{ steps.patch.outputs.patch }}
           ALPINE_VER: ${{ matrix.alpine }}
         run: |
-          docker buildx imagetools create \
-            -t "${REGISTRY}/${IMAGE_NAME}:${OXPHP_VER}-php${PHP_PATCH}-alpine${ALPINE_VER}" \
-            "${REGISTRY}/${IMAGE_NAME}:${OXPHP_VER}-php${PHP_MINOR}-alpine${ALPINE_VER}-amd64" \
-            "${REGISTRY}/${IMAGE_NAME}:${OXPHP_VER}-php${PHP_MINOR}-alpine${ALPINE_VER}-arm64"
+          for PREFIX in "${REGISTRY}/${IMAGE_NAME}" "${DOCKERHUB_REGISTRY}/${DOCKERHUB_IMAGE_NAME}"; do
+            docker buildx imagetools create \
+              -t "${PREFIX}:${OXPHP_VER}-php${PHP_PATCH}-alpine${ALPINE_VER}" \
+              "${PREFIX}:${OXPHP_VER}-php${PHP_MINOR}-alpine${ALPINE_VER}-amd64" \
+              "${PREFIX}:${OXPHP_VER}-php${PHP_MINOR}-alpine${ALPINE_VER}-arm64"
+          done
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
@@ -405,25 +429,30 @@ jobs:
           PHP_PATCH: ${{ steps.patch.outputs.patch }}
           ALPINE_VER: ${{ matrix.alpine }}
         run: |
-          cosign sign --yes "${REGISTRY}/${IMAGE_NAME}:${OXPHP_VER}-php${PHP_MINOR}-alpine${ALPINE_VER}"
-          cosign sign --yes "${REGISTRY}/${IMAGE_NAME}:${OXPHP_VER}-php${PHP_PATCH}-alpine${ALPINE_VER}"
+          for PREFIX in "${REGISTRY}/${IMAGE_NAME}" "${DOCKERHUB_REGISTRY}/${DOCKERHUB_IMAGE_NAME}"; do
+            cosign sign --yes "${PREFIX}:${OXPHP_VER}-php${PHP_MINOR}-alpine${ALPINE_VER}"
+            cosign sign --yes "${PREFIX}:${OXPHP_VER}-php${PHP_PATCH}-alpine${ALPINE_VER}"
+          done
 
       - name: Install yq
         run: |
           sudo curl -sL https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64 -o /usr/local/bin/yq
           sudo chmod +x /usr/local/bin/yq
 
-      - name: Move aliases
+      - name: Move aliases (ghcr + Docker Hub)
         env:
           OXPHP_VER: ${{ matrix.oxphp }}
           PHP_MINOR: ${{ matrix.php }}
           ALPINE_VER: ${{ matrix.alpine }}
-          REGISTRY_OVERRIDE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          GHCR_PREFIX: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          DH_PREFIX: ${{ env.DOCKERHUB_REGISTRY }}/${{ env.DOCKERHUB_IMAGE_NAME }}
         run: |
-          REGISTRY="$REGISTRY_OVERRIDE" ./scripts/move-aliases.sh \
-            "$OXPHP_VER" \
-            "$PHP_MINOR" \
-            "$ALPINE_VER"
+          for PREFIX in "$GHCR_PREFIX" "$DH_PREFIX"; do
+            REGISTRY="$PREFIX" ./scripts/move-aliases.sh \
+              "$OXPHP_VER" \
+              "$PHP_MINOR" \
+              "$ALPINE_VER"
+          done
 
       - name: Sign moved aliases
         env:
@@ -434,13 +463,15 @@ jobs:
           LATEST_OXPHP=$(yq '.oxphp_versions[0]' .github/supported-versions.yml)
           DEFAULT_PHP=$(yq '.default_php' .github/supported-versions.yml)
 
-          cosign sign --yes "${REGISTRY}/${IMAGE_NAME}:${OXPHP_VER}-php${PHP_MINOR}"
-          cosign sign --yes "${REGISTRY}/${IMAGE_NAME}:${SEMVER_MINOR}-php${PHP_MINOR}"
+          for PREFIX in "${REGISTRY}/${IMAGE_NAME}" "${DOCKERHUB_REGISTRY}/${DOCKERHUB_IMAGE_NAME}"; do
+            cosign sign --yes "${PREFIX}:${OXPHP_VER}-php${PHP_MINOR}"
+            cosign sign --yes "${PREFIX}:${SEMVER_MINOR}-php${PHP_MINOR}"
 
-          if [[ "$OXPHP_VER" == "$LATEST_OXPHP" ]]; then
-            cosign sign --yes "${REGISTRY}/${IMAGE_NAME}:php${PHP_MINOR}"
-            if [[ "$PHP_MINOR" == "$DEFAULT_PHP" ]]; then
-              cosign sign --yes "${REGISTRY}/${IMAGE_NAME}:${OXPHP_VER}"
-              cosign sign --yes "${REGISTRY}/${IMAGE_NAME}:latest"
+            if [[ "$OXPHP_VER" == "$LATEST_OXPHP" ]]; then
+              cosign sign --yes "${PREFIX}:php${PHP_MINOR}"
+              if [[ "$PHP_MINOR" == "$DEFAULT_PHP" ]]; then
+                cosign sign --yes "${PREFIX}:${OXPHP_VER}"
+                cosign sign --yes "${PREFIX}:latest"
+              fi
             fi
-          fi
+          done
