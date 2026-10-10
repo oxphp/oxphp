@@ -23,6 +23,7 @@ mod pool;
 mod traditional;
 mod worker_mode;
 
+pub(crate) use pool::release_php_thread;
 use pool::{run_scale_manager, run_worker_monitor, ManagedWorker, SpawnStrategy, WorkerRequest};
 use traditional::WorkerLoopMode;
 use worker_mode::WorkerModeConfig;
