@@ -67,9 +67,14 @@ unset($grower);
 if (is_file(OxphpIniPutBackProbe::GROWER_TASK_DONE)) {
     unlink(OxphpIniPutBackProbe::GROWER_TASK_DONE);
 }
+// The end of this request cancels the task, which unwinds as the sleep returns;
+// the marker is written in `finally` so that it records the task ending either way.
 oxphp_async(static function (): void {
-    time_nanosleep(2, 0);
-    file_put_contents(OxphpIniPutBackProbe::GROWER_TASK_DONE, 'done');
+    try {
+        time_nanosleep(2, 0);
+    } finally {
+        file_put_contents(OxphpIniPutBackProbe::GROWER_TASK_DONE, 'done');
+    }
 });
 
 echo 'set';

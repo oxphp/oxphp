@@ -122,6 +122,11 @@ worker/test_pending_exception_destructor >> ?phase=dtorcheck
 worker/test_pending_exception_destructor >> ?phase=dtorloop | GET | | 500 |
 worker/test_pending_exception_destructor >> ?phase=dtorloopcheck
 
+# A request that ends without awaiting a task spinning in a loop that never
+# suspends cancels it by interrupting it; here the wait for the task is deferred
+# past the response, so what is asserted is how the task ended.
+async/test_orphan_cpu_bound_cancelled_at_request_end
+
 # Last in the file on purpose: the gauge is written at the end of a request, so
 # a worker only has one to report once it has served something. By here the pool
 # has served the whole suite.

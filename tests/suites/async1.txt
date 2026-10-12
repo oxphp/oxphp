@@ -20,3 +20,8 @@ async/test_timer_poll_beyond_32
 # A task's ini survives another task starting on the same single async worker
 # while it is suspended.
 async/test_task_ini_survives_a_sibling_task
+
+# Two orphans on the single async worker, one spinning and one queued behind
+# it: the end of the request cancels both before it waits for either, so the
+# queued one never starts and the response is not held.
+async/test_orphans_all_cancelled_before_any_is_waited_on

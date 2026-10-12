@@ -296,7 +296,7 @@ When APM is enabled, OxPHP automatically hooks 33 internal PHP functions (PDO, m
 | `ASYNC_QUEUE_CAPACITY` | `ASYNC_WORKERS × 64` | Maximum pending tasks in the async queue. `0` = auto (workers × 64) |
 | `ASYNC_MAX_FIBERS` | `256` | Per-worker cap on concurrent async task fibers. The process-global in-flight limit (queued + running) is `ASYNC_MAX_FIBERS × ASYNC_WORKERS`; a dispatch past it is rejected immediately with `OxPHP\Async\AsyncException` so fan-out composition cannot deadlock |
 
-The async worker pool handles fire-and-forget background tasks dispatched from PHP. It is separate from the PHP worker pool and is not required for standard request handling.
+The async worker pool runs the closures PHP dispatches with `oxphp_async()`. A task the request ends without awaiting is cancelled then (see [Async Promises](../features/async-promises.md#how-it-works)), so work that has to finish must be awaited. The pool is separate from the PHP worker pool and is not required for standard request handling.
 
 A malformed value in any of these three variables (e.g. `ASYNC_WORKERS=8x`) is a startup error — falling back to a default would silently disable or misconfigure the pool. An exactly-empty value is treated as unset.
 
