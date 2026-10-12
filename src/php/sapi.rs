@@ -4169,20 +4169,42 @@ unsafe fn set_bridge_internal_error(message: &str) {
 }
 
 /// Break a running async task out of a CPU-bound loop after its awaiter has
-/// given up. The cancel flag (`cancelled.cancelled`) must already be set: the
+/// given up, or after the request that dispatched it has ended without awaiting
+/// it. The cancel flag (`cancelled.cancelled`) must already be set: the
 /// scheduler loop polls it to unwind a *suspended* fiber, but a busy-looping
 /// fiber never returns to that loop. Kicking the worker's `EG(vm_interrupt)`
 /// cross-thread breaks it out at the next opcode boundary; the interrupt
 /// handler then throws into the matching fiber (per-fiber `cancel_cell`),
-/// unwinding it. An unset `worker_interrupt` means the task hasn't been picked
-/// up by a worker yet — nothing is running to interrupt, so this is a no-op; so
-/// is a kick after that worker has retired its address on the way out.
+/// unwinding it. An unset `worker_interrupt` means no worker has published
+/// where to kick the task — it is still queued, still being picked up, or was
+/// dropped before it ran — so this is a no-op; so is a kick after that worker
+/// has retired its address on the way out.
 ///
 /// # Safety
 /// Calls into the C bridge; must run on a PHP thread.
 unsafe fn kick_worker_interrupt(cancelled: &CancelShared) {
     if let Some(target) = cancelled.worker_interrupt.get() {
         target.kick();
+    }
+}
+
+/// `kick_worker_interrupt` for a batch of tasks flagged together, kicking each
+/// pool thread once. A kick is taken by whichever fiber the thread is running,
+/// and the interrupt handler throws into a fiber whose flag is set at every
+/// kick it takes: a second kick that lands after the first has unwound the
+/// running task throws again, into the `catch` or `finally` that unwind runs.
+///
+/// # Safety
+/// Same as `kick_worker_interrupt`.
+unsafe fn kick_worker_interrupts<'a>(batch: impl IntoIterator<Item = &'a CancelShared>) {
+    let mut kicked: Vec<&Arc<crate::php::worker_registry::InterruptTarget>> = Vec::new();
+    for cancelled in batch {
+        if let Some(target) = cancelled.worker_interrupt.get() {
+            if !kicked.iter().any(|k| Arc::ptr_eq(k, target)) {
+                target.kick();
+                kicked.push(target);
+            }
+        }
     }
 }
 
@@ -5227,33 +5249,70 @@ unsafe extern "C" fn cleanup_promises_for_fiber_callback(fiber_id: u64) {
         // immediately and the scheduler tick reclaims each promise once its task
         // settles. Worker mode keeps the request heap alive across handlers, so the
         // unfreeze can safely happen after the response is sent.
-        for id in live {
-            defer_promise_drain(id);
-        }
+        let flagged: Vec<Arc<CancelShared>> = live
+            .into_iter()
+            .filter_map(|id| defer_promise_drain(id))
+            .collect();
+        // The flag alone reaches only a suspended fiber; a CPU-bound one needs
+        // the cross-thread interrupt kick — sent once all of them are flagged.
+        kick_worker_interrupts(flagged.iter().map(Arc::as_ref));
     }
     // Last, so PHP code a `keepalive` runs as it goes cannot skip the drains.
     drop(prefetched);
 }
 
-/// Cancel and drain a batch of promises: signal cancellation, wait for each
-/// worker to acknowledge (5 s budget per promise), then release frozen and
-/// borrowed captures. Blocking — reserved for the RSHUTDOWN / worker-teardown
-/// drain-all path, where the thread is exiting and no scheduler shares it. The
-/// worker-mode per-request path defers instead (see `defer_promise_drain`).
+/// Cancel and drain a batch of promises: signal cancellation to all of them,
+/// wait for each worker to acknowledge (5 s budget per promise), then release
+/// frozen and borrowed captures. Blocking — reserved for the RSHUTDOWN /
+/// worker-teardown drain-all path, where the thread is exiting and no scheduler
+/// shares it. The worker-mode per-request path defers instead (see
+/// `defer_promise_drain`).
+///
+/// Every flag is set before the first kick, and every task is kicked before the
+/// first wait. With one pool thread running a CPU-bound task and the next one
+/// queued behind it, waiting on either before the other is cancelled fails both
+/// ways round: a wait on the queued one sits behind the running one until the
+/// budget runs out, and a wait on the running one lets the thread pick up the
+/// queued one before its flag is set, so it starts running — and runs on
+/// uncancelled if its kick arrives before the thread has published where to
+/// send it (see `kick_worker_interrupt`).
+///
+/// A promise whose flag is already set is not kicked again: an await that gave
+/// up on it set the flag and sent its kick then, and the task may by now be
+/// running the `catch` or `finally` that cancellation unwound into (see
+/// `kick_worker_interrupts`). That kick interrupted the task only if its worker
+/// had already published where to send it and was running the task at that
+/// moment. A task still being picked up starts with its flag set and no kick
+/// pending, so a CPU-bound one runs on until it next suspends (see
+/// `kick_worker_interrupt`).
 unsafe fn drain_promises(ids: &[u64]) {
-    for &id in ids {
-        // Receivers can live in either PROMISE_MAP (never-awaited) or
-        // PROMISE_STRANDED (await_race / await_any timed out). Drain
-        // both before unfreezing — the rx must complete (or hit the 5 s
-        // budget) before the matching PROMISE_CLEANUP entry releases
-        // frozen captures, otherwise the still-running worker observes
-        // freed memory.
-        let entry = take_promise(id).or_else(|| take_stranded(id));
-        if let Some((rx, cancelled)) = entry {
-            // Signal cancellation (Release pairs with the worker's Acquire load).
-            cancelled
-                .cancelled
-                .store(true, std::sync::atomic::Ordering::Release);
+    // Receivers can live in either PROMISE_MAP (never-awaited) or
+    // PROMISE_STRANDED (await_race / await_any timed out). Drain both before
+    // unfreezing — the rx must complete (or hit the 5 s budget) before the
+    // matching PROMISE_CLEANUP entry releases frozen captures, otherwise the
+    // still-running worker observes freed memory.
+    let mut flagged: Vec<Arc<CancelShared>> = Vec::new();
+    let entries: Vec<(u64, Option<PromiseEntry>)> = ids
+        .iter()
+        .map(|&id| {
+            let entry = take_promise(id).or_else(|| take_stranded(id));
+            if let Some((_, cancelled)) = &entry {
+                // Release pairs with the worker's Acquire load of the cancel flag.
+                if !cancelled
+                    .cancelled
+                    .swap(true, std::sync::atomic::Ordering::Release)
+                {
+                    flagged.push(Arc::clone(cancelled));
+                }
+            }
+            (id, entry)
+        })
+        .collect();
+    // The flag alone reaches only a suspended fiber; a CPU-bound one needs the
+    // cross-thread interrupt kick.
+    kick_worker_interrupts(flagged.iter().map(Arc::as_ref));
+    for (id, entry) in entries {
+        if let Some((rx, _)) = entry {
             // Block with 5-second timeout per promise to avoid indefinite hang
             if let Some(handle) = ASYNC_TOKIO_HANDLE.get() {
                 let _ = handle.block_on(async {
@@ -5277,15 +5336,17 @@ unsafe fn drain_promises(ids: &[u64]) {
 ///
 /// If the receiver was already consumed (only a cleanup record remains) there
 /// is nothing to wait on, so the cleanup runs immediately — no ordering hazard.
-unsafe fn defer_promise_drain(id: u64) {
+///
+/// Returns the cancel state of a promise it flagged, for the caller to kick
+/// once every promise in the batch is flagged; `None` for one an await had
+/// flagged and kicked already (see `drain_promises`).
+unsafe fn defer_promise_drain(id: u64) -> Option<Arc<CancelShared>> {
     match take_promise(id).or_else(|| take_stranded(id)) {
         Some((rx, cancelled)) => {
-            // Signal cancellation (Release pairs with the worker's Acquire
-            // load). The flag lives in the async side's clone, so dropping our
-            // `cancelled` here is fine — we only needed to set it.
-            cancelled
+            // Signal cancellation (Release pairs with the worker's Acquire load).
+            let newly_flagged = !cancelled
                 .cancelled
-                .store(true, std::sync::atomic::Ordering::Release);
+                .swap(true, std::sync::atomic::Ordering::Release);
             let cleanup = take_promise_cleanup(id);
             DEFERRED_DRAIN.with(|d| {
                 d.borrow_mut().push(DeferredDrain {
@@ -5294,11 +5355,13 @@ unsafe fn defer_promise_drain(id: u64) {
                     deadline: Instant::now() + std::time::Duration::from_secs(5),
                 });
             });
+            newly_flagged.then_some(cancelled)
         }
         None => {
             if let Some(cleanup) = take_promise_cleanup(id) {
                 run_promise_cleanup(&cleanup);
             }
+            None
         }
     }
 }

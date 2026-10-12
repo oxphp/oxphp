@@ -31,7 +31,7 @@ require_once __DIR__ . '/ini_probe_state.php';
 // directives that travel: it stays on the worker while this request is still
 // in flight, and fibers/test_ini_the_worker_keeps_goes_back_with_the_last_request
 // reads it once this request, the last one out, has ended. This request leaves
-// a fire-and-forget task behind for that one: a worker still reclaiming a
+// a task it does not await behind for that one: a worker still reclaiming a
 // task's promise is not idle, so the next request is taken without the reset
 // an idle worker runs first, and what it finds is what this request's own end
 // left.
@@ -133,9 +133,14 @@ $t->assertSame(
 if (is_file(OxphpIniProbeState::TASK_DONE)) {
     unlink(OxphpIniProbeState::TASK_DONE);
 }
+// The end of this request cancels the task, which unwinds as the sleep returns;
+// the marker is written in `finally` so that it records the task ending either way.
 oxphp_async(static function (): void {
-    time_nanosleep(2, 0);
-    file_put_contents(OxphpIniProbeState::TASK_DONE, 'done');
+    try {
+        time_nanosleep(2, 0);
+    } finally {
+        file_put_contents(OxphpIniProbeState::TASK_DONE, 'done');
+    }
 });
 
 $t->done();

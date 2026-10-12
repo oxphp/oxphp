@@ -25,6 +25,10 @@ services:
       LOG_LEVEL: error
       INTERNAL_ADDR: 0.0.0.0:9090
       ASYNC_WORKERS: 4
+      # Two PHP workers whatever the host's core count (the CPU/2 default is 1
+      # below 4 cores): tests here send a request to this server and block their
+      # worker reading the response, which only a second worker can serve.
+      PHP_WORKERS: "2"
     volumes:
       - ../www:/var/www/html
       - ./php:/var/www/html/public/tests
