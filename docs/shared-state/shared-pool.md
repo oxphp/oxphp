@@ -17,7 +17,7 @@ A Pool gives each PHP worker thread its own lane of ready-to-use resources, enfo
 - **Destroy callback on eviction.** An optional `destroy($resource)` closure runs when the pool drops a slot (idle timeout, manual eviction, server stop).
 - **Idle-timeout eviction.** Slots sitting idle longer than `idleTimeoutMs` are destroyed by a background task. Set `idleTimeoutMs: 0` to disable idle eviction entirely.
 - **RAII handles.** `acquire()` returns a `Handle`; the slot returns to the pool automatically when the handle goes out of scope (including on exception), or earlier via `$handle->release()`.
-- **Shareable.** Pools survive request boundaries and are shared by handle (`use ($pool)` in closures).
+- **Shareable.** In worker mode a pool survives request boundaries and is shared by handle (`use ($pool)` in closures). Outside worker mode it lasts only as long as the request that creates it — see [Outside worker mode](#outside-worker-mode).
 
 ## API Reference
 
@@ -178,7 +178,7 @@ The factory runs **lazily** on the acquiring worker thread. A pool with `maxSize
 - The factory must return a PHP object. Returning a non-object surfaces as `TypeException` from the acquire call, and the slot is not counted against the budget.
 - A factory that throws propagates its own exception to the acquire caller unchanged, and the slot is not counted against the budget.
 - A fatal error inside the factory ends the request, and the slot is not counted against the budget either.
-- The destroy callback (if supplied) runs when the pool drops a slot: idle timeout expiry, explicit `evict()`, or server shutdown. It runs on a worker thread (not on the Tokio thread driving the eviction scheduler), so PHP is safe to call.
+- The destroy callback (if supplied) runs when the pool drops a slot: idle timeout expiry, explicit `evict()`, or server shutdown. It runs on a worker thread (not on the Tokio thread driving the eviction scheduler), so PHP is safe to call. Outside worker mode it does not run for the slots still idle when the pool's request ends — see [Outside worker mode](#outside-worker-mode).
 - A destroy callback that throws is logged but does not poison the pool — the slot is already being destroyed, so there is nothing useful to roll back.
 
 ## Per-thread affinity
@@ -186,6 +186,22 @@ The factory runs **lazily** on the acquiring worker thread. A pool with `maxSize
 v1 pools are strict per-thread: a slot minted on worker thread A cannot be acquired on worker thread B. Practically this means `stats()->idle()` can be non-zero on worker A while worker B is blocking in `acquire()`. This keeps slots hot in the thread that uses them (DB connections, OPcache-primed objects) and avoids shuffling resources across cores.
 
 Cross-thread work stealing is a v1.x candidate. Until then, size `maxSize` against the number of worker threads × expected per-thread concurrency, not just aggregate demand.
+
+## Outside worker mode
+
+With traditional, Framework or SPA routing every HTTP request is a PHP request of its own, and when it ends PHP frees every object it created — including the pool's factory and destroy closures and every object the factory returned. A pool a request creates there is tied to that request:
+
+- Only that request can acquire from it. `acquire()`, `tryAcquire()`, `acquireTimeout()`, `with()` and `withTimeout()` called from any other request — one that reached the pool through a `Shared\Map`, say — or from a task started with `oxphp_async()`, which runs on a thread of the `ASYNC_WORKERS` pool, throw `ClosedException`.
+- When the request ends, the pool closes. The objects still idle in it are freed by PHP along with the rest of the request, like any other object the request created; `$destroy` is not called for them. Any later acquire throws `ClosedException`.
+- If the pool's last reference goes away in another request or in a task while the creating request still runs, the pool closes then, and `$destroy` is not called for its idle objects either: PHP frees them when the creating request ends.
+- `Registry::pool()` called from a request throws `SharedException` without calling its factory, and `Registry::global()` throws it when its factory returns a pool: a registry name outlives every request that could use the pool. In a task the request hands its pool to, both throw it when their factory returns that pool.
+- `idleTimeoutMs` has no effect: no slot outlives the request.
+
+A pool created inside a task started with `oxphp_async()` is not tied to a request — the task's thread runs a single PHP request for as long as it lives — and a task can bind it to a name with `Registry::pool()`. A request that calls `Registry::pool()` with that name still gets `SharedException`. Handing such a pool to HTTP requests served without worker mode gains them nothing, though: each object such a request gets from it is one that request's own call to the factory created, it is reused only within that request, and when the request ends PHP frees it along with the rest of the request, without `$destroy`. Without worker mode, use such a pool from tasks only.
+
+`oxphp run` executes the whole script as one request, so there a pool the script creates — `Registry::pool()` included — serves it from start to finish and closes when it ends, without `$destroy` for the objects still idle at that point. A task started with `oxphp_async()` cannot acquire from it or bind it to a name there either.
+
+To keep database connections open across requests without worker mode, use the driver's persistent connections instead of a pool — for PDO, `PDO::ATTR_PERSISTENT => true`, which keeps a connection open in each PHP worker thread for the next request on that thread that connects with the same DSN and credentials. To share one pool across requests, run the application in [worker mode](../features/worker-mode.md).
 
 ## Idle-timeout eviction
 
@@ -218,6 +234,8 @@ Every acquire variant first tries to satisfy the request immediately — reuse a
 | `OperationTimeoutException` | `acquireTimeout` / `withTimeout` exceeded `$ms` without a free slot. **Extends `Async\AsyncException`, not `SharedException`.** |
 | `TypeException`            | Non-positive `maxSize`, negative `idleTimeoutMs`, `$ms <= 0`, or a factory that returned a non-object. |
 | `StaleHandleException`     | `Handle::get()` after the handle was released.                       |
+| `ClosedException`          | Any acquire on a closed pool (server shutdown), and outside worker mode any acquire on a pool a request created that is not made by that request while it runs — see [Outside worker mode](#outside-worker-mode). |
+| `SharedException`          | `Registry::pool()` called from an HTTP request served without worker mode, and `Registry::global()` there when its factory returns a pool; either of them in a task when the factory returns a pool such a request created — see [Outside worker mode](#outside-worker-mode). |
 | `UninitializedException`   | A method call on a pool wrapper that has not finished `__construct`. |
 
 `tryAcquire()` does **not** throw on saturation — it returns `null`. Because `OperationTimeoutException` extends `OxPHP\Async\AsyncException` (not `SharedException`), a `catch (SharedException)` will **not** catch an acquire timeout; use `catch (OxPHP\Async\AsyncException)` or catch `OperationTimeoutException` directly.

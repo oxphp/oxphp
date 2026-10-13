@@ -53,6 +53,8 @@ Compare to the captured-handle pattern (`$x = new Shared\Counter()` in the boots
 
 The same shape works in traditional mode (no `WORKER_MODE_ENABLED`). The first request that touches `'request-counter'` creates the entry; every subsequent request — on any worker thread — sees it. This is the same-host APCu replacement story, with typed primitives and atomic operations instead of `apcu_fetch` / `apcu_store`.
 
+The one type that does not carry over is `Shared\Pool`. Without worker mode a pool a request creates lasts only as long as that request, and a name lasts as long as the server, so `Registry::pool()` called from a request throws `SharedException` there without calling its factory, and `Registry::global()` throws it when its factory returns a pool. (`oxphp run` is the exception: the whole script is one request, and `Registry::pool()` works there.) See [Shared\Pool — Outside worker mode](shared-pool.md#outside-worker-mode).
+
 ## API reference
 
 ```php
@@ -87,7 +89,7 @@ final class Registry
 
 | Method | Returns | Use |
 |---|---|---|
-| `map` / `counter` / `atomic` / `flag` / `once` / `mutex` / `channel` / `pool` | the requested `Shared\*` type | Primary surface. Type-guarded on hit; type-validated on factory return. |
+| `map` / `counter` / `atomic` / `flag` / `once` / `mutex` / `channel` / `pool` | the requested `Shared\*` type | Primary surface. Type-guarded on hit; type-validated on factory return. `pool` called from an HTTP request served without worker mode throws `SharedException`. |
 | `global` | `Shareable` | Untyped get-or-create. Reach for it only when you genuinely don't know the bound type up front. |
 | `remove` | `bool` | Drop the name binding + pin. **Does not destroy the object.** |
 | `keys` | `list<string>` | Currently-bound keys (Bound only; in-flight Creating slots are not listed). |
@@ -137,6 +139,7 @@ If you rotate keys (per-tenant entries that come and go, key-versioning), addres
 | `Shared\DeadlockException` (cross-key cycle) | Waited longer than 30 s on another thread's `Creating` slot — most plausibly factory A holds key K1 while waiting on K2 whose factory is held by thread B waiting on K1. Distinct message from the reentrant case. |
 | `Shared\SharedException` (draining) | The server is shutting down — the registry refuses new acquires and binds. Expected during graceful shutdown; not a code bug. |
 | `Shared\SharedException` (bind race) | A peer creator was already settled into the slot while this thread's factory was running (the factory's entry was NOT pinned under the key). Retry the call. |
+| `Shared\SharedException` (pool without worker mode) | `Registry::pool()` called from an HTTP request served without worker mode, or `Registry::global()` there whose factory returned a `Shared\Pool`; or either of them in a task whose factory returned a pool such a request created. The call binds nothing. See [Shared\Pool — Outside worker mode](shared-pool.md#outside-worker-mode). |
 | `\InvalidArgumentException` (SPL) | Empty `$key`. Argument validation, distinct from domain type errors. |
 | *(factory's exception)* | If the factory throws, the slot is aborted (Creating → absent, waiters wake to retry) and the original exception propagates to the creator. A fatal error inside the factory aborts the slot the same way, and still ends the request. |
 

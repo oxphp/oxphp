@@ -72,6 +72,14 @@ printf '%s' "$out" | grep -q "async-ok" && ok "async (oxphp_sleep)" || bad "asyn
 out="$(run shared.php)"
 printf '%s' "$out" | grep -q "shared-ok" && ok "ox_shared classes" || bad "shared (got '$out')"
 
+# 7b. Registry::pool() works for the whole script, and the idle slot it leaves
+#     does not outlive the request: the process exits 0 with a clean heap.
+perr_file="$(mktemp)"
+pout="$(docker run --rm -v "$FIX:/cli:ro" "$IMAGE" oxphp run /cli/pool.php 2>"$perr_file")"; pcode=$?
+perr="$(cat "$perr_file")"; rm -f "$perr_file"
+{ [ "$pout" = "pool-ok idle=1" ] && [ $pcode -eq 0 ] && ! printf '%s' "$perr" | grep -q "zend_mm_heap corrupted"; } \
+	&& ok "Registry::pool in one-shot + clean exit" || bad "pool one-shot (out='$pout' code=$pcode stderr='$perr')"
+
 # 8. errors → stderr, not stdout
 sout="$(docker run --rm -v "$FIX:/cli:ro" "$IMAGE" oxphp run /cli/stderr.php 2>/dev/null)"
 serr="$(docker run --rm -v "$FIX:/cli:ro" "$IMAGE" oxphp run /cli/stderr.php 2>&1 1>/dev/null)"

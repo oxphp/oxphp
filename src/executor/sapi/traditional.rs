@@ -211,6 +211,7 @@ fn worker_thread(
     // for the rationale — pthread_kill(tid, 0) is unsafe under pthread_t
     // reuse, so Pool uses an explicit registry instead.
     register_as_live_pool_worker();
+    scope_pools_to_each_request();
     // Allocate the per-worker idle-eviction flag; the central scheduler
     // (src/plugins/ox_shared/eviction.rs) sets it when our idle deques
     // have slots past their idle_timeout.
@@ -405,6 +406,40 @@ fn drain_pool_stale_if_requested() {
 #[cfg(not(feature = "plugin-shared"))]
 #[inline]
 fn drain_pool_stale_if_requested() {}
+
+/// Thread-start hook: this thread runs one request after another, so a
+/// pool created here lasts only as long as the request that creates it.
+#[cfg(feature = "plugin-shared")]
+#[inline]
+fn scope_pools_to_each_request() {
+    use crate::plugins::ox_shared::types::pool::{set_request_scope, RequestScope};
+    set_request_scope(RequestScope::EachRequest);
+}
+
+#[cfg(not(feature = "plugin-shared"))]
+#[inline]
+fn scope_pools_to_each_request() {}
+
+#[cfg(feature = "plugin-shared")]
+#[inline]
+fn end_pool_request() {
+    crate::plugins::ox_shared::types::pool::end_request_on_current_thread();
+}
+
+#[cfg(not(feature = "plugin-shared"))]
+#[inline]
+fn end_pool_request() {}
+
+/// End the open PHP request. `php_request_shutdown` resets the request
+/// heap, so right after it the pools let go of what lived there.
+///
+/// # Safety
+/// A request must be open on this thread (`php_request_startup` succeeded
+/// and this has not run since).
+unsafe fn shutdown_request() {
+    bindings::php_request_shutdown(std::ptr::null_mut());
+    end_pool_request();
+}
 
 /// RAII guard that clears SAPI request data on drop (even on panic).
 struct RequestDataGuard;
@@ -607,7 +642,7 @@ fn execute_request(
     if initialised != 0 {
         unsafe {
             libc::close(raw_fd);
-            bindings::php_request_shutdown(std::ptr::null_mut());
+            shutdown_request();
         }
         drop(request_open);
         return Some(ScriptResponse {
@@ -638,7 +673,7 @@ fn execute_request(
     }
 
     unsafe {
-        bindings::php_request_shutdown(std::ptr::null_mut());
+        shutdown_request();
     }
     drop(request_open);
 
