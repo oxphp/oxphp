@@ -69,3 +69,42 @@ function session_inner_read($sock, float $timeout = 5.0): string
 
     return $split === false ? $raw : substr($raw, $split + 4);
 }
+
+/**
+ * Sends a request with no session cookie from an async task, $delay seconds
+ * from now, and returns the promise of what came back: when it was sent, and
+ * the response split into its header block and its body.
+ *
+ * From a task rather than from the calling request because the calling request
+ * spends the whole window parked on the holder's response, so it cannot send
+ * anything into that window itself. A task runs on a pool thread of its own and
+ * sends on time.
+ *
+ * The closure carries everything it uses: it runs on that pool thread, where
+ * nothing this file declares exists.
+ */
+function session_arrival_send(string $path, float $delay): int
+{
+    return oxphp_async(static function (string $path, float $delay): array {
+        oxphp_sleep($delay);
+        $sentAt = microtime(true);
+        $sock = stream_socket_client('tcp://127.0.0.1:80', $errno, $errstr, 5.0);
+        if ($sock === false) {
+            return ['sent_at' => $sentAt, 'headers' => '', 'body' => "connect failed: $errstr ($errno)"];
+        }
+        stream_set_timeout($sock, 10);
+        fwrite($sock, "GET $path HTTP/1.0\r\n"
+            . "Host: 127.0.0.1\r\n"
+            . "Connection: close\r\n\r\n");
+        $raw = (string) stream_get_contents($sock);
+        fclose($sock);
+
+        $split = strpos($raw, "\r\n\r\n");
+
+        return [
+            'sent_at' => $sentAt,
+            'headers' => $split === false ? $raw : substr($raw, 0, $split),
+            'body' => $split === false ? '' : substr($raw, $split + 4),
+        ];
+    }, $path, $delay);
+}

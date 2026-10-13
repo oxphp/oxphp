@@ -17,10 +17,10 @@ require_once __DIR__ . '/session_write_probe.php';
 // relies on. A worker that put the settings back first would write the session
 // under the baseline instead.
 //
-// The inner request opens the session and ends while this one is parked, so no
-// request but the inner one is in the session: it is the inner request's alone
-// to write, at its end. It writes 0.1 + 0.2 at a precision of 5, which serializes
-// as 0.3 — and at the default precision as 0.30000000000000004.
+// The inner request opens the session and ends while this one is parked, and
+// the session is written at its end. It writes 0.1 + 0.2 at a precision of 5,
+// which serializes as 0.3 — and at the default precision as
+// 0.30000000000000004.
 
 $t = new TestCase('session_is_written_under_its_requests_ini', 'fibers');
 

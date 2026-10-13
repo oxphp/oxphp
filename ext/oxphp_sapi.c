@@ -3414,6 +3414,24 @@ static oxphp_stream_claim_result oxphp_db_await_owner(void *key, oxphp_request_f
         oxphp_request_fiber *owner = oxphp_claim_owner(key);
         if (owner == NULL || owner == self) return OXPHP_CLAIM_OK;
 
+        /* A wait neither side can end: the fiber holding the connection is
+         * waiting in session_start() for the session this one has open. Given
+         * up now rather than when the bound runs out, with the same outcome. */
+        if (oxphp_session_slot_waits_for(owner, self)) {
+            static __thread int64_t last_ns = 0;
+            if (oxphp_contended_log_ready(&last_ns)) {
+                char msg[400];
+                snprintf(msg, sizeof(msg),
+                         "oxphp: gave up waiting for connection %p at once because the fiber "
+                         "holding it is itself waiting in session_start() for the session this "
+                         "request has open, so neither could go on. One connection is shared "
+                         "between concurrent fibers (logged at most once a second on this "
+                         "thread)", key);
+                php_log_err(msg);
+            }
+            return OXPHP_CLAIM_REFUSED;
+        }
+
         struct timespec now;
         clock_gettime(CLOCK_MONOTONIC, &now);
         int64_t spent_ns = (int64_t)(now.tv_sec - started.tv_sec) * 1000000000
@@ -5564,6 +5582,108 @@ static void oxphp_filter_guard_restore(void)
     oxphp_orig_filter_input_array = NULL;
 }
 
+/* ─── session_start() and the session slot ───────────────
+ *
+ * One session at a time is open on a worker: the files handler locks the session
+ * it opens, and a second open of the same id on the same thread would wait for
+ * that lock holding the thread the first one needs to let it go. So
+ * session_start() in a request on the event loop waits while another request on
+ * the worker has its session open — parked with it — or is ahead of it in line
+ * for the slot; see oxphp_session_slot_wait_needed().
+ *
+ * The wait parks the request the way sleep() does, a quarter of a second at a
+ * time, and the scheduler wakes it the moment the slot is free. A drain and a
+ * cancellation reach it as they reach a sleep, and its deadline at the first
+ * of those wakes past it. Where it cannot park —
+ * under a userland fiber scheduler, or with switching blocked — it cannot wait
+ * at all, because what it is waiting for runs on this same thread, so while
+ * another request holds the session session_start() fails there the way it
+ * fails when the store cannot be opened: a warning, and false.
+ *
+ * Installed whatever RUNTIME_HOOKS says, because the session is one per thread
+ * whatever suspends a request. Outside a request fiber — the blocking path, the
+ * other modes, the CLI, an async task on its own thread — it passes straight
+ * through. */
+static zif_handler oxphp_orig_session_start = NULL;
+
+#define OXPHP_SESSION_SLOT_POLL_US 250000
+
+static ZEND_NAMED_FUNCTION(oxphp_gated_session_start)
+{
+    oxphp_request_fiber *self = oxphp_current_fiber;
+    if (self == NULL || self->task_mode || !oxphp_session_slot_wait_needed(self)) {
+        oxphp_orig_session_start(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+        return;
+    }
+
+    int rc = 1;
+    oxphp_session_slot_wait_begin(self);
+    zend_try {
+        /* A resume past the request's deadline only raises EG(timed_out), which
+         * the engine acts on once PHP code runs again: a wait that went back to
+         * sleep would carry it until the slot came free, and open the session
+         * before the request was ended. */
+        while (rc == 1 && !zend_atomic_bool_load_ex(&EG(timed_out))
+               && oxphp_session_slot_wait_needed(self)) {
+            rc = oxphp_fiber_sleep_us(OXPHP_SESSION_SLOT_POLL_US);
+        }
+    } zend_catch {
+        /* A drain ends the wait with a bailout. Left in line, the request would
+         * hold up everyone behind it for as long as its shutdown functions
+         * ran. */
+        oxphp_session_slot_wait_end(self);
+        zend_bailout();
+    } zend_end_try();
+    oxphp_session_slot_wait_end(self);
+
+    if (rc == OXPHP_FIBER_UNWIND) {
+        return;
+    }
+    if (rc < 0) {
+        oxphp_throw_exception("OxPHP\\Async\\AsyncException", "Async task cancelled", 0);
+        return;
+    }
+    if (rc == 0 && !oxphp_session_slot_held_by_other(self)) {
+        /* Only behind others in line, with nothing holding the slot: one that
+         * cannot wait takes it ahead of them rather than fail, and they wait for
+         * it as they would for any request holding it. */
+        oxphp_orig_session_start(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+        return;
+    }
+    if (rc == 0) {
+        php_error_docref(NULL, E_WARNING,
+                         "Cannot start a session while another request on this worker has "
+                         "one open, from a context that cannot wait for it to close (a "
+                         "userland fiber scheduler owns it, or switching is blocked)");
+        RETURN_FALSE;
+    }
+    if (zend_atomic_bool_load_ex(&EG(timed_out))) {
+        /* Out of time: back to PHP without a session, where the engine's check
+         * after an internal call ends the request at this one, before the
+         * caller sees what it returned.
+         *
+         * SYNC: php-src Zend/zend_execute.c ZEND_VM_FCALL_INTERRUPT_CHECK;
+         *       ext/opcache/jit/zend_jit_ir.c zend_jit_do_fcall() */
+        RETURN_FALSE;
+    }
+    oxphp_orig_session_start(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+}
+
+/* Swapped on the startup thread, as the filter guard is. A build without the
+ * session extension has no such function, and the gate is never installed. */
+static void oxphp_session_gate_install(void)
+{
+    oxphp_hook_swap("session_start", sizeof("session_start") - 1,
+                    oxphp_gated_session_start, &oxphp_orig_session_start);
+}
+
+static void oxphp_session_gate_restore(void)
+{
+    oxphp_hook_restore("session_start", sizeof("session_start") - 1,
+                       oxphp_orig_session_start);
+    oxphp_orig_session_start = NULL;
+}
+
 /* Publishing the set is what makes an enabled RUNTIME_HOOKS confirmable at all:
  * a misspelled variable name, RUNTIME_HOOKS=0 and a correctly enabled build
  * otherwise serve byte-identical responses and log nothing. The flags are
@@ -5964,11 +6084,11 @@ static void oxphp_soft_reset(void) {
      * Matches PHP-FPM behavior: always write session data, even on crash.
      * This ensures the file lock is released and data is persisted.
      *
-     * Unconditional here, and only here: this path runs with nothing else on the
-     * worker, so whatever session state is standing belongs to a request that has
-     * ended. The event loop shares the same release but has to ask first, because
-     * a request it admits can be arriving beside a suspended one still working in
-     * a session — see oxphp_session_release_if_idle(). */
+     * Unconditional here: this path runs with nothing else on the worker, so
+     * whatever session state is standing belongs to a request that has ended.
+     * The event loop shares the same release, run as each request ends, and
+     * takes each request's session off the thread while the request is
+     * parked — see oxphp_session_after_slice(). */
     oxphp_session_release_request_state();
 
     /* Undo the ini directives the last request changed.
@@ -6517,9 +6637,13 @@ static void oxphp_serve_loop(zend_fcall_info *fci, zend_fcall_info_cache *fcc)
          * it stops the script's timer. (Not the destructors of the objects alive
          * at the fatal error: it marks them all destructed.) That timer is the
          * one the requests have been sharing, disarmed between their slices, so
-         * without this they would run with no limit at all. Only the timer is put
-         * back on this path; the cleanup above is not run. */
+         * without this they would run with no limit at all. The same shutdown
+         * then writes and closes a session it finds open — and the one a request
+         * parked with open is off the thread while that request waits, so it is
+         * put back, or nothing closes it and the store's lock on it outlives the
+         * worker. Those two are all; the cleanup above is not run. */
         oxphp_scheduler_release_execution_timer(&sched);
+        oxphp_scheduler_return_session_holder(&sched);
         zend_bailout();
     } zend_end_try();
     oxphp_scheduler_release_execution_timer(&sched);
@@ -9338,6 +9462,7 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
     /* Last: all extensions (standard included) have registered their
      * functions by now; worker threads have not started yet. */
     oxphp_filter_guard_install();
+    oxphp_session_gate_install();
     oxphp_runtime_hooks_install();
     oxphp_request_body_hook_install();
 
@@ -9364,6 +9489,7 @@ PHP_MSHUTDOWN_FUNCTION(oxphp_sapi)
 {
     oxphp_request_body_hook_restore();
     oxphp_runtime_hooks_restore();
+    oxphp_session_gate_restore();
     oxphp_filter_guard_restore();
     oxphp_shareable_unregister_ce();
     return SUCCESS;

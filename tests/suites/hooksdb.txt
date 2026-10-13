@@ -138,6 +138,15 @@ hooksdb/test_persistent_dtor_follows_last_user
 # returns false and leaves the holder's transaction alone.
 hooksdb/test_persistent_rollback_refused_on_held_connection
 
+# A shared connection beside the one session a worker keeps open at a time. A
+# request with its session open waits for the connection as any other does —
+# the request holding it goes on running and gives it back. And where the request
+# holding the connection is itself waiting in session_start() for that session,
+# the wait for the connection is given up at once rather than when its bound
+# runs out.
+hooksdb/test_session_holder_waits_for_a_claim
+hooksdb/test_session_slot_claim_cycle_breaks
+
 # Last, because both of these end by destroying the connection they hold: a fiber
 # parked inside a socket read holds the stream across the suspension, and another
 # fiber closing that same stream frees it under the reader. Once through a raw

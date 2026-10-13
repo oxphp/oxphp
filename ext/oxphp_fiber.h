@@ -27,6 +27,7 @@
 struct _oxphp_fiber_scheduler;
 struct oxphp_io_reg;
 struct _php_stream;
+struct oxphp_session_lifted;
 
 /* Which fiber, and which of its descriptors, a readiness registration belongs
  * to — so an event can be scattered back into that fiber's own descriptor
@@ -317,6 +318,24 @@ typedef struct {
      * oxphp_fiber_park_ini. Owned while parked; NULL when the request changed
      * nothing that travels with it, which is the common case. */
     HashTable *ini_parked;
+
+    /* This request's session, taken off the thread while it is parked: the id,
+     * which the next session_start() on the thread would take before it looks
+     * at any cookie, the array behind $_SESSION and the $_SESSION entry itself
+     * (owned references, IS_UNDEF when absent), the serialized copy lazy_write
+     * compares against, and the script and line the session was started from.
+     * `lifted` holds the rest while the session is open — the save handler's
+     * open state and the handler it is open with — and is NULL while it is
+     * closed. See oxphp_session_park(). */
+    struct {
+        zend_string *id;
+        zval vars;
+        zval symbol;
+        zend_string *serialized;
+        zend_string *started_filename;
+        uint32_t started_lineno;
+        struct oxphp_session_lifted *lifted;
+    } session;
 } oxphp_fiber_php_state;
 
 /* A request or task as PDO handle teardown tells them apart: the fiber it runs on
@@ -555,12 +574,10 @@ typedef struct _oxphp_request_fiber {
      * oxphp_cancel_already_delivered() reads that one from the reason cell. */
     uint8_t cancel_delivered;
     bool completed;         /* set by coroutine before final switch — low-level API never sets DEAD */
-    /* This request is in the session standing on the thread — it opened one, or
-     * it was admitted while one was already there and was handed it. Session
-     * state is per thread, not per fiber, so it can only be given back while no
-     * live request carries this. Taken after every slice, by the rule in
-     * oxphp_fiber.c. */
-    bool session_touched;
+    /* Nonzero while this request waits in session_start() for another
+     * request's session to close: its place in the line, smaller goes first.
+     * See oxphp_session_slot_wait_needed(). */
+    uint64_t session_wait_seq;
     int consecutive_errors;
 
     /* ── Async-task mode (oxphp_async fiber, not an HTTP request) ──
@@ -649,6 +666,20 @@ typedef struct _oxphp_fiber_scheduler {
 
     /* Currently running fiber (NULL when in scheduler) */
     oxphp_request_fiber *current;
+
+    /* The request whose session is open, while it is parked with it open;
+     * NULL otherwise. One at a time per worker: while this is set the worker
+     * admits no new request, and session_start() in any other request waits —
+     * or, where it cannot park (a userland fiber, switching blocked), warns and
+     * returns false. Set and cleared after each slice by
+     * oxphp_session_after_slice(); also cleared as the scheduler is torn down
+     * (oxphp_scheduler_destroy()) and when a fatal error between two slices
+     * ends the serve loop (oxphp_scheduler_return_session_holder()). */
+    oxphp_request_fiber *session_holder;
+    /* How many requests wait in session_start(), and the next place in that
+     * line to hand out. */
+    uint32_t session_waiters;
+    uint64_t session_wait_next;
 
     /* Shared handler closure (passed to all fibers) */
     zend_fcall_info *shared_fci;
@@ -782,6 +813,10 @@ void oxphp_scheduler_init(oxphp_fiber_scheduler *sched);
  * response. */
 void oxphp_scheduler_retire_fibers(oxphp_fiber_scheduler *sched);
 void oxphp_scheduler_destroy(oxphp_fiber_scheduler *sched);
+/* For a serve loop a fatal error between two slices has ended, in place of the
+ * teardown above: the session the request parked with open goes back on the
+ * thread, for the worker script's own shutdown to write and close. */
+void oxphp_scheduler_return_session_holder(oxphp_fiber_scheduler *sched);
 
 oxphp_request_fiber *oxphp_scheduler_create_fiber(
     oxphp_fiber_scheduler *sched,
@@ -949,6 +984,25 @@ void oxphp_fiber_init_request_state(void);
  * worker. The event loop asks first, through a guarded counterpart private to
  * ext/oxphp_fiber.c; the rule both share is described there. Runs PHP. */
 void oxphp_session_release_request_state(void);
+
+/* The line session_start() waits in, for the hook in ext/oxphp_sapi.c; the
+ * rule is described with the rest of the session state in ext/oxphp_fiber.c.
+ *
+ * wait_needed: whether `self` may not start a session yet — another request
+ * holds the worker's session, or one that began waiting before `self` still
+ * waits. held_by_other: the first of those alone. wait_begin and wait_end take
+ * and give back `self`'s place; wait_end is safe to call on a request that
+ * holds none.
+ *
+ * waits_for: whether `waiter` is in that line while `holder` holds the
+ * session it waits for — the one case where a request waiting on a connection
+ * `waiter` holds would wait on itself. */
+bool oxphp_session_slot_wait_needed(const oxphp_request_fiber *self);
+bool oxphp_session_slot_held_by_other(const oxphp_request_fiber *self);
+void oxphp_session_slot_wait_begin(oxphp_request_fiber *self);
+void oxphp_session_slot_wait_end(oxphp_request_fiber *self);
+bool oxphp_session_slot_waits_for(const oxphp_request_fiber *waiter,
+                                  const oxphp_request_fiber *holder);
 
 /* ─── Async-task scheduler (Rust-driven via bridge callbacks) ───
  * Registered into the bridge at MINIT via

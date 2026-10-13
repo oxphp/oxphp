@@ -192,11 +192,13 @@ fi
 # ── Standalone worker-lifetime checks ────────────────────────
 # None of these can be asserted from inside a request. A request cannot observe
 # its own teardown, what a request leaves behind only shows up as the whole
-# worker's allocator across hundreds of them, and a response is not something
-# the request that produced it can read back. All three drive the fibers profile
-# themselves, from outside, after its suite has finished.
+# worker's allocator across hundreds of them, a response is not something the
+# request that produced it can read back, and what a worker's serve loop leaves
+# when a fatal error ends it is only seen by the worker that replaces it. All
+# four drive the fibers profile themselves, from outside, after its suite has
+# finished.
 if [[ " ${profiles[*]} " == *" fibers "* ]] && [ -z "$FILTER_SUITE" ] && [ -z "$FILTER_TEST" ]; then
-    for check in verify_teardown_unwind verify_worker_does_not_grow verify_response_headers; do
+    for check in verify_teardown_unwind verify_worker_does_not_grow verify_response_headers verify_worker_session_closed_after_a_bailout; do
         log_info "━━━ Standalone: ${check#verify_} ━━━"
         emitted_before=$(wc -l < "$JSONL_FILE")
         # Same reasoning as the admission checks above: a failing check turns the

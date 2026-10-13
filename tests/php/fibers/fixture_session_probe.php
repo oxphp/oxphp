@@ -16,6 +16,10 @@ declare(strict_types=1);
 // from "this request was handed the previous one" at the moment it happens is the
 // E_NOTICE the refusal raises.
 
+// When this request began to run, for the tests that time its admission against
+// a session another request holds. First, so nothing below is counted in it.
+$startedAt = microtime(true);
+
 $preSessionIsset = isset($_SESSION);
 $preSessionId = session_id();
 
@@ -41,6 +45,7 @@ $who = $_SESSION['who'] ?? 'none';
 
 header('Content-Type: application/json');
 echo json_encode([
+    'started_at' => $startedAt,
     'pre_session_isset' => $preSessionIsset,
     'pre_session_id' => $preSessionId,
     'started' => $started,
