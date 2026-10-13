@@ -154,6 +154,30 @@ impl fmt::Display for PhpValue {
     }
 }
 
+impl PhpValue {
+    /// The value as PHP source, in the form the engine reads from an internal
+    /// parameter's `default_value`: it parses this text to fill a parameter a
+    /// named call skipped, and to answer `ReflectionParameter::getDefaultValue()`.
+    pub fn to_php_literal(&self) -> String {
+        match self {
+            PhpValue::Null => "null".to_string(),
+            PhpValue::Bool(true) => "true".to_string(),
+            PhpValue::Bool(false) => "false".to_string(),
+            PhpValue::Int(v) => v.to_string(),
+            PhpValue::Float(v) if v.is_nan() => "NAN".to_string(),
+            PhpValue::Float(v) if v.is_infinite() => {
+                if *v > 0.0 { "INF" } else { "-INF" }.to_string()
+            }
+            // `{:?}` always keeps a decimal point or an exponent (`0.0`,
+            // `1e300`); `{}` would print `0`, which PHP reads back as an int.
+            PhpValue::Float(v) => format!("{v:?}"),
+            PhpValue::String(s) => format!("'{}'", s.replace('\\', "\\\\").replace('\'', "\\'")),
+            PhpValue::Array => "[]".to_string(),
+            PhpValue::ConstExpr(s) => s.clone(),
+        }
+    }
+}
+
 // ─── MagicMethod ─────────────────────────────────────────────────────────────
 
 /// PHP magic method identifiers.
@@ -428,6 +452,43 @@ mod tests {
         assert_eq!(
             PhpValue::ConstExpr("PHP_INT_MAX".to_string()).to_string(),
             "PHP_INT_MAX"
+        );
+    }
+
+    #[test]
+    fn test_php_value_literal() {
+        assert_eq!(PhpValue::Null.to_php_literal(), "null");
+        assert_eq!(PhpValue::Bool(false).to_php_literal(), "false");
+        assert_eq!(PhpValue::Int(-1).to_php_literal(), "-1");
+        assert_eq!(PhpValue::Array.to_php_literal(), "[]");
+        assert_eq!(
+            PhpValue::ConstExpr("\\OxPHP\\Shared\\Ordering::SeqCst".to_string()).to_php_literal(),
+            "\\OxPHP\\Shared\\Ordering::SeqCst"
+        );
+    }
+
+    #[test]
+    fn test_php_value_literal_float_stays_float() {
+        assert_eq!(PhpValue::Float(0.0).to_php_literal(), "0.0");
+        assert_eq!(PhpValue::Float(32.0).to_php_literal(), "32.0");
+        assert_eq!(PhpValue::Float(-2.5).to_php_literal(), "-2.5");
+        assert_eq!(PhpValue::Float(1e300).to_php_literal(), "1e300");
+        assert_eq!(PhpValue::Float(f64::NAN).to_php_literal(), "NAN");
+        assert_eq!(PhpValue::Float(f64::INFINITY).to_php_literal(), "INF");
+        assert_eq!(PhpValue::Float(f64::NEG_INFINITY).to_php_literal(), "-INF");
+    }
+
+    #[test]
+    fn test_php_value_literal_string_is_escaped() {
+        assert_eq!(PhpValue::String("x".to_string()).to_php_literal(), "'x'");
+        assert_eq!(PhpValue::String(String::new()).to_php_literal(), "''");
+        assert_eq!(
+            PhpValue::String("it's".to_string()).to_php_literal(),
+            "'it\\'s'"
+        );
+        assert_eq!(
+            PhpValue::String("a\\b".to_string()).to_php_literal(),
+            "'a\\\\b'"
         );
     }
 

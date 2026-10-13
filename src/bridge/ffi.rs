@@ -637,6 +637,7 @@ extern "C" {
         param_names: *const *const c_char,
         param_types: *const c_int,
         param_optional: *const c_int,
+        param_defaults: *const *const c_char,
     );
     pub fn oxphp_bridge_get_class_method_param_name(
         class_index: c_int,
@@ -670,6 +671,7 @@ extern "C" {
         param_names: *const *const c_char,
         param_types: *const c_int,
         param_optional: *const c_int,
+        param_defaults: *const *const c_char,
     );
     pub fn oxphp_bridge_get_interface_method_param_name(
         iface_index: c_int,
@@ -713,6 +715,7 @@ extern "C" {
         param_names: *const *const c_char,
         param_types: *const c_int,
         param_optional: *const c_int,
+        param_defaults: *const *const c_char,
     );
     pub fn oxphp_bridge_get_enum_method_param_name(
         enum_index: c_int,
@@ -761,6 +764,7 @@ extern "C" {
         param_names: *const *const c_char,
         param_types: *const c_int,
         param_optional: *const c_int,
+        param_defaults: *const *const c_char,
     ) -> c_int;
     pub fn oxphp_bridge_get_plugin_function_param_name(
         index: c_int,

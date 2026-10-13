@@ -192,6 +192,7 @@ typedef struct {
     char **param_names;
     int *param_types;
     int *param_optional;
+    char **param_defaults;
 } oxphp_class_method_t;
 
 typedef struct {
@@ -302,7 +303,8 @@ void oxphp_bridge_class_add_method(int h, const char *name,
     int return_type, int return_nullable,
     const char * const *param_names,
     const int *param_types,
-    const int *param_optional)
+    const int *param_optional,
+    const char * const *param_defaults)
 {
     if (h < 0 || h >= plugin_class_count || !name) return;
     oxphp_plugin_class_entry_t *e = &plugin_classes[h];
@@ -327,12 +329,15 @@ void oxphp_bridge_class_add_method(int h, const char *name,
         m->param_names = calloc(total_params, sizeof(char *));
         m->param_types = calloc(total_params, sizeof(int));
         m->param_optional = calloc(total_params, sizeof(int));
-        if (m->param_names && m->param_types && m->param_optional) {
+        m->param_defaults = calloc(total_params, sizeof(char *));
+        if (m->param_names && m->param_types && m->param_optional && m->param_defaults) {
             for (int i = 0; i < total_params; i++) {
                 const char *pn = (param_names && param_names[i]) ? param_names[i] : "";
                 m->param_names[i] = strdup(pn);
                 m->param_types[i] = param_types ? param_types[i] : 0;
                 m->param_optional[i] = param_optional ? param_optional[i] : 0;
+                const char *pd = param_defaults ? param_defaults[i] : NULL;
+                m->param_defaults[i] = pd ? strdup(pd) : NULL;
             }
         }
     }
@@ -484,6 +489,13 @@ int oxphp_bridge_get_class_method_param_optional(int ci, int mi, int pi) {
     if (pi < 0 || pi >= m->total_params || !m->param_optional) return 0;
     return m->param_optional[pi];
 }
+const char *oxphp_bridge_get_class_method_param_default(int ci, int mi, int pi) {
+    if (ci < 0 || ci >= plugin_class_count) return NULL;
+    if (mi < 0 || mi >= plugin_classes[ci].method_count) return NULL;
+    oxphp_class_method_t *m = &plugin_classes[ci].methods[mi];
+    if (pi < 0 || pi >= m->total_params || !m->param_defaults) return NULL;
+    return m->param_defaults[pi];
+}
 int oxphp_bridge_get_class_magic(int ci, int mt) {
     if (ci < 0 || ci >= plugin_class_count) return 0;
     if (mt < 0 || mt >= MAGIC_METHOD_COUNT) return 0;
@@ -505,6 +517,7 @@ typedef struct {
     char **param_names;
     int *param_types;
     int *param_optional;
+    char **param_defaults;
 } oxphp_iface_method_t;
 
 typedef struct {
@@ -552,7 +565,8 @@ void oxphp_bridge_interface_add_method(int h, const char *name,
     int return_type, int return_nullable,
     const char * const *param_names,
     const int *param_types,
-    const int *param_optional)
+    const int *param_optional,
+    const char * const *param_defaults)
 {
     if (h < 0 || h >= plugin_interface_count || !name) return;
     oxphp_plugin_iface_entry_t *e = &plugin_interfaces[h];
@@ -576,12 +590,15 @@ void oxphp_bridge_interface_add_method(int h, const char *name,
         m->param_names = calloc(total_params, sizeof(char *));
         m->param_types = calloc(total_params, sizeof(int));
         m->param_optional = calloc(total_params, sizeof(int));
-        if (m->param_names && m->param_types && m->param_optional) {
+        m->param_defaults = calloc(total_params, sizeof(char *));
+        if (m->param_names && m->param_types && m->param_optional && m->param_defaults) {
             for (int i = 0; i < total_params; i++) {
                 const char *pn = (param_names && param_names[i]) ? param_names[i] : "";
                 m->param_names[i] = strdup(pn);
                 m->param_types[i] = param_types ? param_types[i] : 0;
                 m->param_optional[i] = param_optional ? param_optional[i] : 0;
+                const char *pd = param_defaults ? param_defaults[i] : NULL;
+                m->param_defaults[i] = pd ? strdup(pd) : NULL;
             }
         }
     }
@@ -675,6 +692,13 @@ int oxphp_bridge_get_interface_method_param_optional(int ii, int mi, int pi) {
     if (pi < 0 || pi >= m->total_params || !m->param_optional) return 0;
     return m->param_optional[pi];
 }
+const char *oxphp_bridge_get_interface_method_param_default(int ii, int mi, int pi) {
+    if (ii < 0 || ii >= plugin_interface_count) return NULL;
+    if (mi < 0 || mi >= plugin_interfaces[ii].method_count) return NULL;
+    oxphp_iface_method_t *m = &plugin_interfaces[ii].methods[mi];
+    if (pi < 0 || pi >= m->total_params || !m->param_defaults) return NULL;
+    return m->param_defaults[pi];
+}
 int oxphp_bridge_get_interface_constant_count(int i) {
     if (i < 0 || i >= plugin_interface_count) return 0;
     return plugin_interfaces[i].constant_count;
@@ -715,6 +739,7 @@ typedef struct {
     char **param_names;
     int *param_types;
     int *param_optional;
+    char **param_defaults;
 } oxphp_enum_method_t;
 
 typedef struct {
@@ -788,7 +813,8 @@ void oxphp_bridge_enum_add_method(int h, const char *name,
     int return_type, int return_nullable,
     const char * const *param_names,
     const int *param_types,
-    const int *param_optional)
+    const int *param_optional,
+    const char * const *param_defaults)
 {
     if (h < 0 || h >= plugin_enum_count || !name) return;
     oxphp_plugin_enum_entry_t *e = &plugin_enums[h];
@@ -812,12 +838,15 @@ void oxphp_bridge_enum_add_method(int h, const char *name,
         m->param_names = calloc(total_params, sizeof(char *));
         m->param_types = calloc(total_params, sizeof(int));
         m->param_optional = calloc(total_params, sizeof(int));
-        if (m->param_names && m->param_types && m->param_optional) {
+        m->param_defaults = calloc(total_params, sizeof(char *));
+        if (m->param_names && m->param_types && m->param_optional && m->param_defaults) {
             for (int i = 0; i < total_params; i++) {
                 const char *pn = (param_names && param_names[i]) ? param_names[i] : "";
                 m->param_names[i] = strdup(pn);
                 m->param_types[i] = param_types ? param_types[i] : 0;
                 m->param_optional[i] = param_optional ? param_optional[i] : 0;
+                const char *pd = param_defaults ? param_defaults[i] : NULL;
+                m->param_defaults[i] = pd ? strdup(pd) : NULL;
             }
         }
     }
@@ -915,6 +944,13 @@ int oxphp_bridge_get_enum_method_param_optional(int ei, int mi, int pi) {
     oxphp_enum_method_t *m = &plugin_enums[ei].methods[mi];
     if (pi < 0 || pi >= m->total_params || !m->param_optional) return 0;
     return m->param_optional[pi];
+}
+const char *oxphp_bridge_get_enum_method_param_default(int ei, int mi, int pi) {
+    if (ei < 0 || ei >= plugin_enum_count) return NULL;
+    if (mi < 0 || mi >= plugin_enums[ei].method_count) return NULL;
+    oxphp_enum_method_t *m = &plugin_enums[ei].methods[mi];
+    if (pi < 0 || pi >= m->total_params || !m->param_defaults) return NULL;
+    return m->param_defaults[pi];
 }
 
 /* ═══════════════════════════════════════════════════════════
@@ -1069,6 +1105,7 @@ typedef struct {
     char **param_names;
     int *param_types;
     int *param_optional;
+    char **param_defaults;
 } oxphp_plugin_func_entry_t;
 
 static oxphp_plugin_func_entry_t *plugin_builder_functions = NULL;
@@ -1079,7 +1116,8 @@ int oxphp_bridge_register_plugin_function(const char *fqn, int required_params,
     int total_params, int is_variadic, int return_type, int return_nullable,
     const char * const *param_names,
     const int *param_types,
-    const int *param_optional)
+    const int *param_optional,
+    const char * const *param_defaults)
 {
     if (!fqn) return -1;
     if (plugin_builder_function_count >= plugin_builder_function_capacity) {
@@ -1102,12 +1140,15 @@ int oxphp_bridge_register_plugin_function(const char *fqn, int required_params,
         e->param_names = calloc(total_params, sizeof(char *));
         e->param_types = calloc(total_params, sizeof(int));
         e->param_optional = calloc(total_params, sizeof(int));
-        if (e->param_names && e->param_types && e->param_optional) {
+        e->param_defaults = calloc(total_params, sizeof(char *));
+        if (e->param_names && e->param_types && e->param_optional && e->param_defaults) {
             for (int i = 0; i < total_params; i++) {
                 const char *pn = (param_names && param_names[i]) ? param_names[i] : "";
                 e->param_names[i] = strdup(pn);
                 e->param_types[i] = param_types ? param_types[i] : 0;
                 e->param_optional[i] = param_optional ? param_optional[i] : 0;
+                const char *pd = param_defaults ? param_defaults[i] : NULL;
+                e->param_defaults[i] = pd ? strdup(pd) : NULL;
             }
         }
     }
@@ -1157,6 +1198,12 @@ int oxphp_bridge_get_plugin_function_param_optional(int i, int pi) {
     oxphp_plugin_func_entry_t *e = &plugin_builder_functions[i];
     if (pi < 0 || pi >= e->total_params || !e->param_optional) return 0;
     return e->param_optional[pi];
+}
+const char *oxphp_bridge_get_plugin_function_param_default(int i, int pi) {
+    if (i < 0 || i >= plugin_builder_function_count) return NULL;
+    oxphp_plugin_func_entry_t *e = &plugin_builder_functions[i];
+    if (pi < 0 || pi >= e->total_params || !e->param_defaults) return NULL;
+    return e->param_defaults[pi];
 }
 
 /* ═══════════════════════════════════════════════════════════
