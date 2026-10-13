@@ -8047,13 +8047,21 @@ static const zend_internal_arg_info *oxphp_build_return_arginfo(int rt, int null
  * the PHP layer (the dispatch hop into Rust is what enforces typing today).
  * The variadic bit is set on the last slot when `is_variadic` is true.
  *
- * `param_names[i]` must point to long-lived storage — the bridge strdup's
- * names at registration time, so the pointer can be borrowed directly.
+ * `param_defaults[i]` is the PHP literal of a parameter's default value, or
+ * NULL for one without. The engine parses it to fill a parameter that a named
+ * call skipped and to answer ReflectionParameter::getDefaultValue(); without
+ * it, a named call that skips the parameter to pass a later one throws
+ * ArgumentCountError.
+ *
+ * `param_names[i]` and `param_defaults[i]` must point to long-lived storage —
+ * the bridge strdup's both at registration time, so the pointers can be
+ * borrowed directly.
  */
 static const zend_internal_arg_info *oxphp_build_method_arginfo(
     int required_params, int total_params, int is_variadic,
     int return_type, int return_nullable,
-    const char * const *param_names)
+    const char * const *param_names,
+    const char * const *param_defaults)
 {
     if (total_params <= 0) {
         return oxphp_build_return_arginfo(return_type, return_nullable);
@@ -8082,6 +8090,7 @@ static const zend_internal_arg_info *oxphp_build_method_arginfo(
             mask |= _ZEND_IS_VARIADIC_BIT;
         }
         info[1 + i].type.type_mask = mask;
+        info[1 + i].default_value = param_defaults ? param_defaults[i] : NULL;
     }
 
     return info;
@@ -8610,6 +8619,7 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
                     int required = oxphp_bridge_get_plugin_function_required(i);
                     int is_variadic = oxphp_bridge_get_plugin_function_is_variadic(i);
                     const char **pnames = NULL;
+                    const char **pdefaults = NULL;
                     if (total > 0) {
                         pnames = calloc(total, sizeof(const char *));
                         if (pnames) {
@@ -8617,10 +8627,17 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
                                 pnames[p] = oxphp_bridge_get_plugin_function_param_name(i, p);
                             }
                         }
+                        pdefaults = calloc(total, sizeof(const char *));
+                        if (pdefaults) {
+                            for (int p = 0; p < total; p++) {
+                                pdefaults[p] = oxphp_bridge_get_plugin_function_param_default(i, p);
+                            }
+                        }
                     }
                     const zend_internal_arg_info *info = oxphp_build_method_arginfo(
-                        required, total, is_variadic, rt, rn, pnames);
+                        required, total, is_variadic, rt, rn, pnames, pdefaults);
                     free((void *)pnames);
+                    free((void *)pdefaults);
                     fn_entries[i].arg_info = info
                         ? info
                         : (const zend_internal_arg_info *)arginfo_oxphp_native_dispatch;
@@ -8659,6 +8676,7 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
                     int required = oxphp_bridge_get_interface_method_required(i, m);
                     int is_variadic = oxphp_bridge_get_interface_method_is_variadic(i, m);
                     const char **pnames = NULL;
+                    const char **pdefaults = NULL;
                     if (total > 0) {
                         pnames = calloc(total, sizeof(const char *));
                         if (pnames) {
@@ -8666,10 +8684,17 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
                                 pnames[p] = oxphp_bridge_get_interface_method_param_name(i, m, p);
                             }
                         }
+                        pdefaults = calloc(total, sizeof(const char *));
+                        if (pdefaults) {
+                            for (int p = 0; p < total; p++) {
+                                pdefaults[p] = oxphp_bridge_get_interface_method_param_default(i, m, p);
+                            }
+                        }
                     }
                     const zend_internal_arg_info *info = oxphp_build_method_arginfo(
-                        required, total, is_variadic, rt, rn, pnames);
+                        required, total, is_variadic, rt, rn, pnames, pdefaults);
                     free((void *)pnames);
+                    free((void *)pdefaults);
                     methods[m].arg_info = info
                         ? info
                         : (const zend_internal_arg_info *)arginfo_oxphp_method_dispatch;
@@ -8742,6 +8767,7 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
                     int required = oxphp_bridge_get_enum_method_required(i, m);
                     int is_variadic = oxphp_bridge_get_enum_method_is_variadic(i, m);
                     const char **pnames = NULL;
+                    const char **pdefaults = NULL;
                     if (total > 0) {
                         pnames = calloc(total, sizeof(const char *));
                         if (pnames) {
@@ -8749,10 +8775,17 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
                                 pnames[p] = oxphp_bridge_get_enum_method_param_name(i, m, p);
                             }
                         }
+                        pdefaults = calloc(total, sizeof(const char *));
+                        if (pdefaults) {
+                            for (int p = 0; p < total; p++) {
+                                pdefaults[p] = oxphp_bridge_get_enum_method_param_default(i, m, p);
+                            }
+                        }
                     }
                     const zend_internal_arg_info *info = oxphp_build_method_arginfo(
-                        required, total, is_variadic, rt, rn, pnames);
+                        required, total, is_variadic, rt, rn, pnames, pdefaults);
                     free((void *)pnames);
+                    free((void *)pdefaults);
                     methods[m].arg_info = info
                         ? info
                         : (const zend_internal_arg_info *)arginfo_oxphp_method_dispatch;
@@ -8847,6 +8880,7 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
                         int required = oxphp_bridge_get_class_method_required(i, m);
                         int is_variadic = oxphp_bridge_get_class_method_is_variadic(i, m);
                         const char **pnames = NULL;
+                        const char **pdefaults = NULL;
                         if (total > 0) {
                             pnames = calloc(total, sizeof(const char *));
                             if (pnames) {
@@ -8854,10 +8888,17 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
                                     pnames[p] = oxphp_bridge_get_class_method_param_name(i, m, p);
                                 }
                             }
+                            pdefaults = calloc(total, sizeof(const char *));
+                            if (pdefaults) {
+                                for (int p = 0; p < total; p++) {
+                                    pdefaults[p] = oxphp_bridge_get_class_method_param_default(i, m, p);
+                                }
+                            }
                         }
                         const zend_internal_arg_info *info = oxphp_build_method_arginfo(
-                            required, total, is_variadic, rt, rn, pnames);
+                            required, total, is_variadic, rt, rn, pnames, pdefaults);
                         free((void *)pnames);
+                        free((void *)pdefaults);
                         methods[m].arg_info = info
                             ? info
                             : (const zend_internal_arg_info *)arginfo_oxphp_method_dispatch;

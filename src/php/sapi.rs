@@ -2486,6 +2486,7 @@ pub fn register_php_definitions(defs: PhpDefinitions) {
                     pa.name_ptrs.as_ptr(),
                     pa.types.as_ptr(),
                     pa.optional.as_ptr(),
+                    pa.default_ptrs.as_ptr(),
                 );
             }
             for constant in &iface.constants {
@@ -2574,6 +2575,7 @@ pub fn register_php_definitions(defs: PhpDefinitions) {
                     pa.name_ptrs.as_ptr(),
                     pa.types.as_ptr(),
                     pa.optional.as_ptr(),
+                    pa.default_ptrs.as_ptr(),
                 );
             }
         }
@@ -2681,6 +2683,7 @@ pub fn register_php_definitions(defs: PhpDefinitions) {
                     pa.name_ptrs.as_ptr(),
                     pa.types.as_ptr(),
                     pa.optional.as_ptr(),
+                    pa.default_ptrs.as_ptr(),
                 );
             }
 
@@ -2729,6 +2732,7 @@ pub fn register_php_definitions(defs: PhpDefinitions) {
                         0,
                         ret_tag,
                         if ret_nullable { 1 } else { 0 },
+                        std::ptr::null(),
                         std::ptr::null(),
                         std::ptr::null(),
                         std::ptr::null(),
@@ -2819,6 +2823,7 @@ pub fn register_php_definitions(defs: PhpDefinitions) {
                 pa.name_ptrs.as_ptr(),
                 pa.types.as_ptr(),
                 pa.optional.as_ptr(),
+                pa.default_ptrs.as_ptr(),
             );
         }
         if let Some(handler) = func.handler {
@@ -2911,6 +2916,8 @@ fn php_type_to_bridge(t: &Option<PhpType>) -> (c_int, c_int) {
 struct ParamArrays {
     _names: Vec<CString>,
     name_ptrs: Vec<*const c_char>,
+    _defaults: Vec<Option<CString>>,
+    default_ptrs: Vec<*const c_char>,
     types: Vec<c_int>,
     optional: Vec<c_int>,
 }
@@ -2921,6 +2928,18 @@ fn build_param_arrays(params: &[PhpParamDef]) -> ParamArrays {
         .map(|p| CString::new(p.name.as_str()).expect("plugin param name contains NUL"))
         .collect();
     let name_ptrs: Vec<*const c_char> = names.iter().map(|c| c.as_ptr()).collect();
+    let defaults: Vec<Option<CString>> = params
+        .iter()
+        .map(|p| {
+            p.default.as_ref().map(|d| {
+                CString::new(d.to_php_literal()).expect("plugin param default contains NUL")
+            })
+        })
+        .collect();
+    let default_ptrs: Vec<*const c_char> = defaults
+        .iter()
+        .map(|d| d.as_ref().map_or(std::ptr::null(), |c| c.as_ptr()))
+        .collect();
     let types: Vec<c_int> = params
         .iter()
         .map(|p| p.php_type.to_bridge_tag().0 as c_int)
@@ -2929,6 +2948,8 @@ fn build_param_arrays(params: &[PhpParamDef]) -> ParamArrays {
     ParamArrays {
         _names: names,
         name_ptrs,
+        _defaults: defaults,
+        default_ptrs,
         types,
         optional,
     }

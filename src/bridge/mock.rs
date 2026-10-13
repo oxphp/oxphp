@@ -732,6 +732,7 @@ pub unsafe fn oxphp_bridge_class_add_method(
     _param_names: *const *const c_char,
     _param_types: *const c_int,
     _param_optional: *const c_int,
+    _param_defaults: *const *const c_char,
 ) {
 }
 pub unsafe fn oxphp_bridge_get_class_method_param_name(
@@ -783,6 +784,7 @@ pub unsafe fn oxphp_bridge_interface_add_method(
     _param_names: *const *const c_char,
     _param_types: *const c_int,
     _param_optional: *const c_int,
+    _param_defaults: *const *const c_char,
 ) {
 }
 pub unsafe fn oxphp_bridge_get_interface_method_param_name(
@@ -838,6 +840,7 @@ pub unsafe fn oxphp_bridge_enum_add_method(
     _param_names: *const *const c_char,
     _param_types: *const c_int,
     _param_optional: *const c_int,
+    _param_defaults: *const *const c_char,
 ) {
 }
 pub unsafe fn oxphp_bridge_get_enum_method_param_name(
@@ -899,6 +902,7 @@ pub unsafe fn oxphp_bridge_register_plugin_function(
     _param_names: *const *const c_char,
     _param_types: *const c_int,
     _param_optional: *const c_int,
+    _param_defaults: *const *const c_char,
 ) -> c_int {
     0
 }

@@ -208,14 +208,17 @@ void oxphp_bridge_class_add_constant(int class_handle, const char *name,
     uint32_t visibility, const char *value);
 
 /** Add a method to a class. return_type: OXPHP_RT_* constant (0 = no type info).
- *  param_names/types/optional are parallel arrays of length total_params. They may be
- *  NULL when total_params == 0. Names are strdup'd by the bridge. */
+ *  param_names/types/optional/defaults are parallel arrays of length total_params. They
+ *  may be NULL when total_params == 0. param_defaults[i] is the PHP literal of the
+ *  parameter's default value, NULL for a parameter without one. Names and defaults
+ *  are strdup'd by the bridge. */
 void oxphp_bridge_class_add_method(int class_handle, const char *name,
     uint32_t visibility, uint32_t flags, int required_params, int total_params, int is_variadic,
     int return_type, int return_nullable,
     const char * const *param_names,
     const int *param_types,
-    const int *param_optional);
+    const int *param_optional,
+    const char * const *param_defaults);
 
 /** Set a magic method handler flag. magic_type is the MagicMethod enum ordinal (0-16). */
 void oxphp_bridge_class_set_magic(int class_handle, int magic_type, int has_handler);
@@ -307,6 +310,9 @@ int oxphp_bridge_get_class_method_param_type(int class_index, int method_index, 
 /** Get class method parameter optional flag (1 = optional). */
 int oxphp_bridge_get_class_method_param_optional(int class_index, int method_index, int param_index);
 
+/** Get class method parameter default as a PHP literal (NULL if none). */
+const char *oxphp_bridge_get_class_method_param_default(int class_index, int method_index, int param_index);
+
 /** Get magic method handler flag. magic_type is MagicMethod enum ordinal. */
 int oxphp_bridge_get_class_magic(int class_index, int magic_type);
 
@@ -316,14 +322,17 @@ int oxphp_bridge_get_class_magic(int class_index, int magic_type);
 int oxphp_bridge_register_interface(const char *fqn, const char *parent_fqn);
 
 /** Add a method to an interface. return_type: OXPHP_RT_* constant (0 = no type info).
- *  param_names/types/optional are parallel arrays of length total_params. May be NULL
- *  when total_params == 0. Names are strdup'd by the bridge. */
+ *  param_names/types/optional/defaults are parallel arrays of length total_params. May be
+ *  NULL when total_params == 0. param_defaults[i] is the PHP literal of the parameter's
+ *  default value, NULL for a parameter without one. Names and defaults are strdup'd by
+ *  the bridge. */
 void oxphp_bridge_interface_add_method(int iface_handle, const char *name,
     uint32_t flags, int required_params, int total_params, int is_variadic,
     int return_type, int return_nullable,
     const char * const *param_names,
     const int *param_types,
-    const int *param_optional);
+    const int *param_optional,
+    const char * const *param_defaults);
 
 /** Add a constant to an interface. */
 void oxphp_bridge_interface_add_constant(int iface_handle, const char *name,
@@ -371,6 +380,9 @@ int oxphp_bridge_get_interface_method_param_type(int iface_index, int method_ind
 /** Get interface method parameter optional flag (1 = optional). */
 int oxphp_bridge_get_interface_method_param_optional(int iface_index, int method_index, int param_index);
 
+/** Get interface method parameter default as a PHP literal (NULL if none). */
+const char *oxphp_bridge_get_interface_method_param_default(int iface_index, int method_index, int param_index);
+
 /** Constant count for an interface. */
 int oxphp_bridge_get_interface_constant_count(int index);
 
@@ -395,14 +407,17 @@ void oxphp_bridge_enum_implements(int enum_handle, const char *interface_fqn);
 void oxphp_bridge_enum_add_case(int enum_handle, const char *name, const char *value);
 
 /** Add a method to an enum. return_type: OXPHP_RT_* constant (0 = no type info).
- *  param_names/types/optional are parallel arrays of length total_params. May be NULL
- *  when total_params == 0. Names are strdup'd by the bridge. */
+ *  param_names/types/optional/defaults are parallel arrays of length total_params. May be
+ *  NULL when total_params == 0. param_defaults[i] is the PHP literal of the parameter's
+ *  default value, NULL for a parameter without one. Names and defaults are strdup'd by
+ *  the bridge. */
 void oxphp_bridge_enum_add_method(int enum_handle, const char *name,
     uint32_t flags, int required_params, int total_params, int is_variadic,
     int return_type, int return_nullable,
     const char * const *param_names,
     const int *param_types,
-    const int *param_optional);
+    const int *param_optional,
+    const char * const *param_defaults);
 
 /** Get enum count. */
 int oxphp_bridge_get_plugin_enum_count(void);
@@ -461,6 +476,9 @@ int oxphp_bridge_get_enum_method_param_type(int enum_index, int method_index, in
 /** Get enum method parameter optional flag (1 = optional). */
 int oxphp_bridge_get_enum_method_param_optional(int enum_index, int method_index, int param_index);
 
+/** Get enum method parameter default as a PHP literal (NULL if none). */
+const char *oxphp_bridge_get_enum_method_param_default(int enum_index, int method_index, int param_index);
+
 /* ─── Plugin Attribute Registry (global, NOT __thread) ──────── */
 
 /** Register an attribute. targets is bitmask of Attribute::TARGET_*. Returns handle. */
@@ -510,13 +528,16 @@ uint32_t oxphp_bridge_get_attribute_property_visibility(int attr_index, int prop
 /* ─── Plugin Function Registry (new builder-based) ──────────── */
 
 /** Register a plugin function via builder. Returns handle (index).
- *  param_names/types/optional are parallel arrays of length total_params. May be NULL
- *  when total_params == 0. Names are strdup'd by the bridge. */
+ *  param_names/types/optional/defaults are parallel arrays of length total_params. May be
+ *  NULL when total_params == 0. param_defaults[i] is the PHP literal of the parameter's
+ *  default value, NULL for a parameter without one. Names and defaults are strdup'd by
+ *  the bridge. */
 int oxphp_bridge_register_plugin_function(const char *fqn, int required_params,
     int total_params, int is_variadic, int return_type, int return_nullable,
     const char * const *param_names,
     const int *param_types,
-    const int *param_optional);
+    const int *param_optional,
+    const char * const *param_defaults);
 
 /** Get number of registered builder-based functions. */
 int oxphp_bridge_get_plugin_function_count(void);
@@ -547,6 +568,9 @@ int oxphp_bridge_get_plugin_function_param_type(int index, int param_index);
 
 /** Get builder-based function parameter optional flag (1 = optional). */
 int oxphp_bridge_get_plugin_function_param_optional(int index, int param_index);
+
+/** Get builder-based function parameter default as a PHP literal (NULL if none). */
+const char *oxphp_bridge_get_plugin_function_param_default(int index, int param_index);
 
 /* ─── Method Dispatch Callback ──────────────────────────────── */
 
