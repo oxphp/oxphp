@@ -41,7 +41,7 @@ When the `Host` header is absent, `SERVER_NAME` defaults to `localhost` and `SER
 
 ### HTTP Request Headers
 
-All HTTP request headers are added to `$_SERVER` with an `HTTP_` prefix. Header names are converted to uppercase with dashes replaced by underscores, following CGI/1.1 conventions:
+HTTP request headers are added to `$_SERVER` with an `HTTP_` prefix. Header names are converted to uppercase with dashes replaced by underscores, following CGI/1.1 conventions:
 
 ```text
 Accept: text/html            -> HTTP_ACCEPT
@@ -51,6 +51,8 @@ Cookie: session=xyz          -> HTTP_COOKIE
 ```
 
 > **Note:** `Content-Type` and `Content-Length` appear without the `HTTP_` prefix — as `CONTENT_TYPE` and `CONTENT_LENGTH` — as required by the CGI specification.
+
+A header whose name contains an underscore (`_`) or a dot (`.`) is not added to `$_SERVER`. PHP turns a dot in a `$_SERVER` key into an underscore, so `X_Forwarded_For` and `X.Forwarded.For` would both arrive as `HTTP_X_FORWARDED_FOR`, the key of the `X-Forwarded-For` header — and a client could set a key that the application expects only from a proxy in front of it, such as `HTTP_X_AUTHENTICATED_USER` from an authentication proxy that sets `X-Authenticated-User`. nginx drops such headers by default as well (`underscores_in_headers off`, `ignore_invalid_headers on`). To read one, use the [request object](request-api.md#headers) with the name as it was sent: `$request->header('X_Api_Key')`.
 
 ### Behind a Reverse Proxy
 

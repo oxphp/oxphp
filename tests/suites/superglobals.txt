@@ -31,4 +31,8 @@ superglobals/test_content_type | POST | -H "Content-Type: application/json" -d '
 superglobals/test_content_length | POST | -d "hello" | |
 superglobals/test_http_headers | GET | -H "X-Custom-Test: hello_world" | |
 superglobals/test_http_multiple_headers | GET | -H "X-First: aaa" -H "X-Second: bbb" | |
+superglobals/test_header_name_with_underscore_not_registered | GET | -H "X_Forwarded_For: 1.2.3.4" -H "X-Custom-Test: hello_world" | |
+superglobals/test_header_name_with_dot_not_registered | GET | -H "X.Authenticated.User: admin" | |
+superglobals/test_header_alias_after_real_does_not_override | GET | -H "X-Forwarded-For: 9.9.9.9" -H "X.Forwarded.For: 6.6.6.6" | |
+superglobals/test_header_alias_before_real_does_not_override | GET | -H "X.Forwarded.For: 6.6.6.6" -H "X-Forwarded-For: 9.9.9.9" | |
 superglobals/test_env_vars_in_server
