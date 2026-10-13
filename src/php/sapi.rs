@@ -1003,11 +1003,20 @@ fn fill_request_data(req: &ScriptRequest) {
                 }
             }
 
-            // All request headers as HTTP_{UPPER_SNAKE_CASE}
-            // (except Content-Type and Content-Length which are handled above without HTTP_ prefix)
+            // Request headers as HTTP_{UPPER_SNAKE_CASE}
+            // (except Content-Type and Content-Length which are handled above without HTTP_ prefix,
+            // and names with `_` or `.`, skipped below)
             let mut header_buf = String::with_capacity(64);
             for (name, value) in req.headers.iter() {
                 if name == header::CONTENT_TYPE || name == header::CONTENT_LENGTH {
+                    continue;
+                }
+                // PHP's registration turns `.` into `_` and keeps `_`, so
+                // `X.Forwarded.For` and `X_Forwarded_For` would both land on
+                // HTTP_X_FORWARDED_FOR, the key of the `X-Forwarded-For` a
+                // proxy in front may have set. Such a name is left out, as
+                // nginx does by default; the object API still returns it.
+                if name.as_str().bytes().any(|b| b == b'_' || b == b'.') {
                     continue;
                 }
                 let Ok(val_str) = value.to_str() else {

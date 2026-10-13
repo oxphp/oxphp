@@ -246,6 +246,8 @@ $request->header(string $name, ?string $default = null): ?string
 
 Returns the raw header value. Header names are case-insensitive. For multi-value headers (`Accept`, `X-Forwarded-For`), the full header line is returned as a single string — parsing is your responsibility.
 
+The name is matched as sent, without the `HTTP_` mapping of `$_SERVER`: `header('X_Api_Key')` does not return an `X-Api-Key` header. This is also how to read a header whose name contains `_` or `.`, which [`$_SERVER` leaves out](superglobals.md#http-request-headers); `headers()` lists those too.
+
 ```php
 $request->hasHeader(string $name): bool
 ```
