@@ -1,0 +1,18 @@
+# profile: pooltrad
+# description: Shared\Pool outside worker mode — a pool lives as long as the request that creates it, and only that request can use it
+
+# Neither registry method binds a pool to a name: the name would outlive the
+# request the pool lives in.
+pooltrad/test_registry_refuses_pool
+
+# A pool another request created, reached through a Shared\Map while that
+# request is still running, refuses this one.
+pooltrad/test_pool_refuses_other_requests
+
+# Once the creating request has ended the pool holds nothing and refuses every
+# acquire — on the thread that created it, too.
+pooltrad/test_pool_closes_with_its_request
+
+# The last reference to a pool going away in another request, while the
+# creating request still runs, frees nothing into that request's memory.
+pooltrad/test_pool_dropped_by_another_request

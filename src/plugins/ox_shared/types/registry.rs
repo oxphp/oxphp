@@ -594,7 +594,47 @@ use crate::bridge::call::NativeCall;
 use crate::bridge::ffi as bridge_ffi;
 use crate::plugin::types::PhpType;
 use crate::plugin::{PhpError, PluginContext, PluginError};
+use crate::plugins::ox_shared::types::pool::{
+    registry_refuses_pools_on_current_thread, PoolInner, SharedInnerPoolExt,
+    POOL_OUTSIDE_ITS_REQUEST,
+};
 use crate::plugins::ox_shared::value::{portbuf_to_sv, raw_to_owned, SharedRefOwned, SharedValue};
+
+/// Why a request served without worker mode gets no pool from the registry.
+const NO_POOL_UNDER_A_NAME: &str = "a pool a request creates there lasts only \
+     until that request ends, and a registry name lasts as long as the server";
+
+/// On a thread that serves one request after another a pool lasts one
+/// request and a name lasts as long as the server. There `pool()` is
+/// refused before its lookup (`pool` is `None`), bound name or not, and
+/// `global()` refuses a pool its factory returns: once `pool()` is
+/// refused, only `global()` reaches this check with a pool there. On any
+/// thread, a `pool` the calling thread may not use, such as one a request
+/// handed to a task, is not bound to a name either: the name would
+/// outlive the request that pool belongs to.
+fn refuse_pool_binding(pool: Option<&PoolInner>) -> Result<(), PhpError> {
+    let message = if registry_refuses_pools_on_current_thread() {
+        match pool {
+            None => format!(
+                "Shared\\Registry::pool() cannot be called from a request served \
+                 without worker mode: {NO_POOL_UNDER_A_NAME}"
+            ),
+            Some(_) => format!(
+                "Shared\\Registry::global() cannot bind a Shared\\Pool to a name in a \
+                 request served without worker mode: {NO_POOL_UNDER_A_NAME}"
+            ),
+        }
+    } else if pool.is_some_and(PoolInner::foreign_to_current_thread) {
+        format!("Shared\\Registry cannot bind a Shared\\Pool to a name: {POOL_OUTSIDE_ITS_REQUEST}")
+    } else {
+        return Ok(());
+    };
+    Err(PhpError::Exception {
+        class: "OxPHP\\Shared\\SharedException".into(),
+        message,
+        code: 0,
+    })
+}
 
 // ─── PHP class — Registry ────────────────────────────────────────────────
 
@@ -763,6 +803,9 @@ fn registry_get_or_create(
                                     });
                                 }
                             };
+                            if actual_tag == SharedType::Pool {
+                                refuse_pool_binding(arc.inner.as_any_pool())?;
+                            }
                             // 4. Bind. Only the Ok path commits the guard;
                             //    every error path returns early so the
                             //    guard's Drop settles our gate as aborted
@@ -955,7 +998,10 @@ pub fn register_class(ctx: &mut PluginContext) -> Result<(), PluginError> {
         .static_()
         .param("key", PhpType::String)
         .param("factory", PhpType::Callable)
-        .handler(|call| registry_get_or_create(call, 0, 1, Some(SharedType::Pool)))
+        .handler(|call| {
+            refuse_pool_binding(None)?;
+            registry_get_or_create(call, 0, 1, Some(SharedType::Pool))
+        })
         // ── Namespace management — operates on the index, NOT the objects.
         .method("remove")
         .static_()

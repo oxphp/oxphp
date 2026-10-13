@@ -95,7 +95,7 @@ oxphp_worker(function () use ($requests) {
 
 Without `Registry`, the bare `new OxPHP\Shared\Counter()` pattern produces a **different** counter per worker thread (each bootstrap creates its own anonymous entry). That can be fine for per-worker accumulators, but for a process-wide total, route through `Registry`.
 
-The same shape works in traditional mode (no `WORKER_MODE_ENABLED`). The first request that touches `'request-counter'` creates the entry; every subsequent request — on any worker thread — sees it. See [Shared\Registry](shared-registry.md) for the full story.
+The same shape works in traditional mode (no `WORKER_MODE_ENABLED`). The first request that touches `'request-counter'` creates the entry; every subsequent request — on any worker thread — sees it. That holds for every type but `Shared\Pool`, which there lasts only as long as the request that creates it ([details](shared-pool.md#outside-worker-mode)). See [Shared\Registry](shared-registry.md) for the full story.
 
 When a fiber needs to see the counter too, hand it through `use`:
 

@@ -1045,21 +1045,51 @@ pub const OXPHP_SHARED_INVOKE_BAILOUT: c_int = -4;
 
 // ── Shared\Pool bridge (host mock) ───────────────────────
 // Host tests cannot invoke PHP, so every factory/body path fails
-// immediately. Tests that exercise pool logic must live under
-// feature=php (docker) — the mock here is enough to compile the
-// FFI declarations on host.
+// immediately unless a test hands the factory a slot to return. Tests
+// that exercise pool logic must live under feature=php (docker) — the
+// mock here is enough to compile the FFI declarations on host.
+thread_local! {
+    static MOCK_POOL_HEAP_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static MOCK_POOL_FACTORY_SLOT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Host tests: make the calling thread's factory calls succeed with
+/// `slot`; null restores the failure.
+#[cfg(test)]
+pub fn mock_pool_factory_mints(slot: *mut c_void) {
+    MOCK_POOL_FACTORY_SLOT.with(|s| s.set(slot as usize));
+}
+
+/// Host tests: how many pool bridge calls that would touch the PHP heap
+/// (`fcc_free`, `slot_free`, `destroy_invoke`) the calling thread made.
+#[cfg(test)]
+pub fn mock_pool_heap_calls() -> u64 {
+    MOCK_POOL_HEAP_CALLS.with(|c| c.get())
+}
+
+fn count_pool_heap_call() {
+    MOCK_POOL_HEAP_CALLS.with(|c| c.set(c.get() + 1));
+}
+
 pub unsafe fn oxphp_pool_fcc_new(
     _callable_zval: *mut c_void,
     _out_fcc_heap: *mut *mut c_void,
 ) -> c_int {
     -1
 }
-pub unsafe fn oxphp_pool_fcc_free(_fcc_heap: *mut c_void) {}
+pub unsafe fn oxphp_pool_fcc_free(_fcc_heap: *mut c_void) {
+    count_pool_heap_call();
+}
 pub unsafe fn oxphp_pool_factory_invoke(
     _fcc_heap: *mut c_void,
-    _out_slot_zv_heap: *mut *mut c_void,
+    out_slot_zv_heap: *mut *mut c_void,
 ) -> c_int {
-    -1
+    let slot = MOCK_POOL_FACTORY_SLOT.with(|s| s.get());
+    if slot == 0 {
+        return -1;
+    }
+    unsafe { *out_slot_zv_heap = slot as *mut c_void };
+    0
 }
 pub unsafe fn oxphp_pool_body_invoke(
     _body_callable_zv: *mut c_void,
@@ -1069,11 +1099,14 @@ pub unsafe fn oxphp_pool_body_invoke(
     -1
 }
 pub unsafe fn oxphp_pool_slot_to_user(_slot_zv_heap: *mut c_void, _user_out_zv: *mut c_void) {}
-pub unsafe fn oxphp_pool_slot_free(_slot_zv_heap: *mut c_void) {}
+pub unsafe fn oxphp_pool_slot_free(_slot_zv_heap: *mut c_void) {
+    count_pool_heap_call();
+}
 pub unsafe fn oxphp_pool_destroy_invoke(
     _destroy_fcc_heap: *mut c_void,
     _slot_zv_heap: *mut c_void,
 ) -> c_int {
+    count_pool_heap_call();
     0
 }
 

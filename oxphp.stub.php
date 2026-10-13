@@ -1734,13 +1734,18 @@ namespace OxPHP\Shared {
      * is reached, acquire waits for a free slot (see the namespace-level
      * timeout convention).
      *
+     * Outside worker mode a pool that a request creates lasts only as long
+     * as that request: only that request can acquire from it, and when it
+     * ends the pool closes and PHP frees the objects still idle in it
+     * without calling destroy.
+     *
      * @link docs/shared-state/shared-pool.md
      */
     final class Pool implements Shareable
     {
         /**
          * @param callable      $factory       Creates a pooled resource. Receives no arguments; must return an object.
-         * @param callable|null $destroy       Called with the resource on eviction/shutdown.
+         * @param callable|null $destroy       Called with the resource on eviction/shutdown (outside worker mode, not for slots still idle when the creating request ends).
          * @param int           $maxSize       Hard budget of live slots; must be > 0 (default 32).
          * @param int           $idleTimeoutMs Idle ms before a slot is eligible for eviction; 0 disables eviction (default 300_000).
          */
@@ -1751,10 +1756,18 @@ namespace OxPHP\Shared {
             int $idleTimeoutMs = 300_000,
         ) {}
 
-        /** Acquire a slot, waiting forever. Always returns a Handle. */
+        /**
+         * Acquire a slot, waiting forever. Always returns a Handle.
+         *
+         * @throws ClosedException If the pool is closed, or if a request created it outside worker mode and this is not that request, or that request has ended.
+         */
         public function acquire(): Pool\Handle {}
 
-        /** Non-blocking acquire. Returns a Handle, or null if the pool is saturated. */
+        /**
+         * Non-blocking acquire. Returns a Handle, or null if the pool is saturated.
+         *
+         * @throws ClosedException If the pool is closed, or if a request created it outside worker mode and this is not that request, or that request has ended.
+         */
         public function tryAcquire(): ?Pool\Handle {}
 
         /**
@@ -1762,6 +1775,7 @@ namespace OxPHP\Shared {
          *
          * @throws OperationTimeoutException On deadline expiry (extends Async\AsyncException, NOT SharedException).
          * @throws TypeException If `$ms <= 0`.
+         * @throws ClosedException If the pool is closed, or if a request created it outside worker mode and this is not that request, or that request has ended.
          */
         public function acquireTimeout(int $ms): Pool\Handle {}
 
@@ -1769,6 +1783,8 @@ namespace OxPHP\Shared {
          * Scope-guard: acquire (forever), invoke `$body($resource)` with the
          * raw pooled resource, and release the slot afterward — even if
          * `$body` throws. Returns whatever `$body` returns.
+         *
+         * @throws ClosedException If the pool is closed, or if a request created it outside worker mode and this is not that request, or that request has ended.
          */
         public function with(callable $body): mixed {}
 
@@ -1777,6 +1793,7 @@ namespace OxPHP\Shared {
          *
          * @throws OperationTimeoutException On deadline expiry.
          * @throws TypeException If `$ms <= 0`.
+         * @throws ClosedException If the pool is closed, or if a request created it outside worker mode and this is not that request, or that request has ended.
          */
         public function withTimeout(callable $body, int $ms): mixed {}
 
@@ -1806,6 +1823,7 @@ namespace OxPHP\Shared {
      * collapses the per-worker bootstrap pattern into one shared
      * instance; in traditional mode it survives across requests, giving
      * APCu-style same-host coordination without an external store.
+     * `Shared\Pool` is the exception there: see {@see pool()}.
      *
      * @see Shareable
      */
@@ -1818,9 +1836,10 @@ namespace OxPHP\Shared {
          *
          * The exception set is identical for every typed method
          * (`counter`, `atomic`, `flag`, `once`, `mutex`, `channel`,
-         * `pool`) and for `global` (which never raises `TypeException`).
-         * The list is documented once here and elided on the siblings
-         * to keep the stub readable.
+         * `pool`) and for `global` (which never raises `TypeException`),
+         * apart from the refusal of a pool outside worker mode noted on
+         * {@see pool()} and {@see global()}. The list is documented once
+         * here and elided on the siblings to keep the stub readable.
          *
          * @throws TypeException If `$key` is bound to a different
          *                       Shared type, the factory returned the
@@ -1860,7 +1879,18 @@ namespace OxPHP\Shared {
         /** Typed get-or-create for `Shared\Channel`. See {@see map()} for the full exception list. */
         public static function channel(string $key, callable $factory): Channel {}
 
-        /** Typed get-or-create for `Shared\Pool`. See {@see map()} for the full exception list. */
+        /**
+         * Typed get-or-create for `Shared\Pool`. See {@see map()} for the full exception list.
+         *
+         * @throws SharedException When called from an HTTP request served
+         *                         without worker mode, before the factory
+         *                         runs and whether or not `$key` is bound:
+         *                         a pool a request creates there lasts
+         *                         only as long as that request. Also when the
+         *                         factory returns a pool the calling thread
+         *                         may not use, such as one a request handed
+         *                         to a task.
+         */
         public static function pool(string $key, callable $factory): Pool {}
 
         /**
@@ -1868,6 +1898,12 @@ namespace OxPHP\Shared {
          * (no type guard). On miss, runs `$factory()` which must return
          * any `Shareable`. Does NOT raise `TypeException` on hit; every
          * other exception from {@see map()} still applies.
+         *
+         * @throws SharedException When called from an HTTP request served
+         *                         without worker mode and `$factory()`
+         *                         returns a `Shared\Pool`, or when it returns
+         *                         a pool the calling thread may not use; see
+         *                         {@see pool()}.
          */
         public static function global(string $key, callable $factory): Shareable {}
 
