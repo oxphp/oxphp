@@ -6142,7 +6142,9 @@ int oxphp_shared_wrapper_new(zval *out, uint8_t type_tag, const void *entry_ptr)
  * it, the Pool and spike helpers included, so it sits outside the codes any
  * of them uses otherwise (the spike's go down to -3).
  * oxphp_pool_destroy_invoke() does not run under it: it is also called from
- * outside a plugin handler, where no stub would raise the bailout. */
+ * outside a plugin handler, where no stub would raise the bailout.
+ * oxphp_pool_destroy_invoke_guarded() is the same call under it, for the
+ * callers inside one. */
 #define OXPHP_SHARED_INVOKE_BAILOUT     -4
 
 /* A bailout OXPHP_SHARED_RUN_GUARDED caught and is holding back. Set in its
@@ -6968,10 +6970,9 @@ void oxphp_pool_slot_free(void *slot_zv_heap) {
 
 /* Best-effort $destroy($resource) invocation, then slot teardown.
  *
- * Called by `PoolInner::on_shutdown_notify` and `on_drop` on the
- * thread that drains the pool — which may not be the thread that
- * minted the resource, and may not even be inside a live PHP
- * request. We guard both hazards:
+ * Called on the thread that drains the pool — which may not be the
+ * thread that minted the resource, and may not even be inside a live
+ * PHP request. We guard both hazards:
  *
  *  - If `destroy_fcc_heap == NULL` (user opted out by passing
  *    `$destroy: null`), we skip invocation entirely.
@@ -6986,9 +6987,11 @@ void oxphp_pool_slot_free(void *slot_zv_heap) {
  *    drain loop can continue. Drain callers have no PHP frame
  *    to propagate into.
  *
- * Always frees `slot_zv_heap` (zval_ptr_dtor + efree). Always
- * returns 0 — best-effort, never signals failure upward. */
-int oxphp_pool_destroy_invoke(void *destroy_fcc_heap, void *slot_zv_heap) {
+ * Frees `slot_zv_heap` (zval_ptr_dtor + efree) and returns 0 —
+ * best-effort, never signals failure upward — unless a bailout ends
+ * it, which oxphp_pool_destroy_invoke() lets go by longjmp and
+ * oxphp_pool_destroy_invoke_guarded() holds back. */
+static int oxphp_pool_destroy_invoke_unguarded(void *destroy_fcc_heap, void *slot_zv_heap) {
     if (!slot_zv_heap) return 0;
     zval *slot = (zval *)slot_zv_heap;
 
@@ -7028,6 +7031,27 @@ int oxphp_pool_destroy_invoke(void *destroy_fcc_heap, void *slot_zv_heap) {
     zval_ptr_dtor(slot);
     efree(slot);
     return 0;
+}
+
+/* For the callers with no dispatch stub below them to raise a bailout
+ * again: a bailout in $destroy, or in freeing the slot, leaves through
+ * them by longjmp. */
+int oxphp_pool_destroy_invoke(void *destroy_fcc_heap, void *slot_zv_heap) {
+    return oxphp_pool_destroy_invoke_unguarded(destroy_fcc_heap, slot_zv_heap);
+}
+
+/* For a caller inside a plugin handler (Shared\Pool::evict). Returns
+ * OXPHP_SHARED_INVOKE_BAILOUT when a bailout ended $destroy or freeing
+ * the slot, or one was already waiting to be raised again. The slot is
+ * not freed then. The bailout may have come from freeing it. Or it may
+ * have come from releasing what $destroy returned, and then freeing the
+ * slot could run a destructor, while no userland may run before the
+ * bailout is raised again. */
+int oxphp_pool_destroy_invoke_guarded(void *destroy_fcc_heap, void *slot_zv_heap) {
+    int rc;
+    OXPHP_SHARED_RUN_GUARDED(rc, oxphp_pool_destroy_invoke_unguarded(
+        destroy_fcc_heap, slot_zv_heap));
+    return rc;
 }
 
 /* ─── Shared\Pool\Handle rust_data wrapper helpers ──────────────

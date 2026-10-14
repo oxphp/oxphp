@@ -1049,12 +1049,40 @@ pub const OXPHP_SHARED_INVOKE_BAILOUT: c_int = -4;
 
 // ── Shared\Pool bridge (host mock) ───────────────────────
 // Host tests cannot invoke PHP, so every factory/body path fails
-// immediately unless a test hands the factory a slot to return. Tests
-// that exercise pool logic must live under feature=php (docker) — the
-// mock here is enough to compile the FFI declarations on host.
+// immediately unless a test hands the factory a slot to return, and
+// `$destroy` does nothing unless a test hands it a hook. Tests that need
+// a callable to actually run must live under feature=php (docker).
+type MockPoolDestroy = Box<dyn FnMut(*mut c_void) -> c_int>;
+
 thread_local! {
     static MOCK_POOL_HEAP_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static MOCK_POOL_FACTORY_SLOT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static MOCK_POOL_DESTROY: std::cell::RefCell<Option<MockPoolDestroy>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Host tests: run `hook` as the calling thread's `$destroy`, given the
+/// slot being destroyed. What it returns is what the guarded destroy helper
+/// returns, and `OXPHP_SHARED_INVOKE_BAILOUT` stands for a bailout that
+/// ended `$destroy`. The unguarded helper cannot return that — the bailout
+/// leaves it by longjmp, across the Rust frames that called it — so the
+/// mock panics there instead. `None` restores the default.
+#[cfg(test)]
+pub fn mock_pool_destroy(hook: Option<MockPoolDestroy>) {
+    MOCK_POOL_DESTROY.with(|h| *h.borrow_mut() = hook);
+}
+
+fn run_mock_pool_destroy(slot: *mut c_void) -> c_int {
+    // Out of the cell while it runs, so a hook that gets a slot destroyed
+    // itself does not find the cell borrowed: that one runs as the default.
+    let Some(mut hook) = MOCK_POOL_DESTROY.with(|h| h.borrow_mut().take()) else {
+        return 0;
+    };
+    let rc = hook(slot);
+    MOCK_POOL_DESTROY.with(|h| {
+        h.borrow_mut().get_or_insert(hook);
+    });
+    rc
 }
 
 /// Host tests: make the calling thread's factory calls succeed with
@@ -1108,10 +1136,22 @@ pub unsafe fn oxphp_pool_slot_free(_slot_zv_heap: *mut c_void) {
 }
 pub unsafe fn oxphp_pool_destroy_invoke(
     _destroy_fcc_heap: *mut c_void,
-    _slot_zv_heap: *mut c_void,
+    slot_zv_heap: *mut c_void,
 ) -> c_int {
     count_pool_heap_call();
+    assert_ne!(
+        run_mock_pool_destroy(slot_zv_heap),
+        OXPHP_SHARED_INVOKE_BAILOUT,
+        "a bailout in the unguarded destroy helper longjmps across its Rust callers"
+    );
     0
+}
+pub unsafe fn oxphp_pool_destroy_invoke_guarded(
+    _destroy_fcc_heap: *mut c_void,
+    slot_zv_heap: *mut c_void,
+) -> c_int {
+    count_pool_heap_call();
+    run_mock_pool_destroy(slot_zv_heap)
 }
 
 pub unsafe fn oxphp_shared_pool_handle_alloc(

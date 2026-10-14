@@ -597,7 +597,11 @@ impl PoolInner {
         }
         // Destroy outside the lock — `destroy_slot` calls
         // release_budget which notifies the waiter condvar and we
-        // want no chance of deadlock.
+        // want no chance of deadlock. Outside the idle map too:
+        // `$destroy` may use this pool, and a release parks its slot
+        // through the map's write lock. Unguarded: nothing below this
+        // drain would raise a held-back bailout again.
+        drop(shard);
         let count = popped.len() as u64;
         for slot in popped {
             self.destroy_slot(slot);
@@ -615,7 +619,14 @@ impl PoolInner {
     ///
     /// Like its stale counterpart it touches only the caller's deque —
     /// cross-thread `$destroy` is unsafe under the per-thread affinity
-    /// model — and runs `destroy_slot` outside the deque lock.
+    /// model — and runs `$destroy` with nothing of the idle map held.
+    ///
+    /// Called only from the `evict()` handler, so `$destroy` runs with a
+    /// bailout held back for the dispatch stub to raise again. The slot a
+    /// bailout ended `$destroy` on counts as destroyed — its budget is
+    /// refunded and nothing frees it — and no `$destroy` runs after it:
+    /// the slots not reached yet go back to the front of the deque, in
+    /// order and as old as they were.
     pub fn evict_all_on_current_thread(&self, reason: EvictReason) -> u64 {
         let me = current_thread_key();
         let Some(shard) = self.idle.get(&me) else {
@@ -628,12 +639,33 @@ impl PoolInner {
                 popped.push(slot);
             }
         }
-        let count = popped.len() as u64;
-        for slot in popped {
-            self.destroy_slot(slot);
+        drop(shard);
+        let mut destroyed = 0;
+        let mut popped = popped.into_iter();
+        while let Some(slot) = popped.next() {
+            // SAFETY: as in `destroy_slot`.
+            let rc = unsafe {
+                ffi::oxphp_pool_destroy_invoke_guarded(self.destroy_fcc(), slot.resource)
+            };
+            self.release_budget();
+            destroyed += 1;
+            if rc == ffi::OXPHP_SHARED_INVOKE_BAILOUT {
+                let unreached: Vec<PoolSlot> = popped.collect();
+                if !unreached.is_empty() {
+                    let shard = self
+                        .idle
+                        .entry(me)
+                        .or_insert_with(|| Mutex::new(VecDeque::new()));
+                    let mut deque = shard.lock().unwrap_or_else(|e| e.into_inner());
+                    for slot in unreached.into_iter().rev() {
+                        deque.push_front(slot);
+                    }
+                }
+                break;
+            }
         }
-        self.record_evicted(count, reason);
-        count
+        self.record_evicted(destroyed, reason);
+        destroyed
     }
 
     /// Block the calling thread until another thread releases a slot
@@ -2782,6 +2814,155 @@ mod tests {
         p.evict_stale_on_current_thread(EvictReason::Manual);
         assert_eq!(p.size(), 1, "fresh slot must survive");
         assert_eq!(p.idle_count(), 1);
+    }
+
+    /// Runs `f` on a thread of its own — a fresh thread key and a fresh mock
+    /// `$destroy` — and fails if it has not returned within five seconds, so
+    /// an evict that waits on itself is a failure rather than a hung run.
+    #[cfg(not(feature = "php"))]
+    fn on_own_thread_within_5s(f: impl FnOnce() + Send + 'static) {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = thread::spawn(move || {
+            f();
+            let _ = tx.send(());
+        });
+        if let Err(std::sync::mpsc::RecvTimeoutError::Timeout) =
+            rx.recv_timeout(Duration::from_secs(5))
+        {
+            panic!("still running after 5s: the evict waits on itself");
+        }
+        if let Err(panic) = handle.join() {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    /// Parks three slots on the calling thread, front to back, with the
+    /// stand-in resources 1, 2 and 3 and an age of ten seconds that differs
+    /// from slot to slot. Returns the three ages.
+    #[cfg(not(feature = "php"))]
+    fn park_three(p: &PoolInner) -> Vec<Instant> {
+        let me = current_thread_key();
+        let base = Instant::now() - Duration::from_secs(10);
+        (1..=3usize)
+            .map(|n| {
+                assert!(p.try_reserve_budget());
+                let mut slot = PoolSlot::new(n as *mut c_void, me);
+                slot.last_active = base + Duration::from_millis(n as u64);
+                let age = slot.last_active;
+                p.deposit_new(slot);
+                age
+            })
+            .collect()
+    }
+
+    /// The calling thread's idle slots, front to back: resource and age.
+    #[cfg(not(feature = "php"))]
+    fn parked(p: &PoolInner) -> Vec<(usize, Instant)> {
+        let me = current_thread_key();
+        p.idle.get(&me).map_or_else(Vec::new, |shard| {
+            let deque = shard.lock().unwrap();
+            deque
+                .iter()
+                .map(|s| (s.resource as usize, s.last_active))
+                .collect()
+        })
+    }
+
+    #[cfg(not(feature = "php"))]
+    #[test]
+    fn evict_all_keeps_the_slots_a_bailout_in_destroy_left_unreached() {
+        use crate::bridge::ffi::{mock_pool_destroy, OXPHP_SHARED_INVOKE_BAILOUT};
+        on_own_thread_within_5s(|| {
+            let p = inner(3);
+            let ages = park_three(&p);
+            let seen = std::rc::Rc::new(RefCell::new(Vec::new()));
+            let log = std::rc::Rc::clone(&seen);
+            mock_pool_destroy(Some(Box::new(move |slot| {
+                log.borrow_mut().push(slot as usize);
+                if slot as usize == 2 {
+                    OXPHP_SHARED_INVOKE_BAILOUT
+                } else {
+                    0
+                }
+            })));
+
+            p.evict_all_on_current_thread(EvictReason::Manual);
+            mock_pool_destroy(None);
+
+            // $destroy ran on 1, then on 2, which a bailout ended; no
+            // $destroy may run past that.
+            assert_eq!(*seen.borrow(), vec![1, 2]);
+            // 1 and 2 are gone, and their budget with them. 3 is idle
+            // again, as old as it was.
+            assert_eq!(parked(&p), vec![(3, ages[2])]);
+            assert_eq!(p.size(), 1);
+            assert_eq!(p.evicted_manual_total(), 2);
+        });
+    }
+
+    #[cfg(not(feature = "php"))]
+    #[test]
+    fn evict_all_puts_unreached_slots_back_ahead_of_one_destroy_parked() {
+        use crate::bridge::ffi::{mock_pool_destroy, OXPHP_SHARED_INVOKE_BAILOUT};
+        on_own_thread_within_5s(|| {
+            let me = current_thread_key();
+            let p = inner(4);
+            let ages = park_three(&p);
+            let q = Arc::clone(&p);
+            mock_pool_destroy(Some(Box::new(move |slot| {
+                if slot as usize != 1 {
+                    return 0;
+                }
+                // $destroy takes a fresh slot of its own pool and gives it
+                // back, while evict still has 2 and 3 in hand, then bails.
+                assert!(q.try_reserve_budget());
+                q.release(PoolSlot::new(9 as *mut c_void, me));
+                OXPHP_SHARED_INVOKE_BAILOUT
+            })));
+
+            p.evict_all_on_current_thread(EvictReason::Manual);
+            mock_pool_destroy(None);
+
+            // The deque stays oldest first: 2 and 3 in front of 9.
+            let after = parked(&p);
+            assert_eq!(
+                after.iter().map(|(r, _)| *r).collect::<Vec<_>>(),
+                vec![2, 3, 9]
+            );
+            assert_eq!(&after[..2], &[(2, ages[1]), (3, ages[2])]);
+            assert_eq!(p.size(), 3);
+            assert_eq!(p.evicted_manual_total(), 1);
+        });
+    }
+
+    #[cfg(not(feature = "php"))]
+    #[test]
+    fn evict_stale_lets_destroy_use_the_pool() {
+        use crate::bridge::ffi::mock_pool_destroy;
+        on_own_thread_within_5s(|| {
+            let me = current_thread_key();
+            let p = inner_with_idle(4, Duration::from_millis(100));
+            park_three(&p);
+            let q = Arc::clone(&p);
+            mock_pool_destroy(Some(Box::new(move |slot| {
+                if slot as usize == 1 {
+                    // Parked after the evict took its slots off the deque,
+                    // so it stays.
+                    assert!(q.try_reserve_budget());
+                    q.release(PoolSlot::new(9 as *mut c_void, me));
+                }
+                0
+            })));
+
+            assert_eq!(p.evict_stale_on_current_thread(EvictReason::IdleTimeout), 3);
+            mock_pool_destroy(None);
+
+            assert_eq!(
+                parked(&p).iter().map(|(r, _)| *r).collect::<Vec<_>>(),
+                vec![9]
+            );
+            assert_eq!(p.size(), 1);
+        });
     }
 
     #[test]

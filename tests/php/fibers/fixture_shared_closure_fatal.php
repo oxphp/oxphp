@@ -2,12 +2,14 @@
 
 declare(strict_types=1);
 
-// Inner self-request for fibers/test_shared_closure_fatal_releases.
+// Inner self-request for fibers/test_shared_closure_fatal_releases and
+// fibers/test_shared_pool_destroy_fatal.
 //
 // A fatal raised inside a callable that a Shared\* method runs on the caller's
 // behalf: the closure of Mutex::withLock and tryWithLock, the factory of
 // Once::getOrInit, of a Registry get-or-create and of a Pool, the body of
-// Pool::with, the callback of Map::forEach. While the callable runs, every one
+// Pool::with, the destroy callback Pool::evict runs on each idle slot, the
+// callback of Map::forEach. While the callable runs, every one
 // of these methods but Map::forEach holds something — the lock, the cell's init
 // lock, the key's creation slot, a slot of the pool or the budget for one — and
 // it gives that back when the callable returns or throws. A fatal does neither: it ends the request from
@@ -160,6 +162,31 @@ try {
                 maxSize: 1,
             ));
             $p->with($fatal);
+            break;
+
+        case 'pool_destroy':
+            // Two idle slots, and evict() takes both off the deque before it
+            // runs $destroy on the first. $destroy fatals on that one — the
+            // older, released first — and only on it, so the test can tell
+            // the slot the fatal was destroying from the one never reached.
+            $calls = Registry::counter("closure-fatal-pool-destroy-calls-$run", static fn (): Counter => new Counter());
+            $p = Registry::pool("closure-fatal-pool-destroy-$run", static fn (): Pool => new Pool(
+                factory: static fn (): \stdClass => new \stdClass(),
+                destroy: static function (\stdClass $r) use ($calls, $fatal): void {
+                    $calls->add();
+                    if ($r->fatal ?? false) {
+                        $fatal();
+                    }
+                },
+                maxSize: 2,
+            ));
+            $older = $p->tryAcquire();
+            $newer = $p->tryAcquire();
+            $older->get()->fatal = true;
+            $newer->get()->name = 'newer';
+            $older->release();
+            $newer->release();
+            $p->evict();
             break;
 
         case 'for_each':

@@ -2505,6 +2505,11 @@ void oxphp_pool_slot_free(void *slot_zv_heap);
  * oxphp_bridge_capture_fatal and cleared. Always returns 0. */
 int oxphp_pool_destroy_invoke(void *destroy_fcc_heap, void *slot_zv_heap);
 
+/* The same, for a caller inside a plugin handler: a bailout is held back
+ * for the dispatch stub, and the slot is then left unfreed. Returns 0, or
+ * OXPHP_SHARED_INVOKE_BAILOUT (-4). */
+int oxphp_pool_destroy_invoke_guarded(void *destroy_fcc_heap, void *slot_zv_heap);
+
 /* Shared\Pool\Handle rust_data wrapper helpers. See
  * oxphp_bridge.c §Shared\Pool\Handle rust_data wrapper helpers
  * for the storage layout and semantics. */
