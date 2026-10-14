@@ -6191,6 +6191,11 @@ static void oxphp_soft_reset(void) {
     }
     php_output_deactivate();
     php_output_activate();
+    /* And what the URL rewriter appends, which the end of the last request
+     * empties but cannot free while a rewriter's handler is still on the stack
+     * (see oxphp_url_rewriter_release()). Only now, with no handler left to
+     * read it. */
+    oxphp_url_rewriter_reset();
 
     /* 2. SAPI headers: clear list, reset status to 200.
      * Through sapi_header_op rather than zend_llist_clean, because the server

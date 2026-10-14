@@ -4,6 +4,7 @@
 
 #include "php.h"
 #include "main/php_output.h" /* php_output_handler: a suspended request parks its own */
+#include "ext/standard/url_scanner_ex.h" /* url_adapt_state_ex_t: and what its URL rewriter appends */
 #include "zend_fibers.h"
 #include "bridge/oxphp_bridge.h" /* oxphp_prof_parked_t: a suspended request parks its profile */
 
@@ -266,6 +267,20 @@ typedef struct {
     zend_stack ob_handlers;
     php_output_handler *ob_active;
     php_output_handler *ob_running;
+
+    /* What PHP's URL rewriter appends to this request's links and forms — the
+     * variables output_add_rewrite_var() added, and the session's id when it is
+     * carried in URLs — with the state of the rewriter's output handler, which
+     * is one of the buffers above. The engine keeps one of each kind per thread,
+     * and whoever adds to it next rewrites it, so a request that suspends would
+     * otherwise have its links go out with what the request served in the
+     * window added. Only the part the engine resets per request is used; owned
+     * while parked, zeroed when there is none. See oxphp_url_rewriter_park(). */
+    url_adapt_state_ex_t url_rewriter_session;
+    url_adapt_state_ex_t url_rewriter_output;
+    /* And the SID constant's value, which names the session's id when it is
+     * carried in URLs. Owned while parked; IS_UNDEF when there is none. */
+    zval sid;
 
     /* What error_get_last() answers, which is thread-wide like the rest of this
      * struct. A request that suspends would otherwise come back reading the last
@@ -964,6 +979,11 @@ void oxphp_request_body_hook_restore(void);
  * Unlike oxphp_soft_reset(), this does NOT touch global OB or other thread-wide state.
  * It only initializes fresh superglobals and SAPI headers for the new request. */
 void oxphp_fiber_init_request_state(void);
+
+/* Give back what the URL rewriter holds for a request, as the engine's request
+ * shutdown does. Only once no output handler is left that reads it — see
+ * oxphp_url_rewriter_free(). */
+void oxphp_url_rewriter_reset(void);
 
 /* Give the session state on this thread back, near enough to the way the end of
  * a request would: write the session out and close the save handler, then

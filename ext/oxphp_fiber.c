@@ -34,6 +34,7 @@
 #include "main/rfc1867.h"     /* destroy_uploaded_files_hash: $_FILES temp files */
 #include "ext/session/php_session.h" /* PS(): session state is per thread, not per request */
 #include "ext/standard/basic_functions.h"
+#include "Zend/zend_smart_str.h" /* smart_str_free: what the URL rewriter appends */
 #include "ext/standard/php_fopen_wrappers.h" /* php_stream_php_wrapper: php://input makes bodies */
 #include <unistd.h> /* close/read for the epoll and timerfd descriptors */
 #include <string.h> /* strdup/strndup/strstr for async-task exception capture */
@@ -437,6 +438,7 @@ static inline void oxphp_fiber_clear_suspend(oxphp_request_fiber *fiber);
 static void oxphp_session_release_orphan(void);
 static void oxphp_session_restore(oxphp_request_fiber *fiber);
 static void oxphp_session_settle(oxphp_request_fiber *fiber);
+static void oxphp_url_rewriter_drop(oxphp_request_fiber *fiber);
 
 /* ─── VM stack rewind after a bailout ─────────────────── */
 
@@ -1833,6 +1835,7 @@ static void oxphp_fiber_free_task_payload(oxphp_request_fiber *fiber) {
     oxphp_output_stack_free(&fiber->php_state.ob_handlers);
     fiber->php_state.ob_active = NULL;
     fiber->php_state.ob_running = NULL;
+    oxphp_url_rewriter_drop(fiber);
 
     if (fiber->php_state.last_error_message) {
         zend_string_release(fiber->php_state.last_error_message);
@@ -3667,6 +3670,135 @@ static void oxphp_reset_filter_input_storage(void) {
     oxphp_filter_storage_gen++;
 }
 
+/* ─── The URL rewriter ─────────────────────────────────── */
+
+/* The part of a URL rewriter's state the engine starts afresh for each request:
+ * everything ahead of the tag table, which url_rewriter.tags and
+ * session.trans_sid_tags configure.
+ * SYNC: php-src/ext/standard/url_scanner_ex.re php_url_scanner_ex_activate() */
+#define OXPHP_URL_REWRITER_REQUEST_PART XtOffsetOf(url_adapt_state_ex_t, tags)
+
+/* Free what `ctx` holds for a request and zero it, as the engine's request
+ * shutdown does. Not while a rewriter's output handler can still run: the
+ * handler reads what it appends without checking that it is there.
+ * SYNC: php-src/ext/standard/url_scanner_ex.re PHP_RSHUTDOWN_FUNCTION(url_scanner) */
+static void oxphp_url_rewriter_free(url_adapt_state_ex_t *ctx) {
+    smart_str_free(&ctx->tag);
+    smart_str_free(&ctx->arg);
+    smart_str_free(&ctx->val);
+    smart_str_free(&ctx->buf);
+    smart_str_free(&ctx->result);
+    smart_str_free(&ctx->form_app);
+    smart_str_free(&ctx->url_app);
+    smart_str_free(&ctx->attr_val);
+    memset(ctx, 0, OXPHP_URL_REWRITER_REQUEST_PART);
+}
+
+/* The SID constant, or NULL until the session module has defined it. The first
+ * session started on a thread defines it, and it stays for the life of the
+ * worker: nothing takes an entry out of the constant table while a request
+ * runs, so the module changes its value in place, and so does this file.
+ * SYNC: php-src/ext/session/session.c php_session_reset_id() */
+static zval *oxphp_sid(void) {
+    return zend_get_constant_str("SID", sizeof("SID") - 1);
+}
+
+static void oxphp_sid_clear(void) {
+    zval *sid = oxphp_sid();
+    if (sid != NULL && !(Z_TYPE_P(sid) == IS_STRING && Z_STRLEN_P(sid) == 0)) {
+        zval_ptr_dtor(sid);
+        ZVAL_EMPTY_STRING(sid);
+    }
+}
+
+/* Take what `fiber`'s request has given the URL rewriter, and the SID
+ * constant's value, off the thread as the request parks. The rewriter's output
+ * handler is one of the buffers the request takes with it, and what that
+ * handler appends goes too. Left standing, what the request served in the
+ * window adds would land on top of it — that request's own session id in this
+ * one's links — and the rewriter's record that its handler is running would
+ * keep that request from starting one of its own. Moved rather than copied, so
+ * the thread is left as a request that never used the rewriter finds it. No
+ * user code runs here. */
+static void oxphp_url_rewriter_park(oxphp_request_fiber *fiber) {
+    memcpy(&fiber->php_state.url_rewriter_session, &BG(url_adapt_session_ex), OXPHP_URL_REWRITER_REQUEST_PART);
+    memset(&BG(url_adapt_session_ex), 0, OXPHP_URL_REWRITER_REQUEST_PART);
+    memcpy(&fiber->php_state.url_rewriter_output, &BG(url_adapt_output_ex), OXPHP_URL_REWRITER_REQUEST_PART);
+    memset(&BG(url_adapt_output_ex), 0, OXPHP_URL_REWRITER_REQUEST_PART);
+
+    zval *sid = oxphp_sid();
+    if (sid != NULL && !(Z_TYPE_P(sid) == IS_STRING && Z_STRLEN_P(sid) == 0)) {
+        ZVAL_COPY_VALUE(&fiber->php_state.sid, sid);
+        ZVAL_EMPTY_STRING(sid);
+    }
+}
+
+/* Put back what oxphp_url_rewriter_park() took, giving up what stands in its
+ * place. That belongs to a request that has ended — one still running would
+ * have taken its own — and the handlers that could read it went with the stack
+ * the resume has just replaced. */
+static void oxphp_url_rewriter_unpark(oxphp_request_fiber *fiber) {
+    oxphp_url_rewriter_free(&BG(url_adapt_session_ex));
+    memcpy(&BG(url_adapt_session_ex), &fiber->php_state.url_rewriter_session, OXPHP_URL_REWRITER_REQUEST_PART);
+    memset(&fiber->php_state.url_rewriter_session, 0, OXPHP_URL_REWRITER_REQUEST_PART);
+    oxphp_url_rewriter_free(&BG(url_adapt_output_ex));
+    memcpy(&BG(url_adapt_output_ex), &fiber->php_state.url_rewriter_output, OXPHP_URL_REWRITER_REQUEST_PART);
+    memset(&fiber->php_state.url_rewriter_output, 0, OXPHP_URL_REWRITER_REQUEST_PART);
+
+    if (Z_ISUNDEF(fiber->php_state.sid)) {
+        oxphp_sid_clear();
+        return;
+    }
+    zval *sid = oxphp_sid();
+    ZEND_ASSERT(sid != NULL);
+    zval_ptr_dtor(sid);
+    ZVAL_COPY_VALUE(sid, &fiber->php_state.sid);
+    ZVAL_UNDEF(&fiber->php_state.sid);
+}
+
+/* What a fiber torn down while parked took of the rewriter and SID. */
+static void oxphp_url_rewriter_drop(oxphp_request_fiber *fiber) {
+    oxphp_url_rewriter_free(&fiber->php_state.url_rewriter_session);
+    oxphp_url_rewriter_free(&fiber->php_state.url_rewriter_output);
+    zval_ptr_dtor(&fiber->php_state.sid);
+    ZVAL_UNDEF(&fiber->php_state.sid);
+}
+
+/* A request has ended: give back what it left the URL rewriter, as the engine's
+ * request shutdown does, and empty SID, so the next request on the thread
+ * starts with neither — rather than with the last session's id appended to its
+ * links as soon as it adds a variable of its own, and named by SID. The
+ * engine's shutdown removes SID instead; here it stays defined, empty, for the
+ * life of the worker (see oxphp_sid()), so defined('SID') is true in a request
+ * that has started no session.
+ *
+ * Unless a rewriter's output handler is still on the stack: left under a buffer
+ * the end of the request could not take off, or started after it. That handler
+ * can still run, and freeing would pull what it reads from under it, so the
+ * variables are emptied in place instead, as output_reset_rewrite_vars()
+ * empties them, and the handler passes what it is given through unchanged. The
+ * rest is freed once the handler has gone: by a resume, or by
+ * oxphp_url_rewriter_reset(). Both rewriters' handlers go by one name, so this
+ * cannot tell whose is left and keeps both: if only the other's is, the one
+ * whose handler has gone still counts as running until then, and a request
+ * taken in the meantime gets no rewriting from it.
+ * SYNC: php-src/ext/standard/url_scanner_ex.re php_url_scanner_add_var_impl() */
+static void oxphp_url_rewriter_release(void) {
+    if (php_output_handler_started(ZEND_STRL("URL-Rewriter"))) {
+        php_url_scanner_reset_session_vars();
+        php_url_scanner_reset_vars();
+    } else {
+        oxphp_url_rewriter_free(&BG(url_adapt_session_ex));
+        oxphp_url_rewriter_free(&BG(url_adapt_output_ex));
+    }
+    oxphp_sid_clear();
+}
+
+void oxphp_url_rewriter_reset(void) {
+    oxphp_url_rewriter_free(&BG(url_adapt_session_ex));
+    oxphp_url_rewriter_free(&BG(url_adapt_output_ex));
+}
+
 void oxphp_fiber_save_php_state(oxphp_request_fiber *fiber) {
     /* ORDERING IS CRITICAL:
      * 1. Park the output buffers this request has open — before the Rust TLS
@@ -3707,6 +3839,8 @@ void oxphp_fiber_save_php_state(oxphp_request_fiber *fiber) {
     zend_stack_init(&OG(handlers), sizeof(php_output_handler *));
     OG(active) = NULL;
     OG(running) = NULL;
+    /* With what the URL rewriter among them appends. */
+    oxphp_url_rewriter_park(fiber);
 
     /* Step 1b: and its last error, for the same reason and by the same move. A
      * request that suspends holding one must find it again on resume, and must
@@ -4030,6 +4164,9 @@ void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber) {
     zend_stack_init(&fiber->php_state.ob_handlers, sizeof(php_output_handler *));
     fiber->php_state.ob_active = NULL;
     fiber->php_state.ob_running = NULL;
+    /* And what the URL rewriter among them appends — after the stack, so no
+     * handler that reads what this gives up is left to run. */
+    oxphp_url_rewriter_unpark(fiber);
 
 #if PHP_VERSION_ID >= 80500
     /* The top let go of the fatal's backtrace that stood here, but the steps
@@ -5465,6 +5602,7 @@ void oxphp_scheduler_start_fiber(oxphp_fiber_scheduler *sched, oxphp_request_fib
 
     if (fiber->completed) {
         /* Handler completed without suspending */
+        oxphp_url_rewriter_release();
         return;
     }
 
@@ -5516,6 +5654,8 @@ void oxphp_scheduler_resume_fiber(oxphp_fiber_scheduler *sched, oxphp_request_fi
     if (!fiber->completed) {
         /* Suspended again — re-snapshot its PHP state */
         oxphp_fiber_save_php_state(fiber);
+    } else {
+        oxphp_url_rewriter_release();
     }
 }
 
