@@ -54,10 +54,22 @@ static zend_class_entry *oxphp_invalid_serve_ctx_exc_ce = NULL;
 static zend_class_entry *oxphp_worker_ce = NULL;
 static zend_object_handlers oxphp_worker_object_handlers;
 
-/* Per-thread cached singleton zval. Lazily allocated on first
- * Worker::current() call; never explicitly freed (process lifetime,
- * bounded leak ~32 bytes × N worker threads). */
-static __thread zval *oxphp_worker_singleton = NULL;
+/* The instance Worker::current() hands out on this thread, UNDEF until the first
+ * call of a request. The object lives in the request's heap and object store, so
+ * it lasts exactly as long as the thread's PHP request: in worker mode and on an
+ * async pool thread that is the whole thread, in traditional mode one HTTP
+ * request. RSHUTDOWN releases it while the store is still alive; post-deactivate,
+ * once PHP has shut the request's executor down, forgets whatever is left
+ * without touching it, and the heap reset that ends the request frees it. That
+ * covers a bailout that skipped the release, and a call made after our
+ * RSHUTDOWN: PHP runs RSHUTDOWN in the reverse of the order modules started, so
+ * a module that starts before this one — the session extension built into PHP,
+ * as in the published images — shuts down after it, and its RSHUTDOWN writes a
+ * session through a user save handler when one was registered without a
+ * shutdown function. Forgetting in RINIT instead would come too late: such a
+ * module also starts each request before this one, and session.auto_start
+ * wakes objects up from the session there. */
+static __thread zval oxphp_worker_singleton;
 
 /* Per-thread re-entry sentinel for Worker::serve(). */
 static __thread bool oxphp_serve_in_progress = false;
@@ -7802,18 +7814,18 @@ static const zend_function_entry oxphp_http_request_iface_methods[] = {
 /* ─── OxPHP\Server\Worker — ZEND_METHOD implementations ─────── */
 
 /* {{{ OxPHP\Server\Worker::current(): OxPHP\Server\Worker
- * Per-thread cached singleton, lazily allocated on first call. */
+ * One instance per PHP request on this thread, created on the request's first
+ * call — see oxphp_worker_singleton. */
 ZEND_METHOD(OxPHP_Server_Worker, current) {
     ZEND_PARSE_PARAMETERS_NONE();
 
-    if (oxphp_worker_singleton == NULL) {
-        oxphp_worker_singleton = (zval *)pemalloc(sizeof(zval), 1);
-        object_init_ex(oxphp_worker_singleton, oxphp_worker_ce);
+    if (Z_ISUNDEF(oxphp_worker_singleton)) {
+        object_init_ex(&oxphp_worker_singleton, oxphp_worker_ce);
     }
 
     /* Return a copy of the cached zval; bump refcount so the caller's
      * eventual zval_ptr_dtor doesn't free our singleton. */
-    ZVAL_COPY(return_value, oxphp_worker_singleton);
+    ZVAL_COPY(return_value, &oxphp_worker_singleton);
 }
 /* }}} */
 
@@ -9554,6 +9566,33 @@ PHP_RSHUTDOWN_FUNCTION(oxphp_sapi)
         zend_hash_clean(&decorator_instance_cache_ht);
     }
 
+    /* Release the request's Worker instance while its object store is alive.
+     * Last, and the slot is emptied before the release, so that whatever the
+     * release runs cannot leave the slot naming an object being freed. */
+    if (!Z_ISUNDEF(oxphp_worker_singleton)) {
+        zval worker;
+        ZVAL_COPY_VALUE(&worker, &oxphp_worker_singleton);
+        ZVAL_UNDEF(&oxphp_worker_singleton);
+        zval_ptr_dtor(&worker);
+    }
+
+    return SUCCESS;
+}
+/* }}} */
+
+/* {{{ post-deactivate — runs once PHP has shut the request's executor down: no
+ * PHP code runs from here until the next request has started, and the heap
+ * reset still ahead frees whatever the request left in it. */
+ZEND_MODULE_POST_ZEND_DEACTIVATE_D(oxphp_sapi)
+{
+    /* Forget, never release: a Worker instance still cached here is one
+     * RSHUTDOWN did not release — created after it ran, or left by a bailout
+     * before it got that far. Releasing it now would free nothing the heap
+     * reset does not, and without PHP's fast shutdown path — a debug build, for
+     * one — PHP holds a reference of its own to each object it left in the
+     * store, so that they show up as leaks — see oxphp_worker_singleton. */
+    ZVAL_UNDEF(&oxphp_worker_singleton);
+
     return SUCCESS;
 }
 /* }}} */
@@ -9592,7 +9631,9 @@ zend_module_entry oxphp_sapi_module_entry = {
     PHP_RSHUTDOWN(oxphp_sapi),   /* RSHUTDOWN */
     PHP_MINFO(oxphp_sapi),
     PHP_OXPHP_SAPI_VERSION,
-    STANDARD_MODULE_PROPERTIES
+    NO_MODULE_GLOBALS,
+    ZEND_MODULE_POST_ZEND_DEACTIVATE_N(oxphp_sapi), /* post deactivate */
+    STANDARD_MODULE_PROPERTIES_EX
 };
 /* }}} */
 

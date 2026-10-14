@@ -1,0 +1,11 @@
+# profile: pooltrad
+# description: Worker::current() outside worker mode — each request gets an instance of its own, and no request is handed one an earlier request on the thread got
+
+# Three requests in a row on one worker, each of which must get an instance it
+# created itself.
+worker_trad/test_current_belongs_to_its_request
+
+# An instance asked for after OxPHP has shut the request down — from a session
+# save handler's write — does not reach the next request on the thread, and the
+# request's own instance was released before that.
+worker_trad/test_current_after_request_shutdown

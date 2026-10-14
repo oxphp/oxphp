@@ -14674,13 +14674,13 @@ if (!oxphp_superglobals_enabled()) {
 
 `OxPHP\Server\Worker` is the unified runtime handle for everything that relates to a single OxPHP OS worker thread. It is a final, stateless wrapper over the bridge thread-local state and is registered by the SAPI extension itself, so it is always available — both in traditional mode and in [worker mode](../features/worker-mode.md). Each call reads live state directly from the runtime; the object itself caches nothing.
 
-`Worker::current()` returns a singleton per OS thread: two calls on the same thread always return the same instance.
+`Worker::current()` returns one instance per PHP request: every call a request makes returns the same instance until OxPHP has finished with the request. In worker mode the worker's whole lifetime is a single PHP request, so the instance stays the same across every HTTP request the worker serves. In traditional mode each HTTP request is a PHP request of its own, and PHP frees the objects a request created when it ends, so each request gets a new instance — and so does a call made once OxPHP has finished with the request: a session save handler registered with `session_set_save_handler($handler, false)`, for one, writes the session at that point.
 
 ## Quick reference
 
 | Method | Description |
 |--------|-------------|
-| `Worker::current(): self` | Returns the singleton handle for the current OS thread. |
+| `Worker::current(): self` | Returns the handle for the current OS thread — one instance per PHP request. |
 | `Worker::isWorkerMode(): bool` | Returns `true` if the server is running in worker mode (i.e. `WORKER_MODE_ENABLED=true`). |
 | `id(): int` | Numeric worker identifier in the range `0..N-1` for the current OS thread. |
 | `startTime(): float` | Unix timestamp (seconds) when this OS worker thread was spawned. |
@@ -14697,7 +14697,7 @@ if (!oxphp_superglobals_enabled()) {
 
 | Method | Traditional mode | Worker mode |
 |--------|------------------|-------------|
-| `current()` | Singleton per OS thread. | Singleton per OS thread. |
+| `current()` | One instance per request; the next request on the thread gets a new one. | One instance for the worker's whole lifetime. |
 | `isWorkerMode()` | `false` | `true` |
 | `id()` | OS-thread index in the worker pool. | OS-thread index in the worker pool. |
 | `startTime()` | Time the OS thread was spawned (typically server start). | Time the OS thread was spawned. |

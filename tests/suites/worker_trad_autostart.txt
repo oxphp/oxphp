@@ -1,0 +1,7 @@
+# profile: tradautostart
+# description: Worker::current() outside worker mode — a request that asks for it while it starts up gets an instance of its own
+
+# A session written after OxPHP's request shutdown asks for an instance, and the
+# next request on the thread asks again from an object its auto-started session
+# wakes up — before OxPHP's module has started that request.
+worker_trad/test_current_during_request_startup
