@@ -1,0 +1,28 @@
+# profile: asyncdecl
+# description: Script code on an async-pool thread — tasks and Shared\Pool callbacks a task runs
+
+# A task naming a function or class of a script its thread never ran fails with
+# an Error. Each of these took the whole process down before.
+asyncdecl/test_task_calls_function_of_entry_file
+asyncdecl/test_task_declares_anonymous_class
+asyncdecl/test_task_declares_named_class
+asyncdecl/test_task_nested_closure_calls_function
+asyncdecl/test_task_default_value_closure_calls_function
+asyncdecl/test_task_unreached_call_is_refused
+# A named class lookup fails with the engine's own Error, as it always did.
+asyncdecl/test_task_named_class_not_found
+
+# The factory and $destroy a task's acquire() and evict() run on its thread.
+asyncdecl/test_pool_factory_anonymous_class_in_task
+asyncdecl/test_pool_factory_calls_function_in_task
+asyncdecl/test_pool_destroy_calls_function_in_task
+asyncdecl/test_pool_internal_factory_in_task
+asyncdecl/test_pool_factory_first_run_by_request
+
+# Preloaded code exists on every thread.
+asyncdecl/test_task_class_named_like_preloaded
+asyncdecl/test_task_runs_preloaded_code
+asyncdecl/test_task_declares_preloaded_named_class
+asyncdecl/test_preloaded_file_required_again
+
+asyncdecl/test_server_alive

@@ -127,6 +127,10 @@ worker/test_pending_exception_destructor >> ?phase=dtorloopcheck
 # past the response, so what is asserted is how the task ended.
 async/test_orphan_cpu_bound_cancelled_at_request_end
 
+# A pool bound to a name runs its factory on the worker thread that acquires;
+# one written in a file only the other worker included is refused there.
+worker/test_pool_factory_from_file_peer_never_loaded
+
 # Last in the file on purpose: the gauge is written at the end of a request, so
 # a worker only has one to report once it has served something. By here the pool
 # has served the whole suite.

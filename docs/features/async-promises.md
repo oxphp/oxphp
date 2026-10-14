@@ -91,6 +91,8 @@ $orders = $results[$p2];
 
 ```php
 <?php
+// fetch_from_primary_db() and fetch_from_replica_db() are loaded by opcache.preload:
+// see Your Own Functions and Classes in Tasks.
 $p1 = oxphp_async(fn() => fetch_from_primary_db());
 $p2 = oxphp_async(fn() => fetch_from_replica_db());
 
@@ -108,9 +110,9 @@ Non-winning promises remain awaitable individually after `oxphp_async_await_race
 
 ```php
 <?php
-$mirror_a = oxphp_async(fn() => fetch('https://mirror-a.example.com/data'));
-$mirror_b = oxphp_async(fn() => fetch('https://mirror-b.example.com/data'));
-$mirror_c = oxphp_async(fn() => fetch('https://mirror-c.example.com/data'));
+$mirror_a = oxphp_async(fn() => file_get_contents('https://mirror-a.example.com/data'));
+$mirror_b = oxphp_async(fn() => file_get_contents('https://mirror-b.example.com/data'));
+$mirror_c = oxphp_async(fn() => file_get_contents('https://mirror-c.example.com/data'));
 
 try {
     $winner = oxphp_async_await_any([$mirror_a, $mirror_b, $mirror_c], 5.0);
@@ -229,11 +231,47 @@ Async closures run on separate threads. This imposes restrictions on what data c
 Additional constraints:
 
 - **User functions only** — the closure must be user-defined, not a wrapper around a built-in function
+- **Your script's functions and classes do not exist in a task** — an async worker thread never runs your script or the files it includes, so nothing they declare exists there; built-in functions and classes and [those loaded by `opcache.preload`](#your-own-functions-and-classes-in-tasks) exist on every thread. A task that calls a function declared at the top level of the closure's own file, or declares a class — anonymous or named — inside the closure, fails before its first statement runs: `oxphp_async_await()` throws `OxPHP\Async\AsyncException` with a message such as `Async task failed: [Error] Call to undefined function helper() at /var/www/html/worker.php:12: it belongs to a script this PHP thread has not loaded; …`. The whole closure is checked, the closures it creates and the branches it never takes included, so a task that only names such a function in a branch it does not take fails as well. A function the file declares inside an `if` or another function is missing too, but the task runs until it reaches the call and then fails with PHP's own `Call to undefined function`. All of this is with OPcache, which is on by default; without it, a call to a function of a file included before the closure's file is refused before the task starts as well. OPcache may replace a call to a function that only returns a constant with that constant, and such a call then works in a task; that is not a way around this. A named class the task instantiates fails with PHP's own `Class "…" not found` when the task reaches it. The same goes for a `Shared\Pool` factory or destroy callback that a task's acquire or `evict()` runs — see [Shared\Pool](../shared-state/shared-pool.md#factory-and-destroy-semantics), and do not call `evict()` inside a task on a pool that has a destroy callback.
 - **Serialization overhead** — arguments and return values are serialized across the thread boundary. Large arrays or strings add latency
 - **No shared state for plain PHP values** — each async worker has its own PHP environment. Plain variables, arrays, and class instances are copied (or rejected) across the boundary. Use the [shared-state primitives](../shared-state/shared-state.md) (`Shared\Counter`, `Shared\Map`, `Shared\Channel`, …) to pass references that are visible to both threads
 - **No pool from a request outside worker mode** — a `Shared\Pool` created outside worker mode, by an HTTP request or by a script under `oxphp run`, crosses into a task, but every acquire on it there throws `ClosedException`, and `Registry::pool()` or `Registry::global()` there throws `SharedException` rather than bind it to a name: such a pool can only be used by the request that created it. See [Shared\Pool](../shared-state/shared-pool.md#outside-worker-mode)
 - **No end of script inside a task** — a task is not a request, so `register_shutdown_function()` called from an async closure registers a callback that never runs: there is no response for it to write into and no request for it to be the end of, and it is discarded when the task finishes. Do that work at the end of the closure itself
 - **No execution deadline inside a task** — `max_execution_time` does not bound what a task runs, and neither does `set_time_limit()` called inside one. Both still succeed — `set_time_limit()` returns `true`, and `ini_set()` returns the previous value, which is what it returns anywhere — and the value still reads back through `ini_get('max_execution_time')`; nothing counts it down. The engine keeps one execution timer per thread, and a pool thread runs every task of its life inside the single request it opened at startup — so a deadline armed there belongs to no task in particular, and would end whichever one happened to be running PHP code when it ran out, including a task that asked for no limit at all. Bound a task from the side that waits for it instead, with the timeout argument of `oxphp_async_await()` and its variants, which [cancels the task it gives up on](#timeouts-cancel-the-abandoned-task). One thing does still read the directive: with [`RUNTIME_HOOKS=streams`](../operations/configuration.md#runtime-hooks) on, a wait for a connection another fiber is using is bounded by the smaller of `max_execution_time` and `default_socket_timeout`, so a task that lowers it shortens that wait — for itself and for the tasks that run on that thread after it, since an ini value a task sets is not rolled back until the request ends and a pool thread's request does not end
+
+## Your Own Functions and Classes in Tasks
+
+Functions and classes loaded by [`opcache.preload`](../php/opcache.md#preloading) exist on every PHP thread, the async worker threads included. Put what tasks need into files the preload script loads:
+
+```ini
+; /usr/local/etc/php/conf.d/zz-preload.ini
+opcache.preload=/var/www/html/preload.php
+```
+
+```php
+<?php
+// /var/www/html/preload.php
+require __DIR__ . '/src/tasks.php';
+```
+
+```php
+<?php
+// /var/www/html/src/tasks.php
+function thumbnail_path(string $path): string
+{
+    return dirname($path) . '/thumb-' . basename($path);
+}
+
+final class Thumbnail
+{
+    public function __construct(public readonly string $path) {}
+}
+```
+
+A task can then call `thumbnail_path()` and use `Thumbnail`, whether its closure is written in your script or in a preloaded file. A closure written in a preloaded file can also declare anonymous classes and call that file's functions. Preloaded code is fixed for the life of the server: restart it after changing those files. Constants are not preloaded: one that a preloaded file defines with `const` or `define()` does not exist in a task.
+
+A class is preloaded only when its parent class, interfaces and traits are built in or preloaded as well, so the preload script has to load the files that declare them too. If it does not, a class loaded with `require` stops the server from starting with a fatal error, and one compiled with `opcache_compile_file()` is left out with a `Can't preload unlinked class` warning at startup, so a task that uses it gets `Class "…" not found`. Your script may still `require` a preloaded file: its functions and classes are not declared a second time, but its other top-level statements run in your script.
+
+When PHP runs as root, it refuses to preload unless `opcache.preload_user` is set. Started as root, OxPHP switches to `www-data` before PHP starts, so the published image needs no `opcache.preload_user` unless the server keeps root (`--user=root`).
 
 ## Docker Example
 

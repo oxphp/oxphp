@@ -4565,6 +4565,140 @@ void oxphp_async_drop_execution_timer(void) {
     EG(timeout_seconds) = 0;
 }
 
+/* === Code compiled for another thread: check before running it here === */
+
+#define OXPHP_NOT_LOADED_HERE \
+    ": it belongs to a script this PHP thread has not loaded; only built-in " \
+    "functions and classes and those loaded by opcache.preload exist on every " \
+    "PHP thread, so the code was not run"
+
+/**
+ * Find a function or class `op` needs that the current thread's tables do not
+ * hold. Returns the message for the Error to throw, or NULL when nothing is
+ * missing.
+ *
+ * Code passed to a thread that never ran its script (an async task, a
+ * Shared\Pool factory or destroy callback) still names that script's functions
+ * and classes, and three opcodes take for granted that the compiler checked
+ * the name exists: ZEND_INIT_FCALL (a call to a function the compiler already
+ * knew, which under OPcache means one of the same file or a preloaded one),
+ * ZEND_DECLARE_ANON_CLASS and ZEND_DECLARE_CLASS (a class declared inside a
+ * function body). Each one asserts the lookup succeeded and dereferences what
+ * it found, and in a release build the assert is gone, so a missing entry is
+ * a NULL dereference that takes the whole process down. Every other opcode
+ * that looks a name up checks the result and throws.
+ *
+ * ZEND_DECLARE_CLASS falls back to the class's lowercased name when its
+ * runtime definition key is gone and reports a redeclaration from there, so
+ * only both missing at once is a crash.
+ *
+ * The whole body is checked, a branch the call never takes included, along
+ * with every closure or function declared inside it, a closure in a
+ * parameter's default value included. A closure in an attribute's arguments
+ * is not: it only runs if the code creates the attribute through reflection. */
+static zend_string *oxphp_op_array_missing_here(const zend_op_array *op);
+
+#if PHP_VERSION_ID >= 80500
+/* PHP 8.5 accepts a static closure in a constant expression, such as a
+ * parameter's default value. The compiler keeps that closure inside the
+ * expression (ZEND_AST_OP_ARRAY) rather than in dynamic_func_defs, and
+ * evaluating the default creates it, so its body is checked as well. */
+static zend_string *oxphp_const_ast_missing_here(zend_ast *ast) {
+    if (!ast) {
+        return NULL;
+    }
+    if (ast->kind == ZEND_AST_OP_ARRAY) {
+        return oxphp_op_array_missing_here(zend_ast_get_op_array(ast)->op_array);
+    }
+    if (zend_ast_is_list(ast)) {
+        zend_ast_list *list = zend_ast_get_list(ast);
+        for (uint32_t i = 0; i < list->children; i++) {
+            zend_string *missing = oxphp_const_ast_missing_here(list->child[i]);
+            if (missing) {
+                return missing;
+            }
+        }
+        return NULL;
+    }
+    if (zend_ast_is_special(ast)) {
+        return NULL;
+    }
+    for (uint32_t i = 0; i < zend_ast_get_num_children(ast); i++) {
+        zend_string *missing = oxphp_const_ast_missing_here(ast->child[i]);
+        if (missing) {
+            return missing;
+        }
+    }
+    return NULL;
+}
+#endif
+
+static zend_string *oxphp_op_array_missing_here(const zend_op_array *op) {
+    for (uint32_t i = 0; i < op->last; i++) {
+        const zend_op *opline = &op->opcodes[i];
+        const zval *name;
+
+        switch (opline->opcode) {
+#if PHP_VERSION_ID >= 80500
+            case ZEND_RECV_INIT: {
+                zval *dflt = RT_CONSTANT(opline, opline->op2);
+                if (Z_TYPE_P(dflt) == IS_CONSTANT_AST) {
+                    zend_string *missing = oxphp_const_ast_missing_here(Z_ASTVAL_P(dflt));
+                    if (missing) {
+                        return missing;
+                    }
+                }
+                break;
+            }
+#endif
+            case ZEND_INIT_FCALL:
+                name = RT_CONSTANT(opline, opline->op2);
+                if (!zend_hash_exists(EG(function_table), Z_STR_P(name))) {
+                    return zend_strpprintf(0,
+                        "Call to undefined function %s() at %s:%u" OXPHP_NOT_LOADED_HERE,
+                        Z_STRVAL_P(name), ZSTR_VAL(op->filename), opline->lineno);
+                }
+                break;
+            case ZEND_DECLARE_ANON_CLASS:
+                name = RT_CONSTANT(opline, opline->op1);
+                if (!zend_hash_exists(EG(class_table), Z_STR_P(name))) {
+                    return zend_strpprintf(0,
+                        "Cannot declare anonymous class at %s:%u" OXPHP_NOT_LOADED_HERE,
+                        ZSTR_VAL(op->filename), opline->lineno);
+                }
+                break;
+            case ZEND_DECLARE_CLASS:
+                /* op1 is the lowercased name, the literal after it the key. */
+                name = RT_CONSTANT(opline, opline->op1);
+                if (!zend_hash_exists(EG(class_table), Z_STR_P(name + 1))
+                 && !zend_hash_exists(EG(class_table), Z_STR_P(name))) {
+                    return zend_strpprintf(0,
+                        "Cannot declare class %s at %s:%u" OXPHP_NOT_LOADED_HERE,
+                        Z_STRVAL_P(name), ZSTR_VAL(op->filename), opline->lineno);
+                }
+                break;
+        }
+    }
+
+    for (uint32_t i = 0; i < op->num_dynamic_func_defs; i++) {
+        zend_string *missing = oxphp_op_array_missing_here(op->dynamic_func_defs[i]);
+        if (missing) {
+            return missing;
+        }
+    }
+    return NULL;
+}
+
+/* The same check for a stored callable. Internal functions exist on every
+ * thread, and a trampoline (__call, __callStatic) has no body of its own. */
+static zend_string *oxphp_function_missing_here(const zend_function *fn) {
+    if (fn->type != ZEND_USER_FUNCTION
+     || (fn->common.fn_flags & ZEND_ACC_CALL_VIA_TRAMPOLINE)) {
+        return NULL;
+    }
+    return oxphp_op_array_missing_here(&fn->op_array);
+}
+
 /* === Async Promise: Fixup run_time_cache for cross-thread execution === */
 
 /**
@@ -4616,6 +4750,15 @@ int oxphp_reconstruct_async_closure(
     char **exc_message
 ) {
     zend_function func;
+
+    /* The task runs on a thread that never ran the script it came from. */
+    zend_string *missing = oxphp_op_array_missing_here(op_array);
+    if (missing) {
+        *exc_class = strdup("Error");
+        *exc_message = strdup(ZSTR_VAL(missing));
+        zend_string_release_ex(missing, 0);
+        return -1;
+    }
 
     /* Reconstruct closure from op_array + static_vars */
     memcpy(&func, op_array, sizeof(zend_op_array));
@@ -6851,6 +6994,15 @@ static int oxphp_pool_factory_invoke_unguarded(void *fcc_heap, void **out_slot_z
 
     oxphp_pool_fcc_t *heap = (oxphp_pool_fcc_t *)fcc_heap;
 
+    /* An acquire can run the factory on a thread that never ran its script:
+     * a task's, or another worker thread's when the pool is shared. */
+    zend_string *missing = oxphp_function_missing_here(heap->fcc.function_handler);
+    if (missing) {
+        zend_throw_error(NULL, "%s", ZSTR_VAL(missing));
+        zend_string_release_ex(missing, 0);
+        return -1;
+    }
+
     zval ret_zv;
     ZVAL_UNDEF(&ret_zv);
 
@@ -7004,11 +7156,19 @@ static int oxphp_pool_destroy_invoke_unguarded(void *destroy_fcc_heap, void *slo
         zval ret_zv;
         ZVAL_UNDEF(&ret_zv);
 
-        zend_call_known_function(heap->fcc.function_handler,
-                                  heap->fcc.object,
-                                  heap->fcc.called_scope,
-                                  &ret_zv,
-                                  1, args, NULL);
+        /* $destroy can run on a thread that never ran its script, a task's or
+         * another worker thread's. Handled the way a throw from it is. */
+        zend_string *missing = oxphp_function_missing_here(heap->fcc.function_handler);
+        if (missing) {
+            oxphp_bridge_capture_fatal(ZSTR_VAL(missing), ZSTR_LEN(missing));
+            zend_string_release_ex(missing, 0);
+        } else {
+            zend_call_known_function(heap->fcc.function_handler,
+                                      heap->fcc.object,
+                                      heap->fcc.called_scope,
+                                      &ret_zv,
+                                      1, args, NULL);
+        }
 
         zval_ptr_dtor(&args[0]);
 
