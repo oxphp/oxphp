@@ -180,6 +180,7 @@ The factory runs **lazily** on the acquiring worker thread. A pool with `maxSize
 - A fatal error inside the factory ends the request, and the slot is not counted against the budget either.
 - The destroy callback (if supplied) runs when the pool drops a slot: idle timeout expiry, explicit `evict()`, or server shutdown. It runs on a worker thread (not on the Tokio thread driving the eviction scheduler), so PHP is safe to call. Outside worker mode it does not run for the slots still idle when the pool's request ends — see [Outside worker mode](#outside-worker-mode).
 - A destroy callback that throws is logged but does not poison the pool — the slot is already being destroyed, so there is nothing useful to roll back.
+- A fatal error in the destroy callback that `evict()` runs ends the request or the task, as it would anywhere else. The slot being destroyed counts as dropped, and the idle slots `evict()` had not reached yet stay in the pool. The object in the dropped slot is not freed, though: in worker mode, and in a pool created inside an `oxphp_async()` task, it stays alive until its thread exits, so a connection in it stays open all that time without counting against `maxSize`. `evict()` holds no lock of the pool while the callback runs, so the callback can call `tryAcquire()` and `release()` on that same pool.
 
 ## Per-thread affinity
 

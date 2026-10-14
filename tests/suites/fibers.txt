@@ -11,6 +11,7 @@ fibers/test_suspend_retry_is_bounded
 fibers/test_generator_fatal_releases_once
 fibers/test_closure_fatal_releases_it
 fibers/test_shared_closure_fatal_releases
+fibers/test_shared_pool_destroy_fatal
 fibers/test_write_cancel_releases_frames
 # Out of memory deep in a call stack, then what the worker has left. Ahead of
 # the fatals in fibers below: on a build where the worker is left with no

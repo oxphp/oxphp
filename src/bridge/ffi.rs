@@ -557,6 +557,14 @@ extern "C" {
         destroy_fcc_heap: *mut c_void,
         slot_zv_heap: *mut c_void,
     ) -> c_int;
+    /// `oxphp_pool_destroy_invoke` with a bailout held back: returns
+    /// `OXPHP_SHARED_INVOKE_BAILOUT` and frees nothing when one ended
+    /// `$destroy`, or was already waiting to be raised again. Only from a
+    /// plugin handler — the dispatch stub raises it again.
+    pub fn oxphp_pool_destroy_invoke_guarded(
+        destroy_fcc_heap: *mut c_void,
+        slot_zv_heap: *mut c_void,
+    ) -> c_int;
 
     // Shared\Pool\Handle rust_data wrapper helpers. Handle storage
     // layout mirrors `PoolHandleStorage` (repr(C)): u64 pool_id,
