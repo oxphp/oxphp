@@ -54,3 +54,6 @@ async/test_async_declared_return_types
 # A task cannot bind a pool created by the request that started it to a
 # registry name: the name would outlive the request the pool belongs to.
 async/test_pool_from_request_not_bound_by_task
+# A task calling a function of the script that dispatched it fails with an
+# Error: the async pool's thread never ran that script.
+async/test_task_calls_function_of_its_own_file
