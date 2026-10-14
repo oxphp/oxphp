@@ -2621,20 +2621,25 @@ namespace OxPHP\Server {
      * Exception\InvalidServeContextException.
      *
      * Stateless wrapper — every method reads from Rust thread-local state via
-     * FFI at call time. No data is cached on the object. The class instance
-     * itself is a per-thread singleton: Worker::current() returns the same
-     * object throughout the worker thread's lifetime.
+     * FFI at call time. No data is cached on the object. Worker::current()
+     * returns one instance per PHP request: in worker mode the same object for
+     * the worker thread's whole lifetime, in traditional mode a new one for
+     * each HTTP request.
      */
     final class Worker
     {
         // ── Factory & mode predicate ──
 
         /**
-         * Returns the per-thread Worker singleton.
+         * Returns the Worker instance of the current PHP request.
          *
-         * The same instance is returned for every call within a given OS
-         * thread. Identity holds across requests in worker mode and across
-         * the single request in traditional mode.
+         * Every call a PHP request makes returns the same instance until
+         * OxPHP has finished with the request. In worker mode the worker's
+         * whole lifetime is one PHP request, so identity holds across the HTTP
+         * requests it serves; in traditional mode each HTTP request gets a new
+         * instance, and so does a call made once OxPHP has finished with the
+         * request — from a session save handler registered with
+         * session_set_save_handler($handler, false), for one.
          */
         public static function current(): self {}
 

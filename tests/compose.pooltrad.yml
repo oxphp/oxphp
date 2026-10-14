@@ -1,9 +1,11 @@
-# Shared\Pool outside worker mode: traditional routing with two PHP workers.
+# Shared\Pool and Worker::current() outside worker mode: traditional routing
+# with two PHP workers.
 #
 # A test holds one worker for its whole run and sends its own requests to the
 # server, so those land on the other worker — one at a time, the same thread
 # every time. That is what lets a test put a pool's creating request and a later
-# request on the same thread, or on two threads at once, and know which.
+# request on the same thread, or on two threads at once, and know which — and
+# send consecutive requests to one thread to see what each of them was handed.
 #
 # Standalone usage:
 #   docker compose -f compose.yml -f compose.pooltrad.yml up
