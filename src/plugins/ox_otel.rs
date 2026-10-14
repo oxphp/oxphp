@@ -957,6 +957,7 @@ mod tests {
         let mut php_attributes = Vec::new();
         let mut php_functions = Vec::new();
         let mut core_flags = HashMap::new();
+        let mut php_thread_handlers = Vec::new();
 
         let mut ctx = PluginContext::new(
             "otel".into(),
@@ -975,6 +976,7 @@ mod tests {
             &mut php_attributes,
             &mut php_functions,
             &mut core_flags,
+            &mut php_thread_handlers,
         );
         plugin.init(&mut ctx).unwrap();
         drop(ctx);

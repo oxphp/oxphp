@@ -226,16 +226,6 @@ struct FiberTlsSlot {
     /// overwritten by every request the worker admits in between.
     #[cfg(feature = "php")]
     profiling_was_active: bool,
-    /// This request's open `#[Trace]` span ids (`DECORATOR_SPAN_IDS`) and its
-    /// open instrumentation frames (`HOOK_FRAMES`). Both are LIFOs of ids
-    /// minted in the profiling context saved above, so they have to travel with
-    /// it: left on the thread they would interleave two requests' entries in
-    /// one stack, and either request would close a span of its own that happens
-    /// to wear an id the other pushed.
-    #[cfg(feature = "php")]
-    decorator_span_ids: Vec<u32>,
-    #[cfg(feature = "php")]
-    hook_frames: Vec<crate::plugins::ox_apm::hooks::HookFrame>,
     /// This request's open `#[SlowThreshold]` and `#[MemoryThreshold]` start
     /// marks (`SLOW_STARTS`, `MEM_STARTS`). LIFOs again, and paired with calls
     /// that are still on this request's PHP stack — a neighbour popping one
@@ -255,7 +245,10 @@ thread_local! {
 ///
 /// Uses `std::mem::take` to move the RESPONSE out of TLS (leaving a Default
 /// placeholder) without cloning. The saved data is keyed by `fiber_id`.
+/// Plugins park their own per-request state first, on `fiber_parked`, while
+/// the request is still on the thread.
 pub fn save_fiber_tls(fiber_id: u64) {
+    crate::plugin::php_thread::installed().fiber_parked(fiber_id);
     #[cfg(feature = "php")]
     {
         let response = RESPONSE.with(|r| std::mem::take(&mut *r.borrow_mut()));
@@ -267,8 +260,6 @@ pub fn save_fiber_tls(fiber_id: u64) {
         let request_data = super::sapi::take_request_data();
         let profiling = crate::profiling::take_profiling_context();
         let profiling_was_active = super::sapi::take_profiling_was_active();
-        let decorator_span_ids = crate::plugins::ox_apm::take_decorator_span_ids();
-        let hook_frames = crate::plugins::ox_apm::hooks::take_hook_frames();
         let slow_starts = crate::profiling::decorators::take_slow_starts();
         let mem_starts = crate::profiling::decorators::take_mem_starts();
         FIBER_TLS_SLOTS.with(|slots| {
@@ -284,17 +275,11 @@ pub fn save_fiber_tls(fiber_id: u64) {
                     request_data,
                     profiling,
                     profiling_was_active,
-                    decorator_span_ids,
-                    hook_frames,
                     slow_starts,
                     mem_starts,
                 },
             );
         });
-    }
-    #[cfg(not(feature = "php"))]
-    {
-        let _ = fiber_id;
     }
 }
 
@@ -302,6 +287,8 @@ pub fn save_fiber_tls(fiber_id: u64) {
 ///
 /// Swaps the slot's saved state back into the thread-local. If no slot
 /// exists for this fiber_id (first activation), TLS is left unchanged.
+/// Plugins restore their own per-request state afterwards, on
+/// `fiber_resumed`.
 pub fn restore_fiber_tls(fiber_id: u64) {
     #[cfg(feature = "php")]
     {
@@ -321,20 +308,17 @@ pub fn restore_fiber_tls(fiber_id: u64) {
             super::sapi::restore_request_data(slot.request_data);
             crate::profiling::restore_profiling_context(slot.profiling);
             super::sapi::restore_profiling_was_active(slot.profiling_was_active);
-            crate::plugins::ox_apm::restore_decorator_span_ids(slot.decorator_span_ids);
-            crate::plugins::ox_apm::hooks::restore_hook_frames(slot.hook_frames);
             crate::profiling::decorators::restore_slow_starts(slot.slow_starts);
             crate::profiling::decorators::restore_mem_starts(slot.mem_starts);
         }
     }
-    #[cfg(not(feature = "php"))]
-    {
-        let _ = fiber_id;
-    }
+    crate::plugin::php_thread::installed().fiber_resumed(fiber_id);
 }
 
-/// Remove a fiber's TLS slot (fiber completed or was destroyed).
+/// Remove a fiber's TLS slot (fiber completed or was destroyed), after
+/// plugins have let go of theirs on `fiber_dropped`.
 pub fn remove_fiber_tls(fiber_id: u64) {
+    crate::plugin::php_thread::installed().fiber_dropped(fiber_id);
     FIBER_TLS_SLOTS.with(|slots| {
         slots.borrow_mut().remove(&fiber_id);
     });
@@ -537,10 +521,6 @@ mod tests {
             #[cfg(feature = "php")]
             profiling_was_active: false,
             #[cfg(feature = "php")]
-            decorator_span_ids: Vec::new(),
-            #[cfg(feature = "php")]
-            hook_frames: Vec::new(),
-            #[cfg(feature = "php")]
             slow_starts: Vec::new(),
             #[cfg(feature = "php")]
             mem_starts: Vec::new(),
@@ -572,10 +552,6 @@ mod tests {
             profiling: None,
             #[cfg(feature = "php")]
             profiling_was_active: false,
-            #[cfg(feature = "php")]
-            decorator_span_ids: Vec::new(),
-            #[cfg(feature = "php")]
-            hook_frames: Vec::new(),
             #[cfg(feature = "php")]
             slow_starts: Vec::new(),
             #[cfg(feature = "php")]
@@ -640,10 +616,6 @@ mod tests {
             profiling: None,
             #[cfg(feature = "php")]
             profiling_was_active: false,
-            #[cfg(feature = "php")]
-            decorator_span_ids: Vec::new(),
-            #[cfg(feature = "php")]
-            hook_frames: Vec::new(),
             #[cfg(feature = "php")]
             slow_starts: Vec::new(),
             #[cfg(feature = "php")]

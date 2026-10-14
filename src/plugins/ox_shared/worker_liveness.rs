@@ -15,9 +15,10 @@
 //! completely unrelated thread and we park into its (stale) deque.
 //!
 //! This module side-steps the hazard with an explicit
-//! `DashSet<ThreadKey>`: each SAPI worker thread calls
+//! `DashSet<ThreadKey>`: each thread of the server's PHP pools calls
 //! `register_worker()` on entry and `unregister_worker()` on exit
-//! (both clean and panic paths — see `src/executor/sapi/traditional.rs`).
+//! (both clean and panic paths), through the plugin's PHP thread hooks
+//! (`SharedThreadHooks` in `mod.rs`).
 //! `is_thread_alive(k)` is an O(1) set lookup with zero syscalls.
 
 use std::sync::OnceLock;
@@ -35,8 +36,8 @@ fn registry() -> &'static DashSet<ThreadKey> {
 /// Mark the calling thread as a live SAPI worker. Idempotent — a
 /// second call from the same thread is a no-op (DashSet dedupes).
 ///
-/// Called from `run_worker_loop` right after the per-thread TSRM /
-/// bridge TLS setup and before the first request is pulled. Missing
+/// Called from the plugin's `thread_started` hook, once the thread is
+/// attached to PHP and before its first request. Missing
 /// this call is a correctness hazard: cross-thread release on any
 /// slot this worker produces will be misclassified as "owner dead"
 /// and the resource will be destroyed prematurely.

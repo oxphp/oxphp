@@ -9,5 +9,7 @@ pub mod request_decode;
 #[cfg(feature = "php")]
 pub mod sapi;
 pub mod supervisor;
+#[cfg(feature = "php")]
+pub mod thread;
 pub mod unhandled_exception;
 pub mod worker_registry;

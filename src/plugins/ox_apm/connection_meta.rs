@@ -45,7 +45,8 @@ pub fn get(object_handle: u32) -> Option<ConnectionMeta> {
     CONN_META.with(|m| m.borrow().get(&object_handle).cloned())
 }
 
-/// Clear all stored connection metadata. Call at request end.
+/// Clear all stored connection metadata. Called as a PHP request opens,
+/// before its startup.
 pub fn clear() {
     CONN_META.with(|m| m.borrow_mut().clear());
 }

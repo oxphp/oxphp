@@ -174,12 +174,10 @@ fn async_worker_thread(
     // Mark this thread as async worker in Rust TLS
     sapi::set_is_async_worker(true);
 
-    // 1. Initialize TSRM thread-local storage (required for ZTS)
+    // 1. Attach this thread to PHP (TSRM, bridge context, worker ID); plugins
+    //    see it run until `_php_thread` drops.
+    let _php_thread = unsafe { crate::php::thread::PhpThread::enter(id) };
     unsafe {
-        let _ = bindings::ts_resource_ex(0, std::ptr::null_mut());
-        bindings::oxphp_bridge_tsrm_update();
-        bindings::oxphp_bridge_init_ctx();
-        bindings::oxphp_bridge_set_worker_id(id as i32);
         ffi::oxphp_bridge_set_async_worker(1);
     }
 
@@ -198,10 +196,15 @@ fn async_worker_thread(
         );
     }
 
-    if unsafe { bindings::php_request_startup() } != 0 {
+    // The thread's one PHP request lasts as long as the thread.
+    if !unsafe { crate::php::thread::open_request(crate::plugin::RequestScope::Thread) } {
         tracing::error!(id, "php_request_startup() failed in async worker");
         return;
     }
+    // The guard in the spawn closure is not enough: a panic unwinds this frame
+    // first, and `_php_thread` would tell plugins the thread is stopping while
+    // its request is still open.
+    let request_open = crate::executor::AbortOnUnwind("with a PHP request open");
 
     // That startup armed the engine's execution timer, with max_execution_time
     // or, where a deployment sets one, max_input_time. This thread is not a
@@ -621,7 +624,8 @@ fn async_worker_thread(
     }
 
     // 4. Shutdown
-    unsafe { bindings::php_request_shutdown(std::ptr::null_mut()) };
+    unsafe { crate::php::thread::close_request() };
+    drop(request_open);
 
     tracing::info!(
         worker = %thread_name,
@@ -693,15 +697,8 @@ fn drain_completed(
             };
             let keepalive: Option<Box<dyn std::any::Any + Send>> =
                 if ser_rc == 0 && !ser_buf.is_null() {
-                    #[cfg(feature = "plugin-shared")]
-                    {
-                        let bytes = unsafe { std::slice::from_raw_parts(ser_buf, ser_len) };
-                        crate::plugins::ox_shared::value::resolve_transit_keepalive(bytes)
-                    }
-                    #[cfg(not(feature = "plugin-shared"))]
-                    {
-                        None
-                    }
+                    let bytes = unsafe { std::slice::from_raw_parts(ser_buf, ser_len) };
+                    crate::plugin::php_thread::installed().value_leaving_thread(bytes)
                 } else {
                     None
                 };

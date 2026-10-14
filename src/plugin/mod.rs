@@ -5,6 +5,7 @@ pub mod handler;
 pub mod macros;
 pub mod manager;
 pub mod php;
+pub mod php_thread;
 pub mod types;
 pub mod wrappers;
 
@@ -25,6 +26,7 @@ pub use manager::PluginManager;
 pub use php::{
     PhpError, PhpException, PhpParam, PhpType, PluginNativeFunction, PluginNativeFunctionDef,
 };
+pub use php_thread::{PluginPhpThreadHandler, RequestScope};
 pub use types::{MagicMethod, Modifiers, PhpValue, Visibility};
 
 /// Re-export of `crate::types::PhpScriptError` — errors captured from PHP

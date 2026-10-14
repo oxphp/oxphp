@@ -80,20 +80,13 @@ pub fn current_thread_key() -> ThreadKey {
 }
 
 /// How long the PHP request on a thread lasts, which bounds how long a
-/// pool created on that thread can be used.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RequestScope {
-    /// The request lasts as long as the thread (worker mode, the async
-    /// pool). Pools live until dropped and serve every thread.
-    Thread,
-    /// The thread runs one request, then the process shuts down
-    /// (`oxphp run`). Pools serve that request.
-    OneRequest,
-    /// The thread runs one request after another (traditional,
-    /// Framework and SPA routing). Pools serve the request that made
-    /// them, and none can be bound to a registry name.
-    EachRequest,
-}
+/// pool created on that thread can be used:
+///
+/// - `Thread`: pools live until dropped and serve every thread;
+/// - `OneRequest`: pools serve that one request;
+/// - `EachRequest`: pools serve the request that made them, and none can
+///   be bound to a registry name.
+pub use crate::plugin::php_thread::RequestScope;
 
 thread_local! {
     static REQUEST_SCOPE: Cell<RequestScope> = const { Cell::new(RequestScope::Thread) };
@@ -105,8 +98,9 @@ thread_local! {
     static REQUEST_POOLS: RefCell<Vec<Weak<Entry>>> = const { RefCell::new(Vec::new()) };
 }
 
-/// Declare the calling thread's [`RequestScope`]. Called once by the
-/// executor that owns the thread, before its first request.
+/// Declare the calling thread's [`RequestScope`]. Called by the plugin's
+/// `request_frame_opening` hook each time a PHP request is about to start
+/// on the thread, before `php_request_startup`.
 pub fn set_request_scope(scope: RequestScope) {
     REQUEST_SCOPE.with(|s| s.set(scope));
 }

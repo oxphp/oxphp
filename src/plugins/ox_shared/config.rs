@@ -231,6 +231,9 @@ mod tests {
         php_attributes: &'a mut Vec<crate::plugin::builders::definitions::PhpAttributeDef>,
         php_functions: &'a mut Vec<crate::plugin::builders::definitions::PhpFunctionDef>,
         core_flags: &'a mut std::collections::HashMap<String, String>,
+        php_thread_handlers: &'a mut Vec<
+            Box<dyn crate::plugin::php_thread::PluginPhpThreadHandler>,
+        >,
     ) -> PluginContext<'a> {
         PluginContext::new(
             "ox_shared".into(),
@@ -249,6 +252,7 @@ mod tests {
             php_attributes,
             php_functions,
             core_flags,
+            php_thread_handlers,
         )
     }
 
@@ -268,6 +272,7 @@ mod tests {
             let mut php_attributes = Vec::new();
             let mut php_functions = Vec::new();
             let mut core_flags = std::collections::HashMap::new();
+            let mut php_thread_handlers = Vec::new();
             let ctx = build_ctx(
                 &mut dispatcher,
                 &mut services,
@@ -283,6 +288,7 @@ mod tests {
                 &mut php_attributes,
                 &mut php_functions,
                 &mut core_flags,
+                &mut php_thread_handlers,
             );
             ($body)(&ctx)
         }};

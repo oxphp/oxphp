@@ -17,7 +17,9 @@
 //! read the worker calls `drain_stale_for_current_thread()`, which
 //! walks the registry again and pops stale slots from every
 //! `PoolInner`'s *own* idle deque, destroying each through the usual
-//! `destroy_slot` path.
+//! `destroy_slot` path. Threads whose one PHP request lasts as long as they
+//! do (worker mode, the `oxphp_async()` pool) register a flag as well but
+//! never take it, so idle-timeout eviction does not reach their idle slots.
 //!
 //! Why drain inside a request and not at the top of the recv loop?
 //! Because `$destroy` runs Zend bytecode. Between requests the VM's

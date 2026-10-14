@@ -1,0 +1,40 @@
+# Shared\Pool outside worker mode, met while a request starts up: traditional
+# routing with one PHP worker, session.auto_start on, and a preloaded class
+# whose __wakeup calls Registry::pool().
+#
+# PHP decodes an auto-started session inside php_request_startup, so the
+# object it holds wakes up before any script runs. The container copies that
+# session into place before the server starts, and the test's request — the
+# first PHP request the one thread serves — carries its cookie.
+#
+# Standalone usage:
+#   docker compose -f compose.yml -f compose.poolstartup.yml up
+services:
+  oxphp-poolstartup:
+    build:
+      context: ..
+      dockerfile: docker/dev/Dockerfile
+      args:
+        PHP_VERSION:
+    command:
+      - sh
+      - -c
+      - cp /var/www/html/public/tests/poolstartup/session.txt /tmp/sess_poolstartup0001 && exec oxphp
+    ports:
+      - "80"
+    networks: [test-net]
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    environment:
+      LOG_LEVEL: error
+      INTERNAL_ADDR: 0.0.0.0:9090
+      PHP_WORKERS: 1
+    volumes:
+      - ../www:/var/www/html
+      - ./php:/var/www/html/public/tests
+      - ./poolstartup.ini:/usr/local/etc/php/conf.d/zz-poolstartup.ini:ro

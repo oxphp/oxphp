@@ -11,6 +11,7 @@ use bytes::Bytes;
 use crate::executor::idle_clock::LastActive;
 use crate::metrics::{WorkerMetrics, WorkerStats};
 use crate::php::{bindings, sapi};
+use crate::plugin::RequestScope;
 use crate::types::ScriptResponse;
 
 use super::pool::{WorkerExit, WorkerRequest};
@@ -73,13 +74,9 @@ fn worker_mode_thread(
         .unwrap_or("php-worker")
         .to_string();
 
-    // 1. Initialize TSRM thread-local storage (required for ZTS)
-    unsafe {
-        let _ = bindings::ts_resource_ex(0, std::ptr::null_mut());
-        bindings::oxphp_bridge_tsrm_update();
-        bindings::oxphp_bridge_init_ctx();
-        bindings::oxphp_bridge_set_worker_id(worker_id as i32);
-    }
+    // 1. Attach this thread to PHP (TSRM, bridge context, worker ID); plugins
+    //    see it run until `_php_thread` drops.
+    let _php_thread = unsafe { crate::php::thread::PhpThread::enter(worker_id) };
 
     // 2. Set worker mode TLS flags
     unsafe {
@@ -153,7 +150,8 @@ fn worker_mode_thread(
     // Without this, frameworks like Symfony abort early on empty $_SERVER.
     sapi::set_boot_server_vars(&config.entry_file, &config.document_root);
 
-    if unsafe { bindings::php_request_startup() } != 0 {
+    // The worker's one PHP request lasts as long as the thread.
+    if !unsafe { crate::php::thread::open_request(RequestScope::Thread) } {
         tracing::error!(worker = %thread_name, "php_request_startup() failed in worker mode");
         return WorkerExit::Ended;
     }
@@ -234,7 +232,7 @@ fn worker_mode_thread(
         .as_secs_f64();
     unsafe {
         bindings::oxphp_bridge_set_request_time(shutdown_secs);
-        bindings::php_request_shutdown(std::ptr::null_mut());
+        crate::php::thread::close_request();
     }
     drop(request_open);
     sapi::clear_request_data();

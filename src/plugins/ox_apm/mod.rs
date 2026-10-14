@@ -23,7 +23,10 @@ use crate::plugin::handler::{
     PluginCompleteHandler, PluginCompleteView, PluginRequestActions, PluginRequestHandler,
     PluginRequestView,
 };
-use crate::plugin::{Plugin, PluginContext, PluginDeps, PluginError, PluginHealth};
+use crate::plugin::{
+    Plugin, PluginContext, PluginDeps, PluginError, PluginHealth, PluginPhpThreadHandler,
+    RequestScope,
+};
 
 use crate::profiling::{now_ns, SpanEvent, SpanEventKind, PROFILING_CONTEXT};
 
@@ -62,6 +65,56 @@ pub fn take_decorator_span_ids() -> Vec<u32> {
 /// [`take_decorator_span_ids`]).
 pub fn restore_decorator_span_ids(ids: Vec<u32>) {
     DECORATOR_SPAN_IDS.with(|cell| *cell.borrow_mut() = ids);
+}
+
+/// A parked request fiber's open `#[Trace]` span ids and hook frames.
+struct ParkedStacks {
+    span_ids: Vec<u32>,
+    hook_frames: Vec<hooks::HookFrame>,
+}
+
+thread_local! {
+    /// The stacks of each request fiber parked on this thread, by fiber id.
+    static PARKED: RefCell<std::collections::HashMap<u64, ParkedStacks>> =
+        RefCell::new(std::collections::HashMap::new());
+}
+
+/// What APM keeps per PHP request on a thread, kept with the request.
+///
+/// The open `#[Trace]` span ids and hook frames are LIFOs of ids minted in
+/// the request's profiling context, which the server parks with a suspended
+/// request fiber, so they are parked with it: left on the thread they would
+/// interleave two requests' entries in one stack, and either request would
+/// close a span of its own that happens to wear an id the other pushed.
+struct ApmThreadHooks;
+
+impl PluginPhpThreadHandler for ApmThreadHooks {
+    fn request_frame_opening(&self, _scope: RequestScope) {
+        // Before the startup, which can already construct a connection: a
+        // session that `session.auto_start` decodes wakes its objects up.
+        connection_meta::clear();
+    }
+
+    fn fiber_parked(&self, fiber_id: u64) {
+        let parked = ParkedStacks {
+            span_ids: take_decorator_span_ids(),
+            hook_frames: hooks::take_hook_frames(),
+        };
+        PARKED.with(|p| p.borrow_mut().insert(fiber_id, parked));
+    }
+
+    fn fiber_resumed(&self, fiber_id: u64) {
+        // Only what was parked is put back: a resume with nothing parked
+        // leaves the thread's stacks alone, as the core does with its own.
+        if let Some(parked) = PARKED.with(|p| p.borrow_mut().remove(&fiber_id)) {
+            restore_decorator_span_ids(parked.span_ids);
+            hooks::restore_hook_frames(parked.hook_frames);
+        }
+    }
+
+    fn fiber_dropped(&self, fiber_id: u64) {
+        PARKED.with(|p| p.borrow_mut().remove(&fiber_id));
+    }
 }
 
 /// Built-in decorator for the `#[OxPHP\Apm\Trace]` PHP attribute.
@@ -172,8 +225,10 @@ struct ApmRequestHandler;
 
 impl PluginRequestHandler for ApmRequestHandler {
     fn handle(&self, _view: &PluginRequestView, _actions: &mut PluginRequestActions) {
-        // NOTE: ProfilingContext reset and connection_meta::clear happen on the PHP
-        // worker thread in execute_request() (executor/sapi.rs), not here.
+        // NOTE: ProfilingContext reset happens on the PHP worker thread in
+        // execute_request() (executor/sapi/traditional.rs; worker mode in
+        // php/sapi.rs), and connection_meta::clear in
+        // ApmThreadHooks before a PHP request starts; neither here.
         // This handler runs on Tokio thread — different TLS from PHP workers.
         // Kept for future use (e.g. extracting metadata for Tokio-side processing).
     }
@@ -605,6 +660,7 @@ impl Plugin for ApmPlugin {
         ctx.on_request(ApmRequestHandler);
         ctx.on_complete(ApmCompleteHandler { provider });
         ctx.register_decorator(TraceDecorator);
+        ctx.on_php_thread(ApmThreadHooks);
 
         // Register internal PHP function hooks for automatic span creation.
         // register_all() populates the C bridge's pending list.
@@ -663,6 +719,124 @@ mod tests {
         DECORATOR_SPAN_IDS.with(|ids| assert_eq!(*ids.borrow(), vec![3, 4]));
     }
 
+    fn frame(span_local_id: u32) -> hooks::HookFrame {
+        hooks::HookFrame {
+            span_local_id,
+            start: std::time::Instant::now(),
+            slow_eligible: false,
+        }
+    }
+
+    /// Both stacks of this thread, emptied, as `(span ids, frame ids)`.
+    fn take_stacks() -> (Vec<u32>, Vec<u32>) {
+        let frames = hooks::take_hook_frames();
+        (
+            take_decorator_span_ids(),
+            frames.iter().map(|f| f.span_local_id).collect(),
+        )
+    }
+
+    /// The handler an enabled plugin subscribes is the one that carries a
+    /// request's open spans with its fiber: what it parks leaves the thread
+    /// empty for the request admitted in the meantime, and comes back only to
+    /// the fiber it was parked for.
+    #[test]
+    fn enabled_apm_parks_the_trace_stacks_with_their_fiber() {
+        let mut plugin = ApmPlugin::new();
+        let (_, handlers) = init_apm_plugin(
+            &mut plugin,
+            &[("APM_ENABLED", None), ("OTEL_APM_ENABLED", Some("true"))],
+        );
+        assert_eq!(handlers.len(), 1);
+        let hooks = &handlers[0];
+        let _ = take_stacks();
+
+        restore_decorator_span_ids(vec![3, 4]);
+        hooks::push_frame(frame(7));
+        hooks.fiber_parked(1);
+        assert_eq!(take_stacks(), (vec![], vec![]));
+
+        // A neighbour parks its own, and the first fiber comes back to its own.
+        restore_decorator_span_ids(vec![1]);
+        hooks::push_frame(frame(1));
+        hooks.fiber_parked(2);
+        hooks.fiber_resumed(1);
+        assert_eq!(take_stacks(), (vec![3, 4], vec![7]));
+
+        // A fiber destroyed while parked takes its stacks with it.
+        hooks.fiber_dropped(2);
+        hooks.fiber_resumed(2);
+        assert_eq!(take_stacks(), (vec![], vec![]));
+    }
+
+    /// A resume with nothing parked for the fiber leaves the thread's stacks
+    /// as they are.
+    #[test]
+    fn resuming_a_fiber_never_parked_leaves_the_stacks_alone() {
+        let mut plugin = ApmPlugin::new();
+        let (_, handlers) = init_apm_plugin(
+            &mut plugin,
+            &[("APM_ENABLED", None), ("OTEL_APM_ENABLED", Some("true"))],
+        );
+        let _ = take_stacks();
+
+        restore_decorator_span_ids(vec![5]);
+        hooks::push_frame(frame(6));
+        handlers[0].fiber_resumed(42);
+        assert_eq!(take_stacks(), (vec![5], vec![6]));
+    }
+
+    /// Connection metadata is keyed by object handle, and the next request on
+    /// the thread hands the same handles out again: it starts without the
+    /// last request's.
+    #[test]
+    fn a_request_opening_forgets_the_connections_of_the_last_one() {
+        let mut plugin = ApmPlugin::new();
+        let (_, handlers) = init_apm_plugin(
+            &mut plugin,
+            &[("APM_ENABLED", None), ("OTEL_APM_ENABLED", Some("true"))],
+        );
+        connection_meta::store(
+            9,
+            connection_meta::parse_pdo_dsn("mysql:host=db;dbname=app"),
+        );
+        assert!(connection_meta::get(9).is_some());
+
+        handlers[0].request_frame_opening(RequestScope::EachRequest);
+        assert!(connection_meta::get(9).is_none());
+    }
+
+    /// The startup can open connections of its own (a session's objects wake
+    /// up inside it), and they belong to the request that has just opened.
+    #[test]
+    fn a_request_opened_keeps_the_connections_its_startup_made() {
+        let mut plugin = ApmPlugin::new();
+        let (_, handlers) = init_apm_plugin(
+            &mut plugin,
+            &[("APM_ENABLED", None), ("OTEL_APM_ENABLED", Some("true"))],
+        );
+        handlers[0].request_frame_opening(RequestScope::EachRequest);
+        connection_meta::store(
+            10,
+            connection_meta::parse_pdo_dsn("mysql:host=db;dbname=app"),
+        );
+
+        handlers[0].request_frame_opened(RequestScope::EachRequest);
+        assert!(connection_meta::get(10).is_some());
+    }
+
+    /// With APM off nothing pushes onto these stacks or that map, so nothing
+    /// has to follow PHP threads either.
+    #[test]
+    fn disabled_apm_subscribes_to_no_php_thread_event() {
+        let mut plugin = ApmPlugin::new();
+        let (_, handlers) = init_apm_plugin(
+            &mut plugin,
+            &[("APM_ENABLED", None), ("OTEL_APM_ENABLED", None)],
+        );
+        assert!(handlers.is_empty());
+    }
+
     /// Initialise the plugin with `vars` applied to the environment for the
     /// duration of `init`, under the crate-wide env lock. Plugin init is the
     /// only step in these tests that reads the environment, so scoping the
@@ -674,7 +848,10 @@ mod tests {
     fn init_apm_plugin(
         plugin: &mut ApmPlugin,
         vars: &[(&str, Option<&str>)],
-    ) -> HashMap<String, serde_json::Value> {
+    ) -> (
+        HashMap<String, serde_json::Value>,
+        Vec<Box<dyn PluginPhpThreadHandler>>,
+    ) {
         // `PluginContext::config` falls back to the unprefixed key, so an
         // ambient `ENABLED=1` would turn the plugin on in the tests that
         // assert it stays off. Pinned ahead of the caller's own variables,
@@ -699,6 +876,7 @@ mod tests {
             let mut php_attributes = Vec::new();
             let mut php_functions = Vec::new();
             let mut core_flags = HashMap::new();
+            let mut php_thread_handlers = Vec::new();
 
             let mut ctx = PluginContext::new(
                 "apm".into(),
@@ -717,17 +895,18 @@ mod tests {
                 &mut php_attributes,
                 &mut php_functions,
                 &mut core_flags,
+                &mut php_thread_handlers,
             );
             plugin.init(&mut ctx).unwrap();
             drop(ctx);
-            config_values
+            (config_values, php_thread_handlers)
         })
     }
 
     #[test]
     fn test_apm_plugin_disabled_by_default() {
         let mut plugin = ApmPlugin::new();
-        let config = init_apm_plugin(
+        let (config, _) = init_apm_plugin(
             &mut plugin,
             &[("APM_ENABLED", None), ("OTEL_APM_ENABLED", None)],
         );
@@ -764,7 +943,7 @@ mod tests {
     #[test]
     fn test_apm_plugin_enabled_via_env() {
         let mut plugin = ApmPlugin::new();
-        let config = init_apm_plugin(
+        let (config, _) = init_apm_plugin(
             &mut plugin,
             &[("APM_ENABLED", None), ("OTEL_APM_ENABLED", Some("true"))],
         );
@@ -776,7 +955,7 @@ mod tests {
     #[test]
     fn test_apm_plugin_enabled_via_prefixed_env() {
         let mut plugin = ApmPlugin::new();
-        let config = init_apm_plugin(
+        let (config, _) = init_apm_plugin(
             &mut plugin,
             &[("OTEL_APM_ENABLED", None), ("APM_ENABLED", Some("1"))],
         );
@@ -811,7 +990,7 @@ mod tests {
     #[test]
     fn test_custom_config() {
         let mut plugin = ApmPlugin::new();
-        let config = init_apm_plugin(
+        let (config, _) = init_apm_plugin(
             &mut plugin,
             &[
                 ("APM_ENABLED", None),
@@ -966,7 +1145,7 @@ mod tests {
     #[test]
     fn test_default_config_values() {
         let mut plugin = ApmPlugin::new();
-        let config = init_apm_plugin(
+        let (config, _) = init_apm_plugin(
             &mut plugin,
             &[
                 ("APM_ENABLED", None),

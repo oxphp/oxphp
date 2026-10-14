@@ -19,7 +19,8 @@ use crate::plugin::PluginManager;
 ///
 /// Drains `plugin_manager` of its native functions, PHP definitions
 /// (classes/interfaces/enums/attributes/functions) and decorators, registering
-/// each kind with the SAPI, then installs the decorator dispatch bridge.
+/// each kind with the SAPI, freezes its PHP thread handlers, then installs the
+/// decorator dispatch bridge.
 ///
 /// Returns the freshly built [`DecoratorRegistry`] so a caller can inspect the
 /// registered count; the bridge already retains its own clone via
@@ -54,6 +55,10 @@ pub fn register_plugin_artifacts(
     {
         sapi::register_php_definitions(php_defs);
     }
+
+    // What plugins need to see of the threads that run PHP. Frozen here, with
+    // the rest, before any of those threads starts.
+    crate::plugin::php_thread::install(plugin_manager.take_php_thread_handlers());
 
     // Create the decorator registry — always, even without Rust plugins,
     // because PHP decorators register at runtime via oxphp_register_decorator().
