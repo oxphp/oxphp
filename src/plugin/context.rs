@@ -15,6 +15,7 @@ use super::handler::{
     PluginResponseHandler,
 };
 use super::php::{PhpParam, PhpType, PluginNativeFunction, PluginNativeFunctionDef};
+use super::php_thread::PluginPhpThreadHandler;
 use super::wrappers::{PluginCompleteWrapper, PluginRequestWrapper, PluginResponseWrapper};
 
 /// Definition collected during plugin init for a Rust-native decorator.
@@ -41,6 +42,7 @@ pub struct PluginContext<'a> {
     php_attributes: &'a mut Vec<PhpAttributeDef>,
     php_functions: &'a mut Vec<PhpFunctionDef>,
     core_flags: &'a mut HashMap<String, String>,
+    php_thread_handlers: &'a mut Vec<Box<dyn PluginPhpThreadHandler>>,
 }
 
 impl<'a> PluginContext<'a> {
@@ -62,6 +64,7 @@ impl<'a> PluginContext<'a> {
         php_attributes: &'a mut Vec<PhpAttributeDef>,
         php_functions: &'a mut Vec<PhpFunctionDef>,
         core_flags: &'a mut HashMap<String, String>,
+        php_thread_handlers: &'a mut Vec<Box<dyn PluginPhpThreadHandler>>,
     ) -> Self {
         Self {
             plugin_name,
@@ -80,6 +83,7 @@ impl<'a> PluginContext<'a> {
             php_attributes,
             php_functions,
             core_flags,
+            php_thread_handlers,
         }
     }
 
@@ -110,6 +114,13 @@ impl<'a> PluginContext<'a> {
             plugin_name: self.plugin_name.clone(),
         };
         self.dispatcher.on(wrapper);
+    }
+
+    /// Register a handler for the lifecycle events of the threads that run
+    /// PHP: a thread starting and stopping, a PHP request opening and closing
+    /// on it, a request fiber parking and resuming, a value leaving it.
+    pub fn on_php_thread(&mut self, handler: impl PluginPhpThreadHandler + 'static) {
+        self.php_thread_handlers.push(Box::new(handler));
     }
 
     /// Signal a core configuration flag to `main()`.
@@ -300,6 +311,9 @@ mod tests {
         php_attributes: &'a mut Vec<PhpAttributeDef>,
         php_functions: &'a mut Vec<PhpFunctionDef>,
         core_flags: &'a mut HashMap<String, String>,
+        php_thread_handlers: &'a mut Vec<
+            Box<dyn crate::plugin::php_thread::PluginPhpThreadHandler>,
+        >,
     ) -> PluginContext<'a> {
         PluginContext::new(
             "test_plugin".into(),
@@ -318,6 +332,7 @@ mod tests {
             php_attributes,
             php_functions,
             core_flags,
+            php_thread_handlers,
         )
     }
 
@@ -337,6 +352,7 @@ mod tests {
         let mut php_attributes = Vec::new();
         let mut php_functions = Vec::new();
         let mut core_flags = HashMap::new();
+        let mut php_thread_handlers = Vec::new();
 
         let ctx = make_context(
             &mut dispatcher,
@@ -353,6 +369,7 @@ mod tests {
             &mut php_attributes,
             &mut php_functions,
             &mut core_flags,
+            &mut php_thread_handlers,
         );
 
         let vars = [
@@ -385,6 +402,7 @@ mod tests {
         let mut php_attributes = Vec::new();
         let mut php_functions = Vec::new();
         let mut core_flags = HashMap::new();
+        let mut php_thread_handlers = Vec::new();
 
         let ctx = make_context(
             &mut dispatcher,
@@ -401,6 +419,7 @@ mod tests {
             &mut php_attributes,
             &mut php_functions,
             &mut core_flags,
+            &mut php_thread_handlers,
         );
 
         // Set both the prefixed and the bare env var: the prefixed one is
@@ -449,6 +468,7 @@ mod tests {
         let mut php_attributes = Vec::new();
         let mut php_functions = Vec::new();
         let mut core_flags = HashMap::new();
+        let mut php_thread_handlers = Vec::new();
 
         let ctx = make_context(
             &mut dispatcher,
@@ -465,6 +485,7 @@ mod tests {
             &mut php_attributes,
             &mut php_functions,
             &mut core_flags,
+            &mut php_thread_handlers,
         );
 
         assert_eq!(ctx.plugin_name(), "test_plugin");
@@ -486,6 +507,7 @@ mod tests {
         let mut php_attributes = Vec::new();
         let mut php_functions = Vec::new();
         let mut core_flags = HashMap::new();
+        let mut php_thread_handlers = Vec::new();
 
         {
             let mut ctx = make_context(
@@ -503,6 +525,7 @@ mod tests {
                 &mut php_attributes,
                 &mut php_functions,
                 &mut core_flags,
+                &mut php_thread_handlers,
             );
 
             // Valid path
@@ -542,6 +565,7 @@ mod tests {
         let mut php_attributes = Vec::new();
         let mut php_functions = Vec::new();
         let mut core_flags = HashMap::new();
+        let mut php_thread_handlers = Vec::new();
 
         let mut ctx = make_context(
             &mut dispatcher,
@@ -558,6 +582,7 @@ mod tests {
             &mut php_attributes,
             &mut php_functions,
             &mut core_flags,
+            &mut php_thread_handlers,
         );
 
         ctx.register_service("my_pool", Box::new(42u32));
@@ -582,6 +607,7 @@ mod tests {
         let mut php_attributes = Vec::new();
         let mut php_functions = Vec::new();
         let mut core_flags = HashMap::new();
+        let mut php_thread_handlers = Vec::new();
 
         let mut ctx = make_context(
             &mut dispatcher,
@@ -598,6 +624,7 @@ mod tests {
             &mut php_attributes,
             &mut php_functions,
             &mut core_flags,
+            &mut php_thread_handlers,
         );
 
         ctx.expose_config("verbose", serde_json::json!(true));
@@ -620,6 +647,7 @@ mod tests {
         let mut php_attributes = Vec::new();
         let mut php_functions = Vec::new();
         let mut core_flags = HashMap::new();
+        let mut php_thread_handlers = Vec::new();
 
         let mut ctx = make_context(
             &mut dispatcher,
@@ -636,6 +664,7 @@ mod tests {
             &mut php_attributes,
             &mut php_functions,
             &mut core_flags,
+            &mut php_thread_handlers,
         );
 
         ctx.register_function(
@@ -681,6 +710,7 @@ mod tests {
         let mut php_attributes = Vec::new();
         let mut php_functions = Vec::new();
         let mut core_flags = HashMap::new();
+        let mut php_thread_handlers = Vec::new();
 
         let mut ctx = make_context(
             &mut dispatcher,
@@ -697,6 +727,7 @@ mod tests {
             &mut php_attributes,
             &mut php_functions,
             &mut core_flags,
+            &mut php_thread_handlers,
         );
 
         ctx.register_decorator(TestDecorator);
@@ -722,6 +753,7 @@ mod tests {
         let mut php_attributes = Vec::new();
         let mut php_functions = Vec::new();
         let mut core_flags = HashMap::new();
+        let mut php_thread_handlers = Vec::new();
 
         let mut ctx = make_context(
             &mut dispatcher,
@@ -738,6 +770,7 @@ mod tests {
             &mut php_attributes,
             &mut php_functions,
             &mut core_flags,
+            &mut php_thread_handlers,
         );
 
         ctx.register_function_as(
@@ -771,6 +804,7 @@ mod tests {
         let mut php_attributes = Vec::new();
         let mut php_functions = Vec::new();
         let mut core_flags = HashMap::new();
+        let mut php_thread_handlers = Vec::new();
 
         let mut ctx = make_context(
             &mut dispatcher,
@@ -787,6 +821,7 @@ mod tests {
             &mut php_attributes,
             &mut php_functions,
             &mut core_flags,
+            &mut php_thread_handlers,
         );
 
         let _ = ctx.register_class("App\\MyClass").build();
@@ -813,6 +848,7 @@ mod tests {
         let mut php_attributes = Vec::new();
         let mut php_functions = Vec::new();
         let mut core_flags = HashMap::new();
+        let mut php_thread_handlers = Vec::new();
 
         let mut ctx = make_context(
             &mut dispatcher,
@@ -829,6 +865,7 @@ mod tests {
             &mut php_attributes,
             &mut php_functions,
             &mut core_flags,
+            &mut php_thread_handlers,
         );
 
         let _ = ctx.register_interface("App\\Countable").build();
@@ -855,6 +892,7 @@ mod tests {
         let mut php_attributes = Vec::new();
         let mut php_functions = Vec::new();
         let mut core_flags = HashMap::new();
+        let mut php_thread_handlers = Vec::new();
 
         let mut ctx = make_context(
             &mut dispatcher,
@@ -871,6 +909,7 @@ mod tests {
             &mut php_attributes,
             &mut php_functions,
             &mut core_flags,
+            &mut php_thread_handlers,
         );
 
         let _ = ctx.register_enum("App\\Status").build();
@@ -897,6 +936,7 @@ mod tests {
         let mut php_attributes = Vec::new();
         let mut php_functions = Vec::new();
         let mut core_flags = HashMap::new();
+        let mut php_thread_handlers = Vec::new();
 
         let mut ctx = make_context(
             &mut dispatcher,
@@ -913,6 +953,7 @@ mod tests {
             &mut php_attributes,
             &mut php_functions,
             &mut core_flags,
+            &mut php_thread_handlers,
         );
 
         let _ = ctx.register_attribute("App\\Route").build();
@@ -939,6 +980,7 @@ mod tests {
         let mut php_attributes = Vec::new();
         let mut php_functions = Vec::new();
         let mut core_flags = HashMap::new();
+        let mut php_thread_handlers = Vec::new();
 
         let mut ctx = make_context(
             &mut dispatcher,
@@ -955,6 +997,7 @@ mod tests {
             &mut php_attributes,
             &mut php_functions,
             &mut core_flags,
+            &mut php_thread_handlers,
         );
 
         let _ = ctx

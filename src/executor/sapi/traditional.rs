@@ -17,6 +17,7 @@ use crate::executor::idle_clock::LastActive;
 use crate::path_guard::ScriptOpenError;
 use crate::php::sapi::Pickup;
 use crate::php::{bindings, sapi};
+use crate::plugin::RequestScope;
 use crate::types::{ScriptRequest, ScriptResponse};
 
 use super::pool::{WorkerExit, WorkerRequest};
@@ -188,15 +189,10 @@ fn worker_thread(
         .unwrap_or("php-worker")
         .to_string();
 
-    // Initialize TSRM thread-local storage for this worker thread (required for ZTS)
+    // Attach this worker thread to PHP (TSRM, bridge context, worker ID);
+    // plugins see it run until `_php_thread` drops.
+    let _php_thread = unsafe { crate::php::thread::PhpThread::enter(worker_id) };
     unsafe {
-        let _ = bindings::ts_resource_ex(0, std::ptr::null_mut());
-        // Update the bridge library's TSRM cache so SG()/CG()/EG() macros work
-        // from liboxphp_bridge.so on this thread (each .so has its own _tsrm_ls_cache).
-        bindings::oxphp_bridge_tsrm_update();
-        // Initialize bridge TLS context and set the worker ID (once per thread).
-        bindings::oxphp_bridge_init_ctx();
-        bindings::oxphp_bridge_set_worker_id(worker_id as i32);
         // Stash spawn time in bridge ctx for Worker::startTime().
         let spawn_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -204,18 +200,6 @@ fn worker_thread(
             .as_secs_f64();
         bindings::oxphp_bridge_set_worker_start_time(spawn_secs);
     }
-
-    // Register this thread as a live Shared\Pool worker so cross-thread
-    // releases routed to our ThreadKey park (rather than destroy-inline
-    // under the dead-owner branch). See src/plugins/ox_shared/worker_liveness.rs
-    // for the rationale — pthread_kill(tid, 0) is unsafe under pthread_t
-    // reuse, so Pool uses an explicit registry instead.
-    register_as_live_pool_worker();
-    scope_pools_to_each_request();
-    // Allocate the per-worker idle-eviction flag; the central scheduler
-    // (src/plugins/ox_shared/eviction.rs) sets it when our idle deques
-    // have slots past their idle_timeout.
-    register_pool_evict_flag();
 
     tracing::info!(worker = %thread_name, "PHP worker thread started");
 
@@ -332,113 +316,7 @@ fn worker_thread(
         }
     }
 
-    // Unregister from the Shared\Pool liveness set before the thread
-    // actually exits — any subsequent cross-thread release targeted
-    // at our ThreadKey then correctly takes the dead-owner destroy
-    // path. Runs on both the normal channel-closed tail and the
-    // panic-break branch above.
-    unregister_as_live_pool_worker();
-    unregister_pool_evict_flag();
-
     tracing::info!(worker = %thread_name, "PHP worker thread stopped");
-}
-
-// ── Shared\Pool liveness hooks ───────────────────────────────────────
-// One-line shims so the worker loop doesn't need its own cfg guards.
-// When the `plugin-shared` feature is off, both calls compile away.
-
-#[cfg(feature = "plugin-shared")]
-#[inline]
-fn register_as_live_pool_worker() {
-    crate::plugins::ox_shared::worker_liveness::register_worker();
-}
-
-#[cfg(not(feature = "plugin-shared"))]
-#[inline]
-fn register_as_live_pool_worker() {}
-
-#[cfg(feature = "plugin-shared")]
-#[inline]
-fn unregister_as_live_pool_worker() {
-    crate::plugins::ox_shared::worker_liveness::unregister_worker();
-}
-
-#[cfg(not(feature = "plugin-shared"))]
-#[inline]
-fn unregister_as_live_pool_worker() {}
-
-#[cfg(feature = "plugin-shared")]
-#[inline]
-fn register_pool_evict_flag() {
-    crate::plugins::ox_shared::eviction::register(
-        crate::plugins::ox_shared::types::pool::current_thread_key(),
-    );
-}
-
-#[cfg(not(feature = "plugin-shared"))]
-#[inline]
-fn register_pool_evict_flag() {}
-
-#[cfg(feature = "plugin-shared")]
-#[inline]
-fn unregister_pool_evict_flag() {
-    crate::plugins::ox_shared::eviction::unregister(
-        crate::plugins::ox_shared::types::pool::current_thread_key(),
-    );
-}
-
-#[cfg(not(feature = "plugin-shared"))]
-#[inline]
-fn unregister_pool_evict_flag() {}
-
-/// Request-frame hook: if the central eviction scheduler raised our
-/// flag, drain this thread's stale slots across every Pool. Called
-/// from `execute_request` after `php_request_startup` so PHP context
-/// is live for `$destroy` invocations.
-#[cfg(feature = "plugin-shared")]
-#[inline]
-fn drain_pool_stale_if_requested() {
-    if crate::plugins::ox_shared::eviction::take_evict_request() {
-        crate::plugins::ox_shared::eviction::drain_stale_for_current_thread();
-    }
-}
-
-#[cfg(not(feature = "plugin-shared"))]
-#[inline]
-fn drain_pool_stale_if_requested() {}
-
-/// Thread-start hook: this thread runs one request after another, so a
-/// pool created here lasts only as long as the request that creates it.
-#[cfg(feature = "plugin-shared")]
-#[inline]
-fn scope_pools_to_each_request() {
-    use crate::plugins::ox_shared::types::pool::{set_request_scope, RequestScope};
-    set_request_scope(RequestScope::EachRequest);
-}
-
-#[cfg(not(feature = "plugin-shared"))]
-#[inline]
-fn scope_pools_to_each_request() {}
-
-#[cfg(feature = "plugin-shared")]
-#[inline]
-fn end_pool_request() {
-    crate::plugins::ox_shared::types::pool::end_request_on_current_thread();
-}
-
-#[cfg(not(feature = "plugin-shared"))]
-#[inline]
-fn end_pool_request() {}
-
-/// End the open PHP request. `php_request_shutdown` resets the request
-/// heap, so right after it the pools let go of what lived there.
-///
-/// # Safety
-/// A request must be open on this thread (`php_request_startup` succeeded
-/// and this has not run since).
-unsafe fn shutdown_request() {
-    bindings::php_request_shutdown(std::ptr::null_mut());
-    end_pool_request();
 }
 
 /// RAII guard that clears SAPI request data on drop (even on panic).
@@ -581,9 +459,6 @@ fn execute_request(
     if profiling_active {
         crate::profiling::set_profiling_mode(request.profiling_mode);
     }
-    #[cfg(feature = "plugin-apm")]
-    crate::plugins::ox_apm::connection_meta::clear();
-
     // Streaming channel is created lazily in send_streaming_headers() — no alloc
     // for the vast majority of non-streaming requests.
 
@@ -603,7 +478,8 @@ fn execute_request(
         bindings::oxphp_bridge_set_request_time(now.as_secs_f64());
     }
 
-    if unsafe { bindings::php_request_startup() } != 0 {
+    // Every request on this thread is a PHP request of its own.
+    if !unsafe { crate::php::thread::open_request(RequestScope::EachRequest) } {
         return Some(ScriptResponse {
             status: 500,
             body: Bytes::from_static(b"php_request_startup() failed"),
@@ -614,15 +490,9 @@ fn execute_request(
             ..Default::default()
         });
     }
-    // Until php_request_shutdown() below, a panic that unwinds this frame ends
+    // Until close_request() below, a panic that unwinds this frame ends
     // the process instead of reaching the catch_unwind in worker_thread.
     let request_open = crate::executor::AbortOnUnwind("with a PHP request open");
-
-    // Shared\Pool idle-timeout eviction check. Runs here — after PHP
-    // request startup, before the user script — because `$destroy`
-    // needs a live `EG(current_execute_data)` frame to execute
-    // bytecode. Compiles away when `plugin-shared` is off.
-    drain_pool_stale_if_requested();
 
     let opened_path = CString::new(verified.opened_path.as_os_str().as_bytes()).unwrap_or_default();
 
@@ -642,7 +512,7 @@ fn execute_request(
     if initialised != 0 {
         unsafe {
             libc::close(raw_fd);
-            shutdown_request();
+            crate::php::thread::close_request();
         }
         drop(request_open);
         return Some(ScriptResponse {
@@ -673,7 +543,7 @@ fn execute_request(
     }
 
     unsafe {
-        shutdown_request();
+        crate::php::thread::close_request();
     }
     drop(request_open);
 

@@ -3368,6 +3368,7 @@ mod tests {
         let mut php_attributes = Vec::new();
         let mut php_functions = Vec::new();
         let mut core_flags = HashMap::new();
+        let mut php_thread_handlers = Vec::new();
 
         {
             let mut ctx = PluginContext::new(
@@ -3387,6 +3388,7 @@ mod tests {
                 &mut php_attributes,
                 &mut php_functions,
                 &mut core_flags,
+                &mut php_thread_handlers,
             );
             register_class(&mut ctx).unwrap();
         }

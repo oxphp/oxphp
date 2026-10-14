@@ -19,7 +19,10 @@ pub mod types;
 pub mod value;
 pub mod worker_liveness;
 
-use crate::plugin::{Plugin, PluginContext, PluginDeps, PluginError, PluginHealth};
+use crate::plugin::{
+    Plugin, PluginContext, PluginDeps, PluginError, PluginHealth, PluginPhpThreadHandler,
+    RequestScope,
+};
 
 pub struct SharedPlugin {
     /// `SHARED_ENABLED`, read in init() so on_ready() can see the same
@@ -38,6 +41,53 @@ impl Default for SharedPlugin {
             lock_diagnostics: config::LockDiagnosticsLevel::Off,
             lock_poll_interval_ms: 100,
         }
+    }
+}
+
+/// `Shared\Pool`'s view of the threads that run PHP: which of them are
+/// alive, when a request on one of them ends, and which idle slots a
+/// thread has been asked to evict.
+struct SharedThreadHooks;
+
+impl PluginPhpThreadHandler for SharedThreadHooks {
+    fn thread_started(&self) {
+        // A slot released from another thread parks in this thread's idle
+        // deque instead of being destroyed as an orphan.
+        worker_liveness::register_worker();
+        eviction::register(types::pool::current_thread_key());
+    }
+
+    fn thread_stopping(&self) {
+        // Also returns the budget of slots the thread still had checked out.
+        worker_liveness::unregister_worker();
+        eviction::unregister(types::pool::current_thread_key());
+    }
+
+    fn request_frame_opening(&self, scope: RequestScope) {
+        // Before the startup, which can already create a pool: a session
+        // that `session.auto_start` decodes wakes its objects up.
+        types::pool::set_request_scope(scope);
+    }
+
+    fn request_frame_opened(&self, scope: RequestScope) {
+        // Only where requests follow one another on the thread. A thread
+        // whose one request lasts its whole life opens it as it starts, with
+        // nothing of its own idle yet: all a drain could reach there is what
+        // an exited thread with the same key left behind, in a heap that is
+        // gone.
+        if scope != RequestScope::Thread && eviction::take_evict_request() {
+            eviction::drain_stale_for_current_thread();
+        }
+    }
+
+    fn request_frame_closed(&self) {
+        // The request heap has just been reset: the pools let go of what
+        // lived in it before the thread opens another request.
+        types::pool::end_request_on_current_thread();
+    }
+
+    fn value_leaving_thread(&self, bytes: &[u8]) -> Option<Box<dyn std::any::Any + Send>> {
+        value::resolve_transit_keepalive(bytes)
     }
 }
 
@@ -63,17 +113,19 @@ impl Plugin for SharedPlugin {
 
         // The master switch, and it switches the whole subsystem: no classes,
         // no functions, no registry, no routes, no metrics, no background
-        // tasks. PHP code that constructs an `OxPHP\Shared\*` then meets an
-        // undefined class and `new` throws `Error: Class "…" not found`, which
-        // is what "off" means here — from PHP's side the same surface a build
-        // without the `plugin-shared` feature offers. The one name that
-        // survives either way is the `OxPHP\Shared\Shareable` interface: the
-        // C extension registers it in MINIT (`ext/oxphp_sapi.c`), not this
-        // plugin, so `interface_exists` on it stays true with nothing to
-        // implement it.
+        // tasks, no PHP thread hooks. PHP code that constructs an
+        // `OxPHP\Shared\*` then meets an undefined class and `new` throws
+        // `Error: Class "…" not found`, which is what "off" means here —
+        // from PHP's side the same surface a build without the
+        // `plugin-shared` feature offers. The one name that survives either
+        // way is the `OxPHP\Shared\Shareable` interface: the C extension
+        // registers it in MINIT (`ext/oxphp_sapi.c`), not this plugin, so
+        // `interface_exists` on it stays true with nothing to implement it.
         //
-        // Leaving `REGISTRY` unset is safe because every reader outside the
-        // classes treats an empty one as nothing to do: `eviction::run_scan`
+        // Leaving `REGISTRY` unset is safe. The PHP thread hooks that reach it
+        // are subscribed below this return, so a disabled plugin's threads
+        // never call them, and every reader outside the classes treats an
+        // empty one as nothing to do anyway: `eviction::run_scan`
         // and `eviction::drain_stale_for_current_thread` return early,
         // `value::resolve_transit_keepalive` does the same, and
         // `worker_liveness::unregister_worker` reaches it only through
@@ -135,6 +187,10 @@ impl Plugin for SharedPlugin {
 
         // Initialise the process-global registry with config.
         registry::init_registry(cfg.clone());
+
+        // What `Shared\Pool` and the values a task hands back need from the
+        // threads that run PHP.
+        ctx.on_php_thread(SharedThreadHooks);
 
         // Store deadlock-detector config for on_ready() — tokio::spawn
         // requires an active Tokio runtime, which is not available at
@@ -281,6 +337,7 @@ mod tests {
         php_classes: Vec<String>,
         php_enums: Vec<String>,
         php_functions: Vec<String>,
+        php_thread_handlers: usize,
         /// Slots ox_shared does not use today, counted anyway so a later
         /// registration landing above the gate is caught. `config_values` is
         /// not among them — it is captured in its own field and the disabled
@@ -309,6 +366,7 @@ mod tests {
         let mut php_attributes: Vec<PhpAttributeDef> = Vec::new();
         let mut php_functions: Vec<PhpFunctionDef> = Vec::new();
         let mut core_flags = HashMap::new();
+        let mut php_thread_handlers = Vec::new();
 
         let mut ctx = PluginContext::new(
             "ox_shared".into(),
@@ -327,6 +385,7 @@ mod tests {
             &mut php_attributes,
             &mut php_functions,
             &mut core_flags,
+            &mut php_thread_handlers,
         );
         plugin.init(&mut ctx).expect("init must succeed");
         drop(ctx);
@@ -339,6 +398,7 @@ mod tests {
             php_classes: php_classes.into_iter().map(|c| c.fqn).collect(),
             php_enums: php_enums.into_iter().map(|e| e.fqn).collect(),
             php_functions: php_functions.into_iter().map(|f| f.fqn).collect(),
+            php_thread_handlers: php_thread_handlers.len(),
             other_slots: php_interfaces.len()
                 + php_attributes.len()
                 + decorators.len()
@@ -379,6 +439,10 @@ mod tests {
         assert_eq!(
             reg.metrics_collectors, 0,
             "SHARED_ENABLED=false still registered a metrics collector"
+        );
+        assert_eq!(
+            reg.php_thread_handlers, 0,
+            "SHARED_ENABLED=false still subscribed to PHP thread events"
         );
         assert_eq!(
             reg.other_slots, 0,
@@ -472,11 +536,57 @@ mod tests {
             .iter()
             .any(|r| r.starts_with("/__ox_shared/")));
         assert_eq!(reg.metrics_collectors, 1);
+        assert_eq!(reg.php_thread_handlers, 1);
         assert_eq!(
             reg.config_values.get("enabled"),
             Some(&serde_json::json!(true))
         );
         assert!(plugin.enabled);
+    }
+
+    /// A thread of the server's PHP pools is a live pool owner with an
+    /// eviction flag from the moment it starts until it stops: a slot
+    /// released to it from another thread parks instead of being destroyed
+    /// as an orphan, and the scheduler can ask it to evict.
+    #[test]
+    fn a_php_thread_is_a_live_pool_owner_while_it_runs() {
+        let me = types::pool::current_thread_key();
+        // From a known state: a thread that exited without unregistering can
+        // leave this `pthread_t` in both sets.
+        SharedThreadHooks.thread_stopping();
+        assert!(!worker_liveness::is_thread_alive(me));
+        assert!(!eviction::request_evict(me));
+
+        SharedThreadHooks.thread_started();
+        assert!(worker_liveness::is_thread_alive(me));
+        assert!(eviction::request_evict(me));
+        // A thread whose one request lasts its whole life opens it as it
+        // starts and leaves the flag alone…
+        SharedThreadHooks.request_frame_opened(RequestScope::Thread);
+        assert!(eviction::take_evict_request());
+        // …while a thread whose requests follow one another takes it with
+        // the next request it opens.
+        assert!(eviction::request_evict(me));
+        SharedThreadHooks.request_frame_opened(RequestScope::EachRequest);
+        assert!(!eviction::take_evict_request());
+
+        SharedThreadHooks.thread_stopping();
+        assert!(!worker_liveness::is_thread_alive(me));
+        assert!(!eviction::request_evict(me));
+    }
+
+    /// The scope a request opens with is the one a pool created in it gets,
+    /// and the registry's refusal reads the same value — already while the
+    /// request starts up, before it has opened.
+    #[test]
+    fn a_request_opening_sets_the_scope_of_its_pools() {
+        SharedThreadHooks.request_frame_opening(RequestScope::EachRequest);
+        assert!(types::pool::registry_refuses_pools_on_current_thread());
+        SharedThreadHooks.request_frame_opening(RequestScope::OneRequest);
+        assert!(!types::pool::registry_refuses_pools_on_current_thread());
+        SharedThreadHooks.request_frame_opening(RequestScope::EachRequest);
+        SharedThreadHooks.request_frame_opening(RequestScope::Thread);
+        assert!(!types::pool::registry_refuses_pools_on_current_thread());
     }
 
     /// `on_ready` reaches `tokio::spawn`, which panics outside a runtime, so

@@ -128,10 +128,7 @@ pub fn run(opts: RunOptions) -> i32 {
 
         // Bridge TLS for this (main) thread so SG()/EG() resolve correctly
         // from liboxphp_bridge.so, then mark it as worker 0.
-        bindings::ts_resource_ex(0, std::ptr::null_mut());
-        bindings::oxphp_bridge_tsrm_update();
-        bindings::oxphp_bridge_init_ctx();
-        bindings::oxphp_bridge_set_worker_id(0);
+        crate::php::thread::attach(0);
     }
     crate::php::worker_registry::init_workers(1);
 
@@ -235,14 +232,8 @@ fn run_cli_oneshot(script: &Path, args: &[std::ffi::OsString]) -> i32 {
         bindings::oxphp_bridge_set_request_time(now);
     }
 
-    // The script is one request, and its heap is reset before the shared
-    // registry is drained: a pool made here lasts as long as the request.
-    #[cfg(feature = "plugin-shared")]
-    crate::plugins::ox_shared::types::pool::set_request_scope(
-        crate::plugins::ox_shared::types::pool::RequestScope::OneRequest,
-    );
-
-    if unsafe { bindings::php_request_startup() } != 0 {
+    // The script is one request, and the process shuts down after it.
+    if !unsafe { crate::php::thread::open_request(crate::plugin::RequestScope::OneRequest) } {
         eprintln!("oxphp: php_request_startup() failed");
         return 1;
     }
@@ -290,11 +281,8 @@ defined('STDERR')||define('STDERR',fopen('php://stderr','wb'));";
 
     unsafe {
         bindings::zend_destroy_file_handle(&mut file_handle);
-        bindings::php_request_shutdown(std::ptr::null_mut());
+        crate::php::thread::close_request();
     }
-    // Right after the heap reset: the pools let go of what lived in it.
-    #[cfg(feature = "plugin-shared")]
-    crate::plugins::ox_shared::types::pool::end_request_on_current_thread();
     sapi::clear_request_data();
 
     // Detach SG(request_info).argc/argv from the storage we are about to free

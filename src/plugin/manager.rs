@@ -8,6 +8,7 @@ use super::builders::definitions::*;
 use super::context::{PluginContext, PluginDecoratorDef};
 use super::handler::{PluginInternalHandler, PluginInternalRequest, PluginMetricsCollector};
 use super::php::PluginNativeFunctionDef;
+use super::php_thread::{PhpThreadHandlers, PluginPhpThreadHandler};
 use super::{Plugin, PluginError, PluginHealth};
 use crate::types::ResponseBody;
 
@@ -36,6 +37,7 @@ pub struct PluginManager {
     /// Read by `main()` after `init_all()` to patch `Config` before the
     /// runtime starts. Replaces the old pattern of `env::set_var` side-effects.
     core_flags: HashMap<String, String>,
+    php_thread_handlers: Vec<Box<dyn PluginPhpThreadHandler>>,
 }
 
 impl PluginManager {
@@ -55,6 +57,7 @@ impl PluginManager {
             php_attributes: Vec::new(),
             php_functions: Vec::new(),
             core_flags: HashMap::new(),
+            php_thread_handlers: Vec::new(),
         }
     }
 
@@ -102,6 +105,7 @@ impl PluginManager {
                 &mut self.php_attributes,
                 &mut self.php_functions,
                 &mut self.core_flags,
+                &mut self.php_thread_handlers,
             );
 
             plugin.init(&mut ctx)?;
@@ -241,6 +245,12 @@ impl PluginManager {
     /// Call after init_all(), before wrapping manager in Arc.
     pub fn take_decorators(&mut self) -> Vec<PluginDecoratorDef> {
         std::mem::take(&mut self.decorators)
+    }
+
+    /// Take the PHP thread lifecycle handlers, in plugin init order.
+    /// Call after init_all(), before wrapping manager in Arc.
+    pub fn take_php_thread_handlers(&mut self) -> PhpThreadHandlers {
+        PhpThreadHandlers::new(std::mem::take(&mut self.php_thread_handlers))
     }
 
     /// Take all PHP type/function definitions contributed by plugins.

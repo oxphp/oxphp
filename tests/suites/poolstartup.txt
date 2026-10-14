@@ -1,0 +1,8 @@
+# profile: poolstartup
+# description: Shared\Pool outside worker mode — a pool is not bound to a name while a request starts up
+
+# The session the request carries is decoded inside php_request_startup, and
+# its object calls Registry::pool() from __wakeup. A scope set only once the
+# startup is over would still be at its default during the first PHP request
+# on a thread, and only then, so this stays the profile's only request.
+poolstartup/test_registry_refuses_pool_during_startup | GET | -H "Cookie: PHPSESSID=poolstartup0001" | |
