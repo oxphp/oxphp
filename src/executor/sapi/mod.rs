@@ -89,6 +89,7 @@ fn build_spawn_strategy(config: &Config, metrics: &Arc<Metrics>) -> SpawnStrateg
             bindings::oxphp_bridge_set_worker_callbacks(
                 sapi::get_worker_wait_callback(),
                 sapi::get_worker_send_callback(),
+                sapi::get_worker_idle_callback(),
             );
         }
 

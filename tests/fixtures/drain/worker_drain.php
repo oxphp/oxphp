@@ -170,6 +170,27 @@ oxphp_worker(function () {
             echo 'pause-done';
             return;
 
+        case '/poolfatal': // parks a Shared\Pool slot whose $destroy ends in a
+                           // fatal error and returns, so the slot goes stale a
+                           // second later on a worker with nothing in flight. A
+                           // drain under way by then must not run the eviction:
+                           // the fatal error would retire the worker, and the
+                           // pool's monitor would boot a replacement in the
+                           // middle of the shutdown.
+            $pool = \OxPHP\Shared\Registry::pool('drain-idle-fatal', static fn (): \OxPHP\Shared\Pool => new \OxPHP\Shared\Pool(
+                factory: static fn (): \stdClass => new \stdClass(),
+                destroy: static function (\stdClass $r): void {
+                    error_log('drain-idle-fatal: destroy ran');
+                    // A compile error, which no error handler sees.
+                    eval('abstract class DrainIdleFatal { abstract public function f() {} }');
+                },
+                maxSize: 1,
+                idleTimeoutMs: 1000,
+            ));
+            $pool->acquire()->release();
+            echo 'pool-parked';
+            return;
+
         case '/spin': // CPU-bound loop: only a vm_interrupt kick can reach it
             for (;;) {
                 // burn until cancelled

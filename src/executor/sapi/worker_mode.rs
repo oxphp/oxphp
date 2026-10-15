@@ -75,7 +75,9 @@ fn worker_mode_thread(
         .to_string();
 
     // 1. Attach this thread to PHP (TSRM, bridge context, worker ID); plugins
-    //    see it run until `_php_thread` drops.
+    //    see it run until `_php_thread` drops. Its waker first: plugins take
+    //    it as the thread starts.
+    let wake_rx = crate::plugin::php_thread::install_waker();
     let _php_thread = unsafe { crate::php::thread::PhpThread::enter(worker_id) };
 
     // 2. Set worker mode TLS flags
@@ -94,6 +96,7 @@ fn worker_mode_thread(
 
     // 3. Store channel receiver, last_active, and metrics in thread-local
     sapi::set_worker_rx(request_rx);
+    sapi::set_worker_wake_rx(wake_rx);
     // Only a dynamic pool retires workers, and only a worker that can be
     // retired pays for looking at the flag — see `sapi::set_worker_shutdown`.
     if matches!(loop_mode, WorkerLoopMode::Dynamic) {

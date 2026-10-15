@@ -2143,10 +2143,14 @@ int oxphp_req_is_active(void) {
 /* ─── Worker Mode ─── */
 static oxphp_worker_wait_fn_t rust_worker_wait = NULL;
 static oxphp_worker_send_fn_t rust_worker_send = NULL;
+static oxphp_worker_idle_fn_t rust_worker_idle = NULL;
 
-void oxphp_bridge_set_worker_callbacks(oxphp_worker_wait_fn_t wait_fn, oxphp_worker_send_fn_t send_fn) {
+void oxphp_bridge_set_worker_callbacks(oxphp_worker_wait_fn_t wait_fn,
+                                       oxphp_worker_send_fn_t send_fn,
+                                       oxphp_worker_idle_fn_t idle_fn) {
     rust_worker_wait = wait_fn;
     rust_worker_send = send_fn;
+    rust_worker_idle = idle_fn;
 }
 
 void oxphp_bridge_set_worker_mode(uint64_t max_memory_mib) {
@@ -2205,6 +2209,12 @@ int oxphp_bridge_worker_wait(void) {
         return rust_worker_wait();
     }
     return -1;
+}
+
+void oxphp_bridge_thread_idle(void) {
+    if (rust_worker_idle != NULL) {
+        rust_worker_idle();
+    }
 }
 
 int oxphp_bridge_worker_send_response(void) {
@@ -6293,15 +6303,19 @@ int oxphp_shared_wrapper_new(zval *out, uint8_t type_tag, const void *entry_ptr)
 #define OXPHP_SHARED_INVOKE_BAILOUT     -4
 
 /* A bailout OXPHP_SHARED_RUN_GUARDED caught and is holding back. Set in its
- * zend_catch; taken — read and cleared — by the plugin dispatch stubs
- * (oxphp_method_dispatch, oxphp_native_dispatch) once the Rust handler
- * between them and the guarded helper has returned, and they re-raise it.
+ * zend_catch; taken — read and cleared — once the Rust code between the
+ * guarded helper and the C that called into it has returned: by the plugin
+ * dispatch stubs (oxphp_method_dispatch, oxphp_native_dispatch), which
+ * re-raise it, and by the serve loop's idle point
+ * (oxphp_serve_loop_thread_idle), which re-raises it into its own zend_try
+ * and recovers.
  *
- * Every guarded helper is called from inside a plugin method or function
- * handler, so a flag that is set always has a stub below it to take it, and
- * nothing between the two parks the fiber that set it. A guarded helper
- * called from anywhere else would leave the flag for the next stub on the
- * thread to raise in a request that never failed. */
+ * Every guarded helper is called either from inside a plugin method or
+ * function handler or from the plugins' thread_idle event, so a flag that is
+ * set always has one of those below it to take it, and nothing between the
+ * two parks the fiber that set it. A guarded helper called from anywhere else
+ * would leave the flag for the next stub on the thread to raise in a request
+ * that never failed. */
 static __thread int oxphp_shared_deferred_bailout = 0;
 
 int oxphp_bridge_deferred_bailout_pending(void) {
@@ -7202,7 +7216,8 @@ int oxphp_pool_destroy_invoke(void *destroy_fcc_heap, void *slot_zv_heap) {
     return oxphp_pool_destroy_invoke_unguarded(destroy_fcc_heap, slot_zv_heap);
 }
 
-/* For a caller inside a plugin handler (Shared\Pool::evict). Returns
+/* For a caller inside a plugin handler (Shared\Pool::evict) or the
+ * thread_idle event (the idle-timeout eviction). Returns
  * OXPHP_SHARED_INVOKE_BAILOUT when a bailout ended $destroy or freeing
  * the slot, or one was already waiting to be raised again. The slot is
  * not freed then. The bailout may have come from freeing it. Or it may

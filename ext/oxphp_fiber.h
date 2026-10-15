@@ -1060,6 +1060,10 @@ void    oxphp_fatal_backtrace_release(void);
  * destructor it runs needs. False: a fatal got in the way, retire the worker. */
 bool    oxphp_serve_loop_collect_cycles(void);
 
+/* Raise the plugins' thread_idle event from the serve loop, with the same
+ * recovery for a fatal in the PHP it calls. False: retire the worker. */
+bool    oxphp_serve_loop_thread_idle(void);
+
 /* Destroy this thread's task scheduler (frees fiber C stacks + task payload).
  * Called from the extension RSHUTDOWN; a no-op if no task ever spawned. */
 void    oxphp_async_sched_shutdown(void);

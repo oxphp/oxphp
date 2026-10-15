@@ -42,6 +42,13 @@
 # it. The request's own promise cleanup must discard that result instead of
 # leaving it to the worker thread's exit.
 #
+# Scenario I (no idle eviction during a drain): two workers, one serving an
+# ordinary request the drain waits for, the other holding a Shared\Pool slot
+# whose $destroy ends in a fatal error. The slot goes stale while the drain is
+# under way and its worker is woken for it, but must not run the eviction: the
+# fatal error would retire the worker, and the monitor would boot a replacement
+# in the middle of the shutdown, as in Scenario G.
+#
 # NOT wired into run_all.sh or CI (like tests/cli_run.sh) — run manually after
 # touching the drain machinery (fiber sweep, cancel plumbing, drain latches).
 #
@@ -61,6 +68,7 @@ DRAIN_E="drain_e_$$"
 DRAIN_F="drain_f_$$"
 DRAIN_G="drain_g_$$"
 DRAIN_H="drain_h_$$"
+DRAIN_I="drain_i_$$"
 # Ephemeral free port unless the caller pins one via PORT=.
 PORT="${PORT:-$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')}"
 PASS=0
@@ -71,13 +79,13 @@ ok()   { printf '  \033[32mPASS\033[0m %s\n' "$1"; PASS=$((PASS + 1)); }
 bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$1"; FAIL=$((FAIL + 1)); }
 
 cleanup() {
-	docker rm -f "$DRAIN_A" "$DRAIN_B" "$DRAIN_C" "$DRAIN_D" "$DRAIN_E" "$DRAIN_F" "$DRAIN_G" "$DRAIN_H" >/dev/null 2>&1
+	docker rm -f "$DRAIN_A" "$DRAIN_B" "$DRAIN_C" "$DRAIN_D" "$DRAIN_E" "$DRAIN_F" "$DRAIN_G" "$DRAIN_H" "$DRAIN_I" >/dev/null 2>&1
 	rm -rf "$TMP"
 }
 trap cleanup EXIT
 
 start_container() {
-	# start_container <name> <drain_timeout_seconds> [log_level]
+	# start_container <name> <drain_timeout_seconds> [log_level] [php_workers]
 	#
 	# `QUEUE_WAIT_TIMEOUT_MS` is raised well past any drain window on purpose:
 	# these scenarios park requests behind a handler that monopolises the
@@ -94,7 +102,7 @@ start_container() {
 	docker run -d --name "$1" \
 		-e WORKER_FILE=/var/www/html/worker_drain.php \
 		-e DOCUMENT_ROOT=/var/www/html \
-		-e PHP_WORKERS=1 \
+		-e PHP_WORKERS="${4:-1}" \
 		-e ASYNC_WORKERS=2 \
 		-e DRAIN_TIMEOUT_SECONDS="$2" \
 		-e QUEUE_WAIT_TIMEOUT_MS=120000 \
@@ -520,6 +528,46 @@ STATUS_H=$(docker inspect -f '{{.State.ExitCode}}' "$DRAIN_H" 2>/dev/null)
 	|| bad "H: exit status $STATUS_H"
 
 docker rm -f "$DRAIN_H" >/dev/null 2>&1
+
+# ── Scenario I: no idle eviction during a drain ──────────────
+# The native sleep holds one worker, so the slot is parked on the other, which
+# then waits. The slot goes stale a second later, with the drain under way and
+# waiting for the sleep.
+if start_container "$DRAIN_I" 30 info 2; then
+	ok "I: container up"
+else
+	bad "I: container failed to start"; docker logs "$DRAIN_I" 2>&1 | tail -5; exit 1
+fi
+
+curl -fsS --max-time 20 "http://localhost:${PORT}/short?ms=5000" > "$TMP/i_short" 2>&1 &
+sleep 0.5
+curl -fsS --max-time 5 "http://localhost:${PORT}/poolfatal" > "$TMP/i_pool" 2>&1
+grep -q "pool-parked" "$TMP/i_pool" \
+	&& ok "I: the other worker parked the slot" \
+	|| bad "I: the slot was not parked"
+
+docker kill -s TERM "$DRAIN_I" >/dev/null
+ELAPSED=$(wait_exit_seconds "$DRAIN_I" 25)
+
+LOGS_I="$(docker logs "$DRAIN_I" 2>&1)"
+# The premise: the drain lasted past the slot's idle timeout.
+grep -q "short-done" "$TMP/i_short" \
+	&& ok "I: the drain waited for the ordinary request, past the slot's idle timeout" \
+	|| bad "I: the ordinary request did not finish"
+
+printf '%s' "$LOGS_I" | grep -q "drain-idle-fatal: destroy ran" \
+	&& bad "I: the idle worker ran the eviction during the drain" \
+	|| ok "I: the idle worker did not run the eviction during the drain"
+
+printf '%s' "$LOGS_I" | grep -q "made while the worker had no request in flight" \
+	&& bad "I: the worker retired itself during the drain" \
+	|| ok "I: the worker did not retire itself during the drain"
+
+[ "$ELAPSED" -le 12 ] \
+	&& ok "I: exited ${ELAPSED}s after SIGTERM (<=12s)" \
+	|| bad "I: exit took ${ELAPSED}s"
+
+docker rm -f "$DRAIN_I" >/dev/null 2>&1
 
 echo
 echo "== result: $PASS passed, $FAIL failed =="

@@ -388,6 +388,7 @@ extern "C" {
     pub fn oxphp_bridge_set_worker_callbacks(
         wait_fn: Option<unsafe extern "C" fn() -> c_int>,
         send_fn: Option<unsafe extern "C" fn() -> c_int>,
+        idle_fn: Option<unsafe extern "C" fn()>,
     );
     pub fn oxphp_bridge_set_worker_mode(max_memory_mib: u64);
     pub fn oxphp_bridge_schedule_exit();
