@@ -4581,7 +4581,9 @@ void oxphp_async_drop_execution_timer(void) {
  * Shared\Pool factory or destroy callback) still names that script's functions
  * and classes, and three opcodes take for granted that the compiler checked
  * the name exists: ZEND_INIT_FCALL (a call to a function the compiler already
- * knew, which under OPcache means one of the same file or a preloaded one),
+ * knew, which in a file OPcache caches means one of the same file or a
+ * preloaded one, and in any other file any function already declared when
+ * the file was compiled),
  * ZEND_DECLARE_ANON_CLASS and ZEND_DECLARE_CLASS (a class declared inside a
  * function body). Each one asserts the lookup succeeded and dereferences what
  * it found, and in a release build the assert is gone, so a missing entry is
