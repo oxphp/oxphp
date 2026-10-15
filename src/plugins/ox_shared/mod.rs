@@ -54,7 +54,10 @@ impl PluginPhpThreadHandler for SharedThreadHooks {
         // A slot released from another thread parks in this thread's idle
         // deque instead of being destroyed as an orphan.
         worker_liveness::register_worker();
-        eviction::register(types::pool::current_thread_key());
+        eviction::register(
+            types::pool::current_thread_key(),
+            crate::plugin::PhpThreadWaker::current(),
+        );
     }
 
     fn thread_stopping(&self) {
@@ -69,13 +72,8 @@ impl PluginPhpThreadHandler for SharedThreadHooks {
         types::pool::set_request_scope(scope);
     }
 
-    fn request_frame_opened(&self, scope: RequestScope) {
-        // Only where requests follow one another on the thread. A thread
-        // whose one request lasts its whole life opens it as it starts, with
-        // nothing of its own idle yet: all a drain could reach there is what
-        // an exited thread with the same key left behind, in a heap that is
-        // gone.
-        if scope != RequestScope::Thread && eviction::take_evict_request() {
+    fn thread_idle(&self) {
+        if eviction::take_evict_request() {
             eviction::drain_stale_for_current_thread();
         }
     }
@@ -547,7 +545,9 @@ mod tests {
     /// A thread of the server's PHP pools is a live pool owner with an
     /// eviction flag from the moment it starts until it stops: a slot
     /// released to it from another thread parks instead of being destroyed
-    /// as an orphan, and the scheduler can ask it to evict.
+    /// as an orphan, and the scheduler can ask it to evict, which wakes it.
+    /// The flag is taken when the thread raises `thread_idle`, and not when
+    /// a request opens.
     #[test]
     fn a_php_thread_is_a_live_pool_owner_while_it_runs() {
         let me = types::pool::current_thread_key();
@@ -557,18 +557,30 @@ mod tests {
         assert!(!worker_liveness::is_thread_alive(me));
         assert!(!eviction::request_evict(me));
 
+        let woken = crate::plugin::php_thread::install_waker();
         SharedThreadHooks.thread_started();
         assert!(worker_liveness::is_thread_alive(me));
         assert!(eviction::request_evict(me));
-        // A thread whose one request lasts its whole life opens it as it
-        // starts and leaves the flag alone…
-        SharedThreadHooks.request_frame_opened(RequestScope::Thread);
-        assert!(eviction::take_evict_request());
-        // …while a thread whose requests follow one another takes it with
-        // the next request it opens.
+        assert!(
+            woken.try_recv().is_ok(),
+            "the scheduler's request wakes the thread"
+        );
+
+        for scope in [
+            RequestScope::Thread,
+            RequestScope::OneRequest,
+            RequestScope::EachRequest,
+        ] {
+            SharedThreadHooks.request_frame_opened(scope);
+        }
+        assert!(
+            eviction::take_evict_request(),
+            "no request opening took the flag"
+        );
+
         assert!(eviction::request_evict(me));
-        SharedThreadHooks.request_frame_opened(RequestScope::EachRequest);
-        assert!(!eviction::take_evict_request());
+        SharedThreadHooks.thread_idle();
+        assert!(!eviction::take_evict_request(), "thread_idle took the flag");
 
         SharedThreadHooks.thread_stopping();
         assert!(!worker_liveness::is_thread_alive(me));

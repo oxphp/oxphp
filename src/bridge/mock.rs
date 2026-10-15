@@ -1059,6 +1059,7 @@ thread_local! {
     static MOCK_POOL_FACTORY_SLOT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static MOCK_POOL_DESTROY: std::cell::RefCell<Option<MockPoolDestroy>> =
         const { std::cell::RefCell::new(None) };
+    static MOCK_DEFERRED_BAILOUT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 /// Host tests: run `hook` as the calling thread's `$destroy`, given the
@@ -1146,12 +1147,33 @@ pub unsafe fn oxphp_pool_destroy_invoke(
     );
     0
 }
+/// As under OXPHP_SHARED_RUN_GUARDED: a bailout the hook stands for is held
+/// back, and while one is, the call is refused without running anything.
 pub unsafe fn oxphp_pool_destroy_invoke_guarded(
     _destroy_fcc_heap: *mut c_void,
     slot_zv_heap: *mut c_void,
 ) -> c_int {
+    if MOCK_DEFERRED_BAILOUT.get() {
+        return OXPHP_SHARED_INVOKE_BAILOUT;
+    }
     count_pool_heap_call();
-    run_mock_pool_destroy(slot_zv_heap)
+    let rc = run_mock_pool_destroy(slot_zv_heap);
+    if rc == OXPHP_SHARED_INVOKE_BAILOUT {
+        MOCK_DEFERRED_BAILOUT.set(true);
+    }
+    rc
+}
+
+pub unsafe fn oxphp_bridge_deferred_bailout_pending() -> c_int {
+    c_int::from(MOCK_DEFERRED_BAILOUT.get())
+}
+
+/// Host tests: take the bailout the guarded destroy helper is holding back
+/// on this thread, as the code that raises it again or recovers from it
+/// would. Returns whether one was held back.
+#[cfg(test)]
+pub fn mock_take_deferred_bailout() -> bool {
+    MOCK_DEFERRED_BAILOUT.replace(false)
 }
 
 pub unsafe fn oxphp_shared_pool_handle_alloc(

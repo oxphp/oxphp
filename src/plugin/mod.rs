@@ -26,7 +26,7 @@ pub use manager::PluginManager;
 pub use php::{
     PhpError, PhpException, PhpParam, PhpType, PluginNativeFunction, PluginNativeFunctionDef,
 };
-pub use php_thread::{PluginPhpThreadHandler, RequestScope};
+pub use php_thread::{PhpThreadWaker, PluginPhpThreadHandler, RequestScope};
 pub use types::{MagicMethod, Modifiers, PhpValue, Visibility};
 
 /// Re-export of `crate::types::PhpScriptError` — errors captured from PHP

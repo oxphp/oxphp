@@ -175,6 +175,9 @@ thread_local! {
     static STREAM_TX: RefCell<Option<tokio::sync::mpsc::Sender<Bytes>>> = const { RefCell::new(None) };
     /// Worker mode: channel receiver for incoming requests.
     static WORKER_RX: RefCell<Option<crossbeam_channel::Receiver<WorkerIncomingRequest>>> = const { RefCell::new(None) };
+    /// Worker mode: the end of this thread's `PhpThreadWaker` the wait for the
+    /// next request also listens on. See `set_worker_wake_rx`.
+    static WORKER_WAKE_RX: RefCell<Option<crossbeam_channel::Receiver<()>>> = const { RefCell::new(None) };
     /// Worker mode: this worker's retirement flag, set only for a dynamic pool.
     /// Its presence is what makes the wait loop poll — a static pool leaves it
     /// unset and keeps sleeping on a plain `recv()`. See `set_worker_shutdown`.
@@ -2964,6 +2967,15 @@ pub fn set_worker_rx(rx: crossbeam_channel::Receiver<WorkerIncomingRequest>) {
     });
 }
 
+/// Store the receiving end of this thread's `PhpThreadWaker`: a wake ends the
+/// wait for the next request without one, and the serve loop raises the
+/// plugins' `thread_idle` event before it waits again.
+pub fn set_worker_wake_rx(rx: crossbeam_channel::Receiver<()>) {
+    WORKER_WAKE_RX.with(|slot| {
+        *slot.borrow_mut() = Some(rx);
+    });
+}
+
 /// Hand this worker thread its retirement flag. Called only for a dynamic
 /// pool: a static pool never retires anyone, so leaving the flag unset keeps
 /// an idle worker asleep on `recv()` at zero CPU instead of waking to read a
@@ -3008,10 +3020,23 @@ pub fn set_server_metrics(m: Arc<crate::metrics::Metrics>) {
     });
 }
 
-/// Take the next request off the channel, or report that this thread should
-/// stop. A worker with a retirement flag (dynamic pool) waits in
-/// `WORKER_RETIRE_POLL` slices so it can notice the flag; one without (static
-/// pool) sleeps on a plain `recv()` until the channel closes, exactly as before.
+/// What a worker's wait for its next request ended with. Returned by value
+/// and taken apart at once, as the `Option` it replaces was; boxing the
+/// request would cost an allocation per request.
+#[allow(clippy::large_enum_variant)]
+enum WorkerWait {
+    Request(WorkerIncomingRequest),
+    /// The thread's `PhpThreadWaker` was woken, and no request came with it.
+    Woken,
+    /// The channel closed, or the scale manager retired this worker.
+    Shutdown,
+}
+
+/// Take the next request off the channel, or report that this thread was
+/// woken or should stop. A worker with a retirement flag (dynamic pool) waits
+/// in `WORKER_RETIRE_POLL` slices so it can notice the flag; one without
+/// (static pool) sleeps until a request comes, the channel closes or its
+/// waker is woken.
 ///
 /// This is the only place the flag is read, and the serve loop only gets here
 /// once it has no request left to run. That cuts both ways, and the second half
@@ -3020,31 +3045,55 @@ pub fn set_server_metrics(m: Arc<crate::metrics::Metrics>) {
 /// that never ends (a stream, a read from a peer that stops answering) never
 /// reaches this function, so it does not retire at all. Its thread stops only
 /// when the channel closes, which is what the event-loop branch watches for.
-fn worker_recv_blocking() -> Option<WorkerIncomingRequest> {
+/// The same holds for a wake: such a worker sees it only once it gets here.
+fn worker_recv_blocking() -> WorkerWait {
     WORKER_RX.with(|slot| {
         let rx = slot.borrow();
-        let rx = rx.as_ref()?;
-        if WORKER_SHUTDOWN.with(|s| s.borrow().is_none()) {
-            return rx.recv().ok();
-        }
-        loop {
-            if worker_retiring() {
-                return None;
+        let Some(rx) = rx.as_ref() else {
+            return WorkerWait::Shutdown;
+        };
+        WORKER_WAKE_RX.with(|wake_slot| {
+            let wake_slot = wake_slot.borrow();
+            let never = crossbeam_channel::never();
+            let mut wake = wake_slot.as_ref().unwrap_or(&never);
+            let retire_poll = WORKER_SHUTDOWN.with(|s| s.borrow().is_some());
+            loop {
+                if retire_poll && worker_retiring() {
+                    return WorkerWait::Shutdown;
+                }
+                // The thread holds a sender of its own waker for as long as it
+                // runs, so the wake end does not disconnect; were it to, it is
+                // dropped from the wait rather than read as a wake each turn.
+                if retire_poll {
+                    crossbeam_channel::select! {
+                        recv(rx) -> req => return req.map_or(WorkerWait::Shutdown, WorkerWait::Request),
+                        recv(wake) -> woken => match woken {
+                            Ok(()) => return WorkerWait::Woken,
+                            Err(_) => wake = &never,
+                        },
+                        default(crate::executor::sapi::WORKER_RETIRE_POLL) => {}
+                    }
+                } else {
+                    crossbeam_channel::select! {
+                        recv(rx) -> req => return req.map_or(WorkerWait::Shutdown, WorkerWait::Request),
+                        recv(wake) -> woken => match woken {
+                            Ok(()) => return WorkerWait::Woken,
+                            Err(_) => wake = &never,
+                        },
+                    }
+                }
             }
-            match rx.recv_timeout(crate::executor::sapi::WORKER_RETIRE_POLL) {
-                Ok(req) => return Some(req),
-                Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
-                Err(crossbeam_channel::RecvTimeoutError::Disconnected) => return None,
-            }
-        }
+        })
     })
 }
 
 /// Worker wait callback — called from C bridge when PHP calls oxphp_worker().
 /// Blocks on the crossbeam channel until a new request arrives.
 /// Populates SAPI TLS with the new request data.
-/// Returns 0 on success (request ready), -1 on shutdown (channel closed or
-/// this worker retired by the scale manager).
+/// Returns 0 on success (request ready), 1 when the thread's `PhpThreadWaker`
+/// was woken with no request (the serve loop then calls
+/// `worker_idle_callback`), -1 on shutdown (channel closed or this worker
+/// retired by the scale manager).
 ///
 /// # Safety
 /// Called from C code via function pointer. Must only be called from a worker thread
@@ -3052,7 +3101,7 @@ fn worker_recv_blocking() -> Option<WorkerIncomingRequest> {
 unsafe extern "C" fn worker_wait_callback() -> std::os::raw::c_int {
     loop {
         match worker_recv_blocking() {
-            Some(req) => match req.take_from_queue() {
+            WorkerWait::Request(req) => match req.take_from_queue() {
                 Pickup::Run => {
                     // Direct call — no PENDING_REQUEST round-trip on the blocking path
                     setup_request_tls(req);
@@ -3062,9 +3111,21 @@ unsafe extern "C" fn worker_wait_callback() -> std::os::raw::c_int {
                 Pickup::Cancelled { expired } => answer_departed_client(req, expired),
                 Pickup::Abandoned => {}
             },
-            None => return -1, // channel closed or retired = shutdown
+            WorkerWait::Woken => return 1,
+            WorkerWait::Shutdown => return -1, // channel closed or retired = shutdown
         }
     }
+}
+
+/// Worker idle callback — called from the C serve loop after
+/// `worker_wait_callback` returned 1, with no request in flight: raises the
+/// plugins' `thread_idle` event.
+///
+/// # Safety
+/// Called from C code via function pointer, on a worker thread inside its
+/// serve loop.
+unsafe extern "C" fn worker_idle_callback() {
+    crate::plugin::php_thread::installed().thread_idle();
 }
 
 /// Answer a request whose queue budget ran out before this worker reached it.
@@ -3379,6 +3440,11 @@ pub fn get_worker_wait_callback() -> Option<unsafe extern "C" fn() -> std::os::r
 /// Get the worker send callback function pointer for registering with the bridge.
 pub fn get_worker_send_callback() -> Option<unsafe extern "C" fn() -> std::os::raw::c_int> {
     Some(worker_send_callback)
+}
+
+/// Get the worker idle callback function pointer for registering with the bridge.
+pub fn get_worker_idle_callback() -> Option<unsafe extern "C" fn()> {
+    Some(worker_idle_callback)
 }
 
 // ─── Non-Blocking Try-Recv for Fiber Scheduler ──────────────

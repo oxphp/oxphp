@@ -1122,14 +1122,22 @@ int         oxphp_req_is_active(void);
 
 /* ─── Worker Mode ─────────────────────────────────────────── */
 
-/** Rust callback: blocks until next request arrives, returns 0 on success, -1 on shutdown. */
+/** Rust callback: blocks until the next request arrives or a plugin wakes the
+ * thread. Returns 0 (request ready), 1 (woken, no request) or -1 (shutdown). */
 typedef int (*oxphp_worker_wait_fn_t)(void);
 
 /** Rust callback: sends current response back to HTTP layer, returns 0 on success. */
 typedef int (*oxphp_worker_send_fn_t)(void);
 
+/** Rust callback: raises the plugins' thread_idle event on this thread. Can
+ * call into PHP, and returns with any bailout in that held back (see
+ * oxphp_bridge_take_deferred_bailout). */
+typedef void (*oxphp_worker_idle_fn_t)(void);
+
 /** Register Rust worker callbacks (called once at init). */
-void oxphp_bridge_set_worker_callbacks(oxphp_worker_wait_fn_t wait_fn, oxphp_worker_send_fn_t send_fn);
+void oxphp_bridge_set_worker_callbacks(oxphp_worker_wait_fn_t wait_fn,
+                                       oxphp_worker_send_fn_t send_fn,
+                                       oxphp_worker_idle_fn_t idle_fn);
 
 /** Set worker mode TLS flags for this thread. */
 void oxphp_bridge_set_worker_mode(uint64_t max_memory_mib);
@@ -1145,8 +1153,13 @@ bool oxphp_bridge_is_worker_mode(void);
  */
 void oxphp_bridge_reset_request_ctx(void);
 
-/** Call Rust worker_wait callback. Returns 0 (request ready) or -1 (shutdown). */
+/** Call Rust worker_wait callback. Returns 0 (request ready), 1 (woken with
+ * no request: call oxphp_bridge_thread_idle) or -1 (shutdown). */
 int oxphp_bridge_worker_wait(void);
+
+/** Call Rust worker_idle callback, from the serve loop with no request in
+ * flight, after oxphp_bridge_worker_wait returned 1. */
+void oxphp_bridge_thread_idle(void);
 
 /** Call Rust worker_send callback. Returns 0 on success. */
 int oxphp_bridge_worker_send_response(void);
@@ -2505,9 +2518,9 @@ void oxphp_pool_slot_free(void *slot_zv_heap);
  * oxphp_bridge_capture_fatal and cleared. Always returns 0. */
 int oxphp_pool_destroy_invoke(void *destroy_fcc_heap, void *slot_zv_heap);
 
-/* The same, for a caller inside a plugin handler: a bailout is held back
- * for the dispatch stub, and the slot is then left unfreed. Returns 0, or
- * OXPHP_SHARED_INVOKE_BAILOUT (-4). */
+/* The same, for a caller inside a plugin handler or the thread_idle event:
+ * a bailout is held back for the dispatch stub or the serve loop, and the
+ * slot is then left unfreed. Returns 0, or OXPHP_SHARED_INVOKE_BAILOUT (-4). */
 int oxphp_pool_destroy_invoke_guarded(void *destroy_fcc_heap, void *slot_zv_heap);
 
 /* Shared\Pool\Handle rust_data wrapper helpers. See

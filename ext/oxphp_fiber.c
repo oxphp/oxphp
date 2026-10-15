@@ -1176,6 +1176,155 @@ bool oxphp_serve_loop_collect_cycles(void) {
     return completed;
 }
 
+/* The two steps of oxphp_serve_loop_thread_idle below that run userland only
+ * through the destructors of what they release, each with the recovery that
+ * function gives a fatal. False: a fatal got in the way. */
+static bool oxphp_serve_loop_drop_exception(oxphp_vm_stack_mark *mark) {
+    bool completed = true;
+    if (EG(exception)) {
+        zend_try {
+            oxphp_discard_pending_exception();
+        } zend_catch {
+            completed = false;
+            oxphp_recover_from_bailout(mark);
+        } zend_end_try();
+    }
+    return completed;
+}
+
+/* What php_free_shutdown_functions() does, with the list taken off the thread
+ * before it is destroyed. That function destroys it in place, which is safe
+ * where it is called — at the end of a request, after every destructor has
+ * run — and not here, where the objects the list holds are alive: a destructor
+ * that registers a shutdown function adds it to the list being destroyed, past
+ * the end the destroy walks to, or, if the list has to grow for it, moves the
+ * entries from under the walk. Taken off first, the list is replaced by a new
+ * one for such a registration, which the next step frees. */
+static bool oxphp_serve_loop_free_shutdown_functions(oxphp_vm_stack_mark *mark) {
+    HashTable *list = BG(user_shutdown_function_names);
+    bool completed = true;
+
+    if (list == NULL) {
+        return true;
+    }
+    BG(user_shutdown_function_names) = NULL;
+    zend_try {
+        zend_hash_destroy(list);
+    } zend_catch {
+        completed = false;
+        oxphp_recover_from_bailout(mark);
+    } zend_end_try();
+    FREE_HASHTABLE(list);
+    return completed;
+}
+
+/* Raises the plugins' thread_idle event on the serve loop's own frame, for a
+ * worker a plugin woke while it had no request in flight, and answers whether
+ * it ran to its end.
+ *
+ * The event can call into PHP — a Shared\Pool's $destroy, from the idle-timeout
+ * eviction — and what is said above of the destructors the cycle collector
+ * runs holds for that userland as well: same frame, same lack of a request to
+ * end. The one difference is the way a fatal arrives. The handlers run as Rust,
+ * so a bailout in the PHP they called is caught on this side of their frames
+ * and held back (OXPHP_SHARED_RUN_GUARDED), and comes back here as a flag
+ * rather than a long jump; it is raised again inside the zend_try below and
+ * gets the same recovery. False then, and the caller retires the worker for the
+ * reason the collector's caller does.
+ *
+ * What that userland opens for a request is opened for none. An output buffer
+ * it leaves open would be ended — flushed — by the reset before the next
+ * request, after that request's response has been cleared, so into it; a
+ * shutdown function it registers would run as that request ends, into its
+ * response and over its superglobals. So the event gets an output stack and a
+ * shutdown list of its own, and whatever it leaves on either is given up
+ * without being run. What the worker had on them before — its boot script's,
+ * until the first request — is put back as it was. */
+bool oxphp_serve_loop_thread_idle(void) {
+    oxphp_vm_stack_mark mark;
+    oxphp_vm_stack_save(&mark);
+    bool completed = true;
+
+    zend_stack ob_handlers = OG(handlers);
+    php_output_handler *ob_active = OG(active);
+    php_output_handler *ob_running = OG(running);
+    HashTable *shutdown_functions = BG(user_shutdown_function_names);
+    zend_stack_init(&OG(handlers), sizeof(php_output_handler *));
+    OG(active) = NULL;
+    OG(running) = NULL;
+    BG(user_shutdown_function_names) = NULL;
+
+    zend_try {
+        oxphp_bridge_thread_idle();
+        if (oxphp_bridge_take_deferred_bailout()) {
+            zend_bailout();
+        }
+    } zend_catch {
+        completed = false;
+        oxphp_recover_from_bailout(&mark);
+    } zend_end_try();
+
+    if (!oxphp_serve_loop_drop_exception(&mark)) {
+        completed = false;
+    }
+
+    /* Giving them up releases callables and their arguments, and a destructor
+     * that runs is userland as well, which can throw, start a buffer or
+     * register a shutdown function in its turn. The shutdown list goes first.
+     * Then the handlers, the way php_output_deactivate() releases them: a
+     * destructor run by one may start another buffer, which makes it the active
+     * one, so no handler is left active while it is freed, and the loop frees
+     * what was started. That buffer's handler goes into the slot just taken off
+     * the stack, so each handler is read out of its slot before it is freed and
+     * freed here, as php_output_handler_free() does from PHP 8.4.17 and 8.5.2
+     * on: before that it reads the slot again after the destructor, and frees
+     * the new handler in place of the old. Then the list again, for what a
+     * destructor run by either step registered. The exception goes last: left
+     * standing, it would make the
+     * next call into PHP on this thread — the $destroy of the next eviction —
+     * return without running, and the serve loop's caller return with it once
+     * the loop ends. A buffer or a shutdown function a destructor run by that
+     * drop leaves is given up with the stack and the list below without being
+     * run, and what it holds stays until the worker exits. What any of these
+     * destructors writes outside a buffer goes straight out, like anything else
+     * written here unbuffered: into a response the next request clears before
+     * it runs. */
+    if (!oxphp_serve_loop_free_shutdown_functions(&mark)) {
+        completed = false;
+    }
+    zend_try {
+        php_output_handler **slot;
+
+        OG(running) = NULL;
+        while ((slot = zend_stack_top(&OG(handlers))) != NULL) {
+            php_output_handler *handler = *slot;
+
+            zend_stack_del_top(&OG(handlers));
+            OG(active) = NULL;
+            if (handler != NULL) {
+                php_output_handler_dtor(handler);
+                efree(handler);
+            }
+        }
+    } zend_catch {
+        completed = false;
+        oxphp_recover_from_bailout(&mark);
+    } zend_end_try();
+    if (!oxphp_serve_loop_free_shutdown_functions(&mark)) {
+        completed = false;
+    }
+    if (!oxphp_serve_loop_drop_exception(&mark)) {
+        completed = false;
+    }
+
+    zend_stack_destroy(&OG(handlers));
+    OG(handlers) = ob_handlers;
+    OG(active) = ob_active;
+    OG(running) = ob_running;
+    BG(user_shutdown_function_names) = shutdown_functions;
+    return completed;
+}
+
 /* ─── Stack Limit Helper ──────────────────────────────── */
 
 /* Install a fiber's C-stack bounds before switching into it, from the copy its

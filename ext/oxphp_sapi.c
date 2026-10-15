@@ -6429,9 +6429,52 @@ static void oxphp_serve_loop(zend_fcall_info *fci, zend_fcall_info_cache *fcc)
                  * by the last request is reclaimed without waiting for the next
                  * one to arrive. ──────────────────────────────────────────── */
 
-                if (oxphp_bridge_worker_wait() != 0) {
+                int wait_rc = oxphp_bridge_worker_wait();
+                if (wait_rc < 0) {
                     ctx->exit_reason = 0;
                     break;
+                }
+                if (wait_rc > 0) {
+                    /* Woken with no request, by a plugin that has work for
+                     * this thread while nothing is in flight on it — a
+                     * Shared\Pool's idle-timeout eviction. Back to the wait
+                     * afterwards, past the checks below, which are a request's.
+                     * What its userland kept on the heap or let go of is no
+                     * request's growth, and this is a moment with nothing in
+                     * flight, so the heap is measured again from here, as at
+                     * the end of the checks. WORKER_MAX_MEMORY_MIB is compared
+                     * when the next request ends.
+                     *
+                     * Not while the server drains, for the reason the checks
+                     * below do not retire a worker then: the pool's monitor
+                     * boots a replacement for a worker that exits until the
+                     * shutdown itself begins, which is after the drain, and a
+                     * fatal error in what the event runs retires the worker.
+                     * The wake is taken and nothing is run; what the event had
+                     * to do stays until the worker exits. */
+                    if (oxphp_bridge_is_draining()) {
+                        continue;
+                    }
+                    if (!oxphp_serve_loop_thread_idle()) {
+                        char msg[256];
+                        snprintf(msg, sizeof(msg),
+                                 "oxphp: worker %d retiring: a fatal error ended a "
+                                 "call into PHP made while the worker had no request "
+                                 "in flight (a Shared\\Pool destroy callback run by "
+                                 "the idle-timeout eviction)",
+                                 oxphp_bridge_get_worker_id());
+                        if (sapi_module.log_message != NULL) {
+                            sapi_module.log_message(msg, LOG_NOTICE);
+                        }
+                        oxphp_bridge_schedule_exit();
+                        break;
+                    }
+                    if (ctx->exit_scheduled) {
+                        break;
+                    }
+                    quiet_heap = zend_memory_usage(0);
+                    quiet_pool = oxphp_fiber_pool_heap_bytes();
+                    continue;
                 }
 
                 oxphp_soft_reset();

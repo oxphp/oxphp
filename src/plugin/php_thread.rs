@@ -8,6 +8,7 @@
 //! thread — every handler runs on the PHP thread the event is about.
 
 use std::any::Any;
+use std::cell::RefCell;
 use std::sync::OnceLock;
 
 /// How long the PHP request on a thread lasts.
@@ -44,7 +45,9 @@ pub enum RequestScope {
 /// `oxphp_async()` pool thread raises only `fiber_dropped`, for each task
 /// fiber still unfinished when its request shuts down. That pool's threads
 /// also raise [`value_leaving_thread`](Self::value_leaving_thread) as they
-/// hand a task's result back.
+/// hand a task's result back. [`thread_idle`](Self::thread_idle) comes only
+/// from the threads that have a [`PhpThreadWaker`]: the HTTP workers in
+/// worker mode.
 ///
 /// A handler must not panic: one that panics while a PHP request is open on
 /// the thread ends the process.
@@ -79,6 +82,21 @@ pub trait PluginPhpThreadHandler: Send + Sync {
     /// (`php_request_shutdown` has returned): what the request allocated is
     /// gone, and no other request has started yet.
     fn request_frame_closed(&self) {}
+
+    /// The thread has no request in flight and is waiting for the next one,
+    /// and its [`PhpThreadWaker`] has been woken since it last raised this
+    /// event. Raised in plugin init order.
+    ///
+    /// The thread's own PHP request is open — in worker mode it lasts as long
+    /// as the thread — so a handler can call into PHP here, but no HTTP
+    /// request is in flight for what it runs to belong to: a fatal error in
+    /// it retires the worker instead of ending a request, and the pool
+    /// replaces the worker. `max_execution_time` does not apply.
+    ///
+    /// Not raised once the server has begun its graceful drain: a worker
+    /// retired then would be replaced in the middle of the shutdown. A wake
+    /// that arrives during the drain is taken without raising the event.
+    fn thread_idle(&self) {}
 
     /// The request fiber `fiber_id` has suspended, and its request is being
     /// taken off the thread. State that belongs to that request has to come
@@ -154,6 +172,12 @@ impl PhpThreadHandlers {
         }
     }
 
+    pub fn thread_idle(&self) {
+        for h in &self.0 {
+            h.thread_idle();
+        }
+    }
+
     pub fn fiber_parked(&self, fiber_id: u64) {
         for h in self.0.iter().rev() {
             h.fiber_parked(fiber_id);
@@ -186,6 +210,46 @@ impl PhpThreadHandlers {
             _ => Some(Box::new(kept)),
         }
     }
+}
+
+/// Wakes a PHP thread that is waiting for work, so that it raises
+/// [`PluginPhpThreadHandler::thread_idle`] without being handed a request.
+///
+/// A handler takes the waker of its own thread in
+/// [`thread_started`](PluginPhpThreadHandler::thread_started) and can wake the
+/// thread from any thread afterwards.
+#[derive(Clone, Debug)]
+pub struct PhpThreadWaker(crossbeam_channel::Sender<()>);
+
+impl PhpThreadWaker {
+    /// The waker of the PHP thread this is called on, or `None` on a thread
+    /// that never raises `thread_idle`.
+    pub fn current() -> Option<Self> {
+        WAKER.with(|w| w.borrow().clone())
+    }
+
+    /// Have the thread raise `thread_idle` the next time it waits for work —
+    /// at once if it is waiting now. Wakes that come before it gets there
+    /// raise the event once. Does nothing once the thread has stopped; once
+    /// the server has begun its graceful drain, the thread wakes but raises
+    /// nothing.
+    pub fn wake(&self) {
+        let _ = self.0.try_send(());
+    }
+}
+
+thread_local! {
+    static WAKER: RefCell<Option<PhpThreadWaker>> = const { RefCell::new(None) };
+}
+
+/// Give the calling thread a [`PhpThreadWaker`] and return the end its wait
+/// for work reads. Called by the code that drives a PHP thread able to raise
+/// `thread_idle`, before the thread raises `thread_started`.
+#[cfg_attr(not(feature = "php"), allow(dead_code))]
+pub(crate) fn install_waker() -> crossbeam_channel::Receiver<()> {
+    let (tx, rx) = crossbeam_channel::bounded(1);
+    WAKER.with(|w| *w.borrow_mut() = Some(PhpThreadWaker(tx)));
+    rx
 }
 
 static INSTALLED: OnceLock<PhpThreadHandlers> = OnceLock::new();
@@ -243,6 +307,9 @@ mod tests {
         fn request_frame_closed(&self) {
             self.push("closed");
         }
+        fn thread_idle(&self) {
+            self.push("idle");
+        }
         fn fiber_parked(&self, fiber_id: u64) {
             self.push(&format!("parked({fiber_id})"));
         }
@@ -282,6 +349,7 @@ mod tests {
         h.thread_started();
         h.request_frame_opening(RequestScope::EachRequest);
         h.request_frame_opened(RequestScope::EachRequest);
+        h.thread_idle();
         h.fiber_parked(7);
         h.fiber_resumed(7);
         h.fiber_dropped(7);
@@ -296,6 +364,8 @@ mod tests {
                 "b:opening(EachRequest)",
                 "a:opened(EachRequest)",
                 "b:opened(EachRequest)",
+                "a:idle",
+                "b:idle",
                 "b:parked(7)",
                 "a:parked(7)",
                 "a:resumed(7)",
@@ -318,12 +388,42 @@ mod tests {
         h.thread_started();
         h.request_frame_opening(RequestScope::Thread);
         h.request_frame_opened(RequestScope::Thread);
+        h.thread_idle();
         h.fiber_parked(1);
         h.fiber_resumed(1);
         h.fiber_dropped(1);
         h.request_frame_closed();
         h.thread_stopping();
         assert!(h.value_leaving_thread(b"x").is_none());
+    }
+
+    #[test]
+    fn a_thread_without_an_installed_waker_has_none() {
+        let none = std::thread::spawn(|| PhpThreadWaker::current().is_none())
+            .join()
+            .unwrap();
+        assert!(none);
+    }
+
+    /// Wakes that come while the thread is busy are one wake once it waits,
+    /// and a waker outliving its thread is harmless.
+    #[test]
+    fn wakes_before_the_wait_collapse_into_one() {
+        let (rx, waker) = std::thread::spawn(|| {
+            let rx = install_waker();
+            (rx, PhpThreadWaker::current().expect("installed"))
+        })
+        .join()
+        .unwrap();
+        waker.wake();
+        waker.clone().wake();
+        assert!(rx.try_recv().is_ok());
+        assert!(
+            rx.try_recv().is_err(),
+            "the second wake was folded into the first"
+        );
+        drop(rx);
+        waker.wake();
     }
 
     #[test]
