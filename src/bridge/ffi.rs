@@ -565,6 +565,13 @@ extern "C" {
         destroy_fcc_heap: *mut c_void,
         slot_zv_heap: *mut c_void,
     ) -> c_int;
+    /// Park the calling fiber for `duration_us` while `Shared\Pool::acquire`
+    /// waits for a slot. 1 parked, 0 nothing here to park (wait on the thread
+    /// instead), -1 the async task was cancelled, `OXPHP_FIBER_UNWIND` the
+    /// fiber is being destroyed, `OXPHP_SHARED_INVOKE_BAILOUT` the server
+    /// ended the request while it was parked — held back for the dispatch
+    /// stub, as above. Only from a plugin handler.
+    pub fn oxphp_pool_park_guarded(duration_us: u64) -> c_int;
 
     // Shared\Pool\Handle rust_data wrapper helpers. Handle storage
     // layout mirrors `PoolHandleStorage` (repr(C)): u64 pool_id,

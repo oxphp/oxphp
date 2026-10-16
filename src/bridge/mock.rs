@@ -11,7 +11,8 @@
 use std::os::raw::{c_char, c_int, c_void};
 
 /// Mirrors `ffi::OXPHP_FIBER_UNWIND` so the suspend-point callers compile on a
-/// host without PHP. Nothing here ever returns it — the mocks never suspend.
+/// host without PHP. The mocks never suspend: nothing here returns it unless a
+/// test's `mock_pool_park` hook does.
 pub const OXPHP_FIBER_UNWIND: c_int = -9;
 
 // ── Value reading ──
@@ -1053,13 +1054,26 @@ pub const OXPHP_SHARED_INVOKE_BAILOUT: c_int = -4;
 // `$destroy` does nothing unless a test hands it a hook. Tests that need
 // a callable to actually run must live under feature=php (docker).
 type MockPoolDestroy = Box<dyn FnMut(*mut c_void) -> c_int>;
+type MockPoolPark = Box<dyn FnMut(u64) -> c_int>;
 
 thread_local! {
     static MOCK_POOL_HEAP_CALLS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static MOCK_POOL_FACTORY_SLOT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static MOCK_POOL_DESTROY: std::cell::RefCell<Option<MockPoolDestroy>> =
         const { std::cell::RefCell::new(None) };
+    static MOCK_POOL_PARK: std::cell::RefCell<Option<MockPoolPark>> =
+        const { std::cell::RefCell::new(None) };
     static MOCK_DEFERRED_BAILOUT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Host tests: run `hook` as the fiber park of a saturated acquire on the
+/// calling thread, given the microseconds asked for. What it returns is what
+/// the guarded park returns, and `OXPHP_SHARED_INVOKE_BAILOUT` stands for a
+/// bailout that ended the park. `None` restores the default: nothing to park,
+/// so the acquire waits on the thread.
+#[cfg(test)]
+pub fn mock_pool_park(hook: Option<MockPoolPark>) {
+    MOCK_POOL_PARK.with(|h| *h.borrow_mut() = hook);
 }
 
 /// Host tests: run `hook` as the calling thread's `$destroy`, given the
@@ -1158,6 +1172,24 @@ pub unsafe fn oxphp_pool_destroy_invoke_guarded(
     }
     count_pool_heap_call();
     let rc = run_mock_pool_destroy(slot_zv_heap);
+    if rc == OXPHP_SHARED_INVOKE_BAILOUT {
+        MOCK_DEFERRED_BAILOUT.set(true);
+    }
+    rc
+}
+
+/// As under OXPHP_SHARED_RUN_GUARDED, like the guarded destroy helper above.
+pub unsafe fn oxphp_pool_park_guarded(duration_us: u64) -> c_int {
+    if MOCK_DEFERRED_BAILOUT.get() {
+        return OXPHP_SHARED_INVOKE_BAILOUT;
+    }
+    let Some(mut hook) = MOCK_POOL_PARK.with(|h| h.borrow_mut().take()) else {
+        return 0;
+    };
+    let rc = hook(duration_us);
+    MOCK_POOL_PARK.with(|h| {
+        h.borrow_mut().get_or_insert(hook);
+    });
     if rc == OXPHP_SHARED_INVOKE_BAILOUT {
         MOCK_DEFERRED_BAILOUT.set(true);
     }

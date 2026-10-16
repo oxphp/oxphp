@@ -11079,7 +11079,7 @@ final class Stats
 {
     public function inUse(): int;    // slots currently checked out
     public function idle(): int;     // free slots ready to hand out
-    public function waiting(): int;  // callers blocked in acquire
+    public function waiting(): int;  // callers waiting in acquire
     public function size(): int;     // inUse() + idle() (live slots)
     public function maxSize(): int;  // configured cap
 
@@ -11207,7 +11207,7 @@ The factory runs **lazily** on the acquiring worker thread. A pool with `maxSize
 
 ## Per-thread affinity
 
-v1 pools are strict per-thread: a slot minted on worker thread A cannot be acquired on worker thread B. Practically this means `stats()->idle()` can be non-zero on worker A while worker B is blocking in `acquire()`. This keeps slots hot in the thread that uses them (DB connections, OPcache-primed objects) and avoids shuffling resources across cores.
+v1 pools are strict per-thread: a slot minted on worker thread A cannot be acquired on worker thread B. Practically this means `stats()->idle()` can be non-zero on worker A while worker B is waiting in `acquire()`. This keeps slots hot in the thread that uses them (DB connections, OPcache-primed objects) and avoids shuffling resources across cores.
 
 Cross-thread work stealing is a v1.x candidate. Until then, size `maxSize` against the number of worker threads × expected per-thread concurrency, not just aggregate demand.
 
@@ -11255,6 +11255,14 @@ Every acquire variant first tries to satisfy the request immediately — reuse a
 
 `$ms` must be `> 0`; `0` or negative raises `TypeException`. There is deliberately no float-seconds form and no "infinite" sentinel argument — use the bare `acquire()` for an unbounded wait.
 
+### What a wait holds
+
+In worker mode, and in a task started with `oxphp_async()`, a wait on a saturated pool suspends the fiber running the request or the task, and the thread goes on running the others — the one holding the slot being waited for among them, when it is on the same thread. A suspended wait looks for a free slot again after 1 ms, then after 2 ms, then every 4 ms, so a slot given back on its thread reaches it within a few milliseconds of the thread being free to resume it. Waiters are not served in the order they arrived; the next free slot goes to whichever looks first.
+
+Where a fiber switch is not possible, the wait holds the thread instead, as it does in a request served without worker mode: inside a fiber your code starts itself, with `new Fiber` or through a scheduler such as Revolt or AMPHP, and in the other places where `oxphp_sleep()` waits on the thread — see the note under [Suspension Points](../features/fiber-multiplexing.md#suspension-points). There a slot held by anything else suspended on the same thread — another request, or another fiber of that scheduler — cannot come back while the wait lasts. Unless a slot is destroyed meanwhile, leaving room for a new one — by `evict()` or idle eviction on another thread, for instance — `acquireTimeout()` throws `OperationTimeoutException` once its `$ms` are up, and `acquire()` can wait until the server shuts down. Use the bounded form in such code.
+
+A task cancelled while its wait is suspended — because the side awaiting it gave up or the request that started it ended, for instance — is resumed, and its acquire throws `OxPHP\Async\AsyncException`.
+
 ## Exceptions
 
 | Exception                  | Raised by                                                            |
@@ -11265,6 +11273,7 @@ Every acquire variant first tries to satisfy the request immediately — reuse a
 | `ClosedException`          | Any acquire on a closed pool (server shutdown), and outside worker mode any acquire on a pool a request created that is not made by that request while it runs — see [Outside worker mode](#outside-worker-mode). |
 | `SharedException`          | `Registry::pool()` called from an HTTP request served without worker mode, and `Registry::global()` there when its factory returns a pool; either of them in a task when the factory returns a pool such a request created — see [Outside worker mode](#outside-worker-mode). |
 | `UninitializedException`   | A method call on a pool wrapper that has not finished `__construct`. |
+| `Async\AsyncException`     | An acquire in an `oxphp_async()` task that was cancelled while its wait was suspended — see [What a wait holds](#what-a-wait-holds). |
 
 `tryAcquire()` does **not** throw on saturation — it returns `null`. Because `OperationTimeoutException` extends `OxPHP\Async\AsyncException` (not `SharedException`), a `catch (SharedException)` will **not** catch an acquire timeout; use `catch (OxPHP\Async\AsyncException)` or catch `OperationTimeoutException` directly.
 

@@ -9481,6 +9481,7 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
     oxphp_bridge_set_in_fiber_check(oxphp_in_oxphp_fiber);
     oxphp_bridge_set_request_end_check(oxphp_request_end_pending);
     oxphp_bridge_set_fiber_yield(oxphp_fiber_suspend_for_yield);
+    oxphp_bridge_set_fiber_sleep(oxphp_fiber_sleep_us);
     oxphp_bridge_set_current_fiber_id_fn(oxphp_fiber_current_id);
     oxphp_bridge_set_async_io_backoff_fn(oxphp_async_io_backoff_bridge);
     oxphp_bridge_set_async_next_deadline_fn(oxphp_async_sched_next_deadline_ns);

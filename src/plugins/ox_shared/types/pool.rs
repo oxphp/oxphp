@@ -192,6 +192,14 @@ pub struct PoolInner {
     waiters: Mutex<u64>,
     waiters_cv: Condvar,
 
+    /// Per-thread count of acquires parked in a fiber, the other half of
+    /// `waiting()`. Per thread because a parked acquire takes its share back
+    /// down only once its park returns, and a fiber the server drops without
+    /// resuming it — after a fatal error between two requests' slices, for
+    /// one — never returns there: `reclaim_budget_for_dead_worker` drops the
+    /// thread's count when the thread exits.
+    parked: DashMap<ThreadKey, AtomicU64>,
+
     /// Factory/destroy callables. Owned by the PHP wrapper via explicit
     /// refcount; typed invocation lives in the FFI layer. `destroy_fcc`
     /// is nullable when the user passes `null` for `$destroy`. Both are
@@ -269,6 +277,7 @@ impl PoolInner {
             in_flight: DashMap::new(),
             waiters: Mutex::new(0),
             waiters_cv: Condvar::new(),
+            parked: DashMap::new(),
             factory_fcc: AtomicPtr::new(factory_fcc),
             destroy_fcc: AtomicPtr::new(destroy_fcc),
             home: (REQUEST_SCOPE.with(|s| s.get()) != RequestScope::Thread)
@@ -478,6 +487,9 @@ impl PoolInner {
     /// it. Left in place, they would be handed out — or given to
     /// `$destroy` by the idle-timeout eviction — on a later thread that
     /// gets the same `pthread_t`.
+    ///
+    /// And drops the count of acquires `key` had parked in a fiber: one
+    /// whose fiber the server dropped without resuming it is still counted.
     pub fn reclaim_budget_for_dead_worker(&self, key: ThreadKey) -> u64 {
         let count = self
             .in_flight
@@ -488,6 +500,7 @@ impl PoolInner {
             self.release_budget();
         }
         self.forget_idle_of(key);
+        self.parked.remove(&key);
         count
     }
 
@@ -711,6 +724,24 @@ impl PoolInner {
         !result.timed_out()
     }
 
+    /// Park the calling fiber for up to `step`, counted in `waiting()`
+    /// while it is parked, and return what the park returned — see
+    /// `oxphp_pool_park_guarded`. Nothing of the count is held locked across
+    /// the park: the fibers that run on this thread meanwhile may read it or
+    /// park here themselves.
+    pub fn park_for_release(&self, step: Duration) -> c_int {
+        let me = current_thread_key();
+        self.parked
+            .entry(me)
+            .or_insert_with(|| AtomicU64::new(0))
+            .fetch_add(1, Ordering::AcqRel);
+        let rc = unsafe { ffi::oxphp_pool_park_guarded(step.as_micros() as u64) };
+        if let Some(count) = self.parked.get(&me) {
+            count.fetch_sub(1, Ordering::AcqRel);
+        }
+        rc
+    }
+
     // ── lifecycle ─────────────────────────────────────────────────────
 
     /// Mark the pool closed. New `acquire` calls fail fast and every
@@ -804,7 +835,13 @@ impl PoolInner {
     }
 
     pub fn waiting_count(&self) -> u64 {
-        *self.waiters.lock().unwrap_or_else(|e| e.into_inner())
+        let on_condvar = *self.waiters.lock().unwrap_or_else(|e| e.into_inner());
+        let parked: u64 = self
+            .parked
+            .iter()
+            .map(|count| count.load(Ordering::Acquire))
+            .sum();
+        on_condvar + parked
     }
 
     /// Snapshot of idle counts per thread. Used by the `/entry`
@@ -1141,6 +1178,14 @@ use crate::bridge::ffi;
 use crate::plugins::ox_shared::error::{ffi_entry, set_last_error};
 use crate::plugins::ox_shared::registry::registry;
 
+/// How long a saturated acquire parks its fiber before it looks at the pool
+/// again: the first step, and the cap the step doubles up to. The cap keeps a
+/// slot given back on the waiter's thread from sitting idle for long; the
+/// doubling keeps a long wait from waking every millisecond. The same pair the
+/// SAPI polls with for a connection another fiber holds.
+const POOL_PARK_STEP_FIRST: Duration = Duration::from_millis(1);
+const POOL_PARK_STEP_MAX: Duration = Duration::from_millis(4);
+
 /// Resolve a live `Entry` pointer to `&Entry`. Returns `Err(Type)` if
 /// the entry belongs to a different Shared type. The caller must have
 /// already null-checked `entry_ptr`.
@@ -1250,9 +1295,15 @@ pub unsafe extern "C" fn oxphp_shared_pool_create(
 /// 1. `try_acquire_local` from the caller's own idle deque.
 /// 2. `try_reserve_budget` → on success call the C bridge factory;
 ///    refund + propagate on throw.
-/// 3. Budget full → `wait_for_release` up to the deadline, then loop.
+/// 3. Budget full → park the fiber for a step, or where there is none to
+///    park, `wait_for_release` up to the deadline; then loop.
 ///
 /// `timeout_ms`: -1 = wait forever, 0 = try only, >0 = milliseconds.
+///
+/// Returns `OXPHP_FIBER_UNWIND` when the fiber was destroyed while parked:
+/// the caller returns to PHP without raising anything, and the VM unwinds
+/// with the exit already pending. Its value is also `SharedError::Cycle`'s,
+/// which no pool path returns, so callers check for it before mapping codes.
 ///
 /// # Safety
 /// `out_slot_zv_heap` and `out_owner_tid` must be valid for writes.
@@ -1275,13 +1326,16 @@ pub unsafe extern "C" fn oxphp_shared_pool_acquire(
         *out_owner_tid = 0;
     }
 
-    ffi_entry(|| {
+    let mut unwound = false;
+    let rc = ffi_entry(|| {
         let entry = lookup_pool(entry_ptr)?;
         let pool = entry
             .inner
             .as_any_pool()
             .ok_or(crate::plugins::ox_shared::error::SharedError::Type)?;
 
+        let mut park_step = POOL_PARK_STEP_FIRST;
+        let mut can_park = true;
         let call_start = Instant::now();
         let (deadline_opt, try_only) = match parse_timeout(timeout_ms) {
             Wait::Forever => (None, false),
@@ -1391,6 +1445,45 @@ pub unsafe extern "C" fn oxphp_shared_pool_acquire(
                     t - now
                 }
             };
+
+            // In a fiber, park rather than hold the thread: the holder of the
+            // slot this waits for can be a request or task parked on this same
+            // thread, and it gives the slot back only once it runs again. A
+            // release does not wake a parked waiter, so the pool is looked at
+            // again after every step, which starts short and doubles to a cap.
+            if can_park {
+                match pool.park_for_release(park_step.min(remaining)) {
+                    1 => {
+                        park_step = (park_step * 2).min(POOL_PARK_STEP_MAX);
+                        continue;
+                    }
+                    // Nothing here to park: wait on the thread, below, for
+                    // the rest of this call.
+                    0 => can_park = false,
+                    // A pending exit, not an error: this acquire has no
+                    // outcome to record.
+                    ffi::OXPHP_FIBER_UNWIND => {
+                        unwound = true;
+                        return Ok(());
+                    }
+                    -1 => {
+                        set_last_error(
+                            "Async task cancelled while waiting for a Shared\\Pool slot",
+                        );
+                        return Err(crate::plugins::ox_shared::error::SharedError::Cancelled);
+                    }
+                    ffi::OXPHP_SHARED_INVOKE_BAILOUT => {
+                        // The server ended the request while it was parked
+                        // here; the dispatch stub raises the bailout again.
+                        set_last_error("Shared\\Pool wait ended by a bailout");
+                        return Err(crate::plugins::ox_shared::error::SharedError::Generic);
+                    }
+                    rc => {
+                        set_last_error(format!("Shared\\Pool fiber park failed with rc={rc}"));
+                        return Err(crate::plugins::ox_shared::error::SharedError::Generic);
+                    }
+                }
+            }
             pool.wait_for_release(remaining);
             // Loop back; the top-of-loop `is_closed` check converts
             // a close-during-wait wake-up into a `Closed` result.
@@ -1417,10 +1510,15 @@ pub unsafe extern "C" fn oxphp_shared_pool_acquire(
                 pool.record_wait(call_start.elapsed());
                 pool.record_acquire_closed();
             }
-            Err(_) => { /* unreachable: factory errors return early */ }
+            Err(_) => { /* unreachable: factory errors and an ended park return early */ }
         }
         result
-    })
+    });
+    if unwound {
+        ffi::OXPHP_FIBER_UNWIND
+    } else {
+        rc
+    }
 }
 
 /// Return a resource to the pool. `slot_zv_heap` is the pointer
@@ -1786,6 +1884,8 @@ fn pool_rc_to_phperr(rc: std::os::raw::c_int, context: &str) -> PhpError {
         -6 => "OxPHP\\Shared\\ClosedException",
         -7 => "OxPHP\\Shared\\OperationTimeoutException",
         -10 => "OxPHP\\Shared\\UninitializedException",
+        // The acquire's wait left because its async task was cancelled.
+        -12 => "OxPHP\\Async\\AsyncException",
         _ => "OxPHP\\Shared\\SharedException",
     };
     PhpError::Exception {
@@ -2075,6 +2175,10 @@ fn pool_acquire_impl(
     let mut owner: u64 = 0;
     let rc =
         unsafe { oxphp_shared_pool_acquire(entry_ptr, timeout_ms, &mut slot_heap, &mut owner) };
+    if rc == ffi::OXPHP_FIBER_UNWIND {
+        // The fiber was destroyed while parked; the exit is already pending.
+        return Ok(());
+    }
     if rc != 0 {
         // tryAcquire: a saturated pool surfaces as `SharedError::Timeout`,
         // which is the expected non-blocking outcome — return PHP null
@@ -2113,6 +2217,11 @@ fn pool_with_impl(call: &mut NativeCall, timeout_ms: i64) -> Result<(), PhpError
     let entry_ptr = pool_get_entry_ptr(call)?;
     let body_zv = unsafe { call.raw_arg_ptr(0) };
     let rc = unsafe { oxphp_shared_pool_with(entry_ptr, timeout_ms, body_zv, call.retval_ptr()) };
+    if rc == ffi::OXPHP_FIBER_UNWIND {
+        // The acquire's fiber was destroyed while parked; the exit is
+        // already pending.
+        return Ok(());
+    }
     if rc != 0 {
         return Err(pool_rc_to_phperr(rc, "Shared\\Pool::with"));
     }
@@ -3488,6 +3597,282 @@ mod tests {
         let rc = unsafe { oxphp_shared_pool_acquire(id, 100, &mut slot_heap, &mut owner) };
         assert_eq!(rc, SharedError::Closed.code());
         assert!(slot_heap.is_null());
+    }
+
+    // ── a saturated acquire parks its fiber ──────────────────────────
+    //
+    // The park is the mock's: each test hands it a hook standing for what
+    // the SAPI's fiber sleep returns. Each runs on a thread of its own, so
+    // the hook, the last error and a held-back bailout stay with it.
+
+    /// A pool of one slot that is checked out: the budget is spent and
+    /// nothing is idle.
+    #[cfg(not(feature = "php"))]
+    fn saturated_pool() -> *const Entry {
+        let id = register_pool(1);
+        // SAFETY: `id` is the `Arc::into_raw` pointer returned by
+        // `register_pool`, kept alive for the duration of the test.
+        let pool = unsafe { &*id }.inner.as_any_pool().unwrap();
+        assert!(pool.try_reserve_budget());
+        id
+    }
+
+    /// `acquire_for_test` with a wait: `timeout_ms` -1 forever, >0 bounded.
+    #[cfg(not(feature = "php"))]
+    fn acquire_waiting(id: *const Entry, timeout_ms: i64) -> (c_int, *mut c_void, String) {
+        crate::plugins::ox_shared::error::clear_last_error();
+        let mut slot_heap: *mut c_void = std::ptr::null_mut();
+        let mut owner: u64 = 0;
+        let rc = unsafe { oxphp_shared_pool_acquire(id, timeout_ms, &mut slot_heap, &mut owner) };
+        let message = crate::plugins::ox_shared::error::read_last_error_message();
+        (rc, slot_heap, message)
+    }
+
+    #[cfg(not(feature = "php"))]
+    #[test]
+    fn saturated_acquire_parks_and_takes_the_slot_given_back_meanwhile() {
+        use crate::bridge::ffi::mock_pool_park;
+        thread::spawn(|| {
+            let id = saturated_pool();
+            let id_addr = id as usize;
+            let sentinel = 0xBABE_0101_usize;
+            let seen = std::rc::Rc::new(RefCell::new(Vec::new()));
+            let log = std::rc::Rc::clone(&seen);
+            mock_pool_park(Some(Box::new(move |us| {
+                // SAFETY: as in `saturated_pool`.
+                let pool = unsafe { &*(id_addr as *const Entry) }
+                    .inner
+                    .as_any_pool()
+                    .unwrap();
+                log.borrow_mut().push((us, pool.waiting_count()));
+                // The holder, on this same thread, runs while the waiter is
+                // parked and gives its slot back.
+                pool.deposit_new(PoolSlot::new(sentinel as *mut c_void, current_thread_key()));
+                1
+            })));
+            let (rc, slot, _) = acquire_waiting(id, -1);
+            mock_pool_park(None);
+
+            assert_eq!(rc, 0);
+            assert_eq!(slot as usize, sentinel);
+            assert_eq!(
+                *seen.borrow(),
+                vec![(1000, 1)],
+                "parked once, for the first step, counted as waiting meanwhile"
+            );
+            // SAFETY: as in `saturated_pool`.
+            let pool = unsafe { &*id }.inner.as_any_pool().unwrap();
+            assert_eq!(pool.waiting_count(), 0);
+            assert_eq!(pool.acquire_ok_total(), 1);
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[cfg(not(feature = "php"))]
+    #[test]
+    fn parked_acquire_backs_off_to_its_cap_and_keeps_its_deadline() {
+        use crate::bridge::ffi::mock_pool_park;
+        thread::spawn(|| {
+            let id = saturated_pool();
+            let steps = std::rc::Rc::new(RefCell::new(Vec::new()));
+            let log = std::rc::Rc::clone(&steps);
+            mock_pool_park(Some(Box::new(move |us| {
+                log.borrow_mut().push(us);
+                thread::sleep(Duration::from_micros(us));
+                1
+            })));
+            let started = Instant::now();
+            let (rc, slot, _) = acquire_waiting(id, 50);
+            let waited = started.elapsed();
+            mock_pool_park(None);
+
+            assert_eq!(rc, SharedError::Timeout.code());
+            assert!(slot.is_null());
+            assert!(waited >= Duration::from_millis(50), "{waited:?}");
+            let steps = steps.borrow();
+            assert_eq!(steps[..3], [1000, 2000, 4000], "{steps:?}");
+            assert!(steps[3..].iter().all(|&us| us <= 4000), "{steps:?}");
+            // SAFETY: as in `saturated_pool`.
+            let pool = unsafe { &*id }.inner.as_any_pool().unwrap();
+            assert_eq!(pool.waiting_count(), 0);
+            assert_eq!(pool.acquire_timeout_total(), 1);
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[cfg(not(feature = "php"))]
+    #[test]
+    fn parked_step_is_cut_to_what_is_left_of_the_deadline() {
+        use crate::bridge::ffi::mock_pool_park;
+        thread::spawn(|| {
+            let id = saturated_pool();
+            let steps = std::rc::Rc::new(RefCell::new(Vec::new()));
+            let log = std::rc::Rc::clone(&steps);
+            // Every park comes back at once, so the wait goes round many
+            // times in the last 4 ms before its deadline.
+            mock_pool_park(Some(Box::new(move |us| {
+                log.borrow_mut().push(us);
+                1
+            })));
+            let (rc, _, _) = acquire_waiting(id, 20);
+            mock_pool_park(None);
+
+            assert_eq!(rc, SharedError::Timeout.code());
+            let steps = steps.borrow();
+            assert_eq!(steps[..3], [1000, 2000, 4000], "{steps:?}");
+            // Past the cap the step stays at 4 ms until less than that is
+            // left; from there each step asks only for what is left.
+            assert!(steps[3..].iter().all(|&us| us <= 4000), "{steps:?}");
+            assert!(steps[3..].iter().any(|&us| us < 4000), "{steps:?}");
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[cfg(not(feature = "php"))]
+    #[test]
+    fn acquire_with_no_fiber_to_park_waits_on_the_thread() {
+        use crate::bridge::ffi::mock_pool_park;
+        let id = saturated_pool();
+        let id_addr = id as usize;
+        let parks = Arc::new(AtomicU64::new(0));
+        let count = Arc::clone(&parks);
+        let waiter = thread::spawn(move || {
+            mock_pool_park(Some(Box::new(move |_| {
+                count.fetch_add(1, Ordering::SeqCst);
+                0
+            })));
+            let (rc, _, _) = acquire_waiting(id_addr as *const Entry, -1);
+            mock_pool_park(None);
+            rc
+        });
+
+        // SAFETY: as in `saturated_pool`.
+        let pool = unsafe { &*id }.inner.as_any_pool().unwrap();
+        let until = Instant::now() + Duration::from_secs(2);
+        while parks.load(Ordering::SeqCst) == 0 && Instant::now() < until {
+            thread::sleep(Duration::from_millis(1));
+        }
+        // Long past the park the mock refused, and past two of the forever
+        // wait's 50 ms turns: still waiting, still counted, and the park
+        // never asked for again — the waiter is on the condvar.
+        thread::sleep(Duration::from_millis(120));
+        assert_eq!(pool.waiting_count(), 1, "the waiter is not waiting");
+        assert_eq!(
+            parks.load(Ordering::SeqCst),
+            1,
+            "asked once, then waited on the thread"
+        );
+
+        pool.close();
+        assert_eq!(waiter.join().unwrap(), SharedError::Closed.code());
+    }
+
+    #[cfg(not(feature = "php"))]
+    #[test]
+    fn cancelled_park_ends_the_acquire_as_cancelled() {
+        use crate::bridge::ffi::mock_pool_park;
+        thread::spawn(|| {
+            let id = saturated_pool();
+            mock_pool_park(Some(Box::new(|_| -1)));
+            let (rc, slot, message) = acquire_waiting(id, -1);
+            mock_pool_park(None);
+
+            assert_eq!(rc, SharedError::Cancelled.code());
+            assert!(slot.is_null());
+            assert!(message.contains("cancelled"), "{message}");
+            // SAFETY: as in `saturated_pool`.
+            let pool = unsafe { &*id }.inner.as_any_pool().unwrap();
+            assert_eq!(pool.waiting_count(), 0);
+            // Not an acquire outcome: nothing recorded.
+            assert_eq!(pool.wait_histogram_snapshot().2, 0);
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[cfg(not(feature = "php"))]
+    #[test]
+    fn unwinding_park_returns_fiber_unwind_without_an_error() {
+        use crate::bridge::ffi::{mock_pool_park, OXPHP_FIBER_UNWIND};
+        thread::spawn(|| {
+            let id = saturated_pool();
+            mock_pool_park(Some(Box::new(|_| OXPHP_FIBER_UNWIND)));
+            let (rc, slot, message) = acquire_waiting(id, -1);
+            mock_pool_park(None);
+
+            assert_eq!(rc, OXPHP_FIBER_UNWIND);
+            assert!(slot.is_null());
+            assert_eq!(message, "", "an unwind is not an error of the pool's");
+            // SAFETY: as in `saturated_pool`.
+            let pool = unsafe { &*id }.inner.as_any_pool().unwrap();
+            assert_eq!(pool.waiting_count(), 0);
+            assert_eq!(pool.wait_histogram_snapshot().2, 0);
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[cfg(not(feature = "php"))]
+    #[test]
+    fn bailout_in_park_is_held_back_and_the_waiter_count_comes_down() {
+        use crate::bridge::ffi::{
+            mock_pool_park, mock_take_deferred_bailout, OXPHP_SHARED_INVOKE_BAILOUT,
+        };
+        thread::spawn(|| {
+            let id = saturated_pool();
+            mock_pool_park(Some(Box::new(|_| OXPHP_SHARED_INVOKE_BAILOUT)));
+            let (rc, slot, message) = acquire_waiting(id, -1);
+            mock_pool_park(None);
+
+            assert_eq!(rc, SharedError::Generic.code());
+            assert!(slot.is_null());
+            assert!(message.contains("bailout"), "{message}");
+            assert!(
+                mock_take_deferred_bailout(),
+                "the bailout is held for the stub"
+            );
+            // SAFETY: as in `saturated_pool`.
+            let pool = unsafe { &*id }.inner.as_any_pool().unwrap();
+            assert_eq!(pool.waiting_count(), 0);
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[cfg(not(feature = "php"))]
+    #[test]
+    fn park_that_never_returns_stops_counting_when_its_thread_exits() {
+        use crate::bridge::ffi::mock_pool_park;
+        thread::spawn(|| {
+            let id = saturated_pool();
+            // The park unwinds out past the acquire's frames instead of
+            // returning, which leaves the count where a fiber the server
+            // drops without resuming it leaves it: nothing after the park
+            // runs.
+            mock_pool_park(Some(Box::new(|_| panic!("the fiber is never resumed"))));
+            let (rc, _, _) = acquire_waiting(id, -1);
+            mock_pool_park(None);
+            assert_eq!(rc, SharedError::Panicked.code());
+
+            // SAFETY: as in `saturated_pool`.
+            let pool = unsafe { &*id }.inner.as_any_pool().unwrap();
+            assert_eq!(pool.waiting_count(), 1, "the dropped park still counts");
+            pool.reclaim_budget_for_dead_worker(current_thread_key());
+            assert_eq!(pool.waiting_count(), 0, "until its thread exits");
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[test]
+    fn cancelled_acquire_maps_to_async_exception() {
+        match pool_rc_to_phperr(SharedError::Cancelled.code(), "Shared\\Pool::acquire") {
+            PhpError::Exception { class, .. } => assert_eq!(class, "OxPHP\\Async\\AsyncException"),
+            other => panic!("expected an exception, got {other:?}"),
+        }
     }
 
     // ── pools of a request that ends before its thread ───────────────
