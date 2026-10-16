@@ -2955,6 +2955,12 @@ int oxphp_bridge_fiber_yield(void) {
     return 0; /* not in fiber — caller should fall back to blocking */
 }
 
+static oxphp_fiber_sleep_fn_t sapi_fiber_sleep = NULL;
+
+void oxphp_bridge_set_fiber_sleep(oxphp_fiber_sleep_fn_t fn) {
+    sapi_fiber_sleep = fn;
+}
+
 static oxphp_in_fiber_check_fn_t sapi_in_fiber_check = NULL;
 
 void oxphp_bridge_set_in_fiber_check(oxphp_in_fiber_check_fn_t fn) {
@@ -7228,6 +7234,31 @@ int oxphp_pool_destroy_invoke_guarded(void *destroy_fcc_heap, void *slot_zv_heap
     int rc;
     OXPHP_SHARED_RUN_GUARDED(rc, oxphp_pool_destroy_invoke_unguarded(
         destroy_fcc_heap, slot_zv_heap));
+    return rc;
+}
+
+/* The fiber sleep oxphp_usleep() parks in, for Shared\Pool::acquire's wait.
+ * A request the server ends while it is parked there — a worker retiring,
+ * a drain once its deadline passes, a streaming request on any drain — is
+ * resumed only to be ended, and the sleep ends it uncatchably from inside
+ * its own frame, by zend_bailout(). Called bare, that longjmp would cross
+ * the acquire's Rust frames, and the waiter count the acquire raised for the
+ * park would stay raised until the thread exits. So it runs guarded
+ * like the helpers above. What runs while it is parked runs on other fibers,
+ * each under a bailout of its own (below). On this fiber userland runs in it
+ * only once the request is being ended: an output handler the error message
+ * is written through ahead of the bailout, which lands in the same catch.
+ *
+ * zend_try across the park is sound: a fiber switch saves and restores
+ * EG(bailout) with the rest of the VM state (zend_fiber_switch_context), so
+ * the request running while this one is parked bails out to its own catch,
+ * and this catch is back in force once this fiber runs again. */
+int oxphp_pool_park_guarded(uint64_t duration_us) {
+    if (sapi_fiber_sleep == NULL) {
+        return 0;
+    }
+    int rc;
+    OXPHP_SHARED_RUN_GUARDED(rc, sapi_fiber_sleep(duration_us));
     return rc;
 }
 

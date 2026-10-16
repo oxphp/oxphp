@@ -1466,6 +1466,7 @@ typedef int (*oxphp_await_any_dispatch_fn_t)(
 typedef int (*oxphp_fiber_await_fn_t)(int64_t promise_id, double timeout, void *retval);
 typedef int (*oxphp_in_fiber_check_fn_t)(void);
 typedef int (*oxphp_fiber_yield_fn_t)(void);
+typedef int (*oxphp_fiber_sleep_fn_t)(uint64_t duration_us);
 
 /** Register Rust async dispatch callbacks (called once at init). */
 void oxphp_bridge_set_async_dispatch(oxphp_async_dispatch_fn_t fn);
@@ -1482,6 +1483,11 @@ int oxphp_bridge_fiber_await(int64_t promise_id, double timeout, void *retval);
  *  yielded. */
 void oxphp_bridge_set_fiber_yield(oxphp_fiber_yield_fn_t fn);
 int oxphp_bridge_fiber_yield(void);
+
+/** Register the SAPI's fiber sleep — the suspend point behind oxphp_usleep().
+ *  Rust reaches it only through oxphp_pool_park_guarded(), which holds back
+ *  the bailout a drain kill ends it with. */
+void oxphp_bridge_set_fiber_sleep(oxphp_fiber_sleep_fn_t fn);
 
 /** Register the SAPI predicate that decides whether the calling thread
  *  is inside an oxphp-managed scheduler fiber. The bridge has no way
@@ -2522,6 +2528,17 @@ int oxphp_pool_destroy_invoke(void *destroy_fcc_heap, void *slot_zv_heap);
  * a bailout is held back for the dispatch stub or the serve loop, and the
  * slot is then left unfreed. Returns 0, or OXPHP_SHARED_INVOKE_BAILOUT (-4). */
 int oxphp_pool_destroy_invoke_guarded(void *destroy_fcc_heap, void *slot_zv_heap);
+
+/* Park the calling fiber for `duration_us` while Shared\Pool::acquire waits
+ * for a slot, so the thread can run whoever holds one. For a caller inside a
+ * plugin handler only. Returns 1 when it parked, 0 when there is nothing here
+ * to park (outside an oxphp fiber, or where a switch is not possible: the
+ * caller waits on the thread instead), -1 when the async task was cancelled
+ * while parked, OXPHP_FIBER_UNWIND (-9, oxphp_fiber.h) when the fiber is
+ * being destroyed with the exit pending that the VM unwinds it with, and
+ * OXPHP_SHARED_INVOKE_BAILOUT when the server ended the request while it was
+ * parked — held back for the dispatch stub, as for the helpers above. */
+int oxphp_pool_park_guarded(uint64_t duration_us);
 
 /* Shared\Pool\Handle rust_data wrapper helpers. See
  * oxphp_bridge.c §Shared\Pool\Handle rust_data wrapper helpers
