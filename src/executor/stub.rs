@@ -30,6 +30,7 @@ impl ScriptExecutor for StubExecutor {
                 HeaderValue::from_static("text/plain"),
             )],
             body: Bytes::from_static(b"OK"),
+            spool: None,
             execution_time_us: 0,
             stream_rx: None,
             errors: Vec::new(),

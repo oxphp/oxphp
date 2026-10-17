@@ -153,6 +153,23 @@ If both old and new are set, `ENTRY_FILE` / `WORKER_MODE_ENABLED` win. Migrate a
 |----------|---------|-------------|
 | `SUPERGLOBALS_ENABLED` | `true` | Describe the request to PHP so it builds `$_SERVER` and `$_GET` before script execution. Set to a [falsy value](#boolean-values) to skip that work in an application that reads neither. It reaches those two only: `$_POST`, `$_FILES` and `$_COOKIE` are built from the request body and the `Cookie` header, which are handed to PHP either way, and `php://input` is a stream rather than a superglobal. See [SUPERGLOBALS_ENABLED](../php/request-api.md#superglobals_enabled) for the full table |
 
+## Response Buffering
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RESPONSE_BUFFER_BYTES` | `1048576` (1 MiB) | How much of a buffered response's output is held in memory. Past it, the response moves to a spool file on disk — see below. `0` = default |
+| `RESPONSE_SPOOL_MAX_BYTES` | `1073741824` (1 GiB) | Maximum bytes the spool files of all responses may hold together. A response that would push the total past it is answered with `503`. `0` = default |
+
+A response is buffered unless it streams (`Content-Type: text/event-stream` or `oxphp_stream_flush()`): it is sent when the script ends or calls `oxphp_finish_request()`, so everything the script writes is held until then, and afterwards for as long as the client takes to read it. Up to `RESPONSE_BUFFER_BYTES` that output stays in memory. Past it, the output moves to a temporary file, the rest of it follows, and the response is sent from that file, so a script that `readfile()`s a 500 MiB download no longer keeps 500 MiB of server memory for as long as a slow client takes to read it. The exception is a response eligible for [compression](../features/compression.md), which only a body of at most 3 MiB is: it is read back into memory to be compressed. Output a response streams is never spooled: it leaves at every flush.
+
+Spool files are created in the system temporary directory — `TMPDIR`, or `/tmp` when it is unset or empty — and removed from it right after they are created, so they do not stay in a directory listing, and the space each one holds is given back when its response has been sent or its client has gone, and also if the server is killed. Where that directory lives decides what the spool costs:
+
+- **Container writable layer** (the default `/tmp` of an image): disk. On Kubernetes this counts toward the pod's ephemeral-storage limit, so size that limit for `RESPONSE_SPOOL_MAX_BYTES`.
+- **tmpfs** (`docker run --tmpfs /tmp`, a Kubernetes `emptyDir` with `medium: Memory`): memory, charged to the container like any other. Point `TMPDIR` at a disk-backed volume instead.
+- **Read-only root filesystem**: mount a writable volume and point `TMPDIR` at it. The server logs a warning at startup when it cannot create a file in the spool directory.
+
+A response that cannot be spooled — `RESPONSE_SPOOL_MAX_BYTES` is reached, or the file cannot be created or written, for example because the disk is full — is answered with `503 Service Unavailable` and `Retry-After: 5` instead of the script's status, headers and output, and a warning naming the cause is logged. The script itself runs to completion; whatever it writes after that point is discarded.
+
 ## Timeouts
 
 | Variable | Default | Description |
@@ -528,6 +545,8 @@ curl -s http://localhost:9090/config | jq .
   "queue_wait_timeout_ms": 1000,
   "rate_limit": 100,
   "rate_window_seconds": 60,
+  "response_buffer_bytes": 1048576,
+  "response_spool_max_bytes": 1073741824,
   "runtime_hooks": [],
   "static_max_age": 2592000,
   "static_revalidate": false,

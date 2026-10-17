@@ -1,6 +1,7 @@
 use bytes::Bytes;
 use http::{header, HeaderValue, Response};
-use http_body_util::BodyExt;
+use http_body_util::{BodyExt, StreamBody};
+use hyper::body::Frame;
 
 use crate::types::{full_body, ResponseBody};
 
@@ -255,7 +256,13 @@ pub async fn maybe_compress(
 
     let body_bytes = match body.collect().await {
         Ok(collected) => collected.to_bytes(),
-        Err(_) => return Response::from_parts(parts, full_body(Bytes::new())),
+        // A body spooled to disk can fail to read back. Pass the error on, so
+        // the response is cut short as it would be uncompressed, instead of
+        // going out as a complete empty body.
+        Err(err) => {
+            let failed = futures_util::stream::once(async move { Err::<Frame<Bytes>, _>(err) });
+            return Response::from_parts(parts, StreamBody::new(failed).boxed());
+        }
     };
 
     // Runtime check for bodies without exact size hint
@@ -922,6 +929,39 @@ mod tests {
         let mut decoded = Vec::new();
         brotli::BrotliDecompress(&mut compressed.as_ref(), &mut decoded).unwrap();
         assert_eq!(decoded, body.as_bytes());
+    }
+
+    /// A body that announces `.0` bytes and fails on its first read.
+    struct FailingBody(u64);
+
+    impl hyper::body::Body for FailingBody {
+        type Data = Bytes;
+        type Error = std::io::Error;
+
+        fn poll_frame(
+            self: std::pin::Pin<&mut Self>,
+            _: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Result<Frame<Bytes>, std::io::Error>>> {
+            std::task::Poll::Ready(Some(Err(std::io::Error::other("read failed"))))
+        }
+
+        fn size_hint(&self) -> hyper::body::SizeHint {
+            hyper::body::SizeHint::with_exact(self.0)
+        }
+    }
+
+    #[tokio::test]
+    async fn test_body_read_error_is_passed_on() {
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/html")
+            .body(FailingBody(4096).boxed())
+            .unwrap();
+
+        let result = maybe_compress(response, Coding::Br, 4).await;
+
+        assert!(result.headers().get(header::CONTENT_ENCODING).is_none());
+        assert!(result.into_body().collect().await.is_err());
     }
 
     #[tokio::test]

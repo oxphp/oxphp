@@ -558,7 +558,7 @@ fn execute_request(
     note_if_abandoned(request);
 
     // Single batched TLS lookup for all response data.
-    let (raw_output, raw_headers, status) = sapi::take_response();
+    let (raw_output, raw_headers, status, spool) = sapi::take_response();
     let body = Bytes::from(raw_output);
 
     // Parse header strings into typed HeaderName/HeaderValue on the worker thread,
@@ -615,6 +615,7 @@ fn execute_request(
         status,
         headers,
         body,
+        spool,
         execution_time_us: start.elapsed().as_micros() as u64,
         stream_rx: None,
         errors: sapi::take_request_errors(),

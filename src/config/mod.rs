@@ -145,6 +145,12 @@ pub struct Config {
     /// them. Bodies are buffered in full before dispatch, so the cap above
     /// bounds the waiting set in requests and this one bounds it in memory.
     pub queue_max_waiting_bytes: usize,
+    /// Buffered output a response holds in memory before the rest goes to a
+    /// spool file on disk.
+    pub response_buffer_bytes: usize,
+    /// Cap on what the spool files of all responses hold together; a response
+    /// that would go past it is answered with 503.
+    pub response_spool_max_bytes: u64,
     /// Trusted reverse proxy networks (CIDR). When set, X-Forwarded-* and
     /// Forwarded headers from these peers are trusted for client IP extraction.
     pub trusted_proxies: Option<TrustedProxyConfig>,
@@ -503,6 +509,22 @@ pub(crate) fn resolve_queue_env(
     Ok((capacity, wait_timeout_ms, max_waiting, max_waiting_bytes))
 }
 
+/// Parse `RESPONSE_BUFFER_BYTES` and `RESPONSE_SPOOL_MAX_BYTES`. `0` means
+/// the default for either: a zero buffer would send every response through a
+/// file, and a zero cap would refuse every response that outgrows the buffer.
+pub(crate) fn resolve_response_spool_env() -> Result<(usize, u64), crate::types::BoxError> {
+    use crate::php::response_spool::{DEFAULT_BUFFER_BYTES, DEFAULT_MAX_BYTES};
+    let buffer_bytes = match parse_knob("RESPONSE_BUFFER_BYTES", 0)? {
+        0 => DEFAULT_BUFFER_BYTES,
+        n => n,
+    };
+    let max_bytes = match parse_knob("RESPONSE_SPOOL_MAX_BYTES", 0)? {
+        0 => DEFAULT_MAX_BYTES,
+        n => n as u64,
+    };
+    Ok((buffer_bytes, max_bytes))
+}
+
 /// How many requests the PHP path can hold without answering — running in a
 /// worker, sitting in the queue, or parked in admission — when that is enough
 /// to take every connection the server is allowed to have.
@@ -739,6 +761,7 @@ impl Config {
 
         let (queue_capacity, queue_wait_timeout_ms, queue_max_waiting, queue_max_waiting_bytes) =
             resolve_queue_env(worker_mode.worker_count(), max_connections)?;
+        let (response_buffer_bytes, response_spool_max_bytes) = resolve_response_spool_env()?;
 
         let trusted_proxies = TrustedProxyConfig::from_env()
             .map_err(|e| -> crate::types::BoxError { format!("TRUSTED_PROXIES: {e}").into() })?;
@@ -785,6 +808,8 @@ impl Config {
             queue_wait_timeout_ms,
             queue_max_waiting,
             queue_max_waiting_bytes,
+            response_buffer_bytes,
+            response_spool_max_bytes,
             trusted_proxies,
             h2,
         })
@@ -846,6 +871,8 @@ impl Config {
             queue_wait_timeout_ms: 1000,
             queue_max_waiting: 128,
             queue_max_waiting_bytes: 64 * 1024 * 1024,
+            response_buffer_bytes: 1 << 20,
+            response_spool_max_bytes: 1 << 30,
             trusted_proxies: None,
             h2: H2Config::default(),
         }
@@ -906,6 +933,8 @@ impl Config {
             "queue_wait_timeout_ms": self.queue_wait_timeout_ms,
             "queue_max_waiting": self.queue_max_waiting,
             "queue_max_waiting_bytes": self.queue_max_waiting_bytes,
+            "response_buffer_bytes": self.response_buffer_bytes,
+            "response_spool_max_bytes": self.response_spool_max_bytes,
             "max_connections": self.max_connections,
             "drain_timeout_seconds": self.drain_timeout_seconds,
             "internal_addr": self.internal_addr,
@@ -1442,6 +1471,40 @@ mod tests {
                 err.to_string().contains("QUEUE_MAX_WAITING_BYTES"),
                 "a size suffix is not accepted here, and saying so beats \
                  falling back to a default the operator did not ask for: {err}"
+            );
+        });
+    }
+
+    #[test]
+    fn response_spool_env_strictness() {
+        use crate::php::response_spool::{DEFAULT_BUFFER_BYTES, DEFAULT_MAX_BYTES};
+        let both = |buffer, max| {
+            [
+                ("RESPONSE_BUFFER_BYTES", buffer),
+                ("RESPONSE_SPOOL_MAX_BYTES", max),
+            ]
+        };
+
+        test_env::with_env(&both(None, None), || {
+            assert_eq!(
+                resolve_response_spool_env().unwrap(),
+                (DEFAULT_BUFFER_BYTES, DEFAULT_MAX_BYTES)
+            );
+        });
+        test_env::with_env(&both(Some("0"), Some("")), || {
+            assert_eq!(
+                resolve_response_spool_env().unwrap(),
+                (DEFAULT_BUFFER_BYTES, DEFAULT_MAX_BYTES)
+            );
+        });
+        test_env::with_env(&both(Some("65536"), Some("8589934592")), || {
+            assert_eq!(resolve_response_spool_env().unwrap(), (65536, 8 << 30));
+        });
+        test_env::with_env(&both(None, Some("1GiB")), || {
+            let err = resolve_response_spool_env().unwrap_err();
+            assert!(
+                err.to_string().contains("RESPONSE_SPOOL_MAX_BYTES"),
+                "err: {err}"
             );
         });
     }

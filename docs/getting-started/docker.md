@@ -271,6 +271,7 @@ services:
 | `DOCUMENT_ROOT` | Readable. `/var/www/html` is chowned to `www-data` at image build, so this is satisfied by default. |
 | Session save path (`session.save_path`, default `/tmp`) | Writable. |
 | Upload tmp dir (`upload_tmp_dir`) | Writable, when file uploads are used. |
+| Response spool directory (`TMPDIR`, default `/tmp`) | Writable. Otherwise every PHP response that does not stream and is larger than `RESPONSE_BUFFER_BYTES` is answered with `503`, and the server logs a warning at startup — see [Response Buffering](../operations/configuration.md#response-buffering). |
 | OPcache file cache (`opcache.file_cache`) | Writable, when a secondary file cache is enabled. |
 | File-based access log | Writable, when logging to a file rather than stdout. |
 | TLS private key (`TLS_KEY`) | **Readable by the dropped user** — group- or world-readable, not root-only `0600`. The key is read *after* the drop, so a root-only key makes TLS startup fail. |

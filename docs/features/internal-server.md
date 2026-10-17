@@ -131,6 +131,8 @@ curl -s http://localhost:9090/config | jq .
   "queue_wait_timeout_ms": 1000,
   "rate_limit": 100,
   "rate_window_seconds": 60,
+  "response_buffer_bytes": 1048576,
+  "response_spool_max_bytes": 1073741824,
   "runtime_hooks": ["sleep", "streams", "net"],
   "static_max_age": 2592000,
   "static_revalidate": false,

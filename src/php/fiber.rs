@@ -166,6 +166,7 @@ pub(crate) struct ResponseBuffers {
     pub(crate) output: Vec<u8>,
     pub(crate) headers: Vec<(String, String)>,
     pub(crate) status_code: u16,
+    pub(crate) spooled: super::response_spool::Spooled,
 }
 
 /// Saved per-fiber TLS state.
@@ -503,6 +504,7 @@ mod tests {
                 output: b"fiber1-output".to_vec(),
                 headers: vec![("X-Fiber".to_string(), "1".to_string())],
                 status_code: 200,
+                ..Default::default()
             },
             #[cfg(feature = "php")]
             early_tx: None,
@@ -535,6 +537,7 @@ mod tests {
                 output: b"fiber2-output".to_vec(),
                 headers: vec![("X-Fiber".to_string(), "2".to_string())],
                 status_code: 404,
+                ..Default::default()
             },
             #[cfg(feature = "php")]
             early_tx: None,
@@ -599,6 +602,7 @@ mod tests {
                 output: b"temp".to_vec(),
                 headers: Vec::new(),
                 status_code: 200,
+                ..Default::default()
             },
             #[cfg(feature = "php")]
             early_tx: None,
