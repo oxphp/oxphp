@@ -117,7 +117,7 @@ Route resolution
 8. **Compression** — text-based responses are compressed before being sent, with whichever of Brotli, Zstandard, and gzip the client's `Accept-Encoding` ranks highest; on a tie, cached static files get Brotli and everything else gets Zstandard (configurable via `COMPRESSION_ENCODINGS` and the per-coding level variables).
 9. **SSE streaming** — if the script sets `Content-Type: text/event-stream` or calls `oxphp_stream_flush()`, OxPHP switches to streaming mode: each `flush()` call sends a chunk to the client immediately without buffering the entire response. In Worker mode, SSE works cooperatively with [fiber multiplexing](../features/fiber-multiplexing.md).
 10. **Early response** — calling `oxphp_finish_request()` sends the HTTP response to the client immediately. The script continues executing in the background — for writing logs, updating caches, sending notifications — without holding the connection open.
-11. **Response delivery** — the completed response is sent back over the connection, and if [access logging](../features/access-logging.md) is enabled, a log entry is written.
+11. **Response delivery** — the completed response is sent back over the connection, and if [access logging](../features/access-logging.md) is enabled, a log entry is written. A PHP response that does not stream and is larger than `RESPONSE_BUFFER_BYTES` (1 MiB by default) is collected in a temporary file rather than in memory; see [Response Buffering](../operations/configuration.md#response-buffering).
 
 ## Worker Mode vs Standard Mode
 

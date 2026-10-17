@@ -12,12 +12,13 @@ use crate::bridge::cancel::{CancelReason, CancellationState};
 use crate::events::{RequestComplete, RequestReceived, ResponseBuilding};
 use crate::executor::ExecuteResult;
 use crate::metrics::Metrics;
+use crate::php::response_spool;
 use crate::php::worker_registry::cancel_request;
 use crate::server::compression;
 use crate::server::response::static_file;
 use crate::server::routing::RouteResult;
 use crate::server::Server;
-use crate::types::{full_body, stream_body, ResponseBody, ScriptRequest};
+use crate::types::{full_body, ResponseBody, ScriptRequest};
 
 /// Maximum request body size for POST/PUT/PATCH (10 MB).
 const MAX_REQUEST_BODY: usize = 10 * 1024 * 1024;
@@ -929,11 +930,13 @@ async fn dispatch_request(
             for (name, value) in &script_response.headers {
                 builder = builder.header(name, value);
             }
-            let response = if let Some(rx) = script_response.stream_rx {
-                builder.body(stream_body(script_response.body, rx)).unwrap()
-            } else {
-                builder.body(full_body(script_response.body)).unwrap()
-            };
+            let response = builder
+                .body(response_spool::body(
+                    script_response.spool,
+                    script_response.body,
+                    script_response.stream_rx,
+                ))
+                .unwrap();
             (response, exec_data)
         }
         RouteResult::NotFound => (

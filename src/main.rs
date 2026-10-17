@@ -129,6 +129,24 @@ fn main() -> Result<(), types::BoxError> {
     // warning stays silent once we have dropped.
     startup_identity::log_startup_identity();
 
+    // Probed as the identity that will create the spool files, so after the
+    // drop. Not fatal: a server whose responses all fit in memory never
+    // touches the directory.
+    let spool = oxphp::php::response_spool::configure(
+        config.response_buffer_bytes,
+        config.response_spool_max_bytes,
+    );
+    if let Err(error) = oxphp::php::response_spool::probe_dir(spool) {
+        tracing::warn!(
+            dir = %spool.dir.display(),
+            %error,
+            buffer_bytes = spool.buffer_bytes,
+            "response spool directory is not writable: every non-streamed response \
+             larger than RESPONSE_BUFFER_BYTES will be answered with 503. Point TMPDIR \
+             at a writable directory"
+        );
+    }
+
     // Create metrics early — needed by executor for worker metrics. Sized
     // by `max_worker_count()` rather than the initial pool size: dynamic-mode
     // scale-ups and traditional-mode respawns hand out IDs up to this limit

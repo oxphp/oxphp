@@ -6,6 +6,7 @@ pub mod fiber;
 pub mod header_match;
 pub mod heartbeat;
 pub mod request_decode;
+pub mod response_spool;
 #[cfg(feature = "php")]
 pub mod sapi;
 pub mod supervisor;

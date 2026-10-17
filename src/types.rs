@@ -145,6 +145,9 @@ pub struct ScriptResponse {
     pub status: u16,
     pub headers: Vec<(HeaderName, HeaderValue)>,
     pub body: Bytes,
+    /// The spool file holding the whole output, when it outgrew memory;
+    /// `body` is then empty.
+    pub spool: Option<Box<crate::php::response_spool::Spool>>,
     pub execution_time_us: u64,
     /// If Some, response is streaming: `body` is the first chunk (may be empty),
     /// subsequent chunks arrive via this channel. Channel close = stream end.
@@ -197,6 +200,7 @@ impl std::fmt::Debug for ScriptResponse {
             .field("status", &self.status)
             .field("headers", &self.headers)
             .field("body_len", &self.body.len())
+            .field("spooled", &self.spool.is_some())
             .field("execution_time_us", &self.execution_time_us)
             .field("streaming", &self.stream_rx.is_some())
             .field("errors_count", &self.errors.len())
@@ -211,6 +215,7 @@ impl Default for ScriptResponse {
             status: 200,
             headers: Vec::new(),
             body: Bytes::new(),
+            spool: None,
             execution_time_us: 0,
             stream_rx: None,
             errors: Vec::new(),

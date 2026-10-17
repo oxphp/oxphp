@@ -15,6 +15,7 @@ use crate::executor::idle_clock::LastActive;
 use crate::metrics::{WorkerMetrics, WorkerStats};
 use crate::php::bindings::{self, *};
 use crate::php::request_decode::{parse_query_pairs, url_decode, value_ptr};
+use crate::php::response_spool::{self, Spool, Spooled};
 use crate::plugin::php::{PluginNativeFunction, PluginNativeFunctionDef};
 use crate::types::{ScriptRequest, ScriptResponse};
 
@@ -25,6 +26,8 @@ pub(crate) struct ResponseBuffers {
     pub(crate) output: Vec<u8>,
     pub(crate) headers: Vec<(String, String)>,
     pub(crate) status_code: u16,
+    /// Whether the start of `output` has moved to a spool file.
+    pub(crate) spooled: Spooled,
 }
 
 impl ResponseBuffers {
@@ -33,6 +36,7 @@ impl ResponseBuffers {
             output: Vec::with_capacity(8192),
             headers: Vec::new(),
             status_code: 200,
+            spooled: Spooled::InMemory,
         }
     }
 }
@@ -640,13 +644,14 @@ pub fn try_early_send() -> bool {
     EARLY_TX.with(|slot| {
         let entry = slot.borrow_mut().take();
         if let Some((start, tx)) = entry {
-            let (raw_output, raw_headers, status) = take_response();
+            let (raw_output, raw_headers, status, spool) = take_response();
             let body = Bytes::from(raw_output);
             let headers = parse_raw_headers(raw_headers);
             let _ = tx.send(ScriptResponse {
                 status,
                 headers,
                 body,
+                spool,
                 execution_time_us: start.elapsed().as_micros() as u64,
                 stream_rx: None,
                 errors: take_request_errors(),
@@ -695,13 +700,14 @@ pub fn send_streaming_headers() -> bool {
             // a streamed `http_response_code(500)` would ship as 200.
             collect_response_code();
 
-            let (raw_output, raw_headers, status) = take_response();
+            let (raw_output, raw_headers, status, spool) = take_response();
             let body = Bytes::from(raw_output);
             let headers = parse_raw_headers(raw_headers);
             let _ = tx.send(ScriptResponse {
                 status,
                 headers,
                 body,
+                spool,
                 execution_time_us: start.elapsed().as_micros() as u64,
                 stream_rx: Some(chunk_rx),
                 // Streaming: errors accumulate on the worker thread for the rest
@@ -1733,10 +1739,17 @@ unsafe extern "C" fn oxphp_ub_write(str: *const c_char, str_length: usize) -> us
 
     // In both streaming and buffered modes, buffer into RESPONSE.output.
     // For streaming, the actual channel send happens in oxphp_flush (buffered-until-flush).
+    // Buffered output past RESPONSE_BUFFER_BYTES moves to a spool file. Streamed
+    // output leaves at the next flush, and an async task's output has no
+    // client, so neither is spooled.
     let data = std::slice::from_raw_parts(str as *const u8, str_length);
+    let config = response_spool::config();
 
     RESPONSE.with(|r| {
-        r.borrow_mut().output.extend_from_slice(data);
+        let resp = &mut *r.borrow_mut();
+        resp.spooled.append(&mut resp.output, data, config, || {
+            !bindings::oxphp_bridge_is_streaming() && !is_async_worker()
+        });
     });
 
     str_length
@@ -2157,14 +2170,26 @@ fn resolve_collected_status(sg_code: std::os::raw::c_int, cancel_reason: u8) -> 
     (sg_code > 0 && sg_code != 200).then_some(sg_code as u16)
 }
 
-pub fn take_response() -> (Vec<u8>, Vec<(String, String)>, u16) {
+/// The output, headers and status. Output that outgrew memory comes as the
+/// spool file that holds all of it, with the in-memory output left empty.
+pub type TakenResponse = (Vec<u8>, Vec<(String, String)>, u16, Option<Box<Spool>>);
+
+/// Take the response — or, for one whose output could not be spooled, the
+/// 503 that replaces it.
+pub fn take_response() -> TakenResponse {
+    let config = response_spool::config();
     RESPONSE.with(|r| {
-        let mut resp = r.borrow_mut();
+        let resp = &mut *r.borrow_mut();
+        let spool = resp.spooled.take(&mut resp.output, config);
         let output = std::mem::take(&mut resp.output);
         let headers = std::mem::take(&mut resp.headers);
         let status = resp.status_code;
         resp.status_code = 200;
-        (output, headers, status)
+        if resp.spooled.is_refused() {
+            let (body, headers, status) = response_spool::refusal();
+            return (body, headers, status, None);
+        }
+        (output, headers, status, spool)
     })
 }
 
@@ -2191,6 +2216,7 @@ pub fn clear_buffers() {
         resp.output.clear();
         resp.headers.clear();
         resp.status_code = 200;
+        resp.spooled = Spooled::InMemory;
     });
     // Drop any unconsumed early sender from a previous request.
     EARLY_TX.with(|slot| {
@@ -3290,7 +3316,7 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
 
     // Take accumulated response and send via oneshot. Any handler-body throw was
     // already pulled into REQUEST_ERRORS (and forced the status) at the top.
-    let (raw_output, raw_headers, status) = take_response();
+    let (raw_output, raw_headers, status, spool) = take_response();
     let body = Bytes::from(raw_output);
     let headers = parse_raw_headers(raw_headers);
 
@@ -3354,6 +3380,7 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
                 status,
                 headers,
                 body,
+                spool,
                 execution_time_us: start.elapsed().as_micros() as u64,
                 stream_rx: None,
                 errors: take_request_errors(),
