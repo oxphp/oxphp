@@ -305,6 +305,8 @@ Ordinary (non-streaming) requests in flight at SIGTERM are not interrupted: they
 
 A handler blocked inside a single long-running **native** call (a native `sleep()`, a heavy `preg_match`, a blocking database query) cannot be interrupted until that call returns. In worker mode prefer the cooperative `oxphp_sleep()` in streaming loops — it yields to the fiber scheduler and is woken immediately on shutdown. Outside worker mode `oxphp_sleep()` falls back to a regular blocking sleep, so the stream reacts to shutdown at its next `flush` after the sleep returns.
 
+A `flush` that is waiting for a slow client to make room in the buffer (see [How It Works](#how-it-works)) cannot return until room frees up either. The stream often still ends at the start of the drain, but if no room frees up it ends only when the server closes the connection as it stops, at least 2 seconds after `DRAIN_TIMEOUT_SECONDS`.
+
 ## See Also
 
 - [Worker Mode](worker-mode.md) -- persistent PHP workers for reduced bootstrap overhead
