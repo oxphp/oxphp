@@ -158,6 +158,12 @@ oxphp_worker(function () {
             }
             // unreachable
 
+        case '/flood': // stream for a client that reads nothing: its flush
+                       // waits for room in its queue, and the soft drain must
+                       // end it there
+            require __DIR__ . '/flood.php';
+            return;
+
         case '/short': // ordinary request: native blocking sleep, no flush
             usleep((int)($_GET['ms'] ?? 3000) * 1000);
             echo 'short-done';

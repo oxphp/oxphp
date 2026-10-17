@@ -1,0 +1,8 @@
+# profile: hooksnoasync
+# description: Worker mode with runtime hooks and no async pool — what a request's suspension and the end of its response must not need the pool for
+
+# A stream's flush waiting for room in its queue leaves the worker free, and
+# what is left of a stream once it ends is handed to its connection without
+# holding the worker thread — with nothing of the async pool's set up.
+fibers/test_stream_backpressure_leaves_the_worker_free
+fibers/test_stream_backpressure_end_leaves_the_worker_free

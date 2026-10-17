@@ -45,13 +45,13 @@ These functions suspend the current fiber and let other requests run on the same
 | `oxphp_sleep(float $seconds)` | Suspends the fiber for the given duration. Other fibers continue running — except in the contexts the note below lists, where the call waits on the worker thread instead |
 | `oxphp_usleep(int $microseconds)` | Same as `oxphp_sleep()` with microsecond granularity (minimum 1 ms) |
 | `oxphp_async_await(int $promise_id)` | Suspends the fiber until the async task completes on the background thread pool. Subject to the same contexts as `oxphp_sleep()` above, where it waits on the worker thread instead |
+| `oxphp_stream_flush()` | Sends a chunk to the client and returns, without suspending. Only when the client reads more slowly than the script writes and the stream's 64-chunk buffer is full does it suspend the fiber until the client takes a chunk — except in the same contexts as `oxphp_sleep()` and the few more [Server-Sent Events](sse.md#how-it-works) lists, where it waits on the worker thread instead. `flush()` in a streaming response waits the same way. Use with `oxphp_sleep()` in SSE loops |
 
 These functions do **not** suspend the fiber:
 
 | Function | Behavior |
 |----------|----------|
-| `oxphp_stream_flush()` | Sends a chunk to the client and returns — unless the client reads more slowly than the script writes and the stream's 64-chunk buffer is full: then it waits on the worker thread until room frees up (see [Server-Sent Events](sse.md#how-it-works)). Use with `oxphp_sleep()` in SSE loops |
-| `oxphp_finish_request()` | Sends the complete response and continues PHP execution. Does not yield |
+| `oxphp_finish_request()` | Sends the complete response and continues PHP execution. Does not yield — except in a streaming response, where it flushes the output not sent yet and waits for room as `oxphp_stream_flush()` does |
 
 > **Note:** PHP's built-in `sleep()` and `usleep()` block the entire worker thread by default. Either use `oxphp_sleep()` / `oxphp_usleep()`, or set `RUNTIME_HOOKS=sleep` to make the native builtins suspend the fiber as well — useful when third-party code calls `sleep()` directly. The `oxphp_*` pair and the hooked builtins alike suspend only where a fiber switch is possible; where it is not, they wait on the worker thread instead, and the hooked builtins hand the call to the native `sleep()`/`usleep()` there, so the wait is the builtin's and so is what `sleep()` gives back when a signal cuts it short. That covers a `declare(ticks)` handler, pcntl's signal dispatch, a request's input build, a `FILTER_CALLBACK` from `filter_input_array()`, and the destructors run after a request comes apart — an open list, carried in full under [Runtime Hooks](../operations/configuration.md#runtime-hooks). A fiber the application starts itself, by `new Fiber` or through a scheduler it drives, is a separate case: OxPHP cannot resume a context it does not own, so a sleep inside one holds a worker thread, and that share of the load has to be sized as if the hook were off. To confirm the server picked the setting up, read `runtime_hooks` from `oxphp_server_info()` or from the internal server's `/config`; an unrecognised environment variable is not an error anywhere. See [Configuration](../operations/configuration.md#runtime-hooks).
 
@@ -113,7 +113,7 @@ oxphp_worker(function () {
 
     for ($i = 0; $i < 30; $i++) {
         echo "data: " . json_encode(['count' => $i, 'time' => time()]) . "\n\n";
-        oxphp_stream_flush(); // Send chunk now (does not suspend)
+        oxphp_stream_flush(); // Send chunk now (suspends only while the buffer is full)
         oxphp_sleep(1.0);     // Yield for 1 second (other requests run)
     }
 });
@@ -130,7 +130,6 @@ Fiber multiplexing is **cooperative, not preemptive**. A fiber that calls a bloc
 - PDO queries, `mysqli_query()`
 - PHP's `sleep()`, `usleep()` (use `oxphp_sleep()` instead, or enable `RUNTIME_HOOKS=sleep` — within the limits given under [Suspension Points](#suspension-points))
 - DNS resolution (`gethostbyname()`)
-- `oxphp_stream_flush()` and `flush()` in a streaming response, while the client reads more slowly than the script writes and the stream's buffer is full. If that client is a request on the same worker thread, reading the stream from this same server through a read hooked by `RUNTIME_HOOKS=streams`, it is never resumed to read it: once the stream outgrows the buffers between them, both requests, and every other request on that worker thread, wait until the server shuts down
 - Any synchronous network or disk I/O
 
 Socket **reads** and **`stream_select()`** are the exception once `RUNTIME_HOOKS=streams` is enabled: both suspend the fiber instead of the thread, which covers clients that block on a PHP stream read (mysqlnd, phpredis, the HTTP stream wrappers) as well as loops waiting on several sockets at once. Writes, `socket_select()`, ext/curl, connecting and DNS resolution still block under `streams` alone; the `net` category also suspends connecting (persistent connects excepted), TLS handshakes and reads, reads on `unix://`, `udp://` and `udg://` sockets, socket pairs and the streams exported from sockets that are not TCP, and writes that wait for room, while `socket_select()`, ext/curl and DNS resolution still block. Whether the categories were installed at all is reported as `runtime_hooks` by `oxphp_server_info()` and by `/config`. See [Configuration](../operations/configuration.md#runtime-hooks).

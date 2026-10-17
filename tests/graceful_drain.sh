@@ -59,6 +59,15 @@
 # so the registry holds its last reference and the stop drops it on the main
 # thread, with its callables in the heap of the worker that created it.
 #
+# Scenario K (a flush waiting for room): a stream's client, over HTTP/2, stops
+# reading, so the stream waits inside a flush for room in its queue that never
+# comes. The soft phase must end it there, in a worker (K, where an ordinary
+# request on the same thread is served and waited for meanwhile) and in a
+# classic process (K2). Its connection outlives it in both — what is queued for
+# a client that reads nothing is never taken — so both reach the deadline, and
+# what tells an ended wait from a stuck one is whether a request was still
+# running at it.
+#
 # NOT wired into run_all.sh or CI (like tests/cli_run.sh) — run manually after
 # touching the drain machinery (fiber sweep, cancel plumbing, drain latches).
 #
@@ -82,6 +91,8 @@ DRAIN_I="drain_i_$$"
 DRAIN_J="drain_j_$$"
 DRAIN_J2="drain_j2_$$"
 DRAIN_J3="drain_j3_$$"
+DRAIN_K="drain_k_$$"
+DRAIN_K2="drain_k2_$$"
 # Ephemeral free port unless the caller pins one via PORT=.
 PORT="${PORT:-$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')}"
 PASS=0
@@ -92,7 +103,7 @@ ok()   { printf '  \033[32mPASS\033[0m %s\n' "$1"; PASS=$((PASS + 1)); }
 bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$1"; FAIL=$((FAIL + 1)); }
 
 cleanup() {
-	docker rm -f "$DRAIN_A" "$DRAIN_B" "$DRAIN_C" "$DRAIN_D" "$DRAIN_E" "$DRAIN_F" "$DRAIN_G" "$DRAIN_H" "$DRAIN_I" "$DRAIN_J" "$DRAIN_J2" "$DRAIN_J3" >/dev/null 2>&1
+	docker rm -f "$DRAIN_A" "$DRAIN_B" "$DRAIN_C" "$DRAIN_D" "$DRAIN_E" "$DRAIN_F" "$DRAIN_G" "$DRAIN_H" "$DRAIN_I" "$DRAIN_J" "$DRAIN_J2" "$DRAIN_J3" "$DRAIN_K" "$DRAIN_K2" >/dev/null 2>&1
 	rm -rf "$TMP"
 }
 trap cleanup EXIT
@@ -627,6 +638,99 @@ DESTROYED=$(printf '%s' "$POOL_STOP_LOGS" | grep -c "drain-stop: destroy ran")
 	|| bad "J2: \$destroy ran $DESTROYED times, not 2"
 
 pool_stop_scenario J3 "$DRAIN_J3" worker_pool_stop_registry_only.php
+
+# ── Scenario K: the soft drain ends a flush waiting for room ─
+# The client runs inside the container, so that nothing between it and the
+# server reads for it, and speaks HTTP/2: once its stream's window is used up,
+# nothing the drain does takes another chunk off the stream's queue. Over
+# HTTP/1.1 the wake that tells a connection the server is stopping can, and a
+# flush that waits on the thread then returns into the drain's own check — the
+# scenario would pass with the wait itself left unended.
+start_classic() {
+	# start_classic <name> <drain_timeout_seconds> — as start_container, with
+	# no worker file
+	docker run -d --name "$1" \
+		-e DOCUMENT_ROOT=/var/www/html \
+		-e PHP_WORKERS=1 \
+		-e DRAIN_TIMEOUT_SECONDS="$2" \
+		-e QUEUE_WAIT_TIMEOUT_MS=120000 \
+		-e LOG_LEVEL=info \
+		-p ${PORT}:80 \
+		-v "$FIX:/var/www/html:ro" \
+		"$IMAGE" >/dev/null || return 1
+	for _ in $(seq 1 30); do
+		curl -fsS "http://localhost:${PORT}/flood.php?ping=1" >/dev/null 2>&1 && return 0
+		sleep 1
+	done
+	return 1
+}
+
+flood_scenario() {
+	# flood_scenario <label> <name> <path> [beside] — the container is up;
+	# `beside` sends an ordinary request alongside the stream before SIGTERM
+	local label="$1" name="$2" logs before=-1 after=0 cancelled deadline
+	# curl stops reading once the pipe to `sleep` is full.
+	docker exec -d "$name" sh -c "curl --http2-prior-knowledge -sS 'http://127.0.0.1$3' | sleep 120"
+
+	# The premise, read before the signal: the stream has flushed, and has
+	# stopped — a second with no flush of it returning.
+	for _ in $(seq 1 20); do
+		after=$(docker logs "$name" 2>&1 | grep -c "flood-flushed")
+		[ "$after" -gt 0 ] && [ "$after" = "$before" ] && break
+		before=$after
+		sleep 1
+	done
+	[ "$after" -gt 0 ] && [ "$after" = "$before" ] \
+		&& ok "$label: the stream is waiting in a flush" \
+		|| bad "$label: the stream never stopped flushing ($after logged)"
+
+	if [ -n "${4:-}" ]; then
+		curl -fsS --max-time 20 "http://localhost:${PORT}/pause?s=2" > "$TMP/${label}_pause" 2>&1 &
+		sleep 0.5
+	fi
+
+	docker kill -s TERM "$name" >/dev/null
+	ELAPSED=$(wait_exit_seconds "$name" 25)
+	logs="$(docker logs "$name" 2>&1)"
+
+	if [ -n "${4:-}" ]; then
+		grep -q "pause-done" "$TMP/${label}_pause" \
+			&& ok "$label: the ordinary request on the stream's thread finished during the drain" \
+			|| bad "$label: the ordinary request on the stream's thread was not served (got: $(head -c 60 "$TMP/${label}_pause"))"
+	fi
+
+	cancelled=$(printf '%s\n' "$logs" | grep -n "Request cancelled (shutdown)" | head -1 | cut -d: -f1)
+	deadline=$(printf '%s\n' "$logs" | grep -n "Drain timeout reached" | head -1 | cut -d: -f1)
+	[ -n "$cancelled" ] && { [ -z "$deadline" ] || [ "$cancelled" -lt "$deadline" ]; } \
+		&& ok "$label: the soft phase ended the stream" \
+		|| bad "$label: the stream was not ended before the deadline"
+
+	# Only the connection is left at the deadline, with what was queued for
+	# its client.
+	[ -z "$deadline" ] || printf '%s\n' "$logs" | grep "Drain timeout reached" \
+		| grep -Eq 'in_flight_requests=0|"in_flight_requests":0' \
+		&& ok "$label: no request was still running at the deadline" \
+		|| bad "$label: a request was still running at the deadline"
+
+	printf '%s' "$logs" | grep -Eq '"exit_reason":3|exit_reason=3|Dead workers detected' \
+		&& bad "$label: the drain kill tripped the consecutive-error breaker" \
+		|| ok "$label: no worker error-exit during the drain window (exited ${ELAPSED}s after SIGTERM)"
+	docker rm -f "$name" >/dev/null 2>&1
+}
+
+if start_container "$DRAIN_K" 6; then
+	ok "K: container up"
+	flood_scenario K "$DRAIN_K" /flood beside
+else
+	bad "K: container failed to start"; docker logs "$DRAIN_K" 2>&1 | tail -5
+fi
+
+if start_classic "$DRAIN_K2" 6; then
+	ok "K2: container up"
+	flood_scenario K2 "$DRAIN_K2" /flood.php
+else
+	bad "K2: container failed to start"; docker logs "$DRAIN_K2" 2>&1 | tail -5
+fi
 
 echo
 echo "== result: $PASS passed, $FAIL failed =="

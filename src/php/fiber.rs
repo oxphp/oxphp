@@ -198,12 +198,13 @@ struct FiberTlsSlot {
     /// request that runs on the same worker thread while this one is parked.
     #[cfg(feature = "php")]
     request_errors: Vec<crate::types::PhpScriptError>,
-    /// Streaming chunk sender (`STREAM_TX`) for a suspended streaming request.
+    /// Streaming chunk sender (`STREAM_TX`) for a suspended streaming request,
+    /// with the wait for room in its queue that the request is parked on, if any.
     /// Thread-global like the buffers above; without per-fiber save/restore
     /// another streaming request on this worker thread would overwrite it and
     /// this request's later chunks would flow to the other client's body channel.
     #[cfg(feature = "php")]
-    stream_tx: Option<tokio::sync::mpsc::Sender<bytes::Bytes>>,
+    stream_tx: Option<super::stream_wait::StreamSender<bytes::Bytes>>,
     /// This request's SAPI data (`REQUEST_DATA`): its path, headers, cookies,
     /// query, body and the strings `SG(request_info)` points at. Thread-global
     /// like the rest, and rewritten by every request the scheduler accepts — so

@@ -1555,6 +1555,24 @@ static int oxphp_fiber_io_wait(struct pollfd *fds, struct oxphp_io_owner *owners
     return 1;
 }
 
+/* Suspend the current fiber until `fd` is readable or `timeout_us` has passed:
+ * the park the bridge's flush makes on the descriptor a stream's queue turns
+ * readable once there may be room in it. Returns what oxphp_fiber_io_wait()
+ * does, with the deadline reported as 1, like a readable descriptor: the flush
+ * looks again either way. */
+static int oxphp_fiber_fd_wait(int fd, uint64_t timeout_us)
+{
+    struct pollfd pfd = {
+        .fd = fd,
+        .events = POLLIN,
+        .revents = 0,
+    };
+    struct oxphp_io_owner owner;
+
+    int rc = oxphp_fiber_io_wait(&pfd, &owner, 1, (int64_t) timeout_us * 1000);
+    return rc == -2 ? 1 : rc;
+}
+
 /* {{{ oxphp_sleep(float $seconds): void
  * Cooperative sleep: suspends the current fiber (if inside one) to let other
  * requests proceed, falling back to blocking usleep when not in a fiber. */
@@ -9482,6 +9500,7 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
     oxphp_bridge_set_request_end_check(oxphp_request_end_pending);
     oxphp_bridge_set_fiber_yield(oxphp_fiber_suspend_for_yield);
     oxphp_bridge_set_fiber_sleep(oxphp_fiber_sleep_us);
+    oxphp_bridge_set_fiber_fd_wait(oxphp_fiber_fd_wait);
     oxphp_bridge_set_current_fiber_id_fn(oxphp_fiber_current_id);
     oxphp_bridge_set_async_io_backoff_fn(oxphp_async_io_backoff_bridge);
     oxphp_bridge_set_async_next_deadline_fn(oxphp_async_sched_next_deadline_ns);

@@ -24,6 +24,9 @@ services:
     environment:
       LOG_LEVEL: error
       INTERNAL_ADDR: 0.0.0.0:9090
+      # Two, so that a test can be the client of a stream it starts: the
+      # stream runs on the other worker.
+      PHP_WORKERS: "2"
     volumes:
       - ../www:/var/www/html
       - ./php:/var/www/html/public/tests
