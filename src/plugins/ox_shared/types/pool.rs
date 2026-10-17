@@ -32,12 +32,21 @@
 //!   allocated.** Every heap is per thread, and a request's is reset when
 //!   it ends; freeing into any other aborts the process. `on_shutdown_notify`
 //!   and `on_drop` destroy the calling thread's own idle slots through
-//!   `oxphp_pool_destroy_invoke` — `$destroy($resource)`, then
+//!   `oxphp_pool_destroy_invoke_guarded` — `$destroy($resource)`, then
 //!   `zval_ptr_dtor`+`efree` on the slot — and only while its request is
 //!   open. The C helper calls `$destroy` only with PHP code executing on
 //!   the thread (`EG(current_execute_data) != NULL`): a throw with no frame
 //!   to return to would end as a fatal error. Exceptions thrown inside
 //!   `$destroy` are captured via `oxphp_bridge_capture_fatal` and cleared.
+//!   A bailout is held back for the C code that the Rust code letting go
+//!   of the pool returns to, which raises it again; until then no PHP
+//!   runs, so the slots not destroyed yet and the callables are forgotten.
+//!   The loop of an `oxphp_async()` worker thread has no such C code: a
+//!   task result nobody receives any more, dropped there between tasks,
+//!   can hold the last reference to a pool. `$destroy` is skipped there,
+//!   with no frame, but freeing a slot still runs its object's destructor,
+//!   and a bailout in it waits for the next plugin call on that thread,
+//!   which raises it in a task that never failed.
 //!   Other threads' slots are left to them: the registry drain at shutdown
 //!   leaves them where they are, and `on_drop` forgets them — their memory
 //!   and the objects in it go with their thread's request. The
@@ -172,6 +181,14 @@ fn note_destroy_rc(rc: c_int) {
     if rc == ffi::OXPHP_SHARED_INVOKE_SKIPPED {
         record_destroy_skipped(1, SkipReason::NoFrame);
     }
+}
+
+/// Whether a bailout a guarded helper caught on this thread is held back,
+/// waiting for the C code the current call into Rust returns to to raise
+/// it again.
+fn bailout_held_back() -> bool {
+    // SAFETY: reads a thread-local of the bridge; no arguments.
+    unsafe { ffi::oxphp_bridge_deferred_bailout_pending() != 0 }
 }
 
 /// Whether `Shared\Registry` must refuse to bind a pool to a name on the
@@ -744,10 +761,29 @@ impl PoolInner {
     /// after it: the slots not reached yet go back to the deque, as old as
     /// they were.
     fn destroy_taken(&self, me: ThreadKey, taken: Vec<PoolSlot>, reason: EvictReason) -> u64 {
+        let (destroyed, unreached) = self.destroy_until_bailout(taken);
+        self.put_back(me, unreached.collect());
+        self.record_evicted(destroyed, reason);
+        destroyed
+    }
+
+    /// Run `$destroy` on `slots`, slots of the calling thread taken out of
+    /// the pool, in order, with a bailout held back rather than raised, and
+    /// stop at the first one a bailout ends. Returns how many were
+    /// destroyed — the one a bailout ended counts: its budget is refunded
+    /// and nothing frees it — and the slots not reached, whose budget is
+    /// still taken.
+    fn destroy_until_bailout(&self, slots: Vec<PoolSlot>) -> (u64, std::vec::IntoIter<PoolSlot>) {
         let mut destroyed = 0;
-        let mut taken = taken.into_iter();
-        while let Some(slot) = taken.next() {
-            // SAFETY: as in `destroy_slot`.
+        let mut slots = slots.into_iter();
+        for slot in slots.by_ref() {
+            // SAFETY: `slot.resource` was minted by `oxphp_pool_factory_invoke`
+            // on this thread, in the request still open on it (or is a
+            // stand-in in host tests, which the mock never dereferences; the
+            // production helper short-circuits on NULL). `destroy_fcc` is
+            // either `null_mut()` (user opted out of $destroy, or
+            // `end_request_on` forgot it with its request heap) or the
+            // emalloc'd fcc from `oxphp_pool_fcc_new`.
             let rc = unsafe {
                 ffi::oxphp_pool_destroy_invoke_guarded(self.destroy_fcc(), slot.resource)
             };
@@ -755,12 +791,10 @@ impl PoolInner {
             self.release_budget();
             destroyed += 1;
             if rc == ffi::OXPHP_SHARED_INVOKE_BAILOUT {
-                self.put_back(me, taken.collect());
                 break;
             }
         }
-        self.record_evicted(destroyed, reason);
-        destroyed
+        (destroyed, slots)
     }
 
     /// Return `slots`, oldest first, to `me`'s idle deque, each behind
@@ -832,27 +866,6 @@ impl PoolInner {
     pub fn close(&self) {
         self.closed.store(true, Ordering::Release);
         self.waiters_cv.notify_all();
-    }
-
-    /// Teardown of a slot of the calling thread, with its request open:
-    /// invoke `$destroy` via the C bridge (which also `zval_ptr_dtor`s and
-    /// `efree`s the slot zval), then account for the freed capacity.
-    ///
-    /// Called from `on_shutdown_notify`, itself called by `on_drop`. The
-    /// bridge helper calls `$destroy` only with PHP code executing on the
-    /// thread, and captures its throws, so we never observe a failure
-    /// path here — hence the `()` return.
-    fn destroy_slot(&self, slot: PoolSlot) {
-        // SAFETY: `slot.resource` was minted by `oxphp_pool_factory_invoke`
-        // on this thread, in the request still open on it (or is
-        // `null_mut()` in host tests — the mock is a no-op, and the
-        // production helper short-circuits on NULL). `destroy_fcc` is
-        // either `null_mut()` (user opted out of $destroy, or
-        // `end_request_on` forgot it with its request heap) or the
-        // emalloc'd fcc from `oxphp_pool_fcc_new`.
-        let rc = unsafe { ffi::oxphp_pool_destroy_invoke(self.destroy_fcc(), slot.resource) };
-        note_destroy_rc(rc);
-        self.release_budget();
     }
 
     /// Whether the calling thread may free the idle slots it parked here:
@@ -1149,11 +1162,11 @@ impl SharedInner for PoolInner {
         // Only what this thread's open request allocated may be freed
         // here: freeing into another thread's heap aborts the process,
         // and an ended request's heap has already been reset. So this
-        // thread's own idle slots are destroyed (`on_shutdown_notify`),
-        // every other deque is forgotten — those slots, and the objects
-        // in them, go with the request of the thread that minted them —
-        // and the callables are freed only by the request that made
-        // them.
+        // thread's own idle slots are destroyed (`on_shutdown_notify`)
+        // until a bailout ends that, every other deque is forgotten —
+        // those slots, and the objects in them, go with the request of
+        // the thread that minted them — and the callables are freed only
+        // by the request that made them.
         self.on_shutdown_notify();
 
         // Keys first: removing from `idle` while iterating it deadlocks.
@@ -1178,8 +1191,14 @@ impl SharedInner for PoolInner {
         // request is the one open on this thread, so the heap is this
         // thread's and has not been reset since. `destroy_fcc` is either
         // NULL or an fcc from the same path. The swap frees each at most
-        // once; otherwise they are forgotten with that heap.
-        let free = self.created_in != 0 && self.created_in == current_request();
+        // once; otherwise they are forgotten with that heap. Freeing one
+        // releases its callable, which can run destructors — PHP, which may
+        // not run while a bailout is held back (`on_shutdown_notify`): then
+        // they are forgotten too, and go with the heap of the request open
+        // here — at the end of the request the bailout ends, or, in worker
+        // mode and on an `oxphp_async()` thread, when the thread exits.
+        let free =
+            self.created_in != 0 && self.created_in == current_request() && !bailout_held_back();
         for fcc in [&self.factory_fcc, &self.destroy_fcc] {
             let fcc = fcc.swap(std::ptr::null_mut(), Ordering::AcqRel);
             if free && !fcc.is_null() {
@@ -1204,20 +1223,25 @@ impl SharedInner for PoolInner {
         // Safe to invoke redundantly — a second call finds no deque of
         // this thread and leaves the fccs alone (those are `on_drop`'s).
         self.close();
-        if !self.frees_own_idle_here() {
+        // Whatever let go of the pool is Rust, and a bailout in `$destroy`
+        // is held back until it returns to the C code that raises it again;
+        // no PHP may run before that. So no `$destroy` runs once one is
+        // held back — from the slot that bailed here, or from an earlier
+        // `$destroy` in the same call into Rust, as when a Map's clear()
+        // lets go of two pools. The slots left stay in this thread's deque,
+        // and `on_drop` forgets them as a request's that has ended: the
+        // bailout ends this one.
+        if !self.frees_own_idle_here() || bailout_held_back() {
             return;
         }
         // Out of the map before any `$destroy` runs, as in
         // `evict_all_on_current_thread`.
-        let Some((_, deque)) = self.idle.remove(&current_thread_key()) else {
+        let me = current_thread_key();
+        let Some((_, deque)) = self.idle.remove(&me) else {
             return;
         };
-        let slots = deque.into_inner().unwrap_or_else(|e| e.into_inner());
-        let drained = slots.len() as u64;
-        for slot in slots {
-            self.destroy_slot(slot);
-        }
-        self.record_evicted(drained, EvictReason::Shutdown);
+        let slots = Vec::from(deque.into_inner().unwrap_or_else(|e| e.into_inner()));
+        self.destroy_taken(me, slots, EvictReason::Shutdown);
     }
 
     fn children(&self, _out: &mut Vec<SharedRef>) {
@@ -2813,12 +2837,13 @@ mod tests {
         assert!(p.is_closed());
     }
 
+    #[cfg(not(feature = "php"))]
     #[test]
     fn on_shutdown_notify_drains_idle_deques() {
         use crate::plugins::ox_shared::worker_liveness;
         // Populate three slots across two live owner keys, then
         // drain with a request open here. Under the mock bridge,
-        // `oxphp_pool_destroy_invoke` is a no-op returning 0 — we only
+        // `oxphp_pool_destroy_invoke_guarded` is a no-op returning 0 — we only
         // observe the Rust-side bookkeeping (size, idle_count, closed
         // flag). Both owner keys are registered so the cross-thread
         // release parks rather than forgetting the slot.
@@ -2852,6 +2877,7 @@ mod tests {
         close_request_token();
     }
 
+    #[cfg(not(feature = "php"))]
     #[test]
     fn on_shutdown_notify_is_idempotent() {
         // Second drain pass must see an empty pool and not panic.
@@ -2869,6 +2895,7 @@ mod tests {
         close_request_token();
     }
 
+    #[cfg(not(feature = "php"))]
     #[test]
     fn on_drop_drains_and_frees_fccs() {
         // NULL fccs + null-resource slots + mock bridge means this
@@ -3061,6 +3088,80 @@ mod tests {
         })
         .join()
         .unwrap();
+    }
+
+    /// The last reference to a pool goes away on the thread that parked
+    /// three slots in it, with its request open, and `$destroy` bails on
+    /// the first of them. The bailout is held back for the code that raises
+    /// it again, and nothing runs PHP after it: not `$destroy` on the other
+    /// two, not the release of the callables, whose destructors are PHP.
+    #[cfg(not(feature = "php"))]
+    #[test]
+    fn drop_holds_back_a_bailout_in_destroy() {
+        use crate::bridge::ffi::{
+            mock_pool_destroy, mock_pool_heap_calls, mock_take_deferred_bailout,
+            OXPHP_SHARED_INVOKE_BAILOUT,
+        };
+        on_own_thread_within_5s(|| {
+            open_request_token();
+            let p = inner_with_fccs(3);
+            park_three(&p);
+            let seen = std::rc::Rc::new(RefCell::new(Vec::new()));
+            let log = std::rc::Rc::clone(&seen);
+            mock_pool_destroy(Some(Box::new(move |slot| {
+                log.borrow_mut().push(slot as usize);
+                OXPHP_SHARED_INVOKE_BAILOUT
+            })));
+            let calls = mock_pool_heap_calls();
+            let skipped = destroy_skipped_total(SkipReason::RequestEnded);
+
+            p.on_drop();
+            mock_pool_destroy(None);
+
+            assert_eq!(*seen.borrow(), vec![1], "nothing after the bailout");
+            assert!(mock_take_deferred_bailout());
+            assert_eq!(
+                mock_pool_heap_calls() - calls,
+                1,
+                "the one $destroy, and neither callable"
+            );
+            // 1 counts as destroyed; 2 and 3 are let go without $destroy.
+            // Every slot's budget is back.
+            assert_eq!((p.size(), p.idle_count()), (0, 0));
+            assert_eq!(p.evicted_shutdown_total(), 1);
+            assert!(destroy_skipped_total(SkipReason::RequestEnded) >= skipped + 2);
+            close_request_token();
+        });
+    }
+
+    /// The same drop with a bailout already held back — by a `$destroy`
+    /// that ran earlier in the same Rust call — runs no PHP at all.
+    #[cfg(not(feature = "php"))]
+    #[test]
+    fn drop_with_a_bailout_held_back_runs_no_php() {
+        use crate::bridge::ffi::{
+            mock_hold_deferred_bailout, mock_pool_destroy, mock_pool_heap_calls,
+            mock_take_deferred_bailout,
+        };
+        on_own_thread_within_5s(|| {
+            open_request_token();
+            let p = inner_with_fccs(3);
+            park_three(&p);
+            mock_pool_destroy(Some(Box::new(|_| 0)));
+            mock_hold_deferred_bailout();
+            let calls = mock_pool_heap_calls();
+            let skipped = destroy_skipped_total(SkipReason::RequestEnded);
+
+            p.on_drop();
+            mock_pool_destroy(None);
+
+            assert_eq!(mock_pool_heap_calls(), calls, "no $destroy, no callable");
+            assert!(mock_take_deferred_bailout(), "left for its raiser");
+            assert_eq!((p.size(), p.idle_count()), (0, 0));
+            assert_eq!(p.evicted_shutdown_total(), 0, "none was destroyed");
+            assert!(destroy_skipped_total(SkipReason::RequestEnded) >= skipped + 3);
+            close_request_token();
+        });
     }
 
     #[test]
@@ -3593,6 +3694,7 @@ mod tests {
         assert_eq!(p.evicted_shutdown_total(), 7);
     }
 
+    #[cfg(not(feature = "php"))]
     #[test]
     fn shutdown_drain_bumps_shutdown_eviction_counter() {
         // Full path: deposit slots, on_shutdown_notify, verify the
@@ -4819,6 +4921,134 @@ mod tests {
                     .reclaim_budget_for_dead_worker(me);
             }
         });
+    }
+
+    /// The walk holds the last reference to the first pool it visits —
+    /// another thread let go of it meanwhile — and that pool still has an
+    /// idle slot of this thread, so letting go of it runs `$destroy`, which
+    /// bails. The walk has to stop there as it does for a bailout in the
+    /// eviction itself: the second pool's stale slot stays, rather than
+    /// being counted as destroyed by a `$destroy` that was refused.
+    #[cfg(not(feature = "php"))]
+    #[test]
+    fn idle_drain_stops_at_a_bailout_from_letting_go_of_a_pool() {
+        use crate::bridge::ffi::{
+            mock_pool_destroy, mock_take_deferred_bailout, OXPHP_SHARED_INVOKE_BAILOUT,
+        };
+        use crate::plugins::ox_shared::eviction::drain_stale_in;
+        on_own_thread_within_5s(|| {
+            open_request_token();
+            let me = current_thread_key();
+            let reg = registry_no_other_walk_sees();
+            let entries: Vec<Arc<Entry>> = [Duration::from_secs(300), Duration::from_millis(100)]
+                .into_iter()
+                .map(|idle_timeout| pool_with_a_slot_idle_for_10s(reg, idle_timeout, me))
+                .collect();
+            // The second pool outlives the walk; the first goes with it.
+            let second = Arc::clone(&entries[1]);
+            let calls = std::rc::Rc::new(Cell::new(0));
+            let count = std::rc::Rc::clone(&calls);
+            mock_pool_destroy(Some(Box::new(move |_| {
+                count.set(count.get() + 1);
+                OXPHP_SHARED_INVOKE_BAILOUT
+            })));
+
+            drain_stale_in(entries);
+            mock_pool_destroy(None);
+
+            assert_eq!(calls.get(), 1, "the $destroy of the pool let go of");
+            assert!(mock_take_deferred_bailout());
+            let pool = (*second.inner).as_any_pool().unwrap();
+            assert_eq!(
+                (pool.size(), pool.idle_count()),
+                (1, 1),
+                "the pool not reached keeps its stale slot"
+            );
+            pool.reclaim_budget_for_dead_worker(me);
+            close_request_token();
+        });
+    }
+
+    /// The same with a map in between: the walk holds the last reference to
+    /// a map, and the map the last one to a pool with an idle slot of this
+    /// thread. The map is no pool, but letting go of it runs that pool's
+    /// `$destroy` all the same.
+    #[cfg(not(feature = "php"))]
+    #[test]
+    fn idle_drain_stops_at_a_bailout_from_letting_go_of_a_map() {
+        use crate::bridge::ffi::{
+            mock_pool_destroy, mock_take_deferred_bailout, OXPHP_SHARED_INVOKE_BAILOUT,
+        };
+        use crate::plugins::ox_shared::eviction::drain_stale_in;
+        use crate::plugins::ox_shared::types::map::MapInner;
+        use crate::plugins::ox_shared::types::map_key::MapKey;
+        use crate::plugins::ox_shared::value::{SharedRefOwned, SharedValue};
+        on_own_thread_within_5s(|| {
+            open_request_token();
+            let me = current_thread_key();
+            let reg = registry_no_other_walk_sees();
+            let held = pool_with_a_slot_idle_for_10s(reg, Duration::from_secs(300), me);
+            let second = pool_with_a_slot_idle_for_10s(reg, Duration::from_millis(100), me);
+            let map = MapInner::new(None);
+            map.set(
+                MapKey::from_str("pool"),
+                SharedValue::Shared(SharedRefOwned::from_arc(held)),
+            )
+            .unwrap();
+            let map = reg.insert(SharedType::Map, Arc::new(map)).unwrap();
+            let calls = std::rc::Rc::new(Cell::new(0));
+            let count = std::rc::Rc::clone(&calls);
+            mock_pool_destroy(Some(Box::new(move |_| {
+                count.set(count.get() + 1);
+                OXPHP_SHARED_INVOKE_BAILOUT
+            })));
+
+            drain_stale_in(vec![map, Arc::clone(&second)]);
+            mock_pool_destroy(None);
+
+            assert_eq!(calls.get(), 1, "the $destroy of the pool in the map");
+            assert!(mock_take_deferred_bailout());
+            let pool = (*second.inner).as_any_pool().unwrap();
+            assert_eq!(
+                (pool.size(), pool.idle_count()),
+                (1, 1),
+                "the pool not reached keeps its stale slot"
+            );
+            pool.reclaim_budget_for_dead_worker(me);
+            close_request_token();
+        });
+    }
+
+    /// A registry of the test's own. The tests that need the walk to hold
+    /// the last reference to an entry keep theirs out of the shared one: a
+    /// test walking that one on another thread meanwhile holds a reference
+    /// to every entry in it.
+    #[cfg(not(feature = "php"))]
+    fn registry_no_other_walk_sees() -> &'static SharedRegistry {
+        SharedRegistry::new_for_test(ensure_registry().config().clone())
+    }
+
+    /// A pool in `reg` with one slot of `me` parked in it, idle for 10 s.
+    #[cfg(not(feature = "php"))]
+    fn pool_with_a_slot_idle_for_10s(
+        reg: &'static SharedRegistry,
+        idle_timeout: Duration,
+        me: ThreadKey,
+    ) -> Arc<Entry> {
+        let inner: Arc<dyn SharedInner> = Arc::new(PoolInner::new(
+            0xFAC0_0062 as *mut c_void,
+            0xDE50_0062 as *mut c_void,
+            1,
+            idle_timeout,
+        ));
+        let entry = reg.insert(SharedType::Pool, Arc::clone(&inner)).unwrap();
+        let pool = (*inner).as_any_pool().expect("just inserted");
+        pool.bind_entry(Arc::downgrade(&entry));
+        assert!(pool.try_reserve_budget());
+        let mut slot = PoolSlot::new(4 as *mut c_void, me);
+        slot.last_active = Instant::now() - Duration::from_secs(10);
+        pool.deposit_new(slot);
+        entry
     }
 
     /// Pins the contract that `try_reserve_budget` / `release_budget`

@@ -35,14 +35,14 @@
 //! forgets the slots it had parked.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use dashmap::DashMap;
 
 use crate::bridge::ffi;
 use crate::plugin::PhpThreadWaker;
-use crate::plugins::ox_shared::registry;
+use crate::plugins::ox_shared::registry::{self, Entry};
 use crate::plugins::ox_shared::types::pool::{
     current_thread_key, EvictReason, SharedInnerPoolExt, ThreadKey,
 };
@@ -163,16 +163,28 @@ pub fn run_scan() {
 /// without running, and the slot handed to it would be counted as
 /// destroyed without having been. The pools not reached keep their stale
 /// slots until the thread is asked again, which on a worker the bailout
-/// retires is never — they go with it.
+/// retires is never — they go with it. A pool not reached that the walk
+/// held the last reference to is torn down without any `$destroy`.
 pub fn drain_stale_for_current_thread() {
     let Some(reg) = registry::REGISTRY.get() else {
         return;
     };
-    for entry in reg.iter_entries() {
-        let Some(pool) = entry.inner.as_any_pool() else {
-            continue;
-        };
-        pool.evict_stale_on_current_thread(EvictReason::IdleTimeout);
+    drain_stale_in(reg.iter_entries());
+}
+
+/// The walk of `drain_stale_for_current_thread` over `entries`, in their
+/// order.
+pub(crate) fn drain_stale_in(entries: impl IntoIterator<Item = Arc<Entry>>) {
+    for entry in entries {
+        if let Some(pool) = entry.inner.as_any_pool() {
+            pool.evict_stale_on_current_thread(EvictReason::IdleTimeout);
+        }
+        // Let go of it before asking: this can be the last reference to the
+        // pool — another thread let go of its own meanwhile — or to a map
+        // or channel holding the last one, and then that pool's teardown
+        // runs `$destroy` on this thread's idle slots, which can bail as
+        // well.
+        drop(entry);
         // SAFETY: reads a thread-local of the bridge; no arguments.
         if unsafe { ffi::oxphp_bridge_deferred_bailout_pending() } != 0 {
             break;

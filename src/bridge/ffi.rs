@@ -553,14 +553,15 @@ extern "C" {
     ) -> c_int;
     pub fn oxphp_pool_slot_to_user(slot_zv_heap: *mut c_void, user_out_zv: *mut c_void);
     pub fn oxphp_pool_slot_free(slot_zv_heap: *mut c_void);
-    pub fn oxphp_pool_destroy_invoke(
-        destroy_fcc_heap: *mut c_void,
-        slot_zv_heap: *mut c_void,
-    ) -> c_int;
-    /// `oxphp_pool_destroy_invoke` with a bailout held back: returns
-    /// `OXPHP_SHARED_INVOKE_BAILOUT` and frees nothing when one ended
-    /// `$destroy`, or was already waiting to be raised again. Only from a
-    /// plugin handler — the dispatch stub raises it again.
+    /// `$destroy($resource)`, then the slot freed, with a bailout held
+    /// back: returns `OXPHP_SHARED_INVOKE_BAILOUT` and frees nothing when
+    /// one ended `$destroy`, or was already waiting to be raised again.
+    /// Only from code that returns to C which raises it again — a plugin
+    /// handler's dispatch stub, the serve loop's idle point, a free_obj
+    /// handler, the scheduler's promise release. One caller has none: the
+    /// teardown of a pool whose last reference an `oxphp_async()` worker
+    /// thread's loop lets go of between tasks, where a bailout waits for
+    /// the next plugin call on that thread.
     pub fn oxphp_pool_destroy_invoke_guarded(
         destroy_fcc_heap: *mut c_void,
         slot_zv_heap: *mut c_void,

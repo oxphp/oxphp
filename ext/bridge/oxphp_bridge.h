@@ -1520,11 +1520,14 @@ void oxphp_bridge_set_request_end_check(oxphp_request_end_check_fn_t fn);
  * Returns 0 when no SAPI callback is registered. */
 int oxphp_bridge_request_end_pending(void);
 
-/* A bailout that ended a call into PHP a Shared\* handler made, held back
- * so the handler's Rust frames could return. Pending: 1 while held, else 0 —
- * for the Rust dispatchers, which must neither throw nor log on its way
- * out. Take: the same answer, and the flag is cleared — for the C dispatch
- * stubs, which raise it again. */
+/* A bailout that ended a call into PHP made from Rust code — a Shared\*
+ * handler, the idle-timeout eviction, the teardown of a Shared\Pool — held
+ * back so the Rust frames could return. Pending: 1 while held, else 0 —
+ * for the Rust code, which must neither throw nor log on its way out, nor
+ * call into PHP again. Take: the same answer, and the flag is cleared — for
+ * the C code the Rust code returns to, which raises it again: the dispatch
+ * stubs, the serve loop's idle point, oxphp_plugin_free_object() and the
+ * scheduler's promise release. */
 int oxphp_bridge_deferred_bailout_pending(void);
 int oxphp_bridge_take_deferred_bailout(void);
 
@@ -2522,15 +2525,11 @@ void oxphp_pool_slot_free(void *slot_zv_heap);
 /* $destroy($resource) + slot release. See oxphp_bridge.c for
  * the full contract. `destroy_fcc_heap` may be NULL (skip
  * invocation). Exceptions are captured via
- * oxphp_bridge_capture_fatal and cleared. Returns 0, or
- * OXPHP_SHARED_INVOKE_SKIPPED (2) when $destroy was given but no
- * PHP code is executing on the thread to call it from. */
-int oxphp_pool_destroy_invoke(void *destroy_fcc_heap, void *slot_zv_heap);
-
-/* The same, for a caller inside a plugin handler or the thread_idle event:
- * a bailout is held back for the dispatch stub or the serve loop, and the
- * slot is then left unfreed. Returns 0, OXPHP_SHARED_INVOKE_SKIPPED (2), or
- * OXPHP_SHARED_INVOKE_BAILOUT (-4). */
+ * oxphp_bridge_capture_fatal and cleared. A bailout is held back
+ * for the C code the Rust caller returns to, and the slot is then
+ * left unfreed. Returns 0, OXPHP_SHARED_INVOKE_SKIPPED (2) when
+ * $destroy was given but no PHP code is executing on the thread to
+ * call it from, or OXPHP_SHARED_INVOKE_BAILOUT (-4). */
 int oxphp_pool_destroy_invoke_guarded(void *destroy_fcc_heap, void *slot_zv_heap);
 
 /* Park the calling fiber for `duration_us` while Shared\Pool::acquire waits

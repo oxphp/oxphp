@@ -5464,8 +5464,10 @@ unsafe fn defer_promise_drain(id: u64) -> Option<Arc<CancelShared>> {
 
 /// Scheduler-tick callback (worker mode): release each deferred promise whose
 /// task has settled or whose 5 s budget has elapsed. Non-blocking — ready
-/// entries are removed under the borrow, then their captures are released after
-/// the borrow is dropped.
+/// entries and the results received for them are taken out under the borrow,
+/// then their captures are released and the results dropped after the borrow
+/// is dropped: a result can hold the last reference to a `Shared\Pool`, whose
+/// teardown runs `$destroy`.
 ///
 /// # Safety
 /// Called from C FFI on the owning HTTP worker thread.
@@ -5473,13 +5475,18 @@ unsafe extern "C" fn poll_deferred_drains_callback() {
     use tokio::sync::oneshot::error::TryRecvError;
 
     let now = Instant::now();
+    let mut results: Vec<AsyncResult> = Vec::new();
     let ready: Vec<DeferredDrain> = DEFERRED_DRAIN.with(|d| {
         let mut list = d.borrow_mut();
         let mut out = Vec::new();
         let mut i = 0;
         while i < list.len() {
             let settled = match list[i].rx.try_recv() {
-                Ok(_) | Err(TryRecvError::Closed) => true,
+                Ok(result) => {
+                    results.push(result);
+                    true
+                }
+                Err(TryRecvError::Closed) => true,
                 Err(TryRecvError::Empty) => now >= list[i].deadline,
             };
             if settled {
@@ -5495,6 +5502,7 @@ unsafe extern "C" fn poll_deferred_drains_callback() {
             run_promise_cleanup(cleanup);
         }
     }
+    drop(results);
 }
 
 /// Scheduler-loop predicate (worker mode): non-zero while any deferred promise
@@ -6529,5 +6537,55 @@ mod tests {
         assert!(req.script.cancel_state.claim_from_queue());
         assert_eq!(req.take_from_queue(), Pickup::Abandoned);
         assert_eq!(req.script.cancel_state.taken_at(), None);
+    }
+
+    /// Records, as it is released, whether `DEFERRED_DRAIN` could be
+    /// borrowed then.
+    struct DrainBorrowProbe(Arc<std::sync::Mutex<Option<bool>>>);
+
+    impl Drop for DrainBorrowProbe {
+        fn drop(&mut self) {
+            let free = DEFERRED_DRAIN
+                .try_with(|d| d.try_borrow_mut().is_ok())
+                .unwrap_or(false);
+            *self.0.lock().unwrap() = Some(free);
+        }
+    }
+
+    /// A deferred promise's result can carry the last reference to a
+    /// `Shared\Pool`, whose teardown runs `$destroy`. A bailout there is held
+    /// back until the poll has returned, and is raised over whatever the poll
+    /// still holds: the result has to go after the `DEFERRED_DRAIN` borrow, or
+    /// the next tick's `has_deferred_drains_callback` finds it taken and
+    /// panics.
+    #[test]
+    fn deferred_drain_poll_releases_results_after_the_borrow() {
+        let seen = Arc::new(std::sync::Mutex::new(None));
+        let (tx, rx) = tokio::sync::oneshot::channel::<AsyncResult>();
+        DEFERRED_DRAIN.with(|d| {
+            d.borrow_mut().push(DeferredDrain {
+                rx,
+                cleanup: None,
+                deadline: Instant::now() + std::time::Duration::from_secs(5),
+            })
+        });
+        tx.send(AsyncResult {
+            success: true,
+            serialized_value: std::ptr::null_mut(),
+            serialized_value_len: 0,
+            exception_class: None,
+            exception_message: None,
+            keepalive: Some(Box::new(DrainBorrowProbe(Arc::clone(&seen)))),
+        })
+        .unwrap();
+
+        unsafe { poll_deferred_drains_callback() };
+
+        assert_eq!(
+            *seen.lock().unwrap(),
+            Some(true),
+            "released, after the borrow was dropped"
+        );
+        assert_eq!(unsafe { has_deferred_drains_callback() }, 0);
     }
 }

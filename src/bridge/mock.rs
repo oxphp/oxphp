@@ -1080,9 +1080,7 @@ pub fn mock_pool_park(hook: Option<MockPoolPark>) {
 /// Host tests: run `hook` as the calling thread's `$destroy`, given the
 /// slot being destroyed. What it returns is what the guarded destroy helper
 /// returns, and `OXPHP_SHARED_INVOKE_BAILOUT` stands for a bailout that
-/// ended `$destroy`. The unguarded helper cannot return that — the bailout
-/// leaves it by longjmp, across the Rust frames that called it — so the
-/// mock panics there instead. `None` restores the default.
+/// ended `$destroy`. `None` restores the default.
 #[cfg(test)]
 pub fn mock_pool_destroy(hook: Option<MockPoolDestroy>) {
     MOCK_POOL_DESTROY.with(|h| *h.borrow_mut() = hook);
@@ -1150,18 +1148,6 @@ pub unsafe fn oxphp_pool_slot_to_user(_slot_zv_heap: *mut c_void, _user_out_zv: 
 pub unsafe fn oxphp_pool_slot_free(_slot_zv_heap: *mut c_void) {
     count_pool_heap_call();
 }
-pub unsafe fn oxphp_pool_destroy_invoke(
-    _destroy_fcc_heap: *mut c_void,
-    slot_zv_heap: *mut c_void,
-) -> c_int {
-    count_pool_heap_call();
-    let rc = run_mock_pool_destroy(slot_zv_heap);
-    assert_ne!(
-        rc, OXPHP_SHARED_INVOKE_BAILOUT,
-        "a bailout in the unguarded destroy helper longjmps across its Rust callers"
-    );
-    rc
-}
 /// As under OXPHP_SHARED_RUN_GUARDED: a bailout the hook stands for is held
 /// back, and while one is, the call is refused without running anything.
 pub unsafe fn oxphp_pool_destroy_invoke_guarded(
@@ -1207,6 +1193,13 @@ pub unsafe fn oxphp_bridge_deferred_bailout_pending() -> c_int {
 #[cfg(test)]
 pub fn mock_take_deferred_bailout() -> bool {
     MOCK_DEFERRED_BAILOUT.replace(false)
+}
+
+/// Host tests: hold a bailout back on this thread, as a guarded helper that
+/// caught one does.
+#[cfg(test)]
+pub fn mock_hold_deferred_bailout() {
+    MOCK_DEFERRED_BAILOUT.set(true);
 }
 
 pub unsafe fn oxphp_shared_pool_handle_alloc(
