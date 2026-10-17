@@ -1760,6 +1760,7 @@ namespace OxPHP\Shared {
          * Acquire a slot, waiting forever. Always returns a Handle.
          *
          * @throws ClosedException If the pool is closed, or if a request created it outside worker mode and this is not that request, or that request has ended.
+         * @throws \OxPHP\Async\AsyncException If the async task the call runs in is cancelled while the wait is suspended.
          */
         public function acquire(): Pool\Handle {}
 
@@ -1776,6 +1777,7 @@ namespace OxPHP\Shared {
          * @throws OperationTimeoutException On deadline expiry (extends Async\AsyncException, NOT SharedException).
          * @throws TypeException If `$ms <= 0`.
          * @throws ClosedException If the pool is closed, or if a request created it outside worker mode and this is not that request, or that request has ended.
+         * @throws \OxPHP\Async\AsyncException If the async task the call runs in is cancelled while the wait is suspended.
          */
         public function acquireTimeout(int $ms): Pool\Handle {}
 
@@ -1785,6 +1787,7 @@ namespace OxPHP\Shared {
          * `$body` throws. Returns whatever `$body` returns.
          *
          * @throws ClosedException If the pool is closed, or if a request created it outside worker mode and this is not that request, or that request has ended.
+         * @throws \OxPHP\Async\AsyncException If the async task the call runs in is cancelled while the wait is suspended.
          */
         public function with(callable $body): mixed {}
 
@@ -1794,6 +1797,7 @@ namespace OxPHP\Shared {
          * @throws OperationTimeoutException On deadline expiry.
          * @throws TypeException If `$ms <= 0`.
          * @throws ClosedException If the pool is closed, or if a request created it outside worker mode and this is not that request, or that request has ended.
+         * @throws \OxPHP\Async\AsyncException If the async task the call runs in is cancelled while the wait is suspended.
          */
         public function withTimeout(callable $body, int $ms): mixed {}
 
