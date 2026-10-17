@@ -3061,6 +3061,16 @@ void oxphp_bridge_set_fiber_fd_wait(oxphp_fiber_fd_wait_fn_t fn) {
  * stream offers one, and otherwise — or where the scheduler cannot watch it —
  * the fiber sleep for `duration_us`. Called from C, with none of the flush's
  * Rust frames between it and the engine.
+ * Not with an exception pending in a request fiber: an output handler that
+ * threw on the way here, whose output PHP then hands on without it and
+ * flushes. Zend does not carry EG(exception) across a fiber switch, and the
+ * scheduler clears what it finds pending once the fiber has parked, so the
+ * flush would come back with the exception gone and the script carry on as
+ * though the handler had returned. The flush does not wait there at all: the
+ * output is left for the next flush, or for the end of the request, which hands
+ * it to the stream without waiting. Waiting on the thread would keep the
+ * exception too, but hold every other request on the thread until the client
+ * read.
  * Not while the engine is compiling — a diagnostic it displays mid-compilation
  * into a stream that flushes implicitly gets here — since some of the
  * compiler's state is the thread's and a compilation that starts does not set
@@ -3072,8 +3082,12 @@ void oxphp_bridge_set_fiber_fd_wait(oxphp_fiber_fd_wait_fn_t fn) {
  * and still while it displays a warning such a handler declined by returning
  * false, so a flush from either parks mid-compilation, as a sleep inside such
  * a handler does.
- * Returns what the wait returns, and 0 where it does not park. */
+ * Returns what the wait returns, 0 where it does not park, and -1 where the
+ * flush is not to wait. */
 static int oxphp_flush_park(int room_fd, uint64_t duration_us) {
+    if (EG(exception) != NULL && oxphp_bridge_in_fiber()) {
+        return -1;
+    }
     if (zend_is_compiling()) {
         return 0;
     }
