@@ -1,0 +1,34 @@
+# oxphp_async() tasks with OPcache off: a single async worker, so every task
+# runs on the same thread, and two PHP workers, so a test can send requests to
+# this server while it blocks its own worker reading the response.
+#
+# asyncnocache.ini sets opcache.enable=0.
+#
+# Standalone usage:
+#   docker compose -f compose.yml -f compose.asyncnocache.yml up
+services:
+  oxphp-asyncnocache:
+    build:
+      context: ..
+      dockerfile: docker/dev/Dockerfile
+      args:
+        PHP_VERSION:
+    ports:
+      - "80"
+    networks: [test-net]
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    environment:
+      LOG_LEVEL: error
+      INTERNAL_ADDR: 0.0.0.0:9090
+      ASYNC_WORKERS: 1
+      PHP_WORKERS: "2"
+    volumes:
+      - ../www:/var/www/html
+      - ./php:/var/www/html/public/tests
+      - ./asyncnocache.ini:/usr/local/etc/php/conf.d/zz-asyncnocache.ini:ro

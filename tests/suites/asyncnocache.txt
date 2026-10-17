@@ -1,0 +1,4 @@
+# profile: asyncnocache
+# description: oxphp_async() tasks with OPcache off
+
+asyncnocache/test_task_class_lookup_slot_of_another_request

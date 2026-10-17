@@ -3063,11 +3063,14 @@ uint64_t oxphp_bridge_async_drain_output(void) {
     return 0; /* no scheduler registered */
 }
 
+static void oxphp_publish_map_ptr_last(void);
+
 int64_t oxphp_bridge_async_dispatch(
     void *op_array, void *static_vars, void *this_ptr,
     uint32_t argc, void *args, void *closure_zval
 ) {
     if (__builtin_expect(rust_async_dispatch != NULL, 1)) {
+        oxphp_publish_map_ptr_last();
         return rust_async_dispatch(op_array, static_vars, this_ptr, argc, args, closure_zval);
     }
     return -1;
@@ -4717,20 +4720,69 @@ static zend_string *oxphp_function_missing_here(const zend_function *fn) {
     return oxphp_op_array_missing_here(&fn->op_array);
 }
 
-/* === Async Promise: Fixup run_time_cache for cross-thread execution === */
+/* === Code compiled for another thread: cover its MAP_PTR slots here === */
+
+/* The highest CG(map_ptr_last) of any thread that has handed code to another.
+ * Only ever grows. */
+static _Atomic size_t oxphp_handoff_map_ptr_last;
 
 /**
- * Ensure the current thread's MAP_PTR table is large enough and allocate a
- * fresh run_time_cache for the given op_array.
+ * Called on the thread that hands code to another one: an async task's
+ * source, or the thread that stores a Shared\Pool callable.
  *
- * In PHP ZTS, run_time_cache uses ZEND_MAP_PTR which is an offset into the
- * per-thread CG(map_ptr_base) table. When an op_array is transferred from
- * one thread (PHP worker) to another (async worker), the async worker's
- * MAP_PTR table may be smaller than the offset, causing SIGBUS when the VM
- * tries to access the run_time_cache.
+ * The functions, closures and classes OPcache caches in shared memory reach
+ * their runtime cache, static variables, static properties and other
+ * per-thread data through MAP_PTR offsets into the running thread's
+ * CG(map_ptr_base) table. OPcache grows a thread's table only while that
+ * thread itself loads or caches a script or links a class, so a thread that
+ * runs code cached after its own last load can meet offsets past the end of
+ * its table, and ZEND_MAP_PTR_GET/SET do not check. The handing thread's table
+ * covers every offset in the code it hands over: it loaded or cached that code
+ * itself, or was handed it and covered it first.
  *
- * This function grows the table if needed, then allocates a fresh cache.
+ * Without OPcache's shared memory nothing is published. Code then reaches that
+ * data through direct pointers, and its only offsets are the class-lookup
+ * slots of its class names, which each thread numbers on its own: the names
+ * it interns while compiling a request's scripts, numbered again from the
+ * start after every request, and under opcache.file_cache_only the class
+ * names of each script it loads from the file cache. Zend trusts such a slot
+ * below CG(map_ptr_last) (ZSTR_VALID_CE_CACHE), so raising another thread's
+ * map_ptr_last over them would have it read a class another thread stored
+ * there. A thread interns strings for a request only without shared memory,
+ * which is how zend_deactivate() tells the two apart too, but a script loaded
+ * from the file cache interns none, so file_cache_only is read as well. With
+ * shared memory and opcache.file_cache set, OPcache also loads scripts from
+ * the file cache while its shared memory is full or restarting, and numbers
+ * their class names the same way; this does not tell those apart.
  */
+static void oxphp_publish_map_ptr_last(void) {
+    if (zend_hash_num_elements(&CG(interned_strings)) > 0) {
+        return;
+    }
+    zend_string *file_cache_only = zend_ini_str(
+        "opcache.file_cache_only", sizeof("opcache.file_cache_only") - 1, false);
+    if (file_cache_only && zend_ini_parse_bool(file_cache_only)) {
+        return;
+    }
+    size_t last = CG(map_ptr_last);
+    size_t seen = atomic_load(&oxphp_handoff_map_ptr_last);
+    while (seen < last
+        && !atomic_compare_exchange_weak(&oxphp_handoff_map_ptr_last, &seen, last)) {
+    }
+}
+
+/**
+ * Called on the thread about to run code another thread handed over, before
+ * it does: grows this thread's table to cover every offset published so far.
+ * zend_map_ptr_extend() does nothing when this thread's CG(map_ptr_last)
+ * already reaches that mark, and zero-fills the slots it adds.
+ */
+static void oxphp_cover_map_ptr_last(void) {
+    zend_map_ptr_extend(atomic_load(&oxphp_handoff_map_ptr_last));
+}
+
+/* === Async Promise: Fixup run_time_cache for cross-thread execution === */
+
 /**
  * In PHP ZTS, run_time_cache uses ZEND_MAP_PTR — a byte offset into the
  * per-thread CG(map_ptr_base) table. When an op_array is transferred across
@@ -4777,6 +4829,11 @@ int oxphp_reconstruct_async_closure(
         zend_string_release_ex(missing, 0);
         return -1;
     }
+
+    /* The closures the task creates, and on PHP 8.5 the callables in its
+     * constant expressions, use MAP_PTR offsets the source thread's table
+     * covers, not necessarily this one's. */
+    oxphp_cover_map_ptr_last();
 
     /* Reconstruct closure from op_array + static_vars */
     memcpy(&func, op_array, sizeof(zend_op_array));
@@ -6981,6 +7038,7 @@ int oxphp_pool_fcc_new(void *callable_zval, void **out_fcc_heap) {
     heap->fcc = fcc;
     ZVAL_COPY(&heap->callable_zv, callable);
     *out_fcc_heap = (void *)heap;
+    oxphp_publish_map_ptr_last();
     return 0;
 }
 
@@ -7024,6 +7082,7 @@ static int oxphp_pool_factory_invoke_unguarded(void *fcc_heap, void **out_slot_z
         zend_string_release_ex(missing, 0);
         return -1;
     }
+    oxphp_cover_map_ptr_last();
 
     zval ret_zv;
     ZVAL_UNDEF(&ret_zv);
@@ -7185,6 +7244,7 @@ static int oxphp_pool_destroy_invoke_unguarded(void *destroy_fcc_heap, void *slo
             oxphp_bridge_capture_fatal(ZSTR_VAL(missing), ZSTR_LEN(missing));
             zend_string_release_ex(missing, 0);
         } else {
+            oxphp_cover_map_ptr_last();
             zend_call_known_function(heap->fcc.function_handler,
                                       heap->fcc.object,
                                       heap->fcc.called_scope,

@@ -25,4 +25,11 @@ asyncdecl/test_task_runs_preloaded_code
 asyncdecl/test_task_declares_preloaded_named_class
 asyncdecl/test_preloaded_file_required_again
 
+# Code a task's thread runs whose per-thread slots OPcache numbered past the
+# ones that thread had. Each test includes a large file of its own first, so
+# the order matters: the first one starts its task before any is included.
+asyncdecl/test_pool_named_factory_created_after_task_started
+asyncdecl/test_task_nested_closure_of_late_file
+asyncdecl/test_task_default_value_closure_of_late_file
+
 asyncdecl/test_server_alive
