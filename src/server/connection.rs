@@ -89,8 +89,8 @@ fn parse_content_length(bytes: &[u8]) -> Option<usize> {
 ///
 /// What bounds it is the dispatch scope, not the response. A response sent
 /// early — a stream, or `oxphp_finish_request()` — leaves that scope while
-/// the handler is still running, so a cancellation raised afterwards (the
-/// stream's own `blocking_send` failure, say) is read by nothing: not here,
+/// the handler is still running, so a cancellation raised afterwards (a
+/// stream's flush finding its client gone, say) is read by nothing: not here,
 /// the guard having already gone, and nowhere else either. That gap is older
 /// than this guard — the site that used to count read the same zero off the
 /// early-sent response — and is tracked on its own.

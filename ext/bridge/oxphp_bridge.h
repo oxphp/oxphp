@@ -1010,7 +1010,13 @@ void oxphp_bridge_bailout(void);
  * This avoids longjmp crossing Rust FFI boundaries.
  */
 typedef size_t (*oxphp_ub_write_fn_t)(const char *str, size_t str_length);
-typedef void   (*oxphp_flush_fn_t)(void *server_context);
+/* `wait_here`: 0 — a stream whose queue has no room keeps the output and
+ * returns 1, for the caller to wait for room itself, and stores in `*room_fd`
+ * a descriptor that turns readable once there may be room, or -1 when it has
+ * none to offer; 1 — wait for room on this thread, until there is some or the
+ * request is to stop. Returns 1 when the output was kept for want of room,
+ * else 0. */
+typedef int    (*oxphp_flush_fn_t)(void *server_context, int wait_here, int *room_fd);
 
 void oxphp_bridge_set_sapi_callbacks(oxphp_ub_write_fn_t ub_write, oxphp_flush_fn_t flush);
 
@@ -1467,6 +1473,7 @@ typedef int (*oxphp_fiber_await_fn_t)(int64_t promise_id, double timeout, void *
 typedef int (*oxphp_in_fiber_check_fn_t)(void);
 typedef int (*oxphp_fiber_yield_fn_t)(void);
 typedef int (*oxphp_fiber_sleep_fn_t)(uint64_t duration_us);
+typedef int (*oxphp_fiber_fd_wait_fn_t)(int fd, uint64_t timeout_us);
 
 /** Register Rust async dispatch callbacks (called once at init). */
 void oxphp_bridge_set_async_dispatch(oxphp_async_dispatch_fn_t fn);
@@ -1486,8 +1493,16 @@ int oxphp_bridge_fiber_yield(void);
 
 /** Register the SAPI's fiber sleep — the suspend point behind oxphp_usleep().
  *  Rust reaches it only through oxphp_pool_park_guarded(), which holds back
- *  the bailout a drain kill ends it with. */
+ *  the bailout a drain kill ends it with. The bridge's flush calls it from C,
+ *  to wait for room in a stream's queue. */
 void oxphp_bridge_set_fiber_sleep(oxphp_fiber_sleep_fn_t fn);
+
+/** Register the SAPI's wait for a descriptor to turn readable, which parks
+ *  the calling fiber as a sleep does, until the descriptor is readable or
+ *  `timeout_us` has passed. Returns what the sleep returns: 1 once the wait is
+ *  over, either way; 0 where the fiber cannot be parked on it. The bridge's
+ *  flush parks on it for room in a stream's queue. */
+void oxphp_bridge_set_fiber_fd_wait(oxphp_fiber_fd_wait_fn_t fn);
 
 /** Register the SAPI predicate that decides whether the calling thread
  *  is inside an oxphp-managed scheduler fiber. The bridge has no way

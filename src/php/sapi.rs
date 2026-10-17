@@ -16,6 +16,7 @@ use crate::metrics::{WorkerMetrics, WorkerStats};
 use crate::php::bindings::{self, *};
 use crate::php::request_decode::{parse_query_pairs, url_decode, value_ptr};
 use crate::php::response_spool::{self, Spool, Spooled};
+use crate::php::stream_wait::{NoRoom, StreamSender};
 use crate::plugin::php::{PluginNativeFunction, PluginNativeFunctionDef};
 use crate::types::{ScriptRequest, ScriptResponse};
 
@@ -174,9 +175,9 @@ thread_local! {
     /// worker_send_callback's terminal cleanup, so the bridge's raw pointer
     /// stays valid even if the tokio dispatch future is dropped early.
     static WORKER_CANCEL_STATE: RefCell<Option<std::sync::Arc<crate::bridge::cancel::CancellationState>>> = const { RefCell::new(None) };
-    /// Streaming body chunk sender — worker thread sends chunks via `blocking_send()`.
+    /// Streaming body chunk sender — the PHP thread sends chunks through `flush_stream_chunk()`.
     /// Created lazily in `send_streaming_headers()` to avoid heap alloc for non-streaming requests.
-    static STREAM_TX: RefCell<Option<tokio::sync::mpsc::Sender<Bytes>>> = const { RefCell::new(None) };
+    static STREAM_TX: RefCell<Option<StreamSender<Bytes>>> = const { RefCell::new(None) };
     /// Worker mode: channel receiver for incoming requests.
     static WORKER_RX: RefCell<Option<crossbeam_channel::Receiver<WorkerIncomingRequest>>> = const { RefCell::new(None) };
     /// Worker mode: the end of this thread's `PhpThreadWaker` the wait for the
@@ -303,12 +304,12 @@ pub fn restore_request_errors(errors: Vec<crate::types::PhpScriptError>) {
 /// thread-global slot: another fiber's request running on the same worker thread
 /// would overwrite it, and this request's later chunks would then flow to the
 /// other client's body channel (and vice versa).
-pub fn take_stream_tx() -> Option<tokio::sync::mpsc::Sender<Bytes>> {
+pub fn take_stream_tx() -> Option<StreamSender<Bytes>> {
     STREAM_TX.with(|s| s.borrow_mut().take())
 }
 
 /// Restore a fiber's streaming chunk sender (counterpart of `take_stream_tx`).
-pub fn restore_stream_tx(tx: Option<tokio::sync::mpsc::Sender<Bytes>>) {
+pub fn restore_stream_tx(tx: Option<StreamSender<Bytes>>) {
     STREAM_TX.with(|s| *s.borrow_mut() = tx);
 }
 
@@ -634,10 +635,9 @@ pub fn try_early_send() -> bool {
 
     // If streaming is active, finish_request means "end the stream"
     if unsafe { bindings::oxphp_bridge_is_streaming() } {
-        // Flush any remaining buffered output as a final chunk
-        flush_stream_chunk();
-        // Drop the sender to close the body channel → stream ends
-        close_stream();
+        // Flush any remaining buffered output as a final chunk, then drop the
+        // sender to close the body channel → stream ends
+        finish_stream();
         return true;
     }
 
@@ -690,7 +690,7 @@ pub fn send_streaming_headers() -> bool {
             // This avoids a heap allocation for the vast majority of non-streaming requests.
             let (chunk_tx, chunk_rx) = tokio::sync::mpsc::channel::<Bytes>(64);
             STREAM_TX.with(|s| {
-                *s.borrow_mut() = Some(chunk_tx);
+                *s.borrow_mut() = Some(StreamSender::new(chunk_tx));
             });
 
             // Sync the status a script set via `http_response_code()` before it
@@ -727,56 +727,148 @@ pub fn send_streaming_headers() -> bool {
     })
 }
 
+/// How long a stream's flush waiting for room on its own thread goes without
+/// asking whether it should stop: whether its client has gone, its request is
+/// being ended, or the server has begun to drain. Room is not waited for in
+/// steps — it wakes the wait as soon as there is some.
+const STREAM_WAIT_CHECK: std::time::Duration = std::time::Duration::from_millis(16);
+
 /// Drain the output buffer and send it as a chunk via STREAM_TX.
-/// If `blocking_send` errors (receiver dropped → client disconnected),
-/// mark the request's cancel cell and raise the interrupt, so the flush that
-/// called this asks again on its way out and, where the request is ended when
-/// its client leaves, ends it there.
-fn flush_stream_chunk() {
+///
+/// The chunk queue is bounded. With no room in it, the output is left where
+/// it is and `true` returned, unless `wait_here`, in which case the room is
+/// waited for on this thread — until there is some, or until the request is to
+/// stop: its client has gone, it has been cancelled, the engine has an
+/// interrupt pending that ends it, or the server has begun to drain while its
+/// response is not finished (see `cancel_stream_for_drain`). `true` then means
+/// the wait stopped short of room. The bridge's flush makes the other kind of
+/// wait, parking the request in between, and asks for this one only where it
+/// cannot park: for the park, a `true` returned without `wait_here` stores in
+/// `room_fd` the descriptor that turns readable once there may be room, or -1
+/// where there is none to offer and the park has to be timed.
+///
+/// A receiver found dropped (client disconnected) drops the output, marks the
+/// request's cancel cell and raises the interrupt, so the flush that called
+/// this asks again on its way out and, where the request is ended when its
+/// client leaves, ends it there.
+fn flush_stream_chunk(wait_here: bool, room_fd: &mut c_int) -> bool {
     STREAM_TX.with(|slot| {
-        if let Some(tx) = slot.borrow().as_ref() {
-            let data = RESPONSE.with(|r| {
-                let mut resp = r.borrow_mut();
-                if resp.output.is_empty() {
-                    return None;
-                }
-                Some(Bytes::from(std::mem::take(&mut resp.output)))
-            });
-            // blocking_send: blocks if channel full (backpressure).
-            // Err means the receiver was dropped — client gone. A None chunk
-            // (empty flush) is not an error but must still see the drain check.
-            let send_failed = match data {
-                Some(chunk) => tx.blocking_send(chunk).is_err(),
-                None => false,
+        let mut slot = slot.borrow_mut();
+        let Some(stream) = slot.as_mut() else {
+            return false;
+        };
+        let has_output = RESPONSE.with(|r| !r.borrow().output.is_empty());
+        // A flush with no output (heartbeat comment, or the buffer was already
+        // drained) is not an error but must still see the drain check.
+        if has_output {
+            let room = if wait_here {
+                stream.wait_here(STREAM_WAIT_CHECK, stream_wait_should_stop)
+            } else {
+                stream.try_room()
             };
-            unsafe {
-                if send_failed {
-                    if bindings::oxphp_bridge_get_cancel_reason() == 0 {
-                        tracing::warn!("Stream client disconnected during flush");
-                        let _ = bindings::oxphp_bridge_set_cancel_reason(1 /* CLIENT_ABORT */);
-                        bindings::oxphp_bridge_request_interrupt();
-                    }
-                } else if bindings::oxphp_bridge_is_draining()
-                    && bindings::oxphp_bridge_get_cancel_reason() == 0
-                    && !bindings::oxphp_bridge_is_finished()
-                {
-                    // Server is draining: end the stream on the next opcode even
-                    // if this flush carried no output (heartbeat comment, or the
-                    // buffer was already drained). Catches tight flush loops that
-                    // never suspend, so the fiber scheduler's drain sweep — which
-                    // only reaches suspended fibers — cannot see them.
-                    //
-                    // The `is_finished` guard excludes the closing flush that
-                    // oxphp_finish_request() performs on a streaming request:
-                    // the response is complete at that point, and the script's
-                    // post-response work is an ordinary request for drain
-                    // purposes — it gets the window, not an immediate cancel.
-                    let _ = bindings::oxphp_bridge_set_cancel_reason(3 /* SHUTDOWN */);
-                    bindings::oxphp_bridge_request_interrupt();
+            let room = match room {
+                Ok(room) => room,
+                Err(NoRoom::Closed) => {
+                    // Nobody is left to take it, and a request that writes on
+                    // after its client left would otherwise keep all of it.
+                    RESPONSE.with(|r| r.borrow_mut().output.clear());
+                    mark_stream_client_gone();
+                    return false;
+                }
+                Err(NoRoom::Full(fd)) => {
+                    *room_fd = fd.unwrap_or(-1);
+                    return true;
+                }
+                Err(NoRoom::Stopped) => return true,
+            };
+            let chunk = RESPONSE.with(|r| Bytes::from(std::mem::take(&mut r.borrow_mut().output)));
+            room.send(chunk);
+        }
+        cancel_stream_for_drain();
+        false
+    })
+}
+
+/// The stream's receiver is gone: its client has disconnected.
+fn mark_stream_client_gone() {
+    unsafe {
+        if bindings::oxphp_bridge_get_cancel_reason() == 0 {
+            tracing::warn!("Stream client disconnected during flush");
+            let _ = bindings::oxphp_bridge_set_cancel_reason(1 /* CLIENT_ABORT */);
+            bindings::oxphp_bridge_request_interrupt();
+        }
+    }
+}
+
+/// Server is draining: end the stream on the next opcode even if this flush
+/// carried no output (heartbeat comment, or the buffer was already drained).
+/// Catches tight flush loops that never suspend, so the fiber scheduler's drain
+/// sweep — which only reaches suspended fibers — cannot see them, and a flush
+/// waiting for room on its thread, which the sweep cannot reach either.
+///
+/// The `is_finished` guard excludes the closing flush that
+/// oxphp_finish_request() performs on a streaming request: the response is
+/// complete at that point, and the script's post-response work is an ordinary
+/// request for drain purposes — it gets the window, not an immediate cancel.
+///
+/// Returns whether it cancelled the stream.
+fn cancel_stream_for_drain() -> bool {
+    unsafe {
+        if bindings::oxphp_bridge_is_draining()
+            && bindings::oxphp_bridge_get_cancel_reason() == 0
+            && !bindings::oxphp_bridge_is_finished()
+        {
+            let _ = bindings::oxphp_bridge_set_cancel_reason(3 /* SHUTDOWN */);
+            bindings::oxphp_bridge_request_interrupt();
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether a flush waiting for room on its thread should stop waiting: the
+/// engine has an interrupt pending that ends the request — its time limit, a
+/// cancellation, or a drain past its deadline — or the server has begun to
+/// drain, which ends a stream that has not finished its response.
+fn stream_wait_should_stop() -> bool {
+    let ending = unsafe { crate::bridge::ffi::oxphp_bridge_request_end_pending() != 0 };
+    ending || cancel_stream_for_drain()
+}
+
+/// The server's runtime, for the task `finish_stream` hands a stream's last
+/// chunk to. Set once from main.rs whatever the size of the async pool, whose
+/// own handle is set only when there is one.
+static STREAM_TOKIO_HANDLE: OnceLock<tokio::runtime::Handle> = OnceLock::new();
+
+/// Install the runtime `finish_stream` spawns on. Called once from main.rs,
+/// before the server takes requests.
+pub fn set_stream_tokio_handle(handle: tokio::runtime::Handle) {
+    let _ = STREAM_TOKIO_HANDLE.set(handle);
+}
+
+/// Send the output not flushed yet as the stream's last chunk, and close the
+/// stream. Called once the request is over, where nothing can wait: outside its
+/// fiber, on the scheduler's own stack in worker mode. So a queue with no room
+/// for that chunk gets it from a task that waits for the room in the request's
+/// place and closes the stream once it has sent it, and the worker moves on.
+fn finish_stream() {
+    if flush_stream_chunk(false, &mut -1) {
+        let tx = STREAM_TX.with(|slot| slot.borrow_mut().take().map(StreamSender::into_sender));
+        let chunk = RESPONSE.with(|r| Bytes::from(std::mem::take(&mut r.borrow_mut().output)));
+        if let Some(tx) = tx {
+            match STREAM_TOKIO_HANDLE.get() {
+                Some(handle) => {
+                    handle.spawn(async move {
+                        let _ = tx.send(chunk).await;
+                    });
+                }
+                None => {
+                    let _ = tx.blocking_send(chunk);
                 }
             }
         }
-    });
+    }
+    close_stream();
 }
 
 /// Drop the STREAM_TX sender to close the body channel (signals stream end).
@@ -1714,7 +1806,11 @@ unsafe fn check_client_disconnected() {
     }
     let disconnected = EARLY_TX
         .with(|slot| slot.borrow().as_ref().is_some_and(|(_, tx)| tx.is_closed()))
-        || STREAM_TX.with(|slot| slot.borrow().as_ref().is_some_and(|tx| tx.is_closed()));
+        || STREAM_TX.with(|slot| {
+            slot.borrow()
+                .as_ref()
+                .is_some_and(|stream| stream.sender().is_closed())
+        });
     if disconnected {
         tracing::warn!("Client disconnected, requesting PHP cancellation");
         let _ = bindings::oxphp_bridge_set_cancel_reason(1 /* CLIENT_ABORT */);
@@ -1755,7 +1851,11 @@ unsafe extern "C" fn oxphp_ub_write(str: *const c_char, str_length: usize) -> us
     str_length
 }
 
-unsafe extern "C" fn oxphp_flush(_server_context: *mut c_void) {
+unsafe extern "C" fn oxphp_flush(
+    _server_context: *mut c_void,
+    wait_here: c_int,
+    room_fd: *mut c_int,
+) -> c_int {
     check_client_disconnected();
 
     // Streaming mode: send headers on first flush, then send buffered output as chunk.
@@ -1764,13 +1864,18 @@ unsafe extern "C" fn oxphp_flush(_server_context: *mut c_void) {
             send_streaming_headers();
             bindings::oxphp_bridge_set_headers_sent(true);
         }
-        flush_stream_chunk();
-        return;
+        let mut fd = -1;
+        let kept = flush_stream_chunk(wait_here != 0, &mut fd);
+        if !room_fd.is_null() {
+            *room_fd = fd;
+        }
+        return kept as c_int;
     }
 
     // When oxphp_finish_request() sets the finished flag and calls sapi_flush(),
     // this triggers the early response send.
     try_early_send();
+    0
 }
 
 // ─── Header Handling ────────────────────────────────────────
@@ -3295,8 +3400,7 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
 
     // If streaming was active, close the stream
     if bindings::oxphp_bridge_is_streaming() {
-        flush_stream_chunk();
-        close_stream();
+        finish_stream();
         // If early TX was already consumed by streaming headers, we're done
         if was_early_sent() {
             #[cfg(feature = "plugin-profiler")]

@@ -2741,10 +2741,64 @@ size_t oxphp_bridge_ub_write(const char *str, size_t str_length) {
     return 0;
 }
 
+/* How long a flush that found its stream's queue full stays parked before it
+ * looks again. Parked on the descriptor its stream hands back, it is resumed
+ * as soon as the client takes a chunk, and the last interval only bounds how
+ * long a client that has stopped reading keeps it from seeing that its
+ * request is to stop. With no descriptor to park on, the park is timed
+ * instead, doubling from the first interval to the last. */
+#define OXPHP_FLUSH_PARK_FIRST_US 1000
+#define OXPHP_FLUSH_PARK_LAST_US  16000
+
+static int oxphp_flush_park(int room_fd, uint64_t duration_us);
+
+/* Whether a flush may wait for room in its stream's queue: not once PHP has
+ * marked the request's connection aborted or timed out, and not while the
+ * engine reports memory_limit exhausted. The time limit marks it as its timer
+ * fires, ahead of the interrupt that ends the request where the engine next
+ * looks for one — once the call that flushed has returned, or after an echo at
+ * the next call or loop iteration — which a flush still waiting for room would
+ * hold off for as long as the client did not read. The report of
+ * memory_limit is made with the limit set aside on the heap, and the heap is
+ * the thread's: parked there, the request would leave every other request on
+ * the thread allocating with no limit, and waiting on the thread instead would
+ * hold them all for a request about to end. The output stays in the response
+ * buffer with any other output not flushed yet. */
+static bool oxphp_flush_may_wait(void) {
+    return PG(connection_status) == PHP_CONNECTION_NORMAL
+        && !zend_alloc_in_memory_limit_error_reporting();
+}
+
 void oxphp_bridge_flush(void *server_context) {
     check_cancelled_c();
     if (rust_flush) {
-        rust_flush(server_context);
+        /* A stream whose queue is full hands its output back rather than
+         * waiting for room, and the wait is made here: by parking the request
+         * where it can be parked, so that the worker runs its other requests
+         * meanwhile, and the client the stream waits for may be one of them.
+         * A drain, a cancellation and the time limit reach the park as they
+         * reach a sleep. The park is made after the Rust side has returned,
+         * so the bailout a drain ends it with crosses none of the flush's Rust
+         * frames. Where no park is possible the Rust side waits on the thread,
+         * and stops for the same reasons. */
+        uint64_t step_us = OXPHP_FLUSH_PARK_FIRST_US;
+        int room_fd = -1;
+        while (rust_flush(server_context, 0, &room_fd) && oxphp_flush_may_wait()) {
+            int rc = oxphp_flush_park(room_fd, step_us);
+            if (rc == 0) {
+                rust_flush(server_context, 1, &room_fd);
+                break;
+            }
+            if (rc != 1) {
+                /* Cancelled, or unwinding with an exception pending: the
+                 * output waits for the next flush, or for the end of the
+                 * request. */
+                break;
+            }
+            if (step_us < OXPHP_FLUSH_PARK_LAST_US) {
+                step_us *= 2;
+            }
+        }
         /* A flush is also where a client leaving is found out: sending to a
          * stream whose client has gone, or probing a request that has not sent
          * its headers yet, records CLIENT_ABORT on the way through — after the
@@ -2995,6 +3049,41 @@ static oxphp_fiber_sleep_fn_t sapi_fiber_sleep = NULL;
 
 void oxphp_bridge_set_fiber_sleep(oxphp_fiber_sleep_fn_t fn) {
     sapi_fiber_sleep = fn;
+}
+
+static oxphp_fiber_fd_wait_fn_t sapi_fiber_fd_wait = NULL;
+
+void oxphp_bridge_set_fiber_fd_wait(oxphp_fiber_fd_wait_fn_t fn) {
+    sapi_fiber_fd_wait = fn;
+}
+
+/* The park behind oxphp_bridge_flush's wait for room: on `room_fd` where the
+ * stream offers one, and otherwise — or where the scheduler cannot watch it —
+ * the fiber sleep for `duration_us`. Called from C, with none of the flush's
+ * Rust frames between it and the engine.
+ * Not while the engine is compiling — a diagnostic it displays mid-compilation
+ * into a stream that flushes implicitly gets here — since some of the
+ * compiler's state is the thread's and a compilation that starts does not set
+ * it aside: a script another request on the thread compiled meanwhile would be
+ * compiled inside the class this compilation is in, with its loop and delayed
+ * opline stacks — what the engine itself sets aside before it calls a user
+ * error handler mid-compilation. The flush waits on the thread there instead.
+ * The engine says it is not compiling while a user error handler runs, though,
+ * and still while it displays a warning such a handler declined by returning
+ * false, so a flush from either parks mid-compilation, as a sleep inside such
+ * a handler does.
+ * Returns what the wait returns, and 0 where it does not park. */
+static int oxphp_flush_park(int room_fd, uint64_t duration_us) {
+    if (zend_is_compiling()) {
+        return 0;
+    }
+    if (room_fd >= 0 && sapi_fiber_fd_wait != NULL) {
+        int rc = sapi_fiber_fd_wait(room_fd, OXPHP_FLUSH_PARK_LAST_US);
+        if (rc != 0) {
+            return rc;
+        }
+    }
+    return sapi_fiber_sleep != NULL ? sapi_fiber_sleep(duration_us) : 0;
 }
 
 static oxphp_in_fiber_check_fn_t sapi_in_fiber_check = NULL;

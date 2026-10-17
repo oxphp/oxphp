@@ -303,6 +303,8 @@ async fn async_main(
     TOKIO_HANDLE
         .set(Handle::current())
         .expect("TOKIO_HANDLE already set");
+    #[cfg(feature = "php")]
+    oxphp::php::sapi::set_stream_tokio_handle(Handle::current());
 
     #[cfg(feature = "php")]
     if let Some(ref mut pool) = async_pool {

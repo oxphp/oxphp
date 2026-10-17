@@ -334,7 +334,7 @@ extern "C" {
 
     pub fn oxphp_bridge_set_sapi_callbacks(
         ub_write: Option<unsafe extern "C" fn(*const c_char, usize) -> usize>,
-        flush: Option<unsafe extern "C" fn(*mut c_void)>,
+        flush: Option<unsafe extern "C" fn(*mut c_void, c_int, *mut c_int) -> c_int>,
     );
 
     // ─── Superglobals configuration ─────────────────────

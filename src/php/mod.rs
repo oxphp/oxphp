@@ -9,6 +9,7 @@ pub mod request_decode;
 pub mod response_spool;
 #[cfg(feature = "php")]
 pub mod sapi;
+pub mod stream_wait;
 pub mod supervisor;
 #[cfg(feature = "php")]
 pub mod thread;

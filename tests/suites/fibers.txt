@@ -141,6 +141,21 @@ fibers/test_bailout_in_a_callback_over_buffered_cycles_keeps_the_worker_probe
 fibers/test_bailout_in_a_callback_over_unbuffered_cycles_retires_the_worker | GET | | 504 |
 fibers/test_bailout_in_a_callback_over_unbuffered_cycles_retires_the_worker_probe
 
+# A stream's flush waiting for room in its queue: the stream reaches a client
+# on the same worker thread whole, another request is served while it waits, the
+# wait ends at its client leaving and at its time limit, and what is left of a
+# stream ended that way neither waits nor is lost. What a stream flushes once its
+# client has gone is dropped, and a stream that runs out of memory_limit ends at
+# that error instead of waiting to flush it. A flush that waits by holding the
+# thread wedges this profile's only worker, which fails every test after it, so
+# these come late.
+fibers/test_stream_backpressure_delivers_whole_body
+fibers/test_stream_backpressure_leaves_the_worker_free
+fibers/test_stream_backpressure_honours_time_limit
+fibers/test_stream_backpressure_end_leaves_the_worker_free
+fibers/test_stream_backpressure_client_gone_drops_its_output
+fibers/test_stream_backpressure_memory_fatal_holds_no_one
+
 # How close to the end of its C stack a request or a task may recurse before the
 # engine throws. The second line drives an internal function that uses a lot of
 # stack into the last level the check lets through; if the limit loses its
