@@ -58,7 +58,7 @@ OxPHP swaps the body of every 4xx or 5xx that reaches the response pipeline. The
 | `413.html` | Payload Too Large | The request body exceeds the maximum size |
 | `416.html` | Range Not Satisfiable | An unsatisfiable `Range` header on a static file (`Content-Range` is preserved) |
 | `500.html` | Internal Server Error | An uncaught or fatal PHP error |
-| `503.html` | Service Unavailable | Graceful draining during shutdown |
+| `503.html` | Service Unavailable | Graceful draining during shutdown; a PHP response that does not stream, has outgrown `RESPONSE_BUFFER_BYTES` and could not be written to a spool file — `RESPONSE_SPOOL_MAX_BYTES` reached, `TMPDIR` not writable, or the disk full — see [Response Buffering](../operations/configuration.md#response-buffering) (`Retry-After` is preserved) |
 | `504.html` | Gateway Timeout | PHP's `max_execution_time` (or a `set_time_limit()` limit) ran out — see [Timeouts](timeouts.md) |
 | `529.html` | Site is overloaded | The request spent its wait budget — at most `QUEUE_WAIT_TIMEOUT_MS`, less where the server has shortened it — without reaching a worker — waiting for a queue slot, or waiting in the queue — or `QUEUE_MAX_WAITING` requests were already waiting, or their bodies already filled `QUEUE_MAX_WAITING_BYTES` (`Retry-After` is preserved) |
 
