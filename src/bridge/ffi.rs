@@ -867,6 +867,11 @@ extern "C" {
 
 pub const OXPHP_SHARED_INVOKE_OK: c_int = 0;
 pub const OXPHP_SHARED_INVOKE_PHP_THREW: c_int = 1;
+/// "Not called": the pool destroy helpers freed the slot without calling
+/// the `$destroy` they were given, because no PHP code is executing on the
+/// thread — a callback without a frame to return to turns a throw into a
+/// fatal error.
+pub const OXPHP_SHARED_INVOKE_SKIPPED: c_int = 2;
 /// "Cannot invoke at all": null pointer, `zend_fcall_info_init` failed, etc.
 /// The callable argument itself is unusable. Defined to mirror the C-side
 /// ABI; Rust callers fold this into the generic-error arm of their match

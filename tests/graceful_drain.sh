@@ -49,6 +49,16 @@
 # fatal error would retire the worker, and the monitor would boot a replacement
 # in the middle of the shutdown, as in Scenario G.
 #
+# Scenario J (idle Shared\Pool slots at stop): two workers each leave a slot
+# of a named pool idle, then the server stops. The registry is drained on the
+# main thread while the workers are still up, and their slots live in their
+# heaps: the drain must leave them alone, and the server must exit with status
+# 0. J2 is the same with each worker making a pool of its own and calling
+# $pool->evict() after oxphp_worker() returns, where $destroy runs for its
+# own slots. In J3 the named pool is reached only inside the request handler,
+# so the registry holds its last reference and the stop drops it on the main
+# thread, with its callables in the heap of the worker that created it.
+#
 # NOT wired into run_all.sh or CI (like tests/cli_run.sh) — run manually after
 # touching the drain machinery (fiber sweep, cancel plumbing, drain latches).
 #
@@ -69,6 +79,9 @@ DRAIN_F="drain_f_$$"
 DRAIN_G="drain_g_$$"
 DRAIN_H="drain_h_$$"
 DRAIN_I="drain_i_$$"
+DRAIN_J="drain_j_$$"
+DRAIN_J2="drain_j2_$$"
+DRAIN_J3="drain_j3_$$"
 # Ephemeral free port unless the caller pins one via PORT=.
 PORT="${PORT:-$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')}"
 PASS=0
@@ -79,13 +92,13 @@ ok()   { printf '  \033[32mPASS\033[0m %s\n' "$1"; PASS=$((PASS + 1)); }
 bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$1"; FAIL=$((FAIL + 1)); }
 
 cleanup() {
-	docker rm -f "$DRAIN_A" "$DRAIN_B" "$DRAIN_C" "$DRAIN_D" "$DRAIN_E" "$DRAIN_F" "$DRAIN_G" "$DRAIN_H" "$DRAIN_I" >/dev/null 2>&1
+	docker rm -f "$DRAIN_A" "$DRAIN_B" "$DRAIN_C" "$DRAIN_D" "$DRAIN_E" "$DRAIN_F" "$DRAIN_G" "$DRAIN_H" "$DRAIN_I" "$DRAIN_J" "$DRAIN_J2" "$DRAIN_J3" >/dev/null 2>&1
 	rm -rf "$TMP"
 }
 trap cleanup EXIT
 
 start_container() {
-	# start_container <name> <drain_timeout_seconds> [log_level] [php_workers]
+	# start_container <name> <drain_timeout_seconds> [log_level] [php_workers] [worker_file]
 	#
 	# `QUEUE_WAIT_TIMEOUT_MS` is raised well past any drain window on purpose:
 	# these scenarios park requests behind a handler that monopolises the
@@ -100,7 +113,7 @@ start_container() {
 	# hanging up mid-request would need to check the budget rather than assume
 	# it.
 	docker run -d --name "$1" \
-		-e WORKER_FILE=/var/www/html/worker_drain.php \
+		-e WORKER_FILE="/var/www/html/${5:-worker_drain.php}" \
 		-e DOCUMENT_ROOT=/var/www/html \
 		-e PHP_WORKERS="${4:-1}" \
 		-e ASYNC_WORKERS=2 \
@@ -568,6 +581,52 @@ printf '%s' "$LOGS_I" | grep -q "made while the worker had no request in flight"
 	|| bad "I: exit took ${ELAPSED}s"
 
 docker rm -f "$DRAIN_I" >/dev/null 2>&1
+
+# ── Scenario J: idle Shared\Pool slots at stop ───────────────
+# Each request holds its slot for 300 ms, so two at once take both workers.
+pool_stop_scenario() {
+	# pool_stop_scenario <label> <name> <worker_file>
+	local label="$1" name="$2" logs status
+	if start_container "$name" 30 info 2 "$3"; then
+		ok "$label: container up"
+	else
+		bad "$label: container failed to start"; docker logs "$name" 2>&1 | tail -5; return
+	fi
+	curl -fsS --max-time 5 "http://localhost:${PORT}/" > "$TMP/${label}_1" 2>&1 &
+	curl -fsS --max-time 5 "http://localhost:${PORT}/" > "$TMP/${label}_2" 2>&1
+	wait
+	grep -q "pool-parked" "$TMP/${label}_1" && grep -q "pool-parked" "$TMP/${label}_2" \
+		&& ok "$label: both requests parked a slot" \
+		|| bad "$label: the slots were not parked"
+
+	docker kill -s TERM "$name" >/dev/null
+	ELAPSED=$(wait_exit_seconds "$name" 25)
+	logs="$(docker logs "$name" 2>&1)"
+	status=$(docker inspect -f '{{.State.ExitCode}}' "$name" 2>/dev/null)
+	printf '%s' "$logs" | grep -Eq 'zend_mm_heap corrupted|\[CRASH\]' \
+		&& bad "$label: the stop crashed: $(printf '%s' "$logs" | grep -E 'zend_mm_heap corrupted|\[CRASH\]' | head -1)" \
+		|| ok "$label: no crash in the log"
+	printf '%s' "$logs" | grep 'Plugin shutdown' | grep -q 'ox_shared' \
+		&& ok "$label: ox_shared shut down" \
+		|| bad "$label: ox_shared never finished its shutdown"
+	[ "$status" = "0" ] \
+		&& ok "$label: exited with status 0, ${ELAPSED}s after SIGTERM" \
+		|| bad "$label: exit status $status"
+	POOL_STOP_LOGS="$logs"
+	docker rm -f "$name" >/dev/null 2>&1
+}
+
+pool_stop_scenario J "$DRAIN_J" worker_pool_stop.php
+
+pool_stop_scenario J2 "$DRAIN_J2" worker_pool_stop_evict.php
+# The workers' own slots, given to $destroy by the evict() after the loop:
+# both of the slots the two requests parked.
+DESTROYED=$(printf '%s' "$POOL_STOP_LOGS" | grep -c "drain-stop: destroy ran")
+[ "$DESTROYED" = "2" ] \
+	&& ok "J2: \$destroy ran for both parked slots after the loops ended" \
+	|| bad "J2: \$destroy ran $DESTROYED times, not 2"
+
+pool_stop_scenario J3 "$DRAIN_J3" worker_pool_stop_registry_only.php
 
 echo
 echo "== result: $PASS passed, $FAIL failed =="

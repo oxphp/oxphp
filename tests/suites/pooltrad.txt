@@ -16,3 +16,7 @@ pooltrad/test_pool_closes_with_its_request
 # The last reference to a pool going away in another request, while the
 # creating request still runs, frees nothing into that request's memory.
 pooltrad/test_pool_dropped_by_another_request
+
+# A pool that goes away as its request ends cannot call $destroy there, and
+# counts the slot it frees without it — only for a pool that has one.
+pooltrad/test_pool_destroy_skipped_at_request_end_is_counted

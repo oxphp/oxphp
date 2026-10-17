@@ -13,7 +13,9 @@ use crate::plugins::ox_shared::registry::{Entry, SharedType, REGISTRY};
 use crate::plugins::ox_shared::types::channel::SharedInnerChannelExt;
 use crate::plugins::ox_shared::types::map::SharedInnerMapExt;
 use crate::plugins::ox_shared::types::once::SharedInnerOnceExt;
-use crate::plugins::ox_shared::types::pool::SharedInnerPoolExt;
+use crate::plugins::ox_shared::types::pool::{
+    destroy_skipped_total, SharedInnerPoolExt, SkipReason,
+};
 use crate::plugins::ox_shared::value::{SharedRef, SharedValue};
 use crate::types::{full_body, ResponseBody};
 
@@ -625,7 +627,7 @@ impl PluginMetricsCollector for SharedMetricsCollector {
         );
         output.push_str("# TYPE oxphp_shared_pool_wait_seconds histogram\n");
         output.push_str(
-            "# HELP oxphp_shared_pool_evicted_total Cumulative destroy invocations, by reason.\n",
+            "# HELP oxphp_shared_pool_evicted_total Cumulative idle slots torn down, by reason.\n",
         );
         output.push_str("# TYPE oxphp_shared_pool_evicted_total counter\n");
 
@@ -702,6 +704,23 @@ impl PluginMetricsCollector for SharedMetricsCollector {
                     pool.evicted_shutdown_total()
                 ));
             }
+        }
+
+        // Process-wide, not per pool: a slot is usually skipped as its pool
+        // goes away.
+        output.push_str(
+            "# HELP oxphp_shared_pool_destroy_skipped_total Pool slots let go without the $destroy their pool was given, by reason.\n",
+        );
+        output.push_str("# TYPE oxphp_shared_pool_destroy_skipped_total counter\n");
+        for (reason, label) in [
+            (SkipReason::NoFrame, "no_frame"),
+            (SkipReason::OtherThread, "other_thread"),
+            (SkipReason::RequestEnded, "request_ended"),
+        ] {
+            output.push_str(&format!(
+                "oxphp_shared_pool_destroy_skipped_total{{reason=\"{label}\"}} {}\n",
+                destroy_skipped_total(reason)
+            ));
         }
     }
 }
@@ -1035,6 +1054,14 @@ mod tests {
             )),
             "missing manual evict counter"
         );
+        for reason in ["no_frame", "other_thread", "request_ended"] {
+            assert!(
+                output.contains(&format!(
+                    "oxphp_shared_pool_destroy_skipped_total{{reason=\"{reason}\"}} "
+                )),
+                "missing destroy skipped counter for {reason}"
+            );
+        }
 
         drop(inner);
         drop(entry);

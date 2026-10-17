@@ -18,6 +18,8 @@ asyncdecl/test_pool_factory_calls_function_in_task
 asyncdecl/test_pool_destroy_calls_function_in_task
 asyncdecl/test_pool_internal_factory_in_task
 asyncdecl/test_pool_factory_first_run_by_request
+# A task's idle slot, when the pool goes away on the worker thread.
+asyncdecl/test_pool_idle_slot_of_a_task_outlives_the_pool
 
 # Preloaded code exists on every thread.
 asyncdecl/test_task_class_named_like_preloaded
