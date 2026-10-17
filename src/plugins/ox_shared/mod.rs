@@ -52,7 +52,7 @@ struct SharedThreadHooks;
 impl PluginPhpThreadHandler for SharedThreadHooks {
     fn thread_started(&self) {
         // A slot released from another thread parks in this thread's idle
-        // deque instead of being destroyed as an orphan.
+        // deque instead of being let go as an orphan.
         worker_liveness::register_worker();
         eviction::register(
             types::pool::current_thread_key(),
@@ -70,6 +70,7 @@ impl PluginPhpThreadHandler for SharedThreadHooks {
         // Before the startup, which can already create a pool: a session
         // that `session.auto_start` decodes wakes its objects up.
         types::pool::set_request_scope(scope);
+        types::pool::open_request_token();
     }
 
     fn thread_idle(&self) {
@@ -80,7 +81,9 @@ impl PluginPhpThreadHandler for SharedThreadHooks {
 
     fn request_frame_closed(&self) {
         // The request heap has just been reset: the pools let go of what
-        // lived in it before the thread opens another request.
+        // lived in it before the thread opens another request. First of all,
+        // nothing may free into that heap any more.
+        types::pool::close_request_token();
         types::pool::end_request_on_current_thread();
     }
 
@@ -544,8 +547,8 @@ mod tests {
 
     /// A thread of the server's PHP pools is a live pool owner with an
     /// eviction flag from the moment it starts until it stops: a slot
-    /// released to it from another thread parks instead of being destroyed
-    /// as an orphan, and the scheduler can ask it to evict, which wakes it.
+    /// released to it from another thread parks instead of being let go as
+    /// an orphan, and the scheduler can ask it to evict, which wakes it.
     /// The flag is taken when the thread raises `thread_idle`, and not when
     /// a request opens.
     #[test]
@@ -599,6 +602,21 @@ mod tests {
         SharedThreadHooks.request_frame_opening(RequestScope::EachRequest);
         SharedThreadHooks.request_frame_opening(RequestScope::Thread);
         assert!(!types::pool::registry_refuses_pools_on_current_thread());
+    }
+
+    /// A request is numbered from before its startup until it has closed: a
+    /// pool frees memory only in the request it took it in.
+    #[test]
+    fn a_request_is_numbered_while_it_is_open() {
+        SharedThreadHooks.request_frame_opening(RequestScope::EachRequest);
+        let first = types::pool::current_request();
+        assert_ne!(first, 0);
+        SharedThreadHooks.request_frame_closed();
+        assert_eq!(types::pool::current_request(), 0);
+        SharedThreadHooks.request_frame_opening(RequestScope::EachRequest);
+        assert_ne!(types::pool::current_request(), first);
+        SharedThreadHooks.request_frame_closed();
+        assert_eq!(types::pool::current_request(), 0);
     }
 
     /// `on_ready` reaches `tokio::spawn`, which panics outside a runtime, so

@@ -2386,6 +2386,7 @@ int oxphp_shared_wrapper_new(zval *out,
 #define OXPHP_SHARED_INVOKE_PHP_THREW    1
 #define OXPHP_SHARED_INVOKE_BAD_CALLABLE -1
 #define OXPHP_SHARED_INVOKE_BAD_RETURN   -2
+#define OXPHP_SHARED_INVOKE_SKIPPED      2
 #define OXPHP_SHARED_INVOKE_BAILOUT      -4
 #endif
 
@@ -2505,9 +2506,9 @@ void oxphp_pool_spike_reset(void);
  *   - `oxphp_pool_slot_to_user` does not transfer ownership;
  *      the pool retains the slot-zval.
  *
- * All *_free helpers invoke `zval_ptr_dtor` and must be called
- * on a Zend-initialised worker thread. v1 leaks on pool-drop;
- * a follow-up will wire the shutdown-driven cleanup path. */
+ * All *_free helpers invoke `zval_ptr_dtor` + `efree` and must be
+ * called by the request that allocated what they free: every heap
+ * is per thread, and a request's is reset when it ends. */
 
 int oxphp_pool_fcc_new(void *callable_zval, void **out_fcc_heap);
 void oxphp_pool_fcc_free(void *fcc_heap);
@@ -2518,15 +2519,18 @@ int oxphp_pool_body_invoke(void *body_callable_zv,
 void oxphp_pool_slot_to_user(void *slot_zv_heap, void *user_out_zv);
 void oxphp_pool_slot_free(void *slot_zv_heap);
 
-/* Best-effort $destroy($resource) + slot release. See
- * oxphp_bridge.c for the full contract. `destroy_fcc_heap`
- * may be NULL (skip invocation). Exceptions are captured via
- * oxphp_bridge_capture_fatal and cleared. Always returns 0. */
+/* $destroy($resource) + slot release. See oxphp_bridge.c for
+ * the full contract. `destroy_fcc_heap` may be NULL (skip
+ * invocation). Exceptions are captured via
+ * oxphp_bridge_capture_fatal and cleared. Returns 0, or
+ * OXPHP_SHARED_INVOKE_SKIPPED (2) when $destroy was given but no
+ * PHP code is executing on the thread to call it from. */
 int oxphp_pool_destroy_invoke(void *destroy_fcc_heap, void *slot_zv_heap);
 
 /* The same, for a caller inside a plugin handler or the thread_idle event:
  * a bailout is held back for the dispatch stub or the serve loop, and the
- * slot is then left unfreed. Returns 0, or OXPHP_SHARED_INVOKE_BAILOUT (-4). */
+ * slot is then left unfreed. Returns 0, OXPHP_SHARED_INVOKE_SKIPPED (2), or
+ * OXPHP_SHARED_INVOKE_BAILOUT (-4). */
 int oxphp_pool_destroy_invoke_guarded(void *destroy_fcc_heap, void *slot_zv_heap);
 
 /* Park the calling fiber for `duration_us` while Shared\Pool::acquire waits

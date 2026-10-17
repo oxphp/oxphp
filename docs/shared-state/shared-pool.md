@@ -14,7 +14,7 @@ A Pool gives each PHP worker thread its own lane of ready-to-use resources, enfo
 - **Strict budget.** `maxSize` is a hard cap across the whole pool. When the pool is saturated, an acquire either waits, returns `null`, or throws — depending on which acquire method you call.
 - **Per-thread affinity.** Each worker thread has its own idle queue. An acquire pulls from the local queue first and never hands a slot minted on thread A to thread B (v1).
 - **Factory runs in the acquiring worker.** Resources are minted lazily on first demand per thread, not at pool construction. An acquire inside an `oxphp_async()` task runs it on the task's thread, where the functions and classes of your script do not exist — see [Factory and destroy semantics](#factory-and-destroy-semantics).
-- **Destroy callback on eviction.** An optional `destroy($resource)` closure runs when the pool drops a slot (idle timeout, manual eviction, server stop).
+- **Destroy callback on eviction.** An optional `destroy($resource)` closure runs when the pool drops a slot on the thread holding it (idle timeout, manual eviction, the pool going away there). It does not run at server stop unless you ask for it — see [When the destroy callback is skipped](#when-the-destroy-callback-is-skipped).
 - **Idle-timeout eviction.** In worker mode, slots sitting idle longer than `idleTimeoutMs` are destroyed by the worker thread holding them, which a background scheduler wakes for it. Set `idleTimeoutMs: 0` to disable idle eviction entirely. Slots held elsewhere are not evicted this way — see [Idle-timeout eviction](#idle-timeout-eviction).
 - **RAII handles.** `acquire()` returns a `Handle`; the slot returns to the pool automatically when the handle goes out of scope (including on exception), or earlier via `$handle->release()`.
 - **Shareable.** In worker mode a pool survives request boundaries and is shared by handle (`use ($pool)` in closures). Outside worker mode it lasts only as long as the request that creates it — see [Outside worker mode](#outside-worker-mode).
@@ -178,7 +178,7 @@ The factory runs **lazily** on the acquiring worker thread. A pool with `maxSize
 - The factory must return a PHP object. Returning a non-object surfaces as `TypeException` from the acquire call, and the slot is not counted against the budget.
 - A factory that throws propagates its own exception to the acquire caller unchanged, and the slot is not counted against the budget.
 - A fatal error inside the factory ends the request, and the slot is not counted against the budget either.
-- The destroy callback (if supplied) runs when the pool drops a slot: idle timeout expiry, explicit `evict()`, or server shutdown. It runs on a worker thread (not on the Tokio thread driving the eviction scheduler), so PHP is safe to call. Outside worker mode it does not run for the slots still idle when the pool's request ends — see [Outside worker mode](#outside-worker-mode).
+- The destroy callback (if supplied) runs when the pool drops a slot on the thread holding it, while PHP code is running there: idle timeout expiry, explicit `evict()`, or the pool's last reference going away on that thread. It runs on a worker thread (not on the Tokio thread driving the eviction scheduler), so PHP is safe to call. It does not run at server stop, nor for a slot another thread holds — see [When the destroy callback is skipped](#when-the-destroy-callback-is-skipped).
 - A destroy callback that throws is logged but does not poison the pool — the slot is already being destroyed, so there is nothing useful to roll back.
 - In worker mode an acquire inside an `oxphp_async()` task runs the factory on the task's thread of the `ASYNC_WORKERS` pool, and the destroy callback for the slots that thread holds runs on it as well — when `evict()` is called inside a task, for one. That thread never ran your script, so nothing your script declares exists on it; built-in functions and classes and [those loaded by `opcache.preload`](../features/async-promises.md#your-own-functions-and-classes-in-tasks) do. A factory or destroy callback that calls a function declared in its own file, or declares a class — anonymous or named — inside its body, is refused there before its first statement runs, even if it already ran on a worker thread. A refused factory throws `Error` from the acquire call, and the slot is not counted against the budget. A refused destroy callback is skipped the way one that throws is: the slot is dropped all the same, and `evict()` counts it. Only the callback's own body and the closures it declares are checked. Anything else it reaches — a method it calls, `self::` and `static::` ones included, or an object or a closure it captured with `use` — is not checked and must be built in or preloaded as well: a call from there to a function of your script still crashes the server. A destroy callback that is not refused and does run on a task's thread — even one with an empty body — can take the server down at a later request, so do not call `evict()` inside a task on a pool that has a destroy callback.
 - In worker mode the same check runs on every worker thread. A pool shared between them — bound to a name with `Registry::pool()`, say — runs its factory on each worker thread that acquires from it, and its destroy callback on the thread that holds the slot. If either is written in a file that only some requests include, and calls a function declared in that file or declares a class, it is refused the same way on a worker thread that never included that file, even if it already ran on another one.
@@ -209,7 +209,7 @@ To keep database connections open across requests without worker mode, use the d
 
 ## Idle-timeout eviction
 
-Idle-timeout eviction works in worker mode. A background scheduler looks at every pool twice a second, and when a worker holds a slot that has been idle longer than `idleTimeoutMs`, it wakes that worker. As soon as the worker has no request in flight it destroys every slot of its own that has been idle that long, in every pool, calling `$destroy` for each, and the budget is released at the same point. A worker waiting for its next request does this at once and serves no request for it; one that always has a request in flight — one carrying long-lived streams, say — does it the next time it has none. Once the server has begun its graceful shutdown the eviction no longer runs, so that a fatal error in `$destroy` cannot retire a worker and have the pool boot a replacement in the middle of the drain: a slot that goes stale during the drain is left to the shutdown, like every other idle slot.
+Idle-timeout eviction works in worker mode. A background scheduler looks at every pool twice a second, and when a worker holds a slot that has been idle longer than `idleTimeoutMs`, it wakes that worker. As soon as the worker has no request in flight it destroys every slot of its own that has been idle that long, in every pool, calling `$destroy` for each, and the budget is released at the same point. A worker waiting for its next request does this at once and serves no request for it; one that always has a request in flight — one carrying long-lived streams, say — does it the next time it has none. Once the server has begun its graceful shutdown the eviction no longer runs, so that a fatal error in `$destroy` cannot retire a worker and have the pool boot a replacement in the middle of the drain: a slot that goes stale during the drain stays in the pool like every other idle slot, and the server's stop does not call `$destroy` for it — see [When the destroy callback is skipped](#when-the-destroy-callback-is-skipped).
 
 `$destroy` runs there between requests, on the worker's own PHP engine. What it outputs there, buffered or not, belongs to no response and is discarded, and a shutdown function it registers there is dropped without running. `max_execution_time` does not apply to it, so a callback that never returns stops that worker from serving, and a fatal error in it retires the worker — see [Factory and destroy semantics](#factory-and-destroy-semantics).
 
@@ -222,6 +222,30 @@ Tune `idleTimeoutMs` to the cost of recreation:
 - **Never evict**: pass `0`. Idle slots then live until the pool is dropped.
 
 `$pool->evict()` force-evicts **all** idle slots reachable from the calling worker right now — regardless of `idleTimeoutMs` — and returns how many were dropped. It is the operational "flush idle now" escape hatch (e.g. a downstream service restarted and you want the next acquire to mint fresh resources). In-use slots are untouched.
+
+## When the destroy callback is skipped
+
+`$destroy` is called only on the thread that holds the slot, and only while PHP code is running there: every PHP thread has a memory heap of its own, which no other thread may free into, and a callback with no PHP code to return to would turn an exception it throws into a fatal error, or hand it to your exception handler from inside the pool's teardown. Anywhere else the slot is let go without it, and PHP frees the object in it when the request of the thread holding it ends, as it frees every object still alive at that point:
+
+- **Server stop.** The shutdown closes every pool but destroys no slot: it runs on a thread that holds none. In worker mode, to have `$destroy` called for the slots a worker holds, call `evict()` after `oxphp_worker()` returns — the code after it runs on that worker once its loop has ended, the server's stop among the reasons — on a pool that worker created itself:
+
+  ```php
+  $pool = new Pool(factory: ..., destroy: ...);
+
+  oxphp_worker(function () use ($pool) {
+      // ... handle the request
+  });
+
+  // The loop has ended: hand the slots this worker holds to $destroy.
+  $pool->evict();
+  ```
+
+  Not on a pool bound to a name with `Registry::pool()`: one worker creates it for all of them, its destroy callback is that worker's closure, and PHP frees the closure when that worker's script ends — which at a stop can be before another worker's loop has ended, if that one was still finishing a request.
+
+- **The end of a request.** A pool whose last reference goes away while its request is ending — once a worker's script has run to its end, say — goes away with no PHP code running, so `$destroy` is not called for the slots of its own thread either. Outside worker mode this is how a pool a request creates ends, unless the request lets go of it earlier — see [Outside worker mode](#outside-worker-mode).
+- **Slots another thread holds.** When the pool's last reference goes away on one thread, the idle slots another thread holds — another worker's, or a task's started with `oxphp_async()` — are let go there and then. Their objects stay alive until that thread's request ends, which for a worker or a task's thread is when the thread exits, and until then a connection in one stays open without counting against `maxSize`.
+
+Each slot let go in one of these ways, when its pool was given a destroy callback, is counted in `oxphp_shared_pool_destroy_skipped_total` — see [Observability](#observability).
 
 ## Budget & acquire semantics
 
@@ -275,6 +299,7 @@ See [Shared Observability](shared-observability.md) for the full tour. Quick ref
   - `oxphp_shared_pool_acquire_total{pool_id="…",result="ok|timeout|closed|saturated"}` — counter. `saturated` counts non-blocking `tryAcquire` calls that found the pool full (distinct from `timeout`, which means a wait elapsed).
   - `oxphp_shared_pool_evicted_total{pool_id="…",reason="idle_timeout|evict|shutdown"}` — counter.
   - `oxphp_shared_pool_wait_seconds_*{pool_id="…"}`  — acquire-wait histogram (bucket / sum / count).
+- Prometheus metric for all pools together: `oxphp_shared_pool_destroy_skipped_total{reason="no_frame|other_thread|request_ended"}` — counter of the slots let go without the destroy callback their pool was given, in the cases listed under [When the destroy callback is skipped](#when-the-destroy-callback-is-skipped).
 
 Alert-worthy combinations: rising `waiting` with flat `count` means the pool is saturated and should be resized; rising `acquire_total{result="timeout"}` with normal `in_use` means the factory is slow (or blocking); rising `acquire_total{result="saturated"}` means callers keep hitting `tryAcquire` on a full pool (backpressure firing).
 

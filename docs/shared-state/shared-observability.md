@@ -189,8 +189,11 @@ All metrics are exposed at `GET /metrics` alongside the core server metrics.
 | `oxphp_shared_pool_acquire_total`         | counter   | `pool_id`                           |
 | `oxphp_shared_pool_evicted_total`         | counter   | `pool_id`, `reason`                 |
 | `oxphp_shared_pool_wait_seconds`          | histogram | `pool_id`                           |
+| `oxphp_shared_pool_destroy_skipped_total` | counter   | `reason`                            |
 
-`oxphp_shared_pool_evicted_total` labels: `reason=idle_timeout | evict | shutdown`. `idle_timeout` is an automatic eviction of an idle slot, `evict` is an explicit `Pool::evict()` call, and `shutdown` is teardown at process exit.
+`oxphp_shared_pool_evicted_total` labels: `reason=idle_timeout | evict | shutdown`. `idle_timeout` is an automatic eviction of an idle slot, `evict` is an explicit `Pool::evict()` call, and `shutdown` is an idle slot torn down when its pool goes away, by the thread holding it — which leaves the series at 0: a pool counts it only as it goes away, after which the pool is no longer reported. The server's stop tears down no slot — see [When the destroy callback is skipped](shared-pool.md#when-the-destroy-callback-is-skipped).
+
+`oxphp_shared_pool_destroy_skipped_total` counts the slots let go without the destroy callback their pool was given, for one of the three reasons below, across all pools — the pool is usually gone by then. Labels: `reason=no_frame | other_thread | request_ended`. `no_frame` is a slot torn down by the thread holding it while no PHP code was running there — as when its pool goes away while that thread's request is ending. `other_thread` is a slot another thread held when the pool went away. `request_ended` is a slot whose thread's request had ended first: outside worker mode when the request is over, otherwise when the thread exits, and for a slot released back to a thread that has already exited. All three series are always exported.
 
 ### Counter / Flag / Once / Mutex
 

@@ -1044,6 +1044,7 @@ pub unsafe fn oxphp_shared_map_cursor_alloc(
 
 pub const OXPHP_SHARED_INVOKE_OK: c_int = 0;
 pub const OXPHP_SHARED_INVOKE_PHP_THREW: c_int = 1;
+pub const OXPHP_SHARED_INVOKE_SKIPPED: c_int = 2;
 pub const OXPHP_SHARED_INVOKE_BAD_CALLABLE: c_int = -1;
 pub const OXPHP_SHARED_INVOKE_BAD_RETURN: c_int = -2;
 pub const OXPHP_SHARED_INVOKE_BAILOUT: c_int = -4;
@@ -1154,12 +1155,12 @@ pub unsafe fn oxphp_pool_destroy_invoke(
     slot_zv_heap: *mut c_void,
 ) -> c_int {
     count_pool_heap_call();
+    let rc = run_mock_pool_destroy(slot_zv_heap);
     assert_ne!(
-        run_mock_pool_destroy(slot_zv_heap),
-        OXPHP_SHARED_INVOKE_BAILOUT,
+        rc, OXPHP_SHARED_INVOKE_BAILOUT,
         "a bailout in the unguarded destroy helper longjmps across its Rust callers"
     );
-    0
+    rc
 }
 /// As under OXPHP_SHARED_RUN_GUARDED: a bailout the hook stands for is held
 /// back, and while one is, the call is refused without running anything.

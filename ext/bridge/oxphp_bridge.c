@@ -6355,6 +6355,9 @@ int oxphp_shared_wrapper_new(zval *out, uint8_t type_tag, const void *entry_ptr)
 #define OXPHP_SHARED_INVOKE_PHP_THREW   1
 #define OXPHP_SHARED_INVOKE_BAD_CALLABLE -1
 #define OXPHP_SHARED_INVOKE_BAD_RETURN  -2
+/* The pool destroy helpers below freed the slot without calling the
+ * $destroy they were given: no PHP code is executing on the thread. */
+#define OXPHP_SHARED_INVOKE_SKIPPED     2
 /* A bailout ended the helper, which is being held back — see
  * OXPHP_SHARED_RUN_GUARDED. Returned by every helper below that runs under
  * it, the Pool and spike helpers included, so it sits outside the codes any
@@ -7008,8 +7011,10 @@ int oxphp_pool_spike_invoke(
  *  Per-resource zvals are emalloc'd once at factory invocation
  *  and owned by the pool; acquire ZVAL_COPYs them into user
  *  out-zvals; release does not touch the slot zval (it stays
- *  refcounted by the pool). Only pool-drop should efree the
- *  slot; v1 leaks on drop.
+ *  refcounted by the pool). A slot is freed, after any
+ *  $destroy, only on the thread holding it: by idle eviction,
+ *  evict() or the pool going away. Other threads' slots are
+ *  forgotten when the pool goes away, not freed.
  * ═══════════════════════════════════════════════════════════ */
 
 typedef struct {
@@ -7042,11 +7047,10 @@ int oxphp_pool_fcc_new(void *callable_zval, void **out_fcc_heap) {
     return 0;
 }
 
-/* Free a fcc_heap. In v1 the pool leaks these at registry drop;
- * later shutdown-drain wiring will invoke this explicitly on the
- * creating worker. zval_ptr_dtor from a non-Zend-initialised
- * thread is unsafe — callers MUST ensure they run inside
- * `php_request_startup` bounds. */
+/* Free a fcc_heap. efree() takes it back into the calling thread's
+ * heap, so only the request that allocated it may call this: another
+ * thread's heap aborts the process ("zend_mm_heap corrupted"), and a
+ * request that has ended had its heap reset, the fcc with it. */
 void oxphp_pool_fcc_free(void *fcc_heap) {
     if (!fcc_heap) return;
     oxphp_pool_fcc_t *heap = (oxphp_pool_fcc_t *)fcc_heap;
@@ -7192,8 +7196,8 @@ void oxphp_pool_slot_to_user(void *slot_zv_heap, void *user_out_zv) {
 }
 
 /* zval_ptr_dtor + efree on a slot-zval heap allocation. Same
- * thread-safety caveat as oxphp_pool_fcc_free: must run on a
- * Zend-initialised worker thread. */
+ * caveat as oxphp_pool_fcc_free: only the request that allocated it
+ * may free it. */
 void oxphp_pool_slot_free(void *slot_zv_heap) {
     if (!slot_zv_heap) return;
     zval *slot = (zval *)slot_zv_heap;
@@ -7201,32 +7205,34 @@ void oxphp_pool_slot_free(void *slot_zv_heap) {
     efree(slot);
 }
 
-/* Best-effort $destroy($resource) invocation, then slot teardown.
+/* $destroy($resource), then slot teardown.
  *
- * Called on the thread that drains the pool — which may not be the
- * thread that minted the resource, and may not even be inside a live
- * PHP request. We guard both hazards:
+ * Frees the slot into the calling thread's heap, so it must be called
+ * by the request that allocated the slot — as oxphp_pool_slot_free —
+ * and the caller makes sure it is.
  *
  *  - If `destroy_fcc_heap == NULL` (user opted out by passing
  *    `$destroy: null`), we skip invocation entirely.
- *  - If `EG(current_execute_data) == NULL` we skip invocation
- *    too: `zend_call_known_function` requires a request context
- *    (symbol tables, VM stack). The slot-zval is still released
- *    — `zval_ptr_dtor` is refcount arithmetic and safe anywhere
- *    the bridge is loaded.
+ *  - If `EG(current_execute_data) == NULL` — the request's own
+ *    teardown, or no PHP code running on the thread — we skip it
+ *    too and say so: with no frame to return to, a throw from
+ *    $destroy would end as a fatal error, or in a user exception
+ *    handler run from inside the pool's teardown.
  *  - If $destroy throws, we serialise the message via
  *    `oxphp_bridge_capture_fatal` (operator-visible via the
  *    thread-local pop path) and clear the exception so the
- *    drain loop can continue. Drain callers have no PHP frame
- *    to propagate into.
+ *    caller can go on to the next slot.
  *
- * Frees `slot_zv_heap` (zval_ptr_dtor + efree) and returns 0 —
- * best-effort, never signals failure upward — unless a bailout ends
- * it, which oxphp_pool_destroy_invoke() lets go by longjmp and
+ * Frees `slot_zv_heap` (zval_ptr_dtor + efree) and returns
+ * OXPHP_SHARED_INVOKE_SKIPPED when a $destroy was given and no PHP
+ * code was executing to call it from, 0 otherwise — never a failure
+ * of $destroy — unless a bailout ends it, which
+ * oxphp_pool_destroy_invoke() lets go by longjmp and
  * oxphp_pool_destroy_invoke_guarded() holds back. */
 static int oxphp_pool_destroy_invoke_unguarded(void *destroy_fcc_heap, void *slot_zv_heap) {
     if (!slot_zv_heap) return 0;
     zval *slot = (zval *)slot_zv_heap;
+    int skipped = destroy_fcc_heap && !EG(current_execute_data);
 
     if (destroy_fcc_heap && EG(current_execute_data)) {
         oxphp_pool_fcc_t *heap = (oxphp_pool_fcc_t *)destroy_fcc_heap;
@@ -7272,7 +7278,7 @@ static int oxphp_pool_destroy_invoke_unguarded(void *destroy_fcc_heap, void *slo
 
     zval_ptr_dtor(slot);
     efree(slot);
-    return 0;
+    return skipped ? OXPHP_SHARED_INVOKE_SKIPPED : 0;
 }
 
 /* For the callers with no dispatch stub below them to raise a bailout

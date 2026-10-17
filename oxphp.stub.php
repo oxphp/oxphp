@@ -1730,7 +1730,11 @@ namespace OxPHP\Shared {
      * eviction.
      *
      * Factory runs lazily on first acquire; destroy (if provided) runs on
-     * slot eviction or pool shutdown. `maxSize` is a hard budget — once it
+     * the thread holding a slot, while PHP code runs there: on eviction, or
+     * when the pool goes away on that thread. It does not run at server
+     * stop — in worker mode call evict() after oxphp_worker() returns for
+     * that, on a pool the worker created itself (not one from
+     * Registry::pool()). `maxSize` is a hard budget — once it
      * is reached, acquire waits for a free slot (see the namespace-level
      * timeout convention).
      *
@@ -1745,7 +1749,7 @@ namespace OxPHP\Shared {
     {
         /**
          * @param callable      $factory       Creates a pooled resource. Receives no arguments; must return an object.
-         * @param callable|null $destroy       Called with the resource on eviction/shutdown (outside worker mode, not for slots still idle when the creating request ends).
+         * @param callable|null $destroy       Called with the resource on eviction, or when the pool goes away, on the thread holding it while PHP code runs there (not at server stop, and outside worker mode not for slots still idle when the creating request ends).
          * @param int           $maxSize       Hard budget of live slots; must be > 0 (default 32).
          * @param int           $idleTimeoutMs Idle ms before a slot is eligible for eviction; 0 disables eviction (default 300_000).
          */

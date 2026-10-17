@@ -28,18 +28,23 @@
 //!   reference can go away in another thread — forgets the same way.
 //!   Threads whose request lasts as long as the thread (worker mode, the
 //!   async pool) leave `home` unset.
-//! * **Best-effort destroy on drop/shutdown.** `on_shutdown_notify` and
-//!   `on_drop` walk every idle deque and call `oxphp_pool_destroy_invoke`
-//!   — which runs `$destroy($resource)` and `zval_ptr_dtor`+`efree` on
-//!   the slot. The C helper guards against a missing Zend context
-//!   (`EG(current_execute_data) == NULL`): if we're not inside a PHP
-//!   request frame we skip `$destroy` but still release the slot
-//!   (refcount arithmetic is safe anywhere). Exceptions thrown inside
-//!   `$destroy` are captured via `oxphp_bridge_capture_fatal` and
-//!   cleared — drain has no user frame to propagate to.
-//!   After drain, `oxphp_pool_fcc_free` releases the factory/destroy
-//!   fccs. Resources in-flight at SIGKILL or panic-before-drain are
-//!   reaped by the OS process teardown.
+//! * **Teardown frees only what the calling thread's open request
+//!   allocated.** Every heap is per thread, and a request's is reset when
+//!   it ends; freeing into any other aborts the process. `on_shutdown_notify`
+//!   and `on_drop` destroy the calling thread's own idle slots through
+//!   `oxphp_pool_destroy_invoke` — `$destroy($resource)`, then
+//!   `zval_ptr_dtor`+`efree` on the slot — and only while its request is
+//!   open. The C helper calls `$destroy` only with PHP code executing on
+//!   the thread (`EG(current_execute_data) != NULL`): a throw with no frame
+//!   to return to would end as a fatal error. Exceptions thrown inside
+//!   `$destroy` are captured via `oxphp_bridge_capture_fatal` and cleared.
+//!   Other threads' slots are left to them: the registry drain at shutdown
+//!   leaves them where they are, and `on_drop` forgets them — their memory
+//!   and the objects in it go with their thread's request. The
+//!   factory/destroy fccs are freed with `oxphp_pool_fcc_free` only by the
+//!   request that created them, and forgotten otherwise. A slot of a pool
+//!   with a `$destroy` that leaves without it is counted in
+//!   `oxphp_shared_pool_destroy_skipped_total`.
 
 use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
@@ -96,13 +101,77 @@ thread_local! {
     /// it on the next addition, since under `oxphp run` the hook that
     /// empties it runs only when the script ends.
     static REQUEST_POOLS: RefCell<Vec<Weak<Entry>>> = const { RefCell::new(Vec::new()) };
+    /// The request open on this thread, as [`open_request_token`] numbered
+    /// it; 0 before the first and once one has been shut down. A request
+    /// whose startup failed is never shut down: its number stays until the
+    /// next request replaces it, and its heap is not reset meanwhile.
+    static OPEN_REQUEST: Cell<u64> = const { Cell::new(0) };
 }
+
+/// Source of request numbers. Process-wide, so that no two requests share
+/// one, whichever threads they ran on: a thread's key can be handed to a
+/// thread started after it has exited.
+static NEXT_REQUEST: AtomicU64 = AtomicU64::new(1);
 
 /// Declare the calling thread's [`RequestScope`]. Called by the plugin's
 /// `request_frame_opening` hook each time a PHP request is about to start
 /// on the thread, before `php_request_startup`.
 pub fn set_request_scope(scope: RequestScope) {
     REQUEST_SCOPE.with(|s| s.set(scope));
+}
+
+/// Number the request about to start on the calling thread. Called by the
+/// plugin's `request_frame_opening` hook, before `php_request_startup`:
+/// what the startup allocates already belongs to this request.
+pub fn open_request_token() {
+    let token = NEXT_REQUEST.fetch_add(1, Ordering::Relaxed);
+    OPEN_REQUEST.with(|r| r.set(token));
+}
+
+/// The calling thread's request has been shut down and its heap reset.
+/// Called by the plugin's `request_frame_closed` hook before anything else
+/// there can tear a pool down.
+pub fn close_request_token() {
+    OPEN_REQUEST.with(|r| r.set(0));
+}
+
+/// The request open on the calling thread, or 0. Memory a pool took from
+/// the request heap can be freed only while the request it was taken in
+/// is this one.
+pub(crate) fn current_request() -> u64 {
+    OPEN_REQUEST.with(|r| r.get())
+}
+
+/// Why a slot of a pool with a `$destroy` left without `$destroy` being
+/// called on it. Exported as `oxphp_shared_pool_destroy_skipped_total`.
+#[derive(Clone, Copy)]
+pub enum SkipReason {
+    /// Its own thread freed it with no PHP code executing there.
+    NoFrame = 0,
+    /// The pool was torn down on another thread, which forgot it.
+    OtherThread = 1,
+    /// The request of its thread ended, and the slot with it.
+    RequestEnded = 2,
+}
+
+static DESTROY_SKIPPED: [AtomicU64; 3] = [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)];
+
+fn record_destroy_skipped(count: u64, reason: SkipReason) {
+    if count > 0 {
+        DESTROY_SKIPPED[reason as usize].fetch_add(count, Ordering::Relaxed);
+    }
+}
+
+/// Slots of every pool that left without `$destroy`, for `reason`.
+pub fn destroy_skipped_total(reason: SkipReason) -> u64 {
+    DESTROY_SKIPPED[reason as usize].load(Ordering::Relaxed)
+}
+
+/// Count the slot a destroy helper freed without calling `$destroy`.
+fn note_destroy_rc(rc: c_int) {
+    if rc == ffi::OXPHP_SHARED_INVOKE_SKIPPED {
+        record_destroy_skipped(1, SkipReason::NoFrame);
+    }
 }
 
 /// Whether `Shared\Registry` must refuse to bind a pool to a name on the
@@ -202,10 +271,11 @@ pub struct PoolInner {
 
     /// Factory/destroy callables. Owned by the PHP wrapper via explicit
     /// refcount; typed invocation lives in the FFI layer. `destroy_fcc`
-    /// is nullable when the user passes `null` for `$destroy`. Both are
-    /// swapped to null when the request heap they live in is reset
-    /// (see [`PoolInner::end_request_on`]), and are freed only if still
-    /// set.
+    /// is nullable when the user passes `null` for `$destroy`. For a pool
+    /// with a home thread, both are swapped to null when the request heap
+    /// they live in is reset (see [`PoolInner::end_request_on`]). They are
+    /// freed only if still set, and only by the request that allocated
+    /// them (`created_in`).
     factory_fcc: AtomicPtr<c_void>,
     destroy_fcc: AtomicPtr<c_void>,
 
@@ -214,6 +284,10 @@ pub struct PoolInner {
     /// until `request_ended`. `None` on [`RequestScope::Thread`].
     home: Option<ThreadKey>,
     request_ended: AtomicBool,
+
+    /// The request the callables were allocated in (see
+    /// [`open_request_token`]); 0 if none was open.
+    created_in: u64,
 
     closed: AtomicBool,
     self_id: OnceLock<SharedId>,
@@ -257,7 +331,9 @@ pub enum EvictReason {
     IdleTimeout,
     /// User-driven (`$pool->evict()` FFI call).
     Manual,
-    /// Shutdown-drain (`SharedRegistry::drain` → `on_shutdown_notify`).
+    /// Teardown of the pool (`on_shutdown_notify`, `on_drop`), on the
+    /// thread that owns the slots, with its request open. Only ever
+    /// counted as the pool goes away, so no scrape sees it.
     Shutdown,
 }
 
@@ -283,6 +359,7 @@ impl PoolInner {
             home: (REQUEST_SCOPE.with(|s| s.get()) != RequestScope::Thread)
                 .then(current_thread_key),
             request_ended: AtomicBool::new(false),
+            created_in: current_request(),
             closed: AtomicBool::new(false),
             self_id: OnceLock::new(),
             self_entry: OnceLock::new(),
@@ -499,7 +576,8 @@ impl PoolInner {
         for _ in 0..count {
             self.release_budget();
         }
-        self.forget_idle_of(key);
+        let forgotten = self.forget_idle_of(key);
+        self.record_skipped(forgotten, SkipReason::RequestEnded);
         self.parked.remove(&key);
         count
     }
@@ -532,9 +610,10 @@ impl PoolInner {
     ///   by definition alive).
     /// * **Cross-thread release, owner alive.** Park in the owner's
     ///   deque; the owner will re-acquire it on its next request.
-    /// * **Cross-thread release, owner gone.** Destroy the slot
-    ///   inline via `destroy_slot`. Prevents the slot from parking
-    ///   in a deque nobody will drain before shutdown.
+    /// * **Cross-thread release, owner gone.** Forget the slot and refund
+    ///   its budget: it lived in the heap of the owner's request, reset
+    ///   when that request ended, so there is nothing left to free or to
+    ///   hand `$destroy`.
     ///
     /// Liveness uses the explicit `worker_liveness` registry, NOT
     /// `pthread_kill(tid, 0)` — see that module for the pthread_t
@@ -547,7 +626,8 @@ impl PoolInner {
         let owner = slot.owner;
 
         if owner != me && !crate::plugins::ox_shared::worker_liveness::is_thread_alive(owner) {
-            self.destroy_slot(slot);
+            self.release_budget();
+            self.record_skipped(1, SkipReason::RequestEnded);
             return;
         }
 
@@ -671,6 +751,7 @@ impl PoolInner {
             let rc = unsafe {
                 ffi::oxphp_pool_destroy_invoke_guarded(self.destroy_fcc(), slot.resource)
             };
+            note_destroy_rc(rc);
             self.release_budget();
             destroyed += 1;
             if rc == ffi::OXPHP_SHARED_INVOKE_BAILOUT {
@@ -753,23 +834,38 @@ impl PoolInner {
         self.waiters_cv.notify_all();
     }
 
-    /// Best-effort teardown of a single slot: invoke `$destroy` via
-    /// the C bridge (which also `zval_ptr_dtor`s and `efree`s the
-    /// slot zval), then account for the freed capacity.
+    /// Teardown of a slot of the calling thread, with its request open:
+    /// invoke `$destroy` via the C bridge (which also `zval_ptr_dtor`s and
+    /// `efree`s the slot zval), then account for the freed capacity.
     ///
-    /// Called from `on_shutdown_notify` and `on_drop`. The bridge
-    /// helper guards `EG` context internally and captures `$destroy`
-    /// throws, so we never observe a failure path here — hence the
-    /// `()` return.
+    /// Called from `on_shutdown_notify`, itself called by `on_drop`. The
+    /// bridge helper calls `$destroy` only with PHP code executing on the
+    /// thread, and captures its throws, so we never observe a failure
+    /// path here — hence the `()` return.
     fn destroy_slot(&self, slot: PoolSlot) {
         // SAFETY: `slot.resource` was minted by `oxphp_pool_factory_invoke`
-        // (or is `null_mut()` in host tests — the mock is a no-op, and
-        // the production helper short-circuits on NULL). `destroy_fcc`
-        // is either `null_mut()` (user opted out of $destroy, or
+        // on this thread, in the request still open on it (or is
+        // `null_mut()` in host tests — the mock is a no-op, and the
+        // production helper short-circuits on NULL). `destroy_fcc` is
+        // either `null_mut()` (user opted out of $destroy, or
         // `end_request_on` forgot it with its request heap) or the
         // emalloc'd fcc from `oxphp_pool_fcc_new`.
-        unsafe { ffi::oxphp_pool_destroy_invoke(self.destroy_fcc(), slot.resource) };
+        let rc = unsafe { ffi::oxphp_pool_destroy_invoke(self.destroy_fcc(), slot.resource) };
+        note_destroy_rc(rc);
         self.release_budget();
+    }
+
+    /// Whether the calling thread may free the idle slots it parked here:
+    /// they were minted in its request, and that request is still open.
+    fn frees_own_idle_here(&self) -> bool {
+        current_request() != 0 && !self.foreign_to_current_thread()
+    }
+
+    /// Count `count` slots that left without `$destroy`, if there is one.
+    fn record_skipped(&self, count: u64, reason: SkipReason) {
+        if !self.destroy_fcc().is_null() {
+            record_destroy_skipped(count, reason);
+        }
     }
 
     /// The request on thread `me` has ended and its heap has been reset.
@@ -778,7 +874,8 @@ impl PoolInner {
     /// their capacity. If `me` is this pool's `home`, close the pool and
     /// forget its callables the same way.
     fn end_request_on(&self, me: ThreadKey) {
-        self.forget_idle_of(me);
+        let forgotten = self.forget_idle_of(me);
+        self.record_skipped(forgotten, SkipReason::RequestEnded);
         if self.home == Some(me) {
             self.request_ended.store(true, Ordering::Release);
             self.close();
@@ -790,14 +887,15 @@ impl PoolInner {
     }
 
     /// Drop the slots parked under `key` without touching them, and
-    /// refund their capacity.
-    fn forget_idle_of(&self, key: ThreadKey) {
+    /// refund their capacity. Returns how many there were.
+    fn forget_idle_of(&self, key: ThreadKey) -> u64 {
         let forgotten = self.idle.remove(&key).map_or(0, |(_, deque)| {
             deque.into_inner().unwrap_or_else(|e| e.into_inner()).len()
         });
         for _ in 0..forgotten {
             self.release_budget();
         }
+        forgotten as u64
     }
 
     pub fn is_closed(&self) -> bool {
@@ -1002,9 +1100,10 @@ pub fn reclaim_all_pools_for_dead_worker(key: ThreadKey) {
 /// minted slots in — no other pool can hold this thread's slots — so
 /// neither a later request nor a registry drain reaches that memory.
 ///
-/// Calls neither PHP nor the bridge, with one exception: a pool without
-/// `home` whose last reference turns out to be the one this hook holds
-/// is torn down here, as by any other last holder.
+/// Calls neither PHP nor the bridge. A pool whose last reference turns
+/// out to be the one this hook holds is torn down here, as by any other
+/// last holder, but the request's number has been cleared by then
+/// ([`close_request_token`]), so that teardown frees nothing.
 pub fn end_request_on_current_thread() {
     let me = current_thread_key();
     for weak in REQUEST_POOLS.with(|list| std::mem::take(&mut *list.borrow_mut())) {
@@ -1043,34 +1142,44 @@ impl SharedInner for PoolInner {
 
     fn on_drop(&self) {
         // Registry evicted this Pool (last SharedId ref released) or
-        // a worker is tearing down the pool directly. Drain idle
-        // resources first (destroy each slot best-effort), then free
-        // the factory/destroy fccs.
+        // a worker is tearing down the pool directly: no thread can use
+        // it any more. Runs on whichever thread let go of it last, with
+        // a request open or not, with PHP code executing there or not.
         //
-        // Runs on whichever thread triggered the drop. That thread
-        // may or may not be inside a PHP request frame; the C bridge
-        // helper (`oxphp_pool_destroy_invoke` / `oxphp_pool_fcc_free`)
-        // guards against a missing `EG(current_execute_data)` by
-        // skipping PHP-touching ops and only doing the refcount
-        // arithmetic that is always safe.
-        //
-        // A pool whose request heap is out of this thread's reach is
-        // only forgotten: freeing into another thread's heap aborts the
-        // process, and an ended request's heap has already been reset.
-        let free = !self.foreign_to_current_thread();
+        // Only what this thread's open request allocated may be freed
+        // here: freeing into another thread's heap aborts the process,
+        // and an ended request's heap has already been reset. So this
+        // thread's own idle slots are destroyed (`on_shutdown_notify`),
+        // every other deque is forgotten — those slots, and the objects
+        // in them, go with the request of the thread that minted them —
+        // and the callables are freed only by the request that made
+        // them.
         self.on_shutdown_notify();
 
+        // Keys first: removing from `idle` while iterating it deadlocks.
+        // A deque of this thread still here is one it may not free: its
+        // request has ended.
+        let me = current_thread_key();
+        let keys: Vec<ThreadKey> = self.idle.iter().map(|e| *e.key()).collect();
+        for key in keys {
+            let forgotten = self.forget_idle_of(key);
+            let reason = if key == me {
+                SkipReason::RequestEnded
+            } else {
+                SkipReason::OtherThread
+            };
+            self.record_skipped(forgotten, reason);
+        }
+
         // SAFETY: a non-null `factory_fcc` was emalloc'd by
-        // `oxphp_pool_fcc_new` when the pool was created, in a request
-        // heap that has not been reset since (`end_request_on` nulls it
-        // when it is). For a pool with `home`, `free` holds only on the
-        // thread of that heap. For a pool without `home` — one made in
-        // worker mode or in an async task — `free` always holds, and
-        // nothing here checks the thread: dropped on any thread but the
-        // one that created it, this frees into another thread's heap,
-        // which is not sound and is a known gap. `destroy_fcc` is either
+        // `oxphp_pool_fcc_new` when the pool was created, in the heap of
+        // request `created_in` (`end_request_on` nulls it when a pool with
+        // `home` outlives that request). `free` holds only while that
+        // request is the one open on this thread, so the heap is this
+        // thread's and has not been reset since. `destroy_fcc` is either
         // NULL or an fcc from the same path. The swap frees each at most
-        // once.
+        // once; otherwise they are forgotten with that heap.
+        let free = self.created_in != 0 && self.created_in == current_request();
         for fcc in [&self.factory_fcc, &self.destroy_fcc] {
             let fcc = fcc.swap(std::ptr::null_mut(), Ordering::AcqRel);
             if free && !fcc.is_null() {
@@ -1081,40 +1190,32 @@ impl SharedInner for PoolInner {
 
     fn on_shutdown_notify(&self) {
         // `SharedRegistry::drain` calls this on every entry during
-        // graceful shutdown. Close the pool first so new acquires
-        // fail fast and blocked waiters wake and bail, then walk
-        // every idle deque and destroy each slot.
+        // graceful shutdown — on the main thread, with no request open;
+        // in server mode the PHP threads still run then — and `on_drop`
+        // calls it first. Close the pool first so new acquires fail fast
+        // and blocked waiters wake and bail, then destroy the calling
+        // thread's own idle slots, if it may free them.
         //
-        // Safe to invoke redundantly — a second call sees empty
-        // deques and exits without touching the fccs (those are
-        // freed exclusively by `on_drop`).
+        // Every other thread's slots live in that thread's heap and are
+        // left where they are: their owner can still evict them, and
+        // worker code after `oxphp_worker()` returns runs while the
+        // server stops. Whoever drops the pool last forgets what remains.
+        //
+        // Safe to invoke redundantly — a second call finds no deque of
+        // this thread and leaves the fccs alone (those are `on_drop`'s).
         self.close();
-
-        // Every slot of a pool with `home` lives in that home's request
-        // heap; out of its reach they are forgotten, not destroyed. Keys
-        // first: removing from `idle` while iterating it deadlocks.
-        if self.foreign_to_current_thread() {
-            let keys: Vec<ThreadKey> = self.idle.iter().map(|e| *e.key()).collect();
-            for key in keys {
-                self.forget_idle_of(key);
-            }
+        if !self.frees_own_idle_here() {
             return;
         }
-
-        let mut drained: u64 = 0;
-        for entry in self.idle.iter() {
-            let mut deque = entry
-                .value()
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner());
-            while let Some(slot) = deque.pop_front() {
-                // Drop the mutex briefly is not strictly required
-                // (we own the shard exclusively during drain), but
-                // destroy_slot calls release_budget which notifies
-                // the waiter condvar — harmless re-entry, no lock.
-                self.destroy_slot(slot);
-                drained += 1;
-            }
+        // Out of the map before any `$destroy` runs, as in
+        // `evict_all_on_current_thread`.
+        let Some((_, deque)) = self.idle.remove(&current_thread_key()) else {
+            return;
+        };
+        let slots = deque.into_inner().unwrap_or_else(|e| e.into_inner());
+        let drained = slots.len() as u64;
+        for slot in slots {
+            self.destroy_slot(slot);
         }
         self.record_evicted(drained, EvictReason::Shutdown);
     }
@@ -1153,8 +1254,9 @@ impl SharedInnerPoolExt for dyn SharedInner {
 // * `factory_callable_zval` / `destroy_callable_zval` on create: C
 //   allocates a `oxphp_pool_fcc_t` (ZVAL_COPY'd callable + cached fcc)
 //   and returns its heap pointer; Rust stores that pointer in
-//   `PoolInner.factory_fcc` / `.destroy_fcc`. v1 leaks these on pool
-//   drop.
+//   `PoolInner.factory_fcc` / `.destroy_fcc`. Freed on pool drop only
+//   in the request that created the pool; dropped anywhere else, they
+//   are left to that request's end.
 // * Per-resource `slot_zv_heap`: C allocates at
 //   `oxphp_pool_factory_invoke` time (ZVAL_COPY of the factory's
 //   object return). Pool is the sole owner. `pool_acquire` hands the
@@ -1528,9 +1630,9 @@ pub unsafe extern "C" fn oxphp_shared_pool_acquire(
 ///
 /// v1 contract: release always succeeds as long as the pool id is
 /// alive and the slot pointer is non-null. If the owner's deque
-/// does not yet exist (factory-minted slot never deposited, or
-/// owner thread terminated) it is created lazily. The shutdown-walker
-/// destroys orphaned deques during drain.
+/// does not yet exist (factory-minted slot never deposited) it is
+/// created lazily; a slot whose owner thread has exited is forgotten
+/// (see `PoolInner::release`).
 ///
 /// # Safety
 /// `slot_zv_heap` must be a pointer that originated from this same
@@ -2525,20 +2627,28 @@ mod tests {
         worker_liveness::force_remove(a_tid);
     }
 
+    #[cfg(not(feature = "php"))]
     #[test]
-    fn release_cross_thread_dead_owner_destroys_inline() {
+    fn release_cross_thread_dead_owner_forgets() {
+        use crate::bridge::ffi::mock_pool_heap_calls;
         // A ghost owner key that was never registered (or has since
-        // unregistered). Cross-thread release treats it as dead and
-        // calls `destroy_slot` — the mock bridge's destroy helper is
-        // a no-op, so we only observe the bookkeeping: size and
-        // idle_count both drop to zero.
-        let p = inner(2);
+        // unregistered). Its heap went with it: cross-thread release
+        // forgets the slot, refunding its budget without freeing it.
+        let p = inner_with_fccs(2);
         const GHOST_KEY: ThreadKey = 0xDEAD_0000_0000_0001;
 
         assert!(p.try_reserve_budget());
+        let calls = mock_pool_heap_calls();
+        let skipped = destroy_skipped_total(SkipReason::RequestEnded);
         p.release(dummy_slot(GHOST_KEY));
 
-        assert_eq!(p.size(), 0, "destroy path must refund budget");
+        assert_eq!(
+            mock_pool_heap_calls(),
+            calls,
+            "a dead thread's heap is gone"
+        );
+        assert!(destroy_skipped_total(SkipReason::RequestEnded) > skipped);
+        assert_eq!(p.size(), 0, "forgetting must refund budget");
         assert_eq!(
             p.idle_count(),
             0,
@@ -2707,11 +2817,12 @@ mod tests {
     fn on_shutdown_notify_drains_idle_deques() {
         use crate::plugins::ox_shared::worker_liveness;
         // Populate three slots across two live owner keys, then
-        // drain. Under the mock bridge, `oxphp_pool_destroy_invoke`
-        // is a no-op returning 0 — we only observe the Rust-side
-        // bookkeeping (size, idle_count, closed flag). Both owner
-        // keys are registered so the cross-thread release parks
-        // rather than destroying inline.
+        // drain with a request open here. Under the mock bridge,
+        // `oxphp_pool_destroy_invoke` is a no-op returning 0 — we only
+        // observe the Rust-side bookkeeping (size, idle_count, closed
+        // flag). Both owner keys are registered so the cross-thread
+        // release parks rather than forgetting the slot.
+        open_request_token();
         let p = inner(4);
         let me = current_thread_key();
         const ALIVE_B: ThreadKey = 0xBEEF_0000_0000_1234;
@@ -2730,15 +2841,21 @@ mod tests {
         p.on_shutdown_notify();
 
         assert!(p.is_closed(), "drain must close the pool");
-        assert_eq!(p.size(), 0, "every destroyed slot frees budget");
-        assert_eq!(p.idle_count(), 0, "all idle deques drained");
+        assert_eq!(p.size(), 1, "every destroyed slot frees budget");
+        assert_eq!(
+            p.idle_by_thread(),
+            vec![(ALIVE_B, 1)],
+            "this thread's deque drained, B's left to B"
+        );
 
         worker_liveness::force_remove(ALIVE_B);
+        close_request_token();
     }
 
     #[test]
     fn on_shutdown_notify_is_idempotent() {
         // Second drain pass must see an empty pool and not panic.
+        open_request_token();
         let p = inner(2);
         assert!(p.try_reserve_budget());
         p.deposit_new(dummy_slot(current_thread_key()));
@@ -2749,6 +2866,7 @@ mod tests {
         p.on_shutdown_notify(); // no-op second call
         assert_eq!(p.size(), 0);
         assert!(p.is_closed());
+        close_request_token();
     }
 
     #[test]
@@ -2760,6 +2878,7 @@ mod tests {
         //   (2) empties the idle deques,
         //   (3) decrements size to zero.
         // NULL fccs are not handed to `oxphp_pool_fcc_free` at all.
+        open_request_token();
         let p = inner(2);
         let me = current_thread_key();
         assert!(p.try_reserve_budget());
@@ -2772,6 +2891,176 @@ mod tests {
         assert!(p.is_closed());
         assert_eq!(p.size(), 0);
         assert_eq!(p.idle_count(), 0);
+        assert_eq!(p.evicted_shutdown_total(), 2, "drained, not forgotten");
+        close_request_token();
+    }
+
+    /// `inner()` with stand-in callables, which the host mock never
+    /// dereferences.
+    #[cfg(not(feature = "php"))]
+    fn inner_with_fccs(max: usize) -> Arc<PoolInner> {
+        Arc::new(PoolInner::new(
+            0xFAC0_0061 as *mut c_void,
+            0xDE50_0061 as *mut c_void,
+            max,
+            Duration::from_secs(300),
+        ))
+    }
+
+    /// Park one slot in `owner`'s deque, as a release from that thread does.
+    #[cfg(not(feature = "php"))]
+    fn park_under(p: &PoolInner, owner: ThreadKey) {
+        assert!(p.try_reserve_budget());
+        p.idle
+            .entry(owner)
+            .or_insert_with(|| Mutex::new(VecDeque::new()))
+            .lock()
+            .unwrap()
+            .push_back(dummy_slot(owner));
+    }
+
+    // Counts calls on the host mock bridge; the stand-in pointers it uses
+    // must never reach the real one.
+    #[cfg(not(feature = "php"))]
+    #[test]
+    fn teardown_off_request_destroys_nothing() {
+        use crate::bridge::ffi::mock_pool_heap_calls;
+        const OTHER: ThreadKey = 0xBEEF_0000_0000_0061;
+
+        // A thread with no request open, as the main thread draining the
+        // registry at shutdown is: a slot of its own, one of another thread.
+        thread::spawn(|| {
+            let p = inner_with_fccs(2);
+            let me = current_thread_key();
+            assert!(p.try_reserve_budget());
+            p.deposit_new(dummy_slot(me));
+            park_under(&p, OTHER);
+            let calls = mock_pool_heap_calls();
+
+            p.on_shutdown_notify();
+
+            assert!(p.is_closed());
+            assert_eq!(
+                mock_pool_heap_calls(),
+                calls,
+                "no request heap is in reach here"
+            );
+            assert_eq!(p.idle_by_thread().len(), 2, "both slots are left");
+            assert_eq!(p.size(), 2);
+            assert_eq!(p.evicted_shutdown_total(), 0);
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[cfg(not(feature = "php"))]
+    #[test]
+    fn drop_forgets_slots_parked_by_another_thread() {
+        use crate::bridge::ffi::mock_pool_heap_calls;
+        const OTHER: ThreadKey = 0xBEEF_0000_0000_0062;
+
+        thread::spawn(|| {
+            open_request_token();
+            let p = inner_with_fccs(4);
+            let me = current_thread_key();
+            assert!(p.try_reserve_budget());
+            p.deposit_new(dummy_slot(me));
+            park_under(&p, OTHER);
+            let calls = mock_pool_heap_calls();
+            let skipped = destroy_skipped_total(SkipReason::OtherThread);
+
+            p.on_drop();
+
+            // Its own slot and the callables its request made, nothing of
+            // the other thread's.
+            assert_eq!(mock_pool_heap_calls() - calls, 1 + 2);
+            assert_eq!((p.size(), p.idle_count()), (0, 0));
+            assert_eq!(p.evicted_shutdown_total(), 1);
+            assert!(destroy_skipped_total(SkipReason::OtherThread) > skipped);
+            close_request_token();
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[cfg(not(feature = "php"))]
+    #[test]
+    fn drop_frees_callables_only_in_the_request_that_created_them() {
+        use crate::bridge::ffi::mock_pool_heap_calls;
+
+        thread::spawn(|| {
+            // Made and dropped with no request open: nothing says the heap it
+            // was made in has not been reset since.
+            let p = inner_with_fccs(1);
+            let calls = mock_pool_heap_calls();
+            p.on_drop();
+            assert_eq!(mock_pool_heap_calls(), calls, "no request made them");
+
+            open_request_token();
+
+            // Dropped on another thread, inside a request of its own.
+            let p = inner_with_fccs(1);
+            let freed = {
+                let p = Arc::clone(&p);
+                thread::spawn(move || {
+                    open_request_token();
+                    let calls = mock_pool_heap_calls();
+                    p.on_drop();
+                    close_request_token();
+                    mock_pool_heap_calls() - calls
+                })
+                .join()
+                .unwrap()
+            };
+            assert_eq!(freed, 0, "another thread's heap is out of reach");
+            assert!(p.factory_fcc().is_null() && p.destroy_fcc().is_null());
+
+            // Dropped on this thread, in a later request than the one that
+            // made it.
+            let p = inner_with_fccs(1);
+            close_request_token();
+            open_request_token();
+            let calls = mock_pool_heap_calls();
+            p.on_drop();
+            assert_eq!(mock_pool_heap_calls(), calls, "that heap has been reset");
+
+            // Dropped in the request that made it.
+            let p = inner_with_fccs(1);
+            let calls = mock_pool_heap_calls();
+            p.on_drop();
+            assert_eq!(mock_pool_heap_calls() - calls, 2, "both callables");
+            close_request_token();
+        })
+        .join()
+        .unwrap();
+    }
+
+    #[cfg(not(feature = "php"))]
+    #[test]
+    fn destroy_skipped_without_a_frame_is_counted() {
+        use crate::bridge::ffi::{mock_pool_destroy, OXPHP_SHARED_INVOKE_SKIPPED};
+
+        thread::spawn(|| {
+            open_request_token();
+            let p = inner_with_fccs(1);
+            assert!(p.try_reserve_budget());
+            p.deposit_new(dummy_slot(current_thread_key()));
+            mock_pool_destroy(Some(Box::new(|_| OXPHP_SHARED_INVOKE_SKIPPED)));
+            let skipped = destroy_skipped_total(SkipReason::NoFrame);
+
+            p.on_drop();
+
+            mock_pool_destroy(None);
+            assert!(destroy_skipped_total(SkipReason::NoFrame) > skipped);
+            assert_eq!(
+                p.evicted_shutdown_total(),
+                1,
+                "the slot was still freed on its own thread"
+            );
+            close_request_token();
+        })
+        .join()
+        .unwrap();
     }
 
     #[test]
@@ -3308,6 +3597,7 @@ mod tests {
     fn shutdown_drain_bumps_shutdown_eviction_counter() {
         // Full path: deposit slots, on_shutdown_notify, verify the
         // shutdown bucket records the drained count.
+        open_request_token();
         let p = inner(3);
         let me = current_thread_key();
         assert!(p.try_reserve_budget());
@@ -3321,6 +3611,7 @@ mod tests {
         // does not bump.
         p.on_shutdown_notify();
         assert_eq!(p.evicted_shutdown_total(), 2);
+        close_request_token();
     }
 
     #[cfg(not(feature = "php"))]
@@ -4026,11 +4317,16 @@ mod tests {
             }
 
             let calls = mock_pool_heap_calls();
+            let skipped = destroy_skipped_total(SkipReason::RequestEnded);
             end_request_on_current_thread();
             assert_eq!(
                 mock_pool_heap_calls(),
                 calls,
                 "the hook must not touch PHP memory"
+            );
+            assert!(
+                destroy_skipped_total(SkipReason::RequestEnded) >= skipped + 3,
+                "two slots of its own pool and one of the other went without $destroy"
             );
             assert!(
                 REQUEST_POOLS.with(|list| list.borrow().is_empty()),
@@ -4106,6 +4402,7 @@ mod tests {
 
         thread::spawn(|| {
             set_request_scope(RequestScope::EachRequest);
+            open_request_token();
             let me = current_thread_key();
             let make = || {
                 let id = register_pool_with_fccs(
@@ -4240,8 +4537,8 @@ mod tests {
         // v1 contract: release for a live owner that has not yet
         // minted a slot creates its idle deque on demand. The owner
         // must be in the liveness registry — a release targeted at
-        // an unregistered key takes the dead-owner inline-destroy
-        // path (covered by `release_cross_thread_dead_owner_destroys_inline`).
+        // an unregistered key takes the dead-owner forget path
+        // (covered by `release_cross_thread_dead_owner_forgets`).
         let id = register_pool(1);
         // SAFETY: `id` is the `Arc::into_raw` pointer returned by
         // `register_pool`, kept alive for the duration of this test.

@@ -4,8 +4,9 @@
 //! back to their owner's idle deque. When a slot is released from a
 //! non-owner thread we need to answer one question: is the owner
 //! still alive? If it is, we park normally. If it is gone (panic +
-//! respawn, scale-down) we destroy the resource inline to avoid
-//! orphaning the slot in a deque nobody will ever read.
+//! respawn, scale-down) we forget the slot and refund its budget,
+//! rather than orphan it in a deque nobody will ever read: it lived in
+//! the heap of the owner's request, reset when that request ended.
 //!
 //! `pthread_kill(tid, 0)` is NOT a reliable answer. Both glibc
 //! NPTL and macOS recycle the `struct pthread` storage after
@@ -75,7 +76,7 @@ pub fn is_thread_alive(key: ThreadKey) -> bool {
     match LIVE_WORKERS.get() {
         Some(reg) => reg.contains(&key),
         // No registry means no workers registered yet — safest answer
-        // is "not alive", which falls back to the inline-destroy path.
+        // is "not alive", which falls back to the dead-owner path.
         // In practice this only fires during host unit tests that
         // never spin up a SAPI worker.
         None => false,
