@@ -14,7 +14,8 @@ if (!class_exists('OxphpStreamBackpressureProbe', false)) {
     final class OxphpStreamBackpressureProbe
     {
         /** How far the fixture got: null, 'flushing' (inside a flush), 'flushed',
-         *  'fatal' (about to run out of memory_limit), 'done'. */
+         *  'fatal' (about to run out of memory_limit), 'thrown' (in a flush
+         *  whose output handler threw), 'done'. */
         public static ?string $stage = null;
 
         /** How many of its flushes have returned. */
@@ -35,6 +36,11 @@ if (!class_exists('OxphpStreamBackpressureProbe', false)) {
 
         /** Set by a test for the fixture to act on after its next flush: 'fatal'. */
         public static ?string $command = null;
+
+        /** How many times its output handlers threw (?throw=), and how many of
+         *  those exceptions the catch around the flush caught. */
+        public static int $thrown = 0;
+        public static int $caught = 0;
 
         /** How many flushes it made after it saw its client gone (?after=). */
         public static int $flushesAfterGone = 0;
@@ -59,6 +65,8 @@ if (!class_exists('OxphpStreamBackpressureProbe', false)) {
             self::$startedAt = 0.0;
             self::$endedAt = 0.0;
             self::$command = null;
+            self::$thrown = 0;
+            self::$caught = 0;
             self::$flushesAfterGone = 0;
             self::$rssBefore = 0;
             self::$rssAfter = 0;

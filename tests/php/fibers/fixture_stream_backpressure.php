@@ -22,6 +22,10 @@ declare(strict_types=1);
 // memory_limit after its next flush, with implicit flush on, so the error PHP
 // displays is flushed to the stream as it is written. ?alloc=N allocates N MiB
 // and answers 'allocated <bytes>', recording what it saw of the stream first.
+//
+// ?throw=1: every chunk goes through an output handler of its own that throws
+// in the chunk's flush, and the flush's catch takes the handler off and counts
+// what it caught.
 
 if (isset($_GET['ping'])) {
     echo 'pong';
@@ -45,6 +49,7 @@ OxphpStreamBackpressureProbe::reset();
 OxphpStreamBackpressureProbe::$startedAt = microtime(true);
 
 $memfatal = isset($_GET['memfatal']);
+$throw = isset($_GET['throw']);
 
 register_shutdown_function(static function () use ($memfatal): void {
     if ($memfatal) {
@@ -74,10 +79,24 @@ $chunks = intdiv((int) ($_GET['mib'] ?? 32) * 1024 * 1024, $size);
 
 header('Content-Type: application/octet-stream');
 
+$thrower = static function (): string {
+    OxphpStreamBackpressureProbe::$stage = 'thrown';
+    OxphpStreamBackpressureProbe::$thrown++;
+    throw new RuntimeException('thrown by the output handler');
+};
+
 for ($i = 0; $i < $chunks; $i++) {
+    if ($throw) {
+        ob_start($thrower);
+    }
     echo stream_backpressure_chunk($i, $size);
     OxphpStreamBackpressureProbe::$stage = 'flushing';
-    oxphp_stream_flush();
+    try {
+        oxphp_stream_flush();
+    } catch (RuntimeException $e) {
+        ob_end_clean();
+        OxphpStreamBackpressureProbe::$caught++;
+    }
     OxphpStreamBackpressureProbe::$stage = 'flushed';
     OxphpStreamBackpressureProbe::$flushes++;
 

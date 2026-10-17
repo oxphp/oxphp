@@ -11,6 +11,8 @@ timeout/test_timeout_sets_connection_status >> ?action=trigger | GET | | 504
 timeout/test_timeout_sets_connection_status >> ?action=check
 
 # A stream's flush that waits on its worker thread for room in its queue still
-# ends at the time limit. The test is the stream's client, so the stream runs
-# on the profile's other worker.
+# ends at the time limit, and keeps what its output handler threw pending
+# through the wait. The test is the stream's client, so the stream runs on the
+# profile's other worker.
 timeout/test_stream_wait_ends_at_the_time_limit
+timeout/test_stream_wait_keeps_a_handler_exception
