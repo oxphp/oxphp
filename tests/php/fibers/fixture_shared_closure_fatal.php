@@ -2,8 +2,8 @@
 
 declare(strict_types=1);
 
-// Inner self-request for fibers/test_shared_closure_fatal_releases and
-// fibers/test_shared_pool_destroy_fatal.
+// Inner self-request for fibers/test_shared_closure_fatal_releases,
+// fibers/test_shared_pool_destroy_fatal and fibers/test_shared_pool_drop_fatal.
 //
 // A fatal raised inside a callable that a Shared\* method runs on the caller's
 // behalf: the closure of Mutex::withLock and tryWithLock, the factory of
@@ -22,6 +22,10 @@ declare(strict_types=1);
 // Every primitive is bound in the Registry under the run id the test passes, so
 // the test can reach the same ones once this request is over, and a second run
 // against the same server starts from fresh ones.
+//
+// The pool_drop_* cases raise the fatal from the destroy callback a pool's own
+// teardown runs, when the last reference to the pool goes away: what that
+// teardown was doing has to be finished on the fatal's way out.
 
 use OxPHP\Shared\Counter;
 use OxPHP\Shared\Map;
@@ -55,6 +59,34 @@ $fatalOnDestruct = static fn (): object => new class ($fatal) {
     {
         ($this->fatal)();
     }
+};
+
+// A pool nothing but the caller holds, with two idle slots this thread parked
+// and a $destroy that counts its calls in the Registry counter $name and fatals
+// on the older slot — released first, and the first the pool's teardown
+// reaches. $destroy calls $first, when given, before anything else.
+$poolOfTwo = static function (string $name, ?\Closure $first = null) use ($fatal): Pool {
+    $calls = Registry::counter($name, static fn (): Counter => new Counter());
+    $p = new Pool(
+        factory: static fn (): \stdClass => new \stdClass(),
+        destroy: static function (\stdClass $r) use ($calls, $fatal, $first): void {
+            if ($first !== null) {
+                $first();
+            }
+            $calls->add();
+            if ($r->fatal ?? false) {
+                $fatal();
+            }
+        },
+        maxSize: 2,
+    );
+    $older = $p->tryAcquire();
+    $newer = $p->tryAcquire();
+    $older->get()->fatal = true;
+    $older->release();
+    $newer->release();
+
+    return $p;
 };
 
 // Named rather than a closure so the test can take it off again: the worker
@@ -188,6 +220,70 @@ try {
             $newer->release();
             $p->evict();
             break;
+
+        case 'pool_drop_unset':
+            // unset() lets go of the pool, and the engine frees the object.
+            $p = $poolOfTwo("closure-fatal-pool-drop-unset-calls-$run");
+            unset($p);
+            break;
+
+        case 'pool_drop_weak':
+            // The same with a weak reference to the pool and a WeakMap keyed
+            // by it. Both let go of it before $destroy runs: the object is
+            // being freed, so $destroy must not get it back through them, and
+            // the WeakMap's value is released then, while destructors still
+            // run.
+            $seen = Registry::counter("closure-fatal-pool-drop-weak-seen-$run", static fn (): Counter => new Counter());
+            $released = Registry::counter(
+                "closure-fatal-pool-drop-weak-released-$run",
+                static fn (): Counter => new Counter()
+            );
+            $weak = new \stdClass();
+            $p = $poolOfTwo(
+                "closure-fatal-pool-drop-weak-calls-$run",
+                static function () use ($weak, $seen): void {
+                    if ($weak->ref->get() !== null) {
+                        $seen->add();
+                    }
+                }
+            );
+            $weak->ref = \WeakReference::create($p);
+            $map = new \WeakMap();
+            $map[$p] = new class ($released) {
+                public function __construct(private Counter $released)
+                {
+                }
+
+                public function __destruct()
+                {
+                    $this->released->add();
+                }
+            };
+            unset($p);
+            break;
+
+        case 'pool_drop_map_remove':
+            // The pool is held by a Map alone, and remove() lets go of it
+            // inside the method.
+            $map = Registry::map("closure-fatal-pool-drop-map-remove-$run", static fn (): Map => new Map());
+            $map->set('pool', $poolOfTwo("closure-fatal-pool-drop-map-remove-calls-$run"));
+            $map->remove('pool');
+            break;
+
+        case 'pool_drop_map_clear':
+            // The same with clear(), which lets go of the values while it
+            // holds the map's lock.
+            $map = Registry::map("closure-fatal-pool-drop-map-clear-$run", static fn (): Map => new Map());
+            $map->set('pool', $poolOfTwo("closure-fatal-pool-drop-map-clear-calls-$run"));
+            $map->clear();
+            break;
+
+        case 'pool_drop_map_use':
+            // Raises nothing: uses the map pool_drop_map_clear cleared.
+            $map = Registry::map("closure-fatal-pool-drop-map-clear-$run", static fn (): Map => new Map());
+            $map->set('pool', 'v');
+            echo 'MAP: ', $map->get('pool'), "\n";
+            return;
 
         case 'for_each':
             // Holds nothing across the callback, so there is nothing to read back

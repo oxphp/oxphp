@@ -1247,6 +1247,7 @@ oxphp_storage_clone_fn_t  oxphp_bridge_get_storage_clone(void)  { return storage
 #include "Zend/zend_execute.h"
 #include "Zend/zend_interfaces.h"
 #include "Zend/zend_enum.h"
+#include "Zend/zend_weakrefs.h"
 
 /* Custom object struct — defined here because it depends on zend_object from php.h.
  * oxphp_bridge.h declares this inside #ifdef PHP_H, but the header is included
@@ -2615,8 +2616,43 @@ zend_object *oxphp_plugin_create_object(zend_class_entry *ce) {
 void oxphp_plugin_free_object(zend_object *obj) {
     oxphp_custom_object *intern = OXPHP_OBJ(obj);
     if (intern->rust_data && storage_drop_fn) {
+        /* Dropping the storage can let go of the last reference to a
+         * Shared\Pool, and the pool's teardown runs $destroy on this
+         * thread's idle slots, guarded: a bailout in it is held back until
+         * the Rust code has returned here (see OXPHP_SHARED_RUN_GUARDED),
+         * and is raised again before anything else runs. Only one held back
+         * in this drop: one held back before it belongs to the C code that
+         * the Rust code which reached this handler returns to, and that C
+         * code raises it.
+         *
+         * The object is left as it is then. zend_object_std_dtor() releases
+         * its properties, which can run destructors, and no userland may
+         * run before the bailout is raised again. Its caller —
+         * zend_objects_store_del() or the GC's free loop — has already
+         * invalidated the object's handle and marked it free-called, so
+         * nothing frees it twice; its memory is reclaimed with the request
+         * heap.
+         *
+         * Weak references to the object go first, as zend_object_std_dtor()
+         * lets them go first: while they live, WeakReference::get() and a
+         * WeakMap hand the object to the PHP code the drop runs, although
+         * its memory goes once this handler returns; and an object left
+         * weakly referenced by a bailout keeps an entry in a WeakMap that
+         * the GC then counts a reference short. Letting go of them can run
+         * a WeakMap value's destructor, so this is skipped while a bailout
+         * is held back. zend_object_std_dtor() below then lets them go,
+         * destructor and all, as it did before: a bailout held back before
+         * this drop is not this handler's to raise (above). */
+        int pending_before = oxphp_bridge_deferred_bailout_pending();
+        if (!pending_before && (GC_FLAGS(obj) & IS_OBJ_WEAKLY_REFERENCED)) {
+            zend_weakrefs_notify(obj);
+            GC_DEL_FLAGS(obj, IS_OBJ_WEAKLY_REFERENCED);
+        }
         storage_drop_fn(intern->class_index, intern->rust_data);
         intern->rust_data = NULL;
+        if (!pending_before && oxphp_bridge_take_deferred_bailout()) {
+            zend_bailout();
+        }
     }
     zend_object_std_dtor(&intern->std);
 }
@@ -3136,9 +3172,23 @@ void oxphp_bridge_set_cleanup_promises_for_fiber(oxphp_cleanup_promises_for_fibe
     rust_cleanup_promises_for_fiber = fn;
 }
 
+/* The promise cleanup and the deferred drain below release promise results,
+ * and a result can hold the last reference to a Shared\Pool: the pool's
+ * teardown then runs $destroy on this thread's idle slots, guarded, with a
+ * bailout in it held back until the Rust callback has returned (see
+ * OXPHP_SHARED_RUN_GUARDED). Raised again as soon as it has, before anything
+ * else runs. It lands in the zend_try of the serve loop these run in, where a
+ * fatal raised at this point would land anyway. */
+static void oxphp_bridge_raise_held_back_bailout(void) {
+    if (oxphp_bridge_take_deferred_bailout()) {
+        zend_bailout();
+    }
+}
+
 void oxphp_bridge_cleanup_promises_for_fiber(uint64_t fiber_id) {
     if (__builtin_expect(rust_cleanup_promises_for_fiber != NULL, 1)) {
         rust_cleanup_promises_for_fiber(fiber_id);
+        oxphp_bridge_raise_held_back_bailout();
     }
 }
 
@@ -3169,6 +3219,7 @@ void oxphp_bridge_set_deferred_drain_callbacks(oxphp_poll_deferred_drains_fn_t p
 void oxphp_bridge_poll_deferred_drains(void) {
     if (__builtin_expect(rust_poll_deferred_drains != NULL, 1)) {
         rust_poll_deferred_drains();
+        oxphp_bridge_raise_held_back_bailout();
     }
 }
 
@@ -6361,27 +6412,35 @@ int oxphp_shared_wrapper_new(zval *out, uint8_t type_tag, const void *entry_ptr)
 /* A bailout ended the helper, which is being held back — see
  * OXPHP_SHARED_RUN_GUARDED. Returned by every helper below that runs under
  * it, the Pool and spike helpers included, so it sits outside the codes any
- * of them uses otherwise (the spike's go down to -3).
- * oxphp_pool_destroy_invoke() does not run under it: it is also called from
- * outside a plugin handler, where no stub would raise the bailout.
- * oxphp_pool_destroy_invoke_guarded() is the same call under it, for the
- * callers inside one. */
+ * of them uses otherwise (the spike's go down to -3). */
 #define OXPHP_SHARED_INVOKE_BAILOUT     -4
 
 /* A bailout OXPHP_SHARED_RUN_GUARDED caught and is holding back. Set in its
  * zend_catch; taken — read and cleared — once the Rust code between the
  * guarded helper and the C that called into it has returned: by the plugin
  * dispatch stubs (oxphp_method_dispatch, oxphp_native_dispatch), which
- * re-raise it, and by the serve loop's idle point
- * (oxphp_serve_loop_thread_idle), which re-raises it into its own zend_try
- * and recovers.
+ * re-raise it, by the serve loop's idle point (oxphp_serve_loop_thread_idle),
+ * which re-raises it into its own zend_try and recovers, and by the C that
+ * the Rust code letting go of a Shared\Pool returns to, which re-raises it:
+ * the plugin objects' free_obj handler (oxphp_plugin_free_object) and the
+ * worker scheduler's promise cleanup and deferred drain
+ * (oxphp_bridge_cleanup_promises_for_fiber,
+ * oxphp_bridge_poll_deferred_drains).
  *
  * Every guarded helper is called either from inside a plugin method or
- * function handler or from the plugins' thread_idle event, so a flag that is
- * set always has one of those below it to take it, and nothing between the
- * two parks the fiber that set it. A guarded helper called from anywhere else
- * would leave the flag for the next stub on the thread to raise in a request
- * that never failed. */
+ * function handler, from the plugins' thread_idle event, or from the teardown
+ * of a pool whose last reference one of those, a free_obj handler or the
+ * scheduler's promise release let go of, so a flag that is set has one of
+ * those below it to take it, and nothing between the two parks the fiber
+ * that set it. A guarded helper called from anywhere else would leave the
+ * flag for the next stub on the thread to raise in a request that never
+ * failed. One teardown is called from elsewhere and does just that: the
+ * loop of an oxphp_async() worker thread, between tasks, drops a task
+ * result nobody receives any more, which can hold the last reference to a
+ * pool whose slots the thread parked. $destroy is skipped there, with no
+ * frame, but freeing a slot runs its object's destructor under the guard,
+ * and a bailout in it is raised by the next stub on that thread, in another
+ * task. */
 static __thread int oxphp_shared_deferred_bailout = 0;
 
 int oxphp_bridge_deferred_bailout_pending(void) {
@@ -7227,7 +7286,6 @@ void oxphp_pool_slot_free(void *slot_zv_heap) {
  * OXPHP_SHARED_INVOKE_SKIPPED when a $destroy was given and no PHP
  * code was executing to call it from, 0 otherwise — never a failure
  * of $destroy — unless a bailout ends it, which
- * oxphp_pool_destroy_invoke() lets go by longjmp and
  * oxphp_pool_destroy_invoke_guarded() holds back. */
 static int oxphp_pool_destroy_invoke_unguarded(void *destroy_fcc_heap, void *slot_zv_heap) {
     if (!slot_zv_heap) return 0;
@@ -7281,15 +7339,10 @@ static int oxphp_pool_destroy_invoke_unguarded(void *destroy_fcc_heap, void *slo
     return skipped ? OXPHP_SHARED_INVOKE_SKIPPED : 0;
 }
 
-/* For the callers with no dispatch stub below them to raise a bailout
- * again: a bailout in $destroy, or in freeing the slot, leaves through
- * them by longjmp. */
-int oxphp_pool_destroy_invoke(void *destroy_fcc_heap, void *slot_zv_heap) {
-    return oxphp_pool_destroy_invoke_unguarded(destroy_fcc_heap, slot_zv_heap);
-}
-
-/* For a caller inside a plugin handler (Shared\Pool::evict) or the
- * thread_idle event (the idle-timeout eviction). Returns
+/* For a caller inside a plugin handler (Shared\Pool::evict), the
+ * thread_idle event (the idle-timeout eviction) or the teardown of a pool
+ * (its last reference let go of on the thread that parked the slots).
+ * Returns
  * OXPHP_SHARED_INVOKE_BAILOUT when a bailout ended $destroy or freeing
  * the slot, or one was already waiting to be raised again. The slot is
  * not freed then. The bailout may have come from freeing it. Or it may
