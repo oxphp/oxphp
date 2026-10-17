@@ -150,10 +150,12 @@ impl Server {
         http_builder
             .http1()
             .timer(hyper_util::rt::TokioTimer::new())
-            // Flush the write buffer after every response — reduces latency for
-            // pipelined and keep-alive requests that would otherwise wait in buffer.
-            .pipeline_flush(true)
             // Use vectored I/O (writev) to send headers + body in a single syscall.
+            // Leave `pipeline_flush` off: with it on, hyper keeps pulling a
+            // response body into its write buffer without limit instead of
+            // waiting for the socket, so a client that reads slowly makes the
+            // server hold a whole streamed body in memory. It also replaces
+            // writev with a copy of every chunk into one flat buffer.
             .writev(true);
         if config.header_read_timeout > Duration::ZERO {
             http_builder
