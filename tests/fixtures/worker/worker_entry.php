@@ -68,6 +68,17 @@ if ($pharReadonlyBoot !== false && $pharReadonlyBoot !== '') {
     ini_set('phar.readonly', $pharReadonlyBoot);
 }
 
+// A variable the bootstrap puts into the process environment, as a `.env` loader
+// that calls putenv() does. hooks/test_putenv_rolled_back reads it before and
+// after one of its requests overwrites it: what a request sets with putenv() ends
+// with that request, and this value is what it ends back to. Only the profile
+// that sets OXPHP_TEST_PUTENV_BOOT does it: on a profile with several workers
+// every one of them would set the same name, and putenv() does not keep two
+// threads that set one name apart.
+if (getenv('OXPHP_TEST_PUTENV_BOOT') === '1') {
+    putenv('OX_PUTENV_BOOT=boot-value');
+}
+
 oxphp_worker(function () use (&$requestCount, &$previousHeaders, &$sharedState, $bootInfo, $iniBoot, $pharReadonlyPhpIni) {
     $requestCount++;
 
