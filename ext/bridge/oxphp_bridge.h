@@ -1805,7 +1805,7 @@ zval *oxphp_closure_get_this(zval *closure);
 
 /* Borrow proxy */
 void oxphp_bridge_set_borrow_proxy_ce(zend_class_entry *ce);
-void oxphp_create_borrow_proxy(zval *dst, uint64_t promise_id);
+void oxphp_create_borrow_proxy(zval *dst);
 
 /* Check if a HashTable contains any IS_RESOURCE or non-Shareable IS_OBJECT values.
  * Shareable objects (implementing OxPHP\Shared\Shareable) are allowed through.
@@ -2302,8 +2302,11 @@ int     oxphp_async_synthetic_promise_cancel(int64_t id);
  * extension is absent (unit tests, bare CLI).
  *
  * Pointer params are opaque (void*) so this stays outside the PHP_H
- * block. op_array / static_vars / this_ptr / args are borrowed
- * (Rust-owned); out_retval points at a zval inside the fiber's storage.
+ * block. op_array / static_vars / args are borrowed (Rust-owned);
+ * out_retval points at a zval inside the fiber's storage. bind_this is
+ * non-zero when the closure is bound to $this: spawn() then binds a
+ * BorrowedProxy it creates on the calling thread, never an object from
+ * the dispatching request's memory.
  *
  *   spawn()   create a task fiber for one reconstructed closure + args
  *             and enqueue it. Returns the fiber_id (>= 0) or -1 (at
@@ -2335,7 +2338,7 @@ int     oxphp_async_synthetic_promise_cancel(int64_t id);
  *             the fiber was found and flagged, 0 otherwise.
  */
 typedef int64_t (*oxphp_async_sched_spawn_fn_t)(
-    void *op_array, void *static_vars, void *this_ptr,
+    void *op_array, void *static_vars, int bind_this,
     uint32_t argc, void *args, void *cancel_cell);
 typedef int (*oxphp_async_sched_tick_fn_t)(void);
 typedef int64_t (*oxphp_async_sched_poll_fn_t)(
@@ -2353,7 +2356,7 @@ void oxphp_bridge_set_async_sched_callbacks(
     oxphp_async_sched_drain_fn_t drain);
 
 int64_t oxphp_bridge_async_spawn(
-    void *op_array, void *static_vars, void *this_ptr,
+    void *op_array, void *static_vars, int bind_this,
     uint32_t argc, void *args, void *cancel_cell);
 int     oxphp_bridge_async_tick(void);
 int64_t oxphp_bridge_async_poll_completed(

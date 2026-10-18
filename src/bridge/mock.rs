@@ -501,7 +501,7 @@ pub unsafe fn oxphp_closure_get_this(_closure: *mut c_void) -> *mut c_void {
 }
 
 // Borrow proxy
-pub unsafe fn oxphp_create_borrow_proxy(_dst: *mut c_void, _promise_id: u64) {}
+pub unsafe fn oxphp_create_borrow_proxy(_dst: *mut c_void) {}
 
 // Async worker
 pub unsafe fn oxphp_async_reset() {}
@@ -607,7 +607,7 @@ pub unsafe fn oxphp_bridge_set_async_synth_cancel(_f: extern "C" fn(i64) -> c_in
 pub unsafe fn oxphp_bridge_async_spawn(
     _op_array: *const c_void,
     _static_vars: *mut c_void,
-    _this_ptr: *mut c_void,
+    _bind_this: c_int,
     _argc: u32,
     _args: *mut c_void,
     _cancel_cell: *mut c_void,

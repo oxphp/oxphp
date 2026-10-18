@@ -7297,7 +7297,7 @@ static void oxphp_task_resume_fiber(oxphp_fiber_scheduler *sched,
 }
 
 int64_t oxphp_async_sched_spawn(void *op_array, void *static_vars,
-                                void *this_ptr, uint32_t argc, void *args,
+                                int bind_this, uint32_t argc, void *args,
                                 void *cancel_cell) {
     oxphp_fiber_scheduler *sched = oxphp_task_sched_get();
 
@@ -7363,14 +7363,30 @@ int64_t oxphp_async_sched_spawn(void *op_array, void *static_vars,
     sched->fibers_tail = fiber;
     sched->fiber_count++;
 
+    /* A bound task gets a BorrowedProxy created here, on the task's thread.
+     * The dispatching request's object lives in that request's memory, which
+     * is torn down when the request ends — and the task can outlive it. The
+     * closure takes its own reference to the proxy, so ours is dropped right
+     * after reconstruction. */
+    zval this_proxy;
+    zval *this_zv = NULL;
+    if (bind_this) {
+        oxphp_create_borrow_proxy(&this_proxy);
+        this_zv = &this_proxy;
+    }
+
     /* Reconstruct the closure into the fiber's owned task_fci/task_fcc.
      * On the same thread as the call, so MAP_PTR fixups apply correctly. */
     char *exc_class = NULL;
     char *exc_message = NULL;
-    if (oxphp_reconstruct_async_closure(
-            (zend_op_array *)op_array, (HashTable *)static_vars, (zval *)this_ptr,
+    int rc = oxphp_reconstruct_async_closure(
+            (zend_op_array *)op_array, (HashTable *)static_vars, this_zv,
             &fiber->task_closure, &fiber->task_fci, &fiber->task_fcc,
-            &exc_class, &exc_message) != 0) {
+            &exc_class, &exc_message);
+    if (this_zv) {
+        zval_ptr_dtor(this_zv);
+    }
+    if (rc != 0) {
         /* Reconstruction failed — surface as a completed-with-exception
          * fiber so the driver gets a normal error result via poll. The
          * fiber is never entered; its context (if newly created) stays

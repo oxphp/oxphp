@@ -1049,7 +1049,7 @@ bool oxphp_session_slot_waits_for(const oxphp_request_fiber *waiter,
  * for the contract. Stub bodies land first; the real per-thread task
  * scheduler fills them in. */
 int64_t oxphp_async_sched_spawn(void *op_array, void *static_vars,
-                                void *this_ptr, uint32_t argc, void *args,
+                                int bind_this, uint32_t argc, void *args,
                                 void *cancel_cell);
 int     oxphp_async_sched_tick(void);
 int64_t oxphp_async_sched_poll_completed(void **out_retval,

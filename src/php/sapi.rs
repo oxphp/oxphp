@@ -254,11 +254,12 @@ thread_local! {
     static PROMISE_CLEANUP: RefCell<HashMap<u64, PromiseCleanup>>
         = RefCell::new(HashMap::new());
 
-    /// Receivers for promises stranded by an `await_race` / `await_any`
-    /// timeout. The original `select_all` / poll-loop future was dropped
-    /// when the timeout fired, so these rxs are no longer in PROMISE_MAP
-    /// — but the workers may still be running and still touching frozen
-    /// captures. RSHUTDOWN drains this map first, block_on'ing each rx
+    /// Receivers for promises stranded by an awaiter that gave up on them:
+    /// the losers of an `await_race` / `await_any` timeout, the members an
+    /// `await_all` abandons, and the task a single `oxphp_async_await()`
+    /// timed out on. These rxs are no longer in PROMISE_MAP — but the
+    /// workers may still be running and still touching frozen captures.
+    /// RSHUTDOWN drains this map first, block_on'ing each rx
     /// (5 s budget) before the matching PROMISE_CLEANUP entry unfreezes
     /// the zvals — closing the UAF window between cancel-flag signal and
     /// vm_interrupt observation.
@@ -3913,8 +3914,8 @@ pub fn take_promise_cleanup(id: u64) -> Option<PromiseCleanup> {
 pub fn outstanding_promise_ids() -> Vec<u64> {
     let mut ids: std::collections::HashSet<u64> =
         PROMISE_MAP.with(|m| m.borrow().keys().copied().collect());
-    // Also include IDs that only exist in PROMISE_CLEANUP (e.g., timed-out promises
-    // where the rx was consumed but cleanup data remains).
+    // Also include IDs that only exist in PROMISE_CLEANUP (the rx was taken off
+    // PROMISE_MAP but the cleanup data was never run).
     PROMISE_CLEANUP.with(|m| {
         for &id in m.borrow().keys() {
             ids.insert(id);
@@ -3928,8 +3929,8 @@ pub fn outstanding_promise_ids() -> Vec<u64> {
     ids.into_iter().collect()
 }
 
-/// Stash an (rx, cancel) pair whose owning future was dropped by a
-/// timeout (await_race / await_any). RSHUTDOWN block_on's these rxs
+/// Stash an (rx, cancel) pair whose awaiter gave up on it (an await
+/// timeout, or an `await_all` that bailed out). RSHUTDOWN block_on's these rxs
 /// before unfreezing the matching PROMISE_CLEANUP entry, ensuring the
 /// worker has actually finished touching the frozen captures.
 fn stash_stranded(
@@ -4273,7 +4274,7 @@ pub unsafe extern "C" fn async_dispatch_callback(
         let mut original_data = [0u8; 16];
         let copy_len = zval_size.min(16);
         std::ptr::copy_nonoverlapping(this_ptr as *const u8, original_data.as_mut_ptr(), copy_len);
-        ffi::oxphp_create_borrow_proxy(this_ptr, promise_id);
+        ffi::oxphp_create_borrow_proxy(this_ptr);
         cleanup.borrowed.push(BorrowedZval {
             proxy_zval_ptr: this_ptr,
             original_zval_data: original_data,
@@ -4315,7 +4316,9 @@ pub unsafe extern "C" fn async_dispatch_callback(
         op_array_buf_len: op_array_size,
         serialized_static_vars: sv_buf,
         serialized_static_vars_len: sv_len,
-        this_ptr,
+        // The pool binds a proxy of its own; the zval at `this_ptr` lives in
+        // this request's memory and must not be read from another thread.
+        bind_this: !this_ptr.is_null(),
         argc,
         serialized_args: ser_buf,
         serialized_args_len: ser_len,
@@ -4512,7 +4515,7 @@ pub unsafe extern "C" fn await_dispatch_callback(
     }
 
     // Take promise from map
-    let (rx, cancelled) = match take_promise(id) {
+    let (mut rx, cancelled) = match take_promise(id) {
         Some(p) => p,
         None => {
             set_bridge_internal_error(&format!(
@@ -4527,7 +4530,8 @@ pub unsafe extern "C" fn await_dispatch_callback(
         match ASYNC_TOKIO_HANDLE.get() {
             Some(handle) => {
                 let dur = Duration::from_secs_f64(timeout);
-                match handle.block_on(async { tokio::time::timeout(dur, rx).await }) {
+                // Borrow rx so it survives the timeout and can be stranded.
+                match handle.block_on(async { tokio::time::timeout(dur, &mut rx).await }) {
                     Ok(Ok(r)) => r,
                     Ok(Err(_)) => {
                         // Channel closed — task was dropped
@@ -4537,9 +4541,6 @@ pub unsafe extern "C" fn await_dispatch_callback(
                     }
                     Err(_) => {
                         // Timeout — signal cancellation so the async worker stops.
-                        // Note: rx was consumed by the timeout future, so we can't
-                        // re-store it. The PROMISE_CLEANUP data remains and will be
-                        // cleaned up by RSHUTDOWN (cleanup_outstanding_promises).
                         // The cancelled flag tells the worker to stop early (the
                         // worker's scheduler loop polls it to unwind a SUSPENDED
                         // fiber).
@@ -4551,6 +4552,10 @@ pub unsafe extern "C" fn await_dispatch_callback(
                         // The flag alone reaches only a suspended fiber; a
                         // CPU-bound one needs the cross-thread interrupt kick.
                         unsafe { kick_worker_interrupt(&cancelled) };
+                        // The task may still be running. Strand the receiver so
+                        // the request-end drain waits for it (within its budget)
+                        // before releasing what the task captured.
+                        stash_stranded(id, rx, cancelled);
                         return -2;
                     }
                 }
@@ -5514,7 +5519,7 @@ unsafe extern "C" fn cleanup_promises_for_fiber_callback(fiber_id: u64) {
 /// `kick_worker_interrupt`).
 unsafe fn drain_promises(ids: &[u64]) {
     // Receivers can live in either PROMISE_MAP (never-awaited) or
-    // PROMISE_STRANDED (await_race / await_any timed out). Drain both before
+    // PROMISE_STRANDED (an awaiter gave up on them). Drain both before
     // unfreezing — the rx must complete (or hit the 5 s budget) before the
     // matching PROMISE_CLEANUP entry releases frozen captures, otherwise the
     // still-running worker observes freed memory.
