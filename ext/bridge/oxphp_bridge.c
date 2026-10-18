@@ -3156,11 +3156,11 @@ void oxphp_bridge_set_async_sched_callbacks(
 }
 
 int64_t oxphp_bridge_async_spawn(
-    void *op_array, void *static_vars, void *this_ptr,
+    void *op_array, void *static_vars, int bind_this,
     uint32_t argc, void *args, void *cancel_cell
 ) {
     if (sched_async_spawn != NULL) {
-        return sched_async_spawn(op_array, static_vars, this_ptr, argc, args, cancel_cell);
+        return sched_async_spawn(op_array, static_vars, bind_this, argc, args, cancel_cell);
     }
     return -1; /* no scheduler registered */
 }
@@ -5072,14 +5072,12 @@ void oxphp_arr_add_index_zval(zval *arr, zend_ulong idx, zval *val) {
     zend_hash_index_add_new(Z_ARRVAL_P(arr), idx, &copy);
 }
 
-void oxphp_create_borrow_proxy(zval *dst, uint64_t promise_id) {
+void oxphp_create_borrow_proxy(zval *dst) {
     if (!borrow_proxy_ce) {
         ZVAL_NULL(dst);
         return;
     }
     object_init_ex(dst, borrow_proxy_ce);
-    zend_update_property_long(borrow_proxy_ce, Z_OBJ_P(dst),
-        "promiseId", sizeof("promiseId") - 1, (zend_long)promise_id);
 }
 
 /* ─── Fiber TLS Context Callbacks ──────────────────────── */

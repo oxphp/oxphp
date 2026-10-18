@@ -57,3 +57,9 @@ async/test_pool_from_request_not_bound_by_task
 # A task calling a function of the script that dispatched it fails with an
 # Error: the async pool's thread never ran that script.
 async/test_task_calls_function_of_its_own_file
+# A task bound to $this outlives the request that dispatched it; its $this must
+# be a proxy the pool owns, not one in the dispatching request's torn-down heap.
+async/test_task_bound_to_this_outlives_its_request
+# A single await that times out outside worker mode still has its abandoned
+# task drained at request end: the end waits for it, bounded by the budget.
+async/test_await_timeout_waits_for_the_task_at_request_end

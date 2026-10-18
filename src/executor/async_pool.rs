@@ -164,7 +164,7 @@ fn async_worker_thread(
     use crate::async_types::AsyncResult;
     use crate::bridge::ffi;
     use crate::php::{bindings, sapi};
-    use std::ffi::c_void;
+    use std::ffi::{c_int, c_void};
 
     let thread_name = std::thread::current()
         .name()
@@ -474,7 +474,7 @@ fn async_worker_thread(
                     ffi::oxphp_bridge_async_spawn(
                         task.op_array_buf as *const c_void,
                         local_static_vars,
-                        task.this_ptr,
+                        task.bind_this as c_int,
                         task.argc,
                         local_args,
                         cancel_cell,

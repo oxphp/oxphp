@@ -61,8 +61,10 @@ pub struct AsyncTask {
     pub serialized_static_vars: *mut u8,
     /// Length of the serialized_static_vars buffer.
     pub serialized_static_vars_len: usize,
-    /// Borrowed `$this` object pointer, or null if the closure is not bound.
-    pub this_ptr: *mut c_void,
+    /// Whether the closure is bound to `$this`. The worker then binds a
+    /// `BorrowedProxy` it creates itself: the dispatching request's object
+    /// lives in that request's memory, which the task can outlive.
+    pub bind_this: bool,
     /// Number of arguments (used as count hint for deserialization).
     pub argc: u32,
     /// Portable-serialized argument buffer (system malloc'd, thread-safe).
@@ -224,7 +226,7 @@ mod tests {
             op_array_buf_len: 0,
             serialized_static_vars: ptr::null_mut(),
             serialized_static_vars_len: 0,
-            this_ptr: ptr::null_mut(),
+            bind_this: false,
             argc: 3,
             serialized_args: ptr::null_mut(),
             serialized_args_len: 0,
@@ -235,7 +237,7 @@ mod tests {
         assert_eq!(task.promise_id, 42);
         assert!(task.op_array_buf.is_null());
         assert!(task.serialized_static_vars.is_null());
-        assert!(task.this_ptr.is_null());
+        assert!(!task.bind_this);
         assert_eq!(task.argc, 3);
         assert!(task.serialized_args.is_null());
         assert!(!task.cancelled.cancelled.load(Ordering::Relaxed));

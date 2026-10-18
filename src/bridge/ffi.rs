@@ -359,7 +359,7 @@ extern "C" {
     pub fn oxphp_closure_get_this(closure: *mut c_void) -> *mut c_void;
 
     // Borrow proxy
-    pub fn oxphp_create_borrow_proxy(dst: *mut c_void, promise_id: u64);
+    pub fn oxphp_create_borrow_proxy(dst: *mut c_void);
 
     // Async worker
     pub fn oxphp_async_reset();
@@ -446,12 +446,12 @@ extern "C" {
     // the implementations at MINIT; the Rust driver reaches them through
     // these bridge forwarders. See ext/bridge/oxphp_bridge.h for the
     // spawn/tick/poll/release/cancel contract. Pointer params are opaque:
-    // op_array/static_vars/this_ptr/args are Rust-owned (borrowed by the
-    // fiber); out_retval points into the fiber's owned storage.
+    // op_array/static_vars/args are Rust-owned (borrowed by the fiber);
+    // out_retval points into the fiber's owned storage.
     pub fn oxphp_bridge_async_spawn(
         op_array: *const c_void,
         static_vars: *mut c_void,
-        this_ptr: *mut c_void,
+        bind_this: c_int,
         argc: u32,
         args: *mut c_void,
         cancel_cell: *mut c_void,
