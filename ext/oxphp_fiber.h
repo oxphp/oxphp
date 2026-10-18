@@ -712,6 +712,14 @@ typedef struct _oxphp_fiber_scheduler {
      * left it at. Taken by oxphp_scheduler_own_execution_timer(). */
     zend_long timeout_baseline;
 
+#ifdef HAVE_PUTENV
+    /* What putenv() had recorded when the worker's boot returned, kept out of
+     * BG(putenv_ht) while the scheduler serves, and the fiber that set each name
+     * put into that table since. Taken by oxphp_scheduler_own_putenv(). */
+    HashTable putenv_boot;
+    HashTable putenv_owner;
+#endif
+
     /* Readiness backend for descriptor waits: one epoll instance per scheduler,
      * which is one per thread since both schedulers are thread-local, plus a
      * one-shot timer registered inside it so an idle wait can be bounded
@@ -853,6 +861,17 @@ void oxphp_scheduler_finalize_fiber(oxphp_fiber_scheduler *sched, oxphp_request_
 void oxphp_scheduler_own_execution_timer(oxphp_fiber_scheduler *sched);
 /* Give it back as the serve loop ends, armed for what follows as for a script. */
 void oxphp_scheduler_release_execution_timer(const oxphp_fiber_scheduler *sched);
+/* Take putenv()'s record of what it replaced for the requests the scheduler
+ * runs: what the boot set becomes what every request's putenv() is put back
+ * to, and what a request sets is put back as it ends. Called once, before the
+ * first request. */
+void oxphp_scheduler_own_putenv(oxphp_fiber_scheduler *sched);
+/* Give it back as the serve loop ends, with what requests still had set in it
+ * put back first. */
+void oxphp_scheduler_release_putenv(oxphp_fiber_scheduler *sched);
+/* putenv() has just answered `set` for `setting`: record the request the name
+ * now belongs to, whose end puts it back. */
+void oxphp_fiber_note_putenv(const char *setting, size_t setting_len, bool set);
 /* max_execution_time has been changed on a serving worker — set_time_limit(),
  * ini_set(), ini_restore(). Inside a request, it is that request's limit and
  * deadline that change; outside every request the timer is stopped again. */

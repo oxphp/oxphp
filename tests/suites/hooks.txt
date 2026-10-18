@@ -97,6 +97,24 @@ hooks/test_filter_input_not_shared >> ?mode=callback&oxfilter_token=callback-que
 worker/test_ini_reset_between_requests >> ?phase=set
 worker/test_ini_reset_between_requests >> ?phase=check
 
+# And for the environment putenv() writes: a variable a request sets ends with
+# that request, one the worker entry script set before oxphp_worker() is what the
+# request's overwrite of it ends back to. The first line sets both, the next three
+# demand them gone and back — three because a variable that outlives its request
+# outlives every later one too, and that is how it was seen. Unlike the ini pair
+# these need no single worker: the environment is the whole process's, so a
+# variable left behind shows on every worker, and a request puts its variables
+# back before its response is sent. The park line is what needs one
+# (PHP_WORKERS=1 here): a request the worker serves while another one is parked
+# ends, and loses its own variable while the parked one keeps its; the line after
+# it demands the parked one's gone once it has ended too.
+hooks/test_putenv_rolled_back >> ?mode=seed
+hooks/test_putenv_rolled_back >> ?mode=expect
+hooks/test_putenv_rolled_back >> ?mode=expect
+hooks/test_putenv_rolled_back >> ?mode=expect
+hooks/test_putenv_rolled_back >> ?mode=park
+hooks/test_putenv_rolled_back >> ?mode=after_park
+
 # The directive that same rebasing must not re-announce: phar.readonly takes
 # whatever it is told at the startup stage as the floor for every later change.
 # Listed twice on purpose — the first run proves a request can still relax it

@@ -5714,6 +5714,45 @@ static void oxphp_session_gate_restore(void)
     oxphp_orig_session_start = NULL;
 }
 
+#ifdef HAVE_PUTENV
+/* putenv(), with the request that called it recorded against the name it set,
+ * so that a worker can put the variable back when that request ends — see
+ * oxphp_scheduler_own_putenv(). Outside the serve loop it records nothing. The
+ * builtin does all of the work; the argument is read after it, once its
+ * parameter parsing has turned it into the string it used, and only when it
+ * answered — an exception leaves the return value null. */
+static zif_handler oxphp_orig_putenv = NULL;
+
+static ZEND_NAMED_FUNCTION(oxphp_putenv_hook)
+{
+    oxphp_orig_putenv(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+
+    if (ZEND_NUM_ARGS() < 1 || (Z_TYPE_P(return_value) != IS_TRUE
+                                && Z_TYPE_P(return_value) != IS_FALSE)) {
+        return;
+    }
+    zval *setting = ZEND_CALL_ARG(execute_data, 1);
+    if (Z_TYPE_P(setting) != IS_STRING) {
+        return;
+    }
+    oxphp_fiber_note_putenv(Z_STRVAL_P(setting), Z_STRLEN_P(setting),
+                            Z_TYPE_P(return_value) == IS_TRUE);
+}
+
+/* Swapped on the startup thread, as the session gate is. */
+static void oxphp_putenv_hook_install(void)
+{
+    oxphp_hook_swap("putenv", sizeof("putenv") - 1,
+                    oxphp_putenv_hook, &oxphp_orig_putenv);
+}
+
+static void oxphp_putenv_hook_restore(void)
+{
+    oxphp_hook_restore("putenv", sizeof("putenv") - 1, oxphp_orig_putenv);
+    oxphp_orig_putenv = NULL;
+}
+#endif
+
 /* Publishing the set is what makes an enabled RUNTIME_HOOKS confirmable at all:
  * a misspelled variable name, RUNTIME_HOOKS=0 and a correctly enabled build
  * otherwise serve byte-identical responses and log nothing. The flags are
@@ -6395,6 +6434,10 @@ static void oxphp_serve_loop(zend_fcall_info *fci, zend_fcall_info_cache *fcc)
      * request starts with. */
     oxphp_scheduler_own_execution_timer(&sched);
 
+    /* And what the boot script set with putenv() is what every request's
+     * putenv() is put back to. */
+    oxphp_scheduler_own_putenv(&sched);
+
     #define WORKER_GC_INTERVAL 100
     #define WORKER_MAX_CONSECUTIVE_ERRORS 3
     /* How much the heap may grow between two moments with no request in flight
@@ -6719,12 +6762,19 @@ static void oxphp_serve_loop(zend_fcall_info *fci, zend_fcall_info_cache *fcc)
          * then writes and closes a session it finds open — and the one a request
          * parked with open is off the thread while that request waits, so it is
          * put back, or nothing closes it and the store's lock on it outlives the
-         * worker. Those two are all; the cleanup above is not run. */
+         * worker. And the shutdown destroys putenv()'s record of what it
+         * replaced, which only puts the environment back as it was before the
+         * boot if the boot's entries are in it again — they are kept on this
+         * frame, which the long jump leaves; they go back before the session
+         * does, whose write runs a save handler. Those three are all; the
+         * cleanup above is not run. */
         oxphp_scheduler_release_execution_timer(&sched);
+        oxphp_scheduler_release_putenv(&sched);
         oxphp_scheduler_return_session_holder(&sched);
         zend_bailout();
     } zend_end_try();
     oxphp_scheduler_release_execution_timer(&sched);
+    oxphp_scheduler_release_putenv(&sched);
 }
 
 /* ─── Native plugin function dispatch ─────────────────────── */
@@ -9543,6 +9593,9 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
      * functions by now; worker threads have not started yet. */
     oxphp_filter_guard_install();
     oxphp_session_gate_install();
+#ifdef HAVE_PUTENV
+    oxphp_putenv_hook_install();
+#endif
     oxphp_runtime_hooks_install();
     oxphp_request_body_hook_install();
 
@@ -9570,6 +9623,9 @@ PHP_MSHUTDOWN_FUNCTION(oxphp_sapi)
     oxphp_request_body_hook_restore();
     oxphp_runtime_hooks_restore();
     oxphp_session_gate_restore();
+#ifdef HAVE_PUTENV
+    oxphp_putenv_hook_restore();
+#endif
     oxphp_filter_guard_restore();
     oxphp_shareable_unregister_ce();
     return SUCCESS;

@@ -2868,6 +2868,125 @@ static bool oxphp_fiber_end_request_ini(const oxphp_request_fiber *fiber) {
     return bailed;
 }
 
+/* ─── putenv() per request ─────────────────────────────── */
+
+#ifdef HAVE_PUTENV
+/* The scheduler whose requests putenv() is tracked for, from
+ * oxphp_scheduler_own_putenv() to its release; NULL outside the serve loop.
+ * What the putenv() hook asks rather than the calling fiber's owner_sched,
+ * because a bailout out of the loop leaves that scheduler on a stack frame that
+ * is gone, and the worker script's shutdown runs user code after it. The end of
+ * a request compares its own scheduler against it before touching anything. */
+static __thread oxphp_fiber_scheduler *oxphp_putenv_sched = NULL;
+
+/* putenv() writes the process environment and records what it replaced in
+ * BG(putenv_ht), whose destructor puts that back; the engine destroys the table
+ * at request shutdown, which a worker reaches once in its life. So the table is
+ * split here: what the boot left in it moves out for as long as the scheduler
+ * serves, as what every request's putenv() is put back to, and each name a
+ * request puts in from then on is recorded against that request and destroyed
+ * as it ends.
+ *
+ * Moved rather than copied, because its entries own the strings environ points
+ * at; and out of the table rather than left in it, because putenv() starts by
+ * deleting the entry standing for the name it sets — and a boot entry's
+ * destructor puts back what the process had before the boot, so a request that
+ * overwrote a name the boot set would end it back to that.
+ *
+ * SYNC: php-src/ext/standard/basic_functions.c PHP_FUNCTION(putenv),
+ *       php_putenv_destructor(), PHP_RINIT_FUNCTION(basic) */
+void oxphp_scheduler_own_putenv(oxphp_fiber_scheduler *sched) {
+    sched->putenv_boot = BG(putenv_ht);
+    zend_hash_init(&BG(putenv_ht), 1, NULL, sched->putenv_boot.pDestructor, 0);
+    zend_hash_init(&sched->putenv_owner, 8, NULL, NULL, 0);
+    oxphp_putenv_sched = sched;
+}
+
+/* What requests still have in the table goes first: each entry there replaced
+ * either a boot value, which is alive until the boot entries go, or what the
+ * process had. Then the boot entries go back into the table, for the engine's
+ * request shutdown to put back in turn, as it would have without the split.
+ *
+ * SYNC: php-src/ext/standard/basic_functions.c PHP_RSHUTDOWN_FUNCTION(basic) */
+void oxphp_scheduler_release_putenv(oxphp_fiber_scheduler *sched) {
+    oxphp_putenv_sched = NULL;
+    tsrm_env_lock();
+    zend_hash_destroy(&BG(putenv_ht));
+    tsrm_env_unlock();
+    zend_hash_destroy(&sched->putenv_owner);
+    BG(putenv_ht) = sched->putenv_boot;
+}
+
+void oxphp_fiber_note_putenv(const char *setting, size_t setting_len, bool set) {
+    oxphp_fiber_scheduler *sched = oxphp_putenv_sched;
+    if (sched == NULL) {
+        return;
+    }
+    /* The name as putenv() keys its entry: up to the first '=', or all of it
+     * for the form that unsets. */
+    const char *eq = strchr(setting, '=');
+    size_t name_len = eq ? (size_t)(eq - setting) : setting_len;
+
+    /* A name set outside every request — by a destructor or a callback the
+     * scheduler runs between them — has no owner, and neither has one whose
+     * putenv() failed, which deleted its entry before it failed. */
+    if (!set || oxphp_current_fiber == NULL) {
+        zend_hash_str_del(&sched->putenv_owner, setting, name_len);
+        return;
+    }
+    zval owner;
+    ZVAL_LONG(&owner, (zend_long)oxphp_current_fiber->fiber_id);
+    zend_hash_str_update(&sched->putenv_owner, setting, name_len, &owner);
+}
+
+/* Is the request fiber `fiber_id` names still in flight on this scheduler? */
+static bool oxphp_fiber_id_in_flight(const oxphp_fiber_scheduler *sched, zend_long fiber_id) {
+    for (const oxphp_request_fiber *fiber = sched->fibers_head; fiber; fiber = fiber->next) {
+        if ((zend_long)fiber->fiber_id == fiber_id) {
+            return !fiber->completed;
+        }
+    }
+    return false;
+}
+
+/* End the environment variables a request set with putenv(), as the engine's
+ * request shutdown ends them, which a worker does not run per request: the
+ * request's entries are destroyed, and the destructor puts back what each
+ * variable was before.
+ *
+ * The one entry kept is another request's, while that request is still in
+ * flight on this worker — parked, its variables still its own. An entry with
+ * no owner goes too, set outside every request, and so does one whose owner
+ * finished without getting here: nothing else would ever put either back.
+ *
+ * Nothing here runs user code: the destructor calls putenv() or unsetenv(),
+ * tzset() for TZ, and frees what the entry held. */
+static void oxphp_fiber_end_request_putenv(const oxphp_request_fiber *fiber) {
+    oxphp_fiber_scheduler *sched = fiber->owner_sched;
+    if (sched != oxphp_putenv_sched || zend_hash_num_elements(&BG(putenv_ht)) == 0) {
+        return;
+    }
+    tsrm_env_lock();
+    Bucket *bucket;
+    ZEND_HASH_MAP_FOREACH_BUCKET(&BG(putenv_ht), bucket) {
+        zval *owner = zend_hash_find(&sched->putenv_owner, bucket->key);
+        if (owner != NULL) {
+            if (Z_LVAL_P(owner) != (zend_long)fiber->fiber_id
+                    && oxphp_fiber_id_in_flight(sched, Z_LVAL_P(owner))) {
+                continue;
+            }
+            zend_hash_del(&sched->putenv_owner, bucket->key);
+        }
+        zend_hash_del_bucket(&BG(putenv_ht), bucket);
+    } ZEND_HASH_FOREACH_END();
+    tsrm_env_unlock();
+}
+#else
+void oxphp_scheduler_own_putenv(oxphp_fiber_scheduler *sched) { (void)sched; }
+void oxphp_scheduler_release_putenv(oxphp_fiber_scheduler *sched) { (void)sched; }
+static inline void oxphp_fiber_end_request_putenv(const oxphp_request_fiber *fiber) { (void)fiber; }
+#endif /* HAVE_PUTENV */
+
 /* Defined with the rest of the session bookkeeping below. */
 static bool oxphp_session_state_present(void);
 
@@ -3606,6 +3725,15 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
             oxphp_file_late_bailout(fiber, &mark, "bailout putting back ini");
         }
         oxphp_report_late_exception(fiber, &mark);
+
+        /* The environment variables it set with putenv() end last, past every
+         * point above that can run user code — a shutdown function, a save
+         * handler, a destructor an ini handler drops. What still runs for the
+         * request after this — the destructors of what its superglobals hold,
+         * which the scheduler's finalize drops — runs with no request current,
+         * so a putenv() there has no owner and the next request to end on this
+         * worker puts it back. */
+        oxphp_fiber_end_request_putenv(fiber);
 
         oxphp_current_fiber = NULL;
 
