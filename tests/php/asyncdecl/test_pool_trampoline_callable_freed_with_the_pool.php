@@ -9,7 +9,8 @@ require_once __DIR__ . '/helper.php';
 // it for as long as it keeps the factory, and frees it along with the
 // factory: before, every such pool left one behind until the request ended.
 // The pool keeps a copy of that function, and makes one for every call it
-// makes through it; any other callable it keeps and calls as it is.
+// makes through it, which that call frees together with the name the copy
+// gets; any other callable it keeps and calls as it is.
 $t = new TestCase('test_pool_trampoline_callable_freed_with_the_pool', 'asyncdecl');
 
 final class AsyncDeclTrampolineLeakMaker
@@ -37,7 +38,7 @@ $t->assertLessThan(
             unset($pool);
         }
     }),
-    8192,
+    4096,
 );
 
 $make = static fn (): object => new \stdClass();
@@ -49,7 +50,7 @@ $t->assertLessThan(
             unset($pool);
         }
     }),
-    8192,
+    4096,
 );
 
 $pool = new \OxPHP\Shared\Pool(factory: $make, destroy: null, maxSize: 1);
@@ -61,7 +62,19 @@ $t->assertLessThan(
             $pool->evict();
         }
     }),
-    8192,
+    4096,
+);
+
+$pool = new \OxPHP\Shared\Pool(factory: [$maker, 'make'], destroy: null, maxSize: 1);
+$t->assertLessThan(
+    'a factory reaching __call() run 200 times leaves no memory behind',
+    $grown(static function (int $n) use ($pool): void {
+        for ($i = 0; $i < $n; $i++) {
+            $pool->acquire()->release();
+            $pool->evict();
+        }
+    }),
+    4096,
 );
 
 $t->done();

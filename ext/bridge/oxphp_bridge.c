@@ -7091,10 +7091,15 @@ int oxphp_pool_fcc_new(void *callable_zval, void **out_fcc_heap) {
     /* A callable reaching __call() or __callStatic() resolves to a
      * trampoline, which the engine builds for a single call, in a slot of
      * the thread's own while that slot is free. Keep a copy and free the
-     * slot, as zend_fcc_addref() does. */
+     * slot as zend_free_trampoline() does, attributes included;
+     * zend_fcc_addref() clears the name only. The next function built in
+     * the slot for a parent::$prop::get() or set() call, or for an FFI
+     * call, sets no attributes of its own and would report those left
+     * behind. */
     if (fcc.function_handler == &EG(trampoline)) {
         zend_function *copy = emalloc(sizeof(zend_function));
         memcpy(copy, fcc.function_handler, sizeof(zend_function));
+        EG(trampoline).common.attributes = NULL;
         EG(trampoline).common.function_name = NULL;
         fcc.function_handler = copy;
     }
