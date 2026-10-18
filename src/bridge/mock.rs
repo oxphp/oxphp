@@ -463,20 +463,6 @@ pub unsafe fn oxphp_portable_deserialize_ht(
 pub unsafe fn oxphp_portable_free(_buf: *mut u8) {}
 pub unsafe fn oxphp_portable_free_ht(_ht: *mut c_void) {}
 
-// Cross-thread fcc spike mocks (no-op on host).
-pub unsafe fn oxphp_pool_spike_capture(_callable: *mut c_void, _out_tid: *mut u64) -> c_int {
-    -1
-}
-pub unsafe fn oxphp_pool_spike_invoke(
-    _out_captured: *mut u64,
-    _out_current: *mut u64,
-    _out_buf: *mut *mut u8,
-    _out_len: *mut usize,
-) -> c_int {
-    -1
-}
-pub unsafe fn oxphp_pool_spike_reset() {}
-
 pub unsafe fn oxphp_iter_array_to_portbufs(
     _arr: *const c_void,
     out_concat: *mut *mut u8,

@@ -20,6 +20,12 @@ asyncdecl/test_pool_internal_factory_in_task
 asyncdecl/test_pool_factory_first_run_by_request
 # A task's idle slot, when the pool goes away on the worker thread.
 asyncdecl/test_pool_idle_slot_of_a_task_outlives_the_pool
+# A factory or $destroy reaching __call(), __callStatic() or a closure's
+# __invoke, run more than once, and on a task's thread.
+asyncdecl/test_pool_trampoline_factory_called_twice
+asyncdecl/test_pool_trampoline_destroy_called_twice
+asyncdecl/test_pool_trampoline_callable_freed_with_the_pool
+asyncdecl/test_pool_trampoline_factory_in_task
 
 # Preloaded code exists on every thread.
 asyncdecl/test_task_class_named_like_preloaded

@@ -6,9 +6,7 @@
 //! * **Affinity key is a raw pthread id (`u64`).** Worker threads spawn
 //!   via `std::thread::spawn`, but the FFI boundary needs a type that
 //!   can cross C — `std::thread::ThreadId` has no stable `as_u64`. We
-//!   use `libc::pthread_self() as usize as u64` which matches what the
-//!   cross-thread fcc spike and the SAPI worker pool already treat as
-//!   canonical.
+//!   use `libc::pthread_self() as usize as u64`.
 //! * `factory_fcc` / `destroy_fcc` are stored as `AtomicPtr<c_void>`.
 //!   The creating FFI path (`oxphp_shared_pool_create`) calls
 //!   `oxphp_pool_fcc_new` in the C bridge, which emalloc's a
@@ -80,10 +78,7 @@ const POOL_PER_SLOT_BYTES: isize = 64;
 /// across the Rust↔C bridge without losing information.
 pub type ThreadKey = u64;
 
-/// Canonical thread key for the calling thread. Matches what the
-/// cross-thread fcc spike and the C-bridge pool helpers report via
-/// `pthread_self`, so tags minted here are comparable to tags observed
-/// from either language.
+/// Canonical thread key for the calling thread.
 #[inline]
 pub fn current_thread_key() -> ThreadKey {
     // SAFETY: `pthread_self` is documented to always succeed and return
@@ -233,10 +228,10 @@ impl PoolSlot {
 // SAFETY: `resource` is an opaque owning pointer. Crossing a thread
 // boundary with a `PoolSlot` (e.g. on release from a non-owner thread)
 // is explicit and audited — the code paths that do so are guarded by
-// `slot.owner` checks. Per the cross-thread fcc spike, PHP refcounted values
-// referenced through a `zval*` are safe to hand between ZTS worker
-// threads provided no single worker is executing user code on the same
-// zval concurrently, which is upheld by the per-thread idle discipline.
+// `slot.owner` checks. PHP refcounted values referenced through a
+// `zval*` are safe to hand between ZTS worker threads provided no single
+// worker is executing user code on the same zval concurrently, which is
+// upheld by the per-thread idle discipline.
 unsafe impl Send for PoolSlot {}
 
 // ─── Core state ────────────────────────────────────────────────────────

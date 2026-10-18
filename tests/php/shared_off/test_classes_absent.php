@@ -74,15 +74,6 @@ foreach ($enums as $enum) {
     $t->assertFalse("enum $enum is not registered", enum_exists($enum, false));
 }
 
-// Free functions the plugin registers alongside the classes.
-foreach ([
-    'oxphp_pool_spike_capture',
-    'oxphp_pool_spike_invoke',
-    'oxphp_pool_spike_reset',
-] as $fn) {
-    $t->assertFalse("function $fn() is not registered", function_exists($fn));
-}
-
 // The sentence the documentation puts in front of operators, pinned verbatim.
 // `class_exists` returning false already proves the name is gone; this proves
 // what PHP *does* about it, which is what an operator actually meets: an

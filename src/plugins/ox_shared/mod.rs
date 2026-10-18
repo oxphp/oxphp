@@ -11,7 +11,6 @@ pub mod eviction;
 pub mod exceptions;
 pub mod handle;
 pub mod observability;
-pub mod pool_spike;
 pub mod reentrancy;
 pub mod registry;
 pub mod results;
@@ -182,9 +181,6 @@ impl Plugin for SharedPlugin {
         types::pool::register_classes(ctx)?;
         // Shared\Registry — name-keyed get-or-create facade.
         types::registry::register_class(ctx)?;
-
-        // Cross-thread fcc invocation probe (temporary spike).
-        pool_spike::register_functions(ctx)?;
 
         // Initialise the process-global registry with config.
         registry::init_registry(cfg.clone());
@@ -519,17 +515,6 @@ mod tests {
                 reg.php_enums.iter().any(|e| e == fqn),
                 "default config did not register enum {fqn}: {:?}",
                 reg.php_enums
-            );
-        }
-        for name in [
-            "oxphp_pool_spike_capture",
-            "oxphp_pool_spike_invoke",
-            "oxphp_pool_spike_reset",
-        ] {
-            assert!(
-                reg.php_functions.iter().any(|f| f == name),
-                "default config did not register {name}(): {:?}",
-                reg.php_functions
             );
         }
         assert!(reg

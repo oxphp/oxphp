@@ -2460,62 +2460,8 @@ int oxphp_shared_invoke_2_ret_stop(zval *callable,
                                    size_t val_len);
 #endif
 
-/* ─── Cross-thread fcc spike helpers ─────────────────────────────────────
- * Cross-thread fcc invocation probe. Lives here so both Rust
- * (plugin functions) and C (runtime) can reach it. Not a stable
- * API — superseded by the real Pool FFI below. */
-
-/**
- * Capture a PHP callable's fcc for later cross-thread invocation.
- * Stores the callable zval (refcount bumped) + the capturing
- * pthread id in a process-global slot. Returns the captured
- * pthread id via `out_tid` so the PHP-side test can compare with
- * the invoker's tid.
- *
- * Returns 0 on success, -1 if `zend_fcall_info_init` fails
- * (argument isn't a callable).
- *
- * Calling it repeatedly overwrites the slot and drops the old
- * callable's refcount on the CAPTURING thread, matching normal
- * zval lifetime; the assumption holds as long as the producer
- * keeps issuing capture calls on the original thread or the
- * process exits before the cross-thread dtor would run.
- */
-int oxphp_pool_spike_capture(void *callable_zval, uint64_t *out_tid);
-
-/**
- * Invoke the captured callable with zero arguments. Writes the
- * return value as a portbuf buffer to `*out_ret_buf` (caller frees
- * with `oxphp_portable_free`). Also writes the pthread id of the
- * capture and the invocation thread so the test can assert a
- * genuine cross-thread invocation occurred.
- *
- * Status codes:
- *   0   — OK, buffer filled.
- *  -1   — no captured fcc (capture never called).
- *  -2   — callable threw; `EG(exception)` is set.
- *  -3   — internal serialisation failure.
- *  -4   — a bailout ended it, in the callable or around it
- *         (OXPHP_SHARED_INVOKE_BAILOUT).
- */
-int oxphp_pool_spike_invoke(
-    uint64_t *out_captured_tid,
-    uint64_t *out_current_tid,
-    uint8_t **out_ret_buf,
-    size_t *out_ret_len);
-
-/**
- * Reset the spike slot (drop the stored callable). Meant to run
- * on the capturing thread. Safe to call when the slot is empty.
- * Used by tests to avoid leaking the captured zval across
- * consecutive capture/invoke cycles.
- */
-void oxphp_pool_spike_reset(void);
-
 /* ─── Shared\Pool helpers ───────────────────
- * Real pool factory / body / slot lifecycle helpers. The spike
- * above is a standalone probe and lives alongside these until it
- * can be retired.
+ * Real pool factory / body / slot lifecycle helpers.
  *
  * Lifetime contract:
  *   - `oxphp_pool_fcc_new`  → paired with `oxphp_pool_fcc_free`.

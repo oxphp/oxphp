@@ -335,17 +335,6 @@ extern "C" {
     pub fn oxphp_portable_free(buf: *mut u8);
     pub fn oxphp_portable_free_ht(ht: *mut c_void);
 
-    // Cross-thread fcc spike (temporary probe; superseded by the real
-    // Pool FFI below).
-    pub fn oxphp_pool_spike_capture(callable_zv: *mut c_void, out_tid: *mut u64) -> c_int;
-    pub fn oxphp_pool_spike_invoke(
-        out_captured_tid: *mut u64,
-        out_current_tid: *mut u64,
-        out_ret_buf: *mut *mut u8,
-        out_ret_len: *mut usize,
-    ) -> c_int;
-    pub fn oxphp_pool_spike_reset();
-
     /// Split a PHP array into N independent portbuf-serialized payloads.
     /// Returns 0 on success, -3 if `arr` is not an array, -1 other.
     /// On success `*out_concat` and `*out_offsets` are libc::malloc'd;
