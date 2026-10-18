@@ -6,7 +6,6 @@
 #include <string.h>
 #include <stdlib.h>
 #include <time.h>
-#include <pthread.h>
 #include <inttypes.h>
 #include <sys/resource.h>
 #include <unistd.h>
@@ -6514,8 +6513,8 @@ int oxphp_shared_wrapper_new(zval *out, uint8_t type_tag, const void *entry_ptr)
 #define OXPHP_SHARED_INVOKE_SKIPPED     2
 /* A bailout ended the helper, which is being held back — see
  * OXPHP_SHARED_RUN_GUARDED. Returned by every helper below that runs under
- * it, the Pool and spike helpers included, so it sits outside the codes any
- * of them uses otherwise (the spike's go down to -3). */
+ * it, the Pool helpers included, so it sits outside the codes any of them
+ * uses otherwise. */
 #define OXPHP_SHARED_INVOKE_BAILOUT     -4
 
 /* A bailout OXPHP_SHARED_RUN_GUARDED caught and is holding back. Set in its
@@ -6575,9 +6574,9 @@ int oxphp_bridge_take_deferred_bailout(void) {
  * same on one stack in zend_mm_safe_error() — catch its own fatal's bailout,
  * put the heap right, bail out again — and across two in a Fiber:
  * zend_fiber_execute catches it, and zend_fiber_switch_to raises it again on
- * the other side of the switch. Map::forEach and the Pool spike hold nothing
- * across the call and go through here all the same, so that no bailout out
- * of these helpers jumps across the Rust frames that called them.
+ * the other side of the switch. Map::forEach holds nothing across the call
+ * and goes through here all the same, so that no bailout out of it jumps
+ * across the Rust frames that called it.
  *
  * Nothing is freed or called here. The frames the bailout abandoned stay
  * where they are for whoever recovers from the raised-again one, as the
@@ -7042,133 +7041,21 @@ int oxphp_shared_invoke_2_ret_stop(zval *callable,
 }
 
 /* ═══════════════════════════════════════════════════════════
- *  Cross-thread fcc spike
- *
- *  Probes whether a `zend_fcall_info_cache` captured on thread A
- *  is safely invokable from thread B under ZTS. If not, Pool's
- *  factory path has to store the callable's function NAME and
- *  re-resolve per invoking thread (extra indirection). Temporary
- *  probe — superseded by the real Pool FFI path below.
- * ═══════════════════════════════════════════════════════════ */
-
-typedef struct {
-    zend_fcall_info_cache fcc;
-    zval callable_zv;        /* keeps the Closure/callable alive */
-    uint64_t captured_tid;
-    int in_use;
-} spike_pool_slot_t;
-
-/* Process-global: populated on capture, read on invoke. No mutex:
- * the spike's PHP test is strictly request-at-a-time. Real Pool
- * will use proper synchronisation. */
-static spike_pool_slot_t spike_pool_slot = {0};
-
-static inline uint64_t spike_current_tid(void) {
-    /* pthread_self() returns an opaque handle — on Linux/musl it's
-     * a pointer; cast to uintptr_t for a stable-per-thread id. */
-    return (uint64_t)(uintptr_t)pthread_self();
-}
-
-void oxphp_pool_spike_reset(void) {
-    if (spike_pool_slot.in_use) {
-        zval_ptr_dtor(&spike_pool_slot.callable_zv);
-        memset(&spike_pool_slot, 0, sizeof(spike_pool_slot));
-    }
-}
-
-int oxphp_pool_spike_capture(void *callable_zval, uint64_t *out_tid) {
-    if (!callable_zval || !out_tid) return -1;
-    zval *callable = (zval *)callable_zval;
-
-    zend_fcall_info fci;
-    zend_fcall_info_cache fcc;
-    char *err = NULL;
-    if (zend_fcall_info_init(callable, 0, &fci, &fcc, NULL, &err) != SUCCESS) {
-        if (err) efree(err);
-        return -1;
-    }
-    if (err) efree(err);
-
-    /* Drop any previous capture. Runs on the current thread, which
-     * may not be the prior capturer — zval_ptr_dtor on a closure
-     * allocated elsewhere is exactly the kind of hazard the spike
-     * is meant to flush out. For this probe we accept the risk and
-     * cover it with explicit `reset()` calls in the test runner. */
-    oxphp_pool_spike_reset();
-
-    ZVAL_COPY(&spike_pool_slot.callable_zv, callable);
-    spike_pool_slot.fcc = fcc;
-    spike_pool_slot.captured_tid = spike_current_tid();
-    spike_pool_slot.in_use = 1;
-
-    *out_tid = spike_pool_slot.captured_tid;
-    return 0;
-}
-
-static int oxphp_pool_spike_invoke_unguarded(
-    uint64_t *out_captured_tid,
-    uint64_t *out_current_tid,
-    uint8_t **out_ret_buf,
-    size_t *out_ret_len)
-{
-    if (!out_captured_tid || !out_current_tid || !out_ret_buf || !out_ret_len) return -1;
-    *out_captured_tid = 0;
-    *out_current_tid = spike_current_tid();
-    *out_ret_buf = NULL;
-    *out_ret_len = 0;
-
-    if (!spike_pool_slot.in_use) return -1;
-    *out_captured_tid = spike_pool_slot.captured_tid;
-
-    zval ret_zv;
-    ZVAL_UNDEF(&ret_zv);
-
-    zend_call_known_function(
-        spike_pool_slot.fcc.function_handler,
-        spike_pool_slot.fcc.object,
-        spike_pool_slot.fcc.called_scope,
-        &ret_zv,
-        0, NULL, NULL);
-
-    if (EG(exception)) {
-        zval_ptr_dtor(&ret_zv);
-        return -2;
-    }
-
-    if (oxphp_portable_serialize(&ret_zv, 1, out_ret_buf, out_ret_len) != 0) {
-        zval_ptr_dtor(&ret_zv);
-        return -3;
-    }
-    zval_ptr_dtor(&ret_zv);
-    return 0;
-}
-
-int oxphp_pool_spike_invoke(
-    uint64_t *out_captured_tid,
-    uint64_t *out_current_tid,
-    uint8_t **out_ret_buf,
-    size_t *out_ret_len)
-{
-    int rc;
-    OXPHP_SHARED_RUN_GUARDED(rc, oxphp_pool_spike_invoke_unguarded(
-        out_captured_tid, out_current_tid, out_ret_buf, out_ret_len));
-    if (rc == OXPHP_SHARED_INVOKE_BAILOUT && out_ret_buf && out_ret_len) {
-        *out_ret_buf = NULL;
-        *out_ret_len = 0;
-    }
-    return rc;
-}
-
-/* ═══════════════════════════════════════════════════════════
  *  Shared\Pool helpers
  *
  *  Factory/body closure invocation + slot-zval lifecycle.
  *  Called from Rust's oxphp_shared_pool_* FFI.
  *
- *  oxphp_pool_fcc_t is emalloc'd at pool_create, holds a
- *  ZVAL_COPY of the callable so its op_array outlives any
- *  one thread — the spike above verified `zend_call_known_function`
- *  on the stored fcc is safe to invoke from any worker under ZTS.
+ *  oxphp_pool_fcc_t is emalloc'd at pool_create and holds a
+ *  ZVAL_COPY of the callable, which keeps a closure alive, and with
+ *  it the function and the $this the fcc points to. Any other
+ *  fcc.object gets no reference of its own: it stays alive while the
+ *  callable holds it — $object in [$object, 'method'], unless by
+ *  reference — and not at all when the engine took it from the
+ *  $this of the code creating the pool. The callable is resolved
+ *  once, on the thread creating the pool, and called through
+ *  oxphp_pool_call_fcc on whichever thread runs the factory or
+ *  $destroy.
  *
  *  Per-resource zvals are emalloc'd once at factory invocation
  *  and owned by the pool; acquire ZVAL_COPYs them into user
@@ -7201,6 +7088,17 @@ int oxphp_pool_fcc_new(void *callable_zval, void **out_fcc_heap) {
     }
     if (err) efree(err);
 
+    /* A callable reaching __call() or __callStatic() resolves to a
+     * trampoline, which the engine builds for a single call, in a slot of
+     * the thread's own while that slot is free. Keep a copy and free the
+     * slot, as zend_fcc_addref() does. */
+    if (fcc.function_handler == &EG(trampoline)) {
+        zend_function *copy = emalloc(sizeof(zend_function));
+        memcpy(copy, fcc.function_handler, sizeof(zend_function));
+        EG(trampoline).common.function_name = NULL;
+        fcc.function_handler = copy;
+    }
+
     oxphp_pool_fcc_t *heap = emalloc(sizeof(oxphp_pool_fcc_t));
     heap->fcc = fcc;
     ZVAL_COPY(&heap->callable_zv, callable);
@@ -7216,8 +7114,29 @@ int oxphp_pool_fcc_new(void *callable_zval, void **out_fcc_heap) {
 void oxphp_pool_fcc_free(void *fcc_heap) {
     if (!fcc_heap) return;
     oxphp_pool_fcc_t *heap = (oxphp_pool_fcc_t *)fcc_heap;
+    zend_release_fcall_info_cache(&heap->fcc);
     zval_ptr_dtor(&heap->callable_zv);
     efree(heap);
+}
+
+/* Call a stored fcc. A trampoline — the function a callable reaching
+ * __call(), __callStatic() or a closure's __invoke resolves to — is freed by
+ * the call it is made for, which takes its name over too, so each call gets
+ * a copy of it, as zend_call_known_fcc() makes. Unlike that one, the copy
+ * gets a name of its own rather than another reference to the stored one:
+ * the stored name can be a string in the heap of the thread that created the
+ * pool, the call can run on any thread, and a reference count is not
+ * atomic. */
+static void oxphp_pool_call_fcc(const zend_fcall_info_cache *fcc,
+                                zval *retval, uint32_t argc, zval *argv) {
+    zend_function *func = fcc->function_handler;
+    if (UNEXPECTED(func->common.fn_flags & ZEND_ACC_CALL_VIA_TRAMPOLINE)) {
+        zend_string *name = func->common.function_name;
+        func = emalloc(sizeof(zend_function));
+        memcpy(func, fcc->function_handler, sizeof(zend_function));
+        func->common.function_name = zend_string_init(ZSTR_VAL(name), ZSTR_LEN(name), 0);
+    }
+    zend_call_known_function(func, fcc->object, fcc->called_scope, retval, argc, argv, NULL);
 }
 
 /* Invoke the factory with 0 args. On success, emalloc a fresh
@@ -7253,11 +7172,7 @@ static int oxphp_pool_factory_invoke_unguarded(void *fcc_heap, void **out_slot_z
     zval ret_zv;
     ZVAL_UNDEF(&ret_zv);
 
-    zend_call_known_function(heap->fcc.function_handler,
-                              heap->fcc.object,
-                              heap->fcc.called_scope,
-                              &ret_zv,
-                              0, NULL, NULL);
+    oxphp_pool_call_fcc(&heap->fcc, &ret_zv, 0, NULL);
 
     if (EG(exception)) {
         zval_ptr_dtor(&ret_zv);
@@ -7412,11 +7327,7 @@ static int oxphp_pool_destroy_invoke_unguarded(void *destroy_fcc_heap, void *slo
             zend_string_release_ex(missing, 0);
         } else {
             oxphp_cover_map_ptr_last();
-            zend_call_known_function(heap->fcc.function_handler,
-                                      heap->fcc.object,
-                                      heap->fcc.called_scope,
-                                      &ret_zv,
-                                      1, args, NULL);
+            oxphp_pool_call_fcc(&heap->fcc, &ret_zv, 1, args);
         }
 
         zval_ptr_dtor(&args[0]);
