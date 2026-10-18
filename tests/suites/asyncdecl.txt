@@ -26,6 +26,7 @@ asyncdecl/test_pool_trampoline_factory_called_twice
 asyncdecl/test_pool_trampoline_destroy_called_twice
 asyncdecl/test_pool_trampoline_callable_freed_with_the_pool
 asyncdecl/test_pool_trampoline_factory_in_task
+asyncdecl/test_pool_trampoline_leaves_no_attributes_in_the_slot
 
 # Preloaded code exists on every thread.
 asyncdecl/test_task_class_named_like_preloaded
