@@ -13,7 +13,8 @@ declare(strict_types=1);
 // cancellation, then for a few seconds keeps checking that `$this` is still an
 // `OxPHP\Async\BorrowedProxy` with its class intact, over a window that spans
 // past the point the request's heap is gone. It records:
-//   `<marker>.started`   as the task starts,
+//   `<marker>.started`   as the task starts, from inside the `try` that catches
+//                        the cancellation,
 //   `<marker>.caught_at` when the cancellation is delivered,
 //   `<marker>.result`    "ok", or the first anomaly it saw in `$this`,
 //   `<marker>.ended_at`  when it stops.
@@ -30,9 +31,14 @@ final class OrphanDispatcher
     public function dispatch(string $base): void
     {
         $task = function () use ($base): void {
-            file_put_contents("$base.started", '1');
             $start = microtime(true);
             try {
+                // Written inside the `try`: the request returns, and its end
+                // cancels the task, as soon as this file exists — the file is
+                // there before the call even returns — and the cancellation
+                // lands on the next opcode boundary. Written before the `try`,
+                // that boundary can be this call's return, outside the `catch`.
+                file_put_contents("$base.started", '1');
                 while (microtime(true) - $start < 20.0) {
                     // CPU-bound; only the request-end interrupt breaks this.
                 }
