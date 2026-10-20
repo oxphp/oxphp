@@ -998,6 +998,12 @@ size_t oxphp_zval_size(void);
 /** Return sizeof(zend_op_array) for the running PHP build. */
 size_t oxphp_op_array_size(void);
 
+/** Return 1 when the body of this op_array (opcodes, literals, names) lives in
+ * a request's memory rather than in OPcache's shared memory, so it can be freed
+ * once its last user lets go of it or that request ends; 0 when it lives in
+ * shared memory, and in the cases the definition notes it cannot tell. */
+int oxphp_op_array_in_request_memory(const void *op_array);
+
 /** Trigger zend_bailout() — safely abort PHP execution from SAPI callbacks. */
 void oxphp_bridge_bailout(void);
 

@@ -1974,6 +1974,27 @@ size_t oxphp_op_array_size(void) {
     return sizeof(zend_op_array);
 }
 
+/*
+ * OPcache gives an op_array it stores in shared memory no refcount; one the
+ * request compiled itself — OPcache off, eval()'d code, or a file it did not
+ * cache — counts its users in a refcount allocated with it. A script OPcache
+ * holds for its file cache in the request's own memory, read from that cache
+ * or compiled for it (opcache.file_cache_only, or shared memory full or
+ * restarting), has no refcount either, but its opcodes are in this thread's
+ * Zend heap. That check sees only this thread's heap, so a file-cache script
+ * another thread loaded is not told apart from one in shared memory (a task
+ * dispatching a closure it created from the code of the request that
+ * dispatched it). Nor is one when the Zend heap is not in use: with
+ * USE_ZEND_ALLOC=0 the check finds nothing, and with USE_TRACKED_ALLOC=1 too
+ * it finds only the start of an allocation, while these opcodes lie inside a
+ * block of the request's arena; an extension that installs its own allocator
+ * handlers has the same effect.
+ */
+int oxphp_op_array_in_request_memory(const void *op_array) {
+    const zend_op_array *op = (const zend_op_array *)op_array;
+    return op->refcount != NULL || is_zend_ptr(op->opcodes);
+}
+
 /* ─── Worker Mode ─────────────────────────────────────────── */
 
 /*
@@ -4992,6 +5013,20 @@ int oxphp_reconstruct_async_closure(
     memcpy(&func, op_array, sizeof(zend_op_array));
     func.op_array.static_variables = static_vars;
 
+    /* Outside OPcache's shared memory the body, its refcount and the
+     * closure's name live in the memory of the request that compiled or loaded
+     * the code, which owns their lifetime. The closure built here must not
+     * count them from this thread, nor free the body when its count reaches
+     * zero. A body in shared memory already has no refcount, and its name is
+     * interned. */
+    func.op_array.refcount = NULL;
+    zend_string *own_name = NULL;
+    if (!ZSTR_IS_INTERNED(func.op_array.function_name)) {
+        own_name = zend_string_init(
+            ZSTR_VAL(func.op_array.function_name), ZSTR_LEN(func.op_array.function_name), 0);
+        func.op_array.function_name = own_name;
+    }
+
     /* Fix up run_time_cache for this thread — the MAP_PTR offset from the
      * source thread's op_array may be invalid on the async worker's thread. */
     oxphp_fixup_run_time_cache(&func.op_array);
@@ -5020,6 +5055,10 @@ int oxphp_reconstruct_async_closure(
         NULL, /* called_scope */
         this_ptr /* this_ptr, may be NULL */
     );
+    /* The closure took its own reference to the name. */
+    if (own_name) {
+        zend_string_release_ex(own_name, 0);
+    }
 
     if (zend_fcall_info_init(out_closure, 0, fci, fcc, NULL, NULL) != SUCCESS) {
         zval_ptr_dtor(out_closure);
