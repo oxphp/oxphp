@@ -51,8 +51,13 @@ pub struct AsyncTask {
     pub promise_id: u64,
     /// System-malloc'd copy of the `zend_op_array` struct bytes.
     /// Copied on the dispatching thread to avoid cross-thread reads.
-    /// The internal pointers (opcodes, literals) reference OPcache SHM or
-    /// stable compiled-script memory — safe to dereference from any thread.
+    /// The internal pointers (opcodes, literals) reference the closure's body,
+    /// which stays valid for the task only while it is in OPcache's shared
+    /// memory, or while the request whose memory holds it keeps it alive. A body
+    /// outside shared memory is flagged at dispatch, and the dispatching request
+    /// then keeps its closure until the task has ended (see
+    /// `PromiseCleanup::code_in_request_memory` and
+    /// `oxphp_op_array_in_request_memory`, which names the cases it cannot tell).
     pub op_array_buf: *mut u8,
     /// Size of the op_array_buf (sizeof(zend_op_array)).
     pub op_array_buf_len: usize,
@@ -82,7 +87,11 @@ pub struct AsyncTask {
 
 // SAFETY: op_array_buf is a system-malloc'd buffer exclusively owned by this task,
 // containing a snapshot of the zend_op_array struct. Its internal pointers reference
-// OPcache SHM or stable compiled-script memory (safe from any thread).
+// the closure's body, which stays allocated while it is in OPcache's shared memory or
+// while the request whose memory holds it keeps it alive; a body flagged as outside
+// shared memory is held by the dispatching request until the task ends. That covers its
+// lifetime only: outside shared memory the engine on the pool thread still writes into
+// it, to the reference count of an array literal for one.
 // Serialization buffers are system-malloc'd and exclusively owned.
 // The Arc<CancelShared> is inherently thread-safe. The oneshot::Sender is Send.
 unsafe impl Send for AsyncTask {}
@@ -185,6 +194,10 @@ pub struct PromiseCleanup {
     /// Closure zval pointer (addref'd to prevent GC while async task holds op_array).
     /// Must be dtor'd on cleanup to release the reference.
     pub closure_zval: *mut std::ffi::c_void,
+    /// Whether the closure's code lives in request memory rather than in
+    /// OPcache's shared memory. This request then keeps the closure until the
+    /// task has ended, however long past the drain budget.
+    pub code_in_request_memory: bool,
 }
 
 // SAFETY: Contains only FrozenZval and BorrowedZval (both Send). Only accessed
@@ -198,6 +211,7 @@ impl PromiseCleanup {
             frozen: Vec::new(),
             borrowed: Vec::new(),
             closure_zval: std::ptr::null_mut(),
+            code_in_request_memory: false,
         }
     }
 }

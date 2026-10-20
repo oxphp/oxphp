@@ -317,6 +317,9 @@ pub unsafe fn oxphp_zval_size() -> usize {
 pub unsafe fn oxphp_op_array_size() -> usize {
     256 // approximate; only used in non-php builds for compilation
 }
+pub unsafe fn oxphp_op_array_in_request_memory(_op_array: *const c_void) -> c_int {
+    0
+}
 
 // ── Async dispatch function pointer registration ──
 

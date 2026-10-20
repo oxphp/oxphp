@@ -57,6 +57,7 @@ impl AsyncWorkerPool {
     /// For now, workers are stub implementations (actual PHP task execution will be added later).
     #[cfg(feature = "php")]
     pub fn start(&mut self) {
+        crate::php::sapi::set_async_pool_threads(self.worker_count);
         for id in 0..self.worker_count {
             let rx = self.task_rx.clone();
             let shutdown = self.shutdown.clone();
@@ -199,6 +200,8 @@ fn async_worker_thread(
     // The thread's one PHP request lasts as long as the thread.
     if !unsafe { crate::php::thread::open_request(crate::plugin::RequestScope::Thread) } {
         tracing::error!(id, "php_request_startup() failed in async worker");
+        // No RSHUTDOWN runs to count this thread out, and it runs no task.
+        sapi::async_pool_thread_stopped();
         return;
     }
     // The guard in the spawn closure is not enough: a panic unwinds this frame

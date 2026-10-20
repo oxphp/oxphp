@@ -1,8 +1,8 @@
 use std::cell::RefCell;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_long, c_uint, c_void};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::{Instant, SystemTime};
 
 use bytes::Bytes;
@@ -218,13 +218,16 @@ type PromiseEntry = (
 /// A finished fiber's orphaned promise awaiting non-blocking drain. Moved out of
 /// the promise maps by `cleanup_promises_for_fiber_callback` so the worker's
 /// finalize path never blocks in `block_on`; the scheduler tick polls `rx` and,
-/// once the task settles (or `deadline` passes), runs `cleanup` to release the
-/// frozen/borrowed captures. Worker mode does not free request memory at the
-/// handler boundary, so deferring the unfreeze past the response send is safe.
+/// once the task settles (or `deadline` passes and `drain_budget_releases`
+/// agrees), runs `cleanup` to release the frozen/borrowed captures. `deadline`
+/// is `None` once the budget has run out on a task the drain must wait for.
+/// Worker mode does not free request memory at the handler boundary, so
+/// deferring the unfreeze past the response send is safe.
 struct DeferredDrain {
+    id: u64,
     rx: tokio::sync::oneshot::Receiver<AsyncResult>,
     cleanup: Option<PromiseCleanup>,
-    deadline: Instant,
+    deadline: Option<Instant>,
 }
 
 thread_local! {
@@ -4105,6 +4108,39 @@ pub fn get_global_async_tx(
     GLOBAL_ASYNC_TX.get()
 }
 
+/// Pool threads that may still run task code: set when the pool starts, and
+/// each thread counts itself out once (see `async_pool_thread_stopped`).
+static ASYNC_POOL_RUNNING: AtomicUsize = AtomicUsize::new(0);
+
+/// Becomes `true` when the last pool thread counts itself out. From then on no
+/// task is running, and none will start: a task still queued is never taken off
+/// the queue, and the sender of its result, held by the queue, is never dropped.
+static ASYNC_POOL_STOPPED: LazyLock<tokio::sync::watch::Sender<bool>> =
+    LazyLock::new(|| tokio::sync::watch::Sender::new(false));
+
+/// Record how many pool threads are about to start. Called once, before any
+/// of them is spawned.
+pub fn set_async_pool_threads(count: usize) {
+    ASYNC_POOL_RUNNING.store(count, Ordering::Release);
+}
+
+/// Count the calling pool thread out: it runs no task from here on. Called
+/// once per pool thread — after its task fibers are torn down, or in place of
+/// the request it failed to open.
+pub fn async_pool_thread_stopped() {
+    let last = ASYNC_POOL_RUNNING
+        .fetch_update(Ordering::AcqRel, Ordering::Acquire, |n| n.checked_sub(1))
+        == Ok(1);
+    if last {
+        ASYNC_POOL_STOPPED.send_replace(true);
+    }
+}
+
+/// Whether every pool thread has counted itself out.
+fn async_pool_stopped() -> bool {
+    *ASYNC_POOL_STOPPED.borrow()
+}
+
 // ─── Async In-Flight Cap ─────────────────────────────────────
 
 /// Process-global bound on `queued + running` async tasks. Installed once
@@ -4249,6 +4285,7 @@ pub unsafe extern "C" fn async_dispatch_callback(
             cleanup.closure_zval = obj_ptr;
         }
     }
+    cleanup.code_in_request_memory = ffi::oxphp_op_array_in_request_memory(op_array) != 0;
 
     // Portable-serialize static_vars (closure use-vars) for safe cross-thread transfer.
     // All data crossing thread boundaries must be serialized — no pointer sharing.
@@ -4804,7 +4841,8 @@ pub unsafe extern "C" fn await_race_dispatch_callback(
             // and can return early instead of running to completion.
             //
             // Each stranded worker can extend RSHUTDOWN by up to 5 s
-            // (the per-promise block_on budget). Tracked via
+            // (the per-promise block_on budget), or until it stops when its
+            // code is not in OPcache shared memory. Tracked via
             // async_tasks_stranded so the stall risk shows up in metrics.
             let stranded_count = rxs.len() as u64;
             for ((id, rx), cancelled) in id_map.into_iter().zip(rxs).zip(cancel_map) {
@@ -5322,7 +5360,8 @@ pub unsafe extern "C" fn await_any_dispatch_callback(
             // before unfreezing the matching PROMISE_CLEANUP entry, so
             // workers finish touching the frozen captures before they're
             // released. Each stranded worker can therefore extend
-            // RSHUTDOWN by up to 5 s — tracked via async_tasks_stranded.
+            // RSHUTDOWN by up to 5 s, or until it stops when its code is not
+            // in OPcache shared memory — tracked via async_tasks_stranded.
             //
             // We also signal cancellation on every cancel flag so the
             // worker can return early at the next vm_interrupt poll
@@ -5405,6 +5444,14 @@ unsafe fn cleanup_promise(id: u64) {
 /// # Safety
 /// Called from C FFI (RSHUTDOWN).
 unsafe extern "C" fn cleanup_outstanding_promises_callback() {
+    // On a pool thread this runs once, as the thread exits, and after
+    // `oxphp_async_sched_shutdown` has torn down its task fibers. Counted out
+    // before the drain below: a task this thread dispatched and is about to
+    // wait for may be one no pool thread will run any more, and once every
+    // thread has counted itself out the wait ends.
+    if is_async_worker() {
+        async_pool_thread_stopped();
+    }
     let prefetched = take_ready_results(None);
     if !prefetched.is_empty() {
         tracing::debug!(
@@ -5494,11 +5541,11 @@ unsafe extern "C" fn cleanup_promises_for_fiber_callback(fiber_id: u64) {
 }
 
 /// Cancel and drain a batch of promises: signal cancellation to all of them,
-/// wait for each worker to acknowledge (5 s budget per promise), then release
-/// frozen and borrowed captures. Blocking — reserved for the RSHUTDOWN /
-/// worker-teardown drain-all path, where the thread is exiting and no scheduler
-/// shares it. The worker-mode per-request path defers instead (see
-/// `defer_promise_drain`).
+/// wait for each worker to acknowledge (5 s budget per promise, unless
+/// `drain_budget_releases` refuses), then release frozen and borrowed
+/// captures. Blocking — reserved for the RSHUTDOWN / worker-teardown drain-all
+/// path, where the thread is exiting and no scheduler shares it. The
+/// worker-mode per-request path defers instead (see `defer_promise_drain`).
 ///
 /// Every flag is set before the first kick, and every task is kicked before the
 /// first wait. With one pool thread running a CPU-bound task and the next one
@@ -5520,7 +5567,8 @@ unsafe extern "C" fn cleanup_promises_for_fiber_callback(fiber_id: u64) {
 unsafe fn drain_promises(ids: &[u64]) {
     // Receivers can live in either PROMISE_MAP (never-awaited) or
     // PROMISE_STRANDED (an awaiter gave up on them). Drain both before
-    // unfreezing — the rx must complete (or hit the 5 s budget) before the
+    // unfreezing — the rx must complete (or hit the 5 s budget, where
+    // `drain_budget_releases` allows) before the
     // matching PROMISE_CLEANUP entry releases frozen captures, otherwise the
     // still-running worker observes freed memory.
     let mut flagged: Vec<Arc<CancelShared>> = Vec::new();
@@ -5544,21 +5592,79 @@ unsafe fn drain_promises(ids: &[u64]) {
     // cross-thread interrupt kick.
     kick_worker_interrupts(flagged.iter().map(Arc::as_ref));
     for (id, entry) in entries {
+        let cleanup = take_promise_cleanup(id);
         if let Some((rx, _)) = entry {
-            // Block with 5-second timeout per promise to avoid indefinite hang
-            if let Some(handle) = ASYNC_TOKIO_HANDLE.get() {
-                let _ = handle.block_on(async {
-                    tokio::time::timeout(std::time::Duration::from_secs(5), rx).await
-                });
-            } else {
-                // No handle available, just drop rx
-                drop(rx);
-            }
+            wait_for_cancelled_task(
+                id,
+                rx,
+                Some(std::time::Duration::from_secs(5)),
+                cleanup.as_ref(),
+            );
         }
-        if let Some(cleanup) = take_promise_cleanup(id) {
+        if let Some(cleanup) = cleanup {
             run_promise_cleanup(&cleanup);
         }
     }
+}
+
+/// Block until a cancelled task answers, for at most `budget` — or, when
+/// `drain_budget_releases` refuses to let go once it has run out, until the
+/// task answers. `None` waits for the answer outright (a deferred drain whose
+/// budget has already run out). Either wait ends as soon as the pool has
+/// stopped (see `ASYNC_POOL_STOPPED`): no task is running then and none will
+/// start, so an answer still missing never comes. That is checked before the
+/// timer, which a drain run after the runtime has shut down must not poll.
+/// Without a Tokio handle there is nothing to wait with, and `rx` is dropped.
+fn wait_for_cancelled_task(
+    id: u64,
+    mut rx: tokio::sync::oneshot::Receiver<AsyncResult>,
+    budget: Option<std::time::Duration>,
+    cleanup: Option<&PromiseCleanup>,
+) {
+    let Some(handle) = ASYNC_TOKIO_HANDLE.get() else {
+        return;
+    };
+    let mut stopped = ASYNC_POOL_STOPPED.subscribe();
+    if let Some(budget) = budget {
+        let settled = handle.block_on(async {
+            tokio::select! {
+                biased;
+                _ = stopped.wait_for(|stopped| *stopped) => true,
+                answer = tokio::time::timeout(budget, &mut rx) => answer.is_ok(),
+            }
+        });
+        if settled || drain_budget_releases(id, cleanup) {
+            return;
+        }
+    }
+    handle.block_on(async {
+        tokio::select! {
+            biased;
+            _ = stopped.wait_for(|stopped| *stopped) => {}
+            _ = rx => {}
+        }
+    });
+}
+
+/// Whether the drain of a cancelled task that has not answered within its budget
+/// may release what the task holds. Not when the task's code lives in request
+/// memory rather than in OPcache's shared memory: the closure this request
+/// holds is what keeps code it compiled or loaded alive, and releasing it lets
+/// the code be freed — at once when that closure was its last user, or when the
+/// request ends — while the task may still be running it. Every caller then waits for
+/// the task however long it runs, so this is where the wait is logged, once per
+/// task.
+fn drain_budget_releases(id: u64, cleanup: Option<&PromiseCleanup>) -> bool {
+    if !cleanup.is_some_and(|c| c.code_in_request_memory) {
+        return true;
+    }
+    tracing::warn!(
+        promise_id = id,
+        "Async task still running past the drain budget; waiting for it to stop, \
+         since its code is not in OPcache shared memory and releasing it now \
+         could free code the task is still running"
+    );
+    false
 }
 
 /// Move a finished fiber's orphaned promise into the deferred-drain list:
@@ -5582,9 +5688,10 @@ unsafe fn defer_promise_drain(id: u64) -> Option<Arc<CancelShared>> {
             let cleanup = take_promise_cleanup(id);
             DEFERRED_DRAIN.with(|d| {
                 d.borrow_mut().push(DeferredDrain {
+                    id,
                     rx,
                     cleanup,
-                    deadline: Instant::now() + std::time::Duration::from_secs(5),
+                    deadline: Some(Instant::now() + std::time::Duration::from_secs(5)),
                 });
             });
             newly_flagged.then_some(cancelled)
@@ -5599,11 +5706,12 @@ unsafe fn defer_promise_drain(id: u64) -> Option<Arc<CancelShared>> {
 }
 
 /// Scheduler-tick callback (worker mode): release each deferred promise whose
-/// task has settled or whose 5 s budget has elapsed. Non-blocking — ready
-/// entries and the results received for them are taken out under the borrow,
-/// then their captures are released and the results dropped after the borrow
-/// is dropped: a result can hold the last reference to a `Shared\Pool`, whose
-/// teardown runs `$destroy`.
+/// task has settled or whose 5 s budget has elapsed, unless
+/// `drain_budget_releases` refuses — such an entry then waits for its task
+/// with no deadline. Non-blocking — ready entries and the results received for
+/// them are taken out under the borrow, then their captures are released and
+/// the results dropped after the borrow is dropped: a result can hold the last
+/// reference to a `Shared\Pool`, whose teardown runs `$destroy`.
 ///
 /// # Safety
 /// Called from C FFI on the owning HTTP worker thread.
@@ -5623,7 +5731,19 @@ unsafe extern "C" fn poll_deferred_drains_callback() {
                     true
                 }
                 Err(TryRecvError::Closed) => true,
-                Err(TryRecvError::Empty) => now >= list[i].deadline,
+                Err(TryRecvError::Empty) => match list[i].deadline {
+                    // Nothing is left to wait for once the pool has stopped.
+                    _ if async_pool_stopped() => true,
+                    Some(deadline) if now >= deadline => {
+                        let entry = &mut list[i];
+                        let releases = drain_budget_releases(entry.id, entry.cleanup.as_ref());
+                        if !releases {
+                            entry.deadline = None;
+                        }
+                        releases
+                    }
+                    _ => false,
+                },
             };
             if settled {
                 out.push(list.swap_remove(i));
@@ -5652,18 +5772,17 @@ unsafe extern "C" fn has_deferred_drains_callback() -> c_int {
 }
 
 /// Blocking teardown flush of the deferred-drain list (RSHUTDOWN / worker
-/// teardown): block on each remaining rx (bounded by its own 5 s budget) before
-/// releasing its captures. Safe to block here — the thread is exiting and no
-/// scheduler shares it.
+/// teardown): block on each remaining rx (bounded by what is left of its own
+/// 5 s budget, unless `drain_budget_releases` refuses) before releasing its
+/// captures. Safe to block here — the thread is exiting and no scheduler
+/// shares it.
 unsafe fn flush_deferred_drains() {
     let pending: Vec<DeferredDrain> = DEFERRED_DRAIN.with(|d| d.borrow_mut().drain(..).collect());
     for entry in pending {
-        if let Some(handle) = ASYNC_TOKIO_HANDLE.get() {
-            let remaining = entry.deadline.saturating_duration_since(Instant::now());
-            let _ = handle.block_on(async { tokio::time::timeout(remaining, entry.rx).await });
-        } else {
-            drop(entry.rx);
-        }
+        let remaining = entry
+            .deadline
+            .map(|deadline| deadline.saturating_duration_since(Instant::now()));
+        wait_for_cancelled_task(entry.id, entry.rx, remaining, entry.cleanup.as_ref());
         if let Some(cleanup) = &entry.cleanup {
             run_promise_cleanup(cleanup);
         }
@@ -6700,9 +6819,10 @@ mod tests {
         let (tx, rx) = tokio::sync::oneshot::channel::<AsyncResult>();
         DEFERRED_DRAIN.with(|d| {
             d.borrow_mut().push(DeferredDrain {
+                id: 1,
                 rx,
                 cleanup: None,
-                deadline: Instant::now() + std::time::Duration::from_secs(5),
+                deadline: Some(Instant::now() + std::time::Duration::from_secs(5)),
             })
         });
         tx.send(AsyncResult {
@@ -6722,6 +6842,65 @@ mod tests {
             Some(true),
             "released, after the borrow was dropped"
         );
+        assert_eq!(unsafe { has_deferred_drains_callback() }, 0);
+    }
+
+    /// Push a deferred drain whose budget ran out on a task that has not
+    /// answered, for a closure whose code is (or is not) in request memory.
+    fn push_expired_drain(
+        code_in_request_memory: bool,
+    ) -> tokio::sync::oneshot::Sender<AsyncResult> {
+        let (tx, rx) = tokio::sync::oneshot::channel::<AsyncResult>();
+        let mut cleanup = PromiseCleanup::new();
+        cleanup.code_in_request_memory = code_in_request_memory;
+        DEFERRED_DRAIN.with(|d| {
+            d.borrow_mut().push(DeferredDrain {
+                id: 1,
+                rx,
+                cleanup: Some(cleanup),
+                deadline: Some(Instant::now()),
+            })
+        });
+        tx
+    }
+
+    /// Past its budget a deferred drain lets go of a task whose code is in
+    /// OPcache's shared memory, though the task has not answered.
+    #[test]
+    fn deferred_drain_past_its_budget_releases_a_task_with_shared_code() {
+        let _tx = push_expired_drain(false);
+
+        unsafe { poll_deferred_drains_callback() };
+
+        assert_eq!(unsafe { has_deferred_drains_callback() }, 0);
+    }
+
+    /// A task whose code is in the dispatching request's memory is held past
+    /// the budget, with no deadline left, until it answers.
+    #[test]
+    fn deferred_drain_past_its_budget_waits_for_a_task_with_request_code() {
+        let tx = push_expired_drain(true);
+
+        unsafe { poll_deferred_drains_callback() };
+
+        assert_eq!(unsafe { has_deferred_drains_callback() }, 1);
+        let deadline = DEFERRED_DRAIN.with(|d| d.borrow()[0].deadline);
+        assert_eq!(deadline, None, "waits with no deadline");
+
+        unsafe { poll_deferred_drains_callback() };
+        assert_eq!(unsafe { has_deferred_drains_callback() }, 1);
+
+        tx.send(AsyncResult {
+            success: true,
+            serialized_value: std::ptr::null_mut(),
+            serialized_value_len: 0,
+            exception_class: None,
+            exception_message: None,
+            keepalive: None,
+        })
+        .unwrap();
+        unsafe { poll_deferred_drains_callback() };
+
         assert_eq!(unsafe { has_deferred_drains_callback() }, 0);
     }
 }

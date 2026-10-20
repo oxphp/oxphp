@@ -225,6 +225,7 @@ extern "C" {
     pub fn oxphp_closure_release(obj_ptr: *mut c_void);
     pub fn oxphp_zval_size() -> usize;
     pub fn oxphp_op_array_size() -> usize;
+    pub fn oxphp_op_array_in_request_memory(op_array: *const c_void) -> c_int;
 
     // ── Async dispatch function pointer registration ──
     pub fn oxphp_bridge_set_async_dispatch(
