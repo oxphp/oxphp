@@ -8,7 +8,8 @@ declare(strict_types=1);
 // interrupt raised on its pool thread can reach it — and records how it ended:
 // `<marker>.result` holds the exception that unwound it, or "ran to its end"
 // when nothing did and the loop ran out on its own after 6 s. `<marker>.started`
-// is written as a task starts running.
+// is written as a task starts running, from inside the `try` that records the
+// cancellation.
 //
 // The request waits until the first task is running before it returns: a task
 // still queued when the request ends finds its cancel flag set when it is picked
@@ -18,9 +19,14 @@ $orphans = max(1, (int) ($_GET['orphans'] ?? 1));
 $base = sys_get_temp_dir() . "/oxphp_orphan_{$id}";
 
 $spin = static function (string $marker): void {
-    file_put_contents("$marker.started", '1');
     $t = microtime(true);
     try {
+        // Written inside the `try`: the request returns, and its end cancels the
+        // task, as soon as this file exists — the file is there before the call
+        // even returns — and the cancellation lands on the next opcode boundary.
+        // Written before the `try`, that boundary can be this call's return,
+        // outside the `catch` that records it.
+        file_put_contents("$marker.started", '1');
         while (microtime(true) - $t < 6) {
             // Never suspends; the call and the loop's jump are where the VM
             // checks for an interrupt.
