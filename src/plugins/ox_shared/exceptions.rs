@@ -13,8 +13,9 @@
 //!          │    └── CycleException                     Map::set would form a cycle
 //!          ├── CapacityException
 //!          ├── ValueTooLargeException                  Map value over the per-value cap
-//!          ├── ClosedException                         DEPRECATED — still thrown by Pool;
-//!          │                                            removed once Pool migrates
+//!          ├── ClosedException                         Pool acquire on a closed pool, or outside
+//!          │                                            worker mode from an oxphp_async() task
+//!          │                                            or a request other than its creator
 //!          ├── PoisonedException                       Once Poison-mode failure
 //!          │                                            (first-class, not deprecated)
 //!          ├── UninitializedException
@@ -34,10 +35,12 @@ pub fn register_all(ctx: &mut PluginContext) -> Result<(), PluginError> {
         .build()?;
 
     // Direct subclasses of SharedException.
-    // NOTE: ClosedException is deprecated but kept because Shared\Pool
-    // still throws it; it is scheduled for removal once Pool migrates to
-    // the new result/exception model. PoisonedException is NOT deprecated —
-    // Shared\Once throws it as a first-class part of its Poison failure mode.
+    // NOTE: ClosedException reaches PHP only from Shared\Pool acquires.
+    // Shared\Channel uses the class name only as an internal waker signal
+    // and reports closure without throwing: through RecvResult / SendResult,
+    // or as a partial sendMany / recvMany result. PoisonedException is NOT
+    // deprecated — Shared\Once throws it as a first-class part of its Poison
+    // failure mode.
     for child in [
         "OxPHP\\Shared\\StaleHandleException",
         "OxPHP\\Shared\\TypeException",
