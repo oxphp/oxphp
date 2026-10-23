@@ -23,7 +23,22 @@ declare(strict_types=1);
 if (!function_exists('oxphp_probe_frame_c')) {
     function oxphp_probe_frame_c(): void
     {
-        trigger_error('probe fatal', E_USER_ERROR);
+        oxphp_probe_fatal();
+        oxphp_probe_fatal();
+    }
+
+    // The fatal, raised with nothing being compiled. Not engine_fatal(): a
+    // compile error strands what the compiler was building, which a worker then
+    // keeps, and what a fatal leaves behind on a worker is what this fixture is
+    // measured by (tests/scripts/verify_worker_does_not_grow.sh). A class
+    // declared at run time fatals with E_COMPILE_ERROR all the same once its
+    // name is taken, and no error handler is handed that either. Called twice
+    // so that it fatals on a worker no earlier request has declared it on.
+    function oxphp_probe_fatal(): void
+    {
+        class OxphpProbeFatal
+        {
+        }
     }
 
     function oxphp_probe_frame_b(): void

@@ -9,6 +9,8 @@ declare(strict_types=1);
 //
 // Declared conditionally for the reason fixture_closure_fatal.php gives.
 
+require_once __DIR__ . '/../engine_fatal.php';
+
 if (!class_exists('OxphpBacktraceProbe', false)) {
     final class OxphpBacktraceProbe
     {
@@ -19,14 +21,13 @@ if (!class_exists('OxphpBacktraceProbe', false)) {
         public static ?\WeakReference $held = null;
 
         /**
-         * Ends the request with a fatal raised two frames down, so that the
-         * backtrace PHP 8.5 takes of it has a frame whose arguments are the
+         * Ends the request with a fatal raised from below this frame, so that
+         * the backtrace PHP 8.5 takes of it has a frame whose arguments are the
          * secret and the object.
          */
         public static function fatal(string $secret, object $held): never
         {
-            trigger_error("backtrace probe fatal for $secret", E_USER_ERROR);
-            exit(1);
+            engine_fatal('OxphpBacktraceProbeFatal');
         }
 
         /**

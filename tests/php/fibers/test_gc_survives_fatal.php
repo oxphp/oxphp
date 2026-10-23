@@ -55,7 +55,7 @@ $t->assertTrue('the collector is enabled at all', gc_enabled());
 // Without this the rest proves nothing, and an inner request the worker never
 // got to serve would prove it just as well: the flag is only raised by a fatal
 // that actually happened, so the check below has to see the fatal itself.
-$t->assertContains('the inner request took its fatal', $resp, 'gc probe fatal');
+$t->assertContains('the inner request took its fatal', $resp, 'OxphpGcProbeFatal');
 $t->assertNotContains('and did not reach the end of the script', $resp, 'NOT-REACHED');
 
 $t->assertGreaterThan(

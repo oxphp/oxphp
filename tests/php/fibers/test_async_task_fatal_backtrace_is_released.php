@@ -33,8 +33,10 @@ $sleeper = oxphp_async(static function (): array {
 
 $fatal = oxphp_async(static function (): void {
     set_error_handler(null);
+    // The task runs on another thread, which has functions of its own.
+    require_once __DIR__ . '/../engine_fatal.php';
     $fail = static function (string $blob): void {
-        trigger_error('async task backtrace probe fatal', E_USER_ERROR);
+        engine_fatal('OxphpAsyncTaskBacktraceProbeFatal');
     };
     $fail(str_repeat('x', 1 << 20));
 });

@@ -40,6 +40,16 @@ fclose($sock);
 // leave no abandoned frames for the worker to get wrong.
 $t->assertNotContains('the inner request did not survive its fatal', $resp, 'NOT-REACHED');
 
+// Nor does an exception, which stops the fixture short of NOT-REACHED as well:
+// it unwinds the frames on its way out, which leaves the worker nothing to
+// release and the assertion below true. Only the fatal leaves its tag in the
+// last error the request saw.
+$t->assertContains(
+    'the inner request ended in a fatal, not in an exception',
+    $resp,
+    'LAST-ERROR:Abstract function OxphpFatalInsideAClosure::f() cannot contain body'
+);
+
 $t->assertContains(
     'a closure the fatal was inside does not outlive its request',
     $resp,

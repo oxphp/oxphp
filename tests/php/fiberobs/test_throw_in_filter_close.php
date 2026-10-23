@@ -27,23 +27,24 @@ declare(strict_types=1);
 
 // Both handler slots, because a worker resets neither: what is installed here
 // on arrival is whatever the last TestCase to run on this worker left behind.
-// The error handler would turn the fatal below into an ErrorException. The
-// exception handler would take the throw from onclose() before the engine's own
+// The error handler throws on every error it is handed, and the fatals below
+// are not handed to it, but a warning is, even one @ silences: the @unlink()
+// below warns whenever there is no marker left to remove. The exception
+// handler would take the throw from onclose() before the engine's own
 // reporting ever sees it — answering this request with the previous test's JSON
 // and ending it with exit(), which reaches the same guard by a shorter road and
 // never gets as far as step 3.
 set_error_handler(null);
 set_exception_handler(null);
 
+require_once __DIR__ . '/../engine_fatal.php';
+
 if (!class_exists('OxPHPFatalOnDestructException', false)) {
     class OxPHPFatalOnDestructException extends RuntimeException
     {
         public function __destruct()
         {
-            trigger_error(
-                'fatal raised while the recovery was dropping the exception its walk was handed',
-                E_USER_ERROR
-            );
+            engine_fatal('OxphpFatalOnExceptionDestruct');
         }
     }
 }
@@ -77,7 +78,7 @@ function oxphp_fatal_under_throwing_filter(): void
     $handle = fopen('php://memory', 'r+');
     stream_filter_append($handle, 'oxphp-throw-on-close');
 
-    trigger_error('the request fatal', E_USER_ERROR);
+    engine_fatal('OxphpRequestFatalUnderAThrowingFilter');
 }
 
 oxphp_fatal_under_throwing_filter();

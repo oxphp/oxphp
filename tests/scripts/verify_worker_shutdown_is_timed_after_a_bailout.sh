@@ -102,7 +102,7 @@ for _ in $(seq 1 60); do
 	sleep 0.25
 done
 
-if echo "$log" | grep -q 'a destructor the collector ran ended in a fatal error' \
+if echo "$log" | grep -q 'OxphpWorkerTimerDestructorFatal' \
 	&& echo "$log" | grep -q 'oxphp-worker-shutdown-probe: started'; then
 	ok "premise: a fatal error between requests ended the serve loop and the worker script's shutdown ran"
 else
