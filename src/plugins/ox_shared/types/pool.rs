@@ -7,12 +7,15 @@
 //!   via `std::thread::spawn`, but the FFI boundary needs a type that
 //!   can cross C — `std::thread::ThreadId` has no stable `as_u64`. We
 //!   use `libc::pthread_self() as usize as u64`.
-//! * `factory_fcc` / `destroy_fcc` are stored as `AtomicPtr<c_void>`.
-//!   The creating FFI path (`oxphp_shared_pool_create`) calls
+//! * The factory and `$destroy` are held as one [`Callables`] set. The
+//!   creating FFI path (`oxphp_shared_pool_create`) calls
 //!   `oxphp_pool_fcc_new` in the C bridge, which emalloc's a
 //!   `oxphp_pool_fcc_t` (fcc + ZVAL_COPY'd callable) and hands back a
 //!   heap pointer — memory of the creating thread's current request,
-//!   as is every slot the factory mints.
+//!   as is every slot the factory mints. Other threads call them under
+//!   the set's lease, which that request ends before its shutdown
+//!   starts; a pool bound to a name then takes a new set from the next
+//!   `Shared\Registry::pool()` or `global()` call for that name.
 //! * **Outside worker mode a pool belongs to the request that made
 //!   it.** A thread that runs one request after another (traditional,
 //!   Framework and SPA routing) resets its request heap at the end of
@@ -54,9 +57,9 @@
 //!   `oxphp_shared_pool_destroy_skipped_total`.
 
 use std::cell::{Cell, RefCell};
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicPtr, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
@@ -110,6 +113,20 @@ thread_local! {
     /// whose startup failed is never shut down: its number stays until the
     /// next request replaces it, and its heap is not reset meanwhile.
     static OPEN_REQUEST: Cell<u64> = const { Cell::new(0) };
+    /// The leases of the pool callables this thread's open request made,
+    /// which other threads may still be calling when the request begins to
+    /// shut down ([`end_callables_of_closing_request`]). The leases, not the
+    /// callables: the hook that walks the list can then never be the last
+    /// holder of a callable, and free it with no PHP frame to run what that
+    /// frees. Weak, so the list keeps nothing alive; one already gone is
+    /// dropped from it on the next addition.
+    static MADE_HERE: RefCell<Vec<Weak<Lease>>> = const { RefCell::new(Vec::new()) };
+    /// The leases of the pool callables this thread has called while they
+    /// belonged to another request ([`leave_leases_of_exiting_thread`]).
+    static CALLED_HERE: RefCell<Vec<Weak<Lease>>> = const { RefCell::new(Vec::new()) };
+    /// The open request has begun to shut down: callables it makes from
+    /// here on are for its own use only.
+    static REQUEST_CLOSING: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Source of request numbers. Process-wide, so that no two requests share
@@ -130,6 +147,7 @@ pub fn set_request_scope(scope: RequestScope) {
 pub fn open_request_token() {
     let token = NEXT_REQUEST.fetch_add(1, Ordering::Relaxed);
     OPEN_REQUEST.with(|r| r.set(token));
+    REQUEST_CLOSING.with(|c| c.set(false));
 }
 
 /// The calling thread's request has been shut down and its heap reset.
@@ -154,7 +172,8 @@ pub enum SkipReason {
     NoFrame = 0,
     /// The pool was torn down on another thread, which forgot it.
     OtherThread = 1,
-    /// The request of its thread ended, and the slot with it.
+    /// The request of its thread ended, and the slot with it; or the
+    /// request that made the pool's `$destroy` had begun to shut down.
     RequestEnded = 2,
 }
 
@@ -198,6 +217,230 @@ pub fn registry_refuses_pools_on_current_thread() -> bool {
 pub const POOL_OUTSIDE_ITS_REQUEST: &str =
     "outside worker mode a Shared\\Pool can only be used by the request \
      that created it, and only until that request ends";
+
+/// Message of the `ClosedException` an `acquire` gets when it has to make
+/// a slot and the pool's factory belongs to a request that has begun to
+/// shut down.
+pub const POOL_FACTORY_ENDED: &str =
+    "Shared\\Pool cannot make a new slot: its factory belonged to a PHP request \
+     that has ended. A pool bound to a name takes the factory and destroy \
+     callbacks of the next Shared\\Registry::pool() or Shared\\Registry::global() \
+     call for that name";
+
+// ─── Callables ─────────────────────────────────────────────────────────
+
+/// A pool's factory and `$destroy`, as `oxphp_pool_fcc_new` made them in the
+/// heap of a PHP request: the one that created the pool, or, once that one
+/// has begun to shut down, the one `Shared\Registry` handed the pool to
+/// ([`PoolInner::adopt_callables_from`]).
+///
+/// Any thread may call them while that request is open, and no thread after:
+/// its shutdown frees every object still alive, referenced or not — a
+/// closure among them — and the heap goes at the latest with the thread.
+/// So a thread whose open request did not make them calls them under the
+/// [`Lease`], and the request that did, before its shutdown starts, refuses
+/// new such calls and waits for those in progress
+/// ([`end_callables_of_closing_request`]).
+///
+/// Freed by whoever lets go of them last, if that is the request that made
+/// them; anywhere else they are forgotten, and go with that request's heap.
+struct Callables {
+    /// `oxphp_pool_fcc_t*`; null only in host tests.
+    factory: *mut c_void,
+    /// `oxphp_pool_fcc_t*`, or null when the pool has no `$destroy`.
+    destroy: *mut c_void,
+    /// The request that made them ([`open_request_token`]); 0 if none was
+    /// open.
+    made_in: u64,
+    lease: Arc<Lease>,
+}
+
+// SAFETY: the pointers are opaque here. The bridge dereferences them on a
+// thread holding the lease, or in the request that made them, and only that
+// request frees them (`Drop`).
+unsafe impl Send for Callables {}
+unsafe impl Sync for Callables {}
+
+impl Callables {
+    /// Callables made by the request open on the calling thread. Remembered
+    /// for that request's shutdown, unless the shutdown has begun: then they
+    /// are for its own use from the start.
+    fn new(factory: *mut c_void, destroy: *mut c_void) -> Arc<Self> {
+        let set = Arc::new(Self {
+            factory,
+            destroy,
+            made_in: current_request(),
+            lease: Arc::default(),
+        });
+        if REQUEST_CLOSING.with(|c| c.get()) {
+            set.lease.lock().ended = true;
+        } else if set.made_in != 0 {
+            MADE_HERE.with(|list| {
+                let mut list = list.borrow_mut();
+                list.retain(|w| w.strong_count() > 0);
+                list.push(Arc::downgrade(&set.lease));
+            });
+        }
+        set
+    }
+
+    /// Whether the request open on the calling thread made them.
+    fn made_here(&self) -> bool {
+        self.made_in != 0 && self.made_in == current_request()
+    }
+
+    /// Whether a request other than the open one would be refused a call.
+    fn ended(&self) -> bool {
+        self.lease.lock().ended
+    }
+}
+
+impl Drop for Callables {
+    fn drop(&mut self) {
+        // SAFETY: both were allocated by `oxphp_pool_fcc_new` in the heap
+        // of request `made_in`. That request is the one open on this thread,
+        // so the heap is this thread's and has not been reset since, and the
+        // last reference is going, so no thread calls them any more. Freeing
+        // one releases its callable, which can run destructors — PHP, which
+        // may not run while a bailout is held back: then they are forgotten
+        // too, and go with the heap of the request the bailout ends.
+        if !self.made_here() || bailout_held_back() {
+            return;
+        }
+        for fcc in [self.factory, self.destroy] {
+            if !fcc.is_null() {
+                unsafe { ffi::oxphp_pool_fcc_free(fcc) };
+            }
+        }
+    }
+}
+
+/// The calls into one [`Callables`] that other requests' threads are
+/// making, and whether the request that made it still takes new ones.
+#[derive(Default)]
+struct Lease {
+    state: Mutex<LeaseState>,
+    /// Notified whenever a thread's count drops to zero.
+    left: Condvar,
+}
+
+#[derive(Default)]
+struct LeaseState {
+    /// The request that made the callables has begun to shut down: no new
+    /// call from another request. Never cleared; a pool given new callables
+    /// gets another `Callables`.
+    ended: bool,
+    /// Calls in progress, by the thread making them.
+    users: HashMap<ThreadKey, u32>,
+}
+
+/// How long the request that made a pool's callables waits for other
+/// threads' calls into them before it says, once, that it is waiting.
+const LEASE_WAIT_WARN_AFTER: Duration = Duration::from_secs(5);
+
+impl Lease {
+    fn lock(&self) -> std::sync::MutexGuard<'_, LeaseState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// One call `me` made has returned.
+    fn leave(&self, me: ThreadKey) {
+        let mut state = self.lock();
+        if let Some(count) = state.users.get_mut(&me) {
+            *count -= 1;
+            if *count == 0 {
+                state.users.remove(&me);
+            }
+        }
+        drop(state);
+        self.left.notify_all();
+    }
+
+    /// Thread `me` is exiting. A call it still counts here is one whose
+    /// fiber was dropped without being resumed, and will never return.
+    fn forget(&self, me: ThreadKey) {
+        if self.lock().users.remove(&me).is_some() {
+            self.left.notify_all();
+        }
+    }
+
+    /// Refuse every new call from another request, then wait, without a
+    /// bound, for the calls in progress to return.
+    fn end_and_wait(&self) {
+        let mut state = self.lock();
+        state.ended = true;
+        let warn_at = Instant::now() + LEASE_WAIT_WARN_AFTER;
+        let mut warned = false;
+        while !state.users.is_empty() {
+            if warned {
+                state = self.left.wait(state).unwrap_or_else(|e| e.into_inner());
+                continue;
+            }
+            let until_warning = warn_at.saturating_duration_since(Instant::now());
+            state = self
+                .left
+                .wait_timeout(state, until_warning)
+                .unwrap_or_else(|e| e.into_inner())
+                .0;
+            if Instant::now() >= warn_at && !state.users.is_empty() {
+                warned = true;
+                tracing::warn!(
+                    threads = state.users.len(),
+                    "A PHP request is shutting down while another thread is still \
+                     running the factory or destroy callback of a Shared\\Pool \
+                     this request created; the shutdown waits for that call to \
+                     return, since the callback is freed with the request"
+                );
+            }
+        }
+    }
+}
+
+/// One call into a pool's [`Callables`] on the calling thread; dropping it
+/// ends the call.
+struct CallablesInUse {
+    set: Arc<Callables>,
+    /// The thread counted in the lease; `None` in the request that made
+    /// the callables.
+    counted: Option<ThreadKey>,
+}
+
+impl Drop for CallablesInUse {
+    fn drop(&mut self) {
+        if let Some(me) = self.counted {
+            self.set.lease.leave(me);
+        }
+    }
+}
+
+/// The request open on the calling thread is about to shut down. Pool
+/// callables it made take no new call from another request from here on,
+/// and the calls other threads are making into them are waited for: the
+/// shutdown frees them. Callables the request makes after this are for its
+/// own use only.
+///
+/// The wait has no bound. A call that waits in turn for something only
+/// this request's shutdown gives up holds the thread for good.
+pub fn end_callables_of_closing_request() {
+    REQUEST_CLOSING.with(|c| c.set(true));
+    for weak in MADE_HERE.with(|list| std::mem::take(&mut *list.borrow_mut())) {
+        if let Some(lease) = weak.upgrade() {
+            lease.end_and_wait();
+        }
+    }
+}
+
+/// The calling thread is exiting: the calls it is still counted for in
+/// other requests' pool callables will never return, and are not waited
+/// for. A call whose fiber the server dropped without resuming it is one.
+pub fn leave_leases_of_exiting_thread() {
+    let me = current_thread_key();
+    for weak in CALLED_HERE.with(|list| std::mem::take(&mut *list.borrow_mut())) {
+        if let Some(lease) = weak.upgrade() {
+            lease.forget(me);
+        }
+    }
+}
 
 /// One resource slot — either checked out to a worker or sitting in
 /// its owner's idle deque.
@@ -281,25 +524,17 @@ pub struct PoolInner {
     /// thread's count when the thread exits.
     parked: DashMap<ThreadKey, AtomicU64>,
 
-    /// Factory/destroy callables. Owned by the PHP wrapper via explicit
-    /// refcount; typed invocation lives in the FFI layer. `destroy_fcc`
-    /// is nullable when the user passes `null` for `$destroy`. For a pool
-    /// with a home thread, both are swapped to null when the request heap
-    /// they live in is reset (see [`PoolInner::end_request_on`]). They are
-    /// freed only if still set, and only by the request that allocated
-    /// them (`created_in`).
-    factory_fcc: AtomicPtr<c_void>,
-    destroy_fcc: AtomicPtr<c_void>,
+    /// Factory and `$destroy`, with the request they belong to. Taken for
+    /// each call through [`PoolInner::use_callables`]. `None` once a pool
+    /// with a home thread has outlived its request
+    /// ([`PoolInner::end_request_on`]) or the pool has been torn down.
+    callables: Mutex<Option<Arc<Callables>>>,
 
     /// The thread that created this pool, when that thread's request
     /// ends before the thread does. Only `home` may acquire, and only
     /// until `request_ended`. `None` on [`RequestScope::Thread`].
     home: Option<ThreadKey>,
     request_ended: AtomicBool,
-
-    /// The request the callables were allocated in (see
-    /// [`open_request_token`]); 0 if none was open.
-    created_in: u64,
 
     closed: AtomicBool,
     self_id: OnceLock<SharedId>,
@@ -366,12 +601,10 @@ impl PoolInner {
             waiters: Mutex::new(0),
             waiters_cv: Condvar::new(),
             parked: DashMap::new(),
-            factory_fcc: AtomicPtr::new(factory_fcc),
-            destroy_fcc: AtomicPtr::new(destroy_fcc),
+            callables: Mutex::new(Some(Callables::new(factory_fcc, destroy_fcc))),
             home: (REQUEST_SCOPE.with(|s| s.get()) != RequestScope::Thread)
                 .then(current_thread_key),
             request_ended: AtomicBool::new(false),
-            created_in: current_request(),
             closed: AtomicBool::new(false),
             self_id: OnceLock::new(),
             self_entry: OnceLock::new(),
@@ -443,16 +676,107 @@ impl PoolInner {
         self.idle_timeout
     }
 
-    /// Opaque factory handle. Invoked via `zend_call_known_function`.
+    fn callables(&self) -> std::sync::MutexGuard<'_, Option<Arc<Callables>>> {
+        self.callables.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Opaque factory handle, or null once the pool has none.
     #[allow(dead_code)]
     pub(crate) fn factory_fcc(&self) -> *mut c_void {
-        self.factory_fcc.load(Ordering::Acquire)
+        self.callables()
+            .as_ref()
+            .map_or(std::ptr::null_mut(), |set| set.factory)
     }
 
     /// Opaque destroy handle. May be null.
     #[allow(dead_code)]
     pub(crate) fn destroy_fcc(&self) -> *mut c_void {
-        self.destroy_fcc.load(Ordering::Acquire)
+        self.callables()
+            .as_ref()
+            .map_or(std::ptr::null_mut(), |set| set.destroy)
+    }
+
+    /// Whether the pool was given a `$destroy`.
+    fn has_destroy(&self) -> bool {
+        self.callables()
+            .as_ref()
+            .is_some_and(|set| !set.destroy.is_null())
+    }
+
+    /// The pool's callables, for one call on the calling thread, or `None`
+    /// when this thread may not call them: the request that made them has
+    /// begun to shut down and is not the one open here, or the pool has
+    /// none any more. A thread whose open request did not make them is
+    /// counted in their [`Lease`] until the returned value is dropped.
+    fn use_callables(&self) -> Option<CallablesInUse> {
+        let set = self.callables().clone()?;
+        if set.made_here() {
+            return Some(CallablesInUse { set, counted: None });
+        }
+        let me = current_thread_key();
+        {
+            let mut state = set.lease.lock();
+            if state.ended {
+                return None;
+            }
+            *state.users.entry(me).or_insert(0) += 1;
+        }
+        CALLED_HERE.with(|list| {
+            let mut list = list.borrow_mut();
+            list.retain(|w| w.strong_count() > 0);
+            if !list
+                .iter()
+                .any(|w| std::ptr::eq(w.as_ptr(), Arc::as_ptr(&set.lease)))
+            {
+                list.push(Arc::downgrade(&set.lease));
+            }
+        });
+        Some(CallablesInUse {
+            set,
+            counted: Some(me),
+        })
+    }
+
+    /// Whether the callables this pool has would refuse a call from the
+    /// calling thread for good: they belong to a request that has begun to
+    /// shut down and is not the one open here. `Shared\Registry` then gives
+    /// the pool new ones as it hands it out by name. Never for a pool with a
+    /// home thread or a closed one, which no other request can use anyway.
+    pub(crate) fn wants_callables(&self) -> bool {
+        self.home.is_none()
+            && !self.is_closed()
+            && self
+                .callables()
+                .as_ref()
+                .is_none_or(|set| !set.made_here() && set.ended())
+    }
+
+    /// Give this pool the callables `from` has, if [`wants_callables`]
+    /// still holds and they were made by the request open on this thread,
+    /// which has not begun to shut down. Both pools share them from here
+    /// on. Returns whether this pool took them.
+    ///
+    /// [`wants_callables`]: PoolInner::wants_callables
+    pub(crate) fn adopt_callables_from(&self, from: &PoolInner) -> bool {
+        let Some(set) = from.callables().clone() else {
+            return false;
+        };
+        if !set.made_here() || set.ended() {
+            return false;
+        }
+        let mut mine = self.callables();
+        let orphaned = mine
+            .as_ref()
+            .is_none_or(|own| !own.made_here() && own.ended());
+        if !orphaned || self.home.is_some() || self.is_closed() {
+            return false;
+        }
+        // Those it had are not this request's: letting go of them frees
+        // nothing.
+        let old = mine.replace(set);
+        drop(mine);
+        drop(old);
+        true
     }
 
     /// Whether what this pool keeps in a request heap is out of the
@@ -769,20 +1093,32 @@ impl PoolInner {
     /// and nothing frees it — and the slots not reached, whose budget is
     /// still taken.
     fn destroy_until_bailout(&self, slots: Vec<PoolSlot>) -> (u64, std::vec::IntoIter<PoolSlot>) {
+        if slots.is_empty() {
+            return (0, slots.into_iter());
+        }
         let mut destroyed = 0;
         let mut slots = slots.into_iter();
+        // A `$destroy` this thread may not call any more is skipped: the
+        // slots are freed without it.
+        let callables = self.use_callables();
+        let destroy = callables
+            .as_ref()
+            .map_or(std::ptr::null_mut(), |c| c.set.destroy);
+        let skipped = callables.is_none() && self.has_destroy();
         for slot in slots.by_ref() {
             // SAFETY: `slot.resource` was minted by `oxphp_pool_factory_invoke`
             // on this thread, in the request still open on it (or is a
             // stand-in in host tests, which the mock never dereferences; the
-            // production helper short-circuits on NULL). `destroy_fcc` is
-            // either `null_mut()` (user opted out of $destroy, or
-            // `end_request_on` forgot it with its request heap) or the
-            // emalloc'd fcc from `oxphp_pool_fcc_new`.
-            let rc = unsafe {
-                ffi::oxphp_pool_destroy_invoke_guarded(self.destroy_fcc(), slot.resource)
-            };
-            note_destroy_rc(rc);
+            // production helper short-circuits on NULL). `destroy` is either
+            // `null_mut()` (no $destroy, or one this thread may not call) or
+            // the emalloc'd fcc from `oxphp_pool_fcc_new`, which `callables`
+            // keeps callable until it is dropped.
+            let rc = unsafe { ffi::oxphp_pool_destroy_invoke_guarded(destroy, slot.resource) };
+            if skipped {
+                record_destroy_skipped(1, SkipReason::RequestEnded);
+            } else {
+                note_destroy_rc(rc);
+            }
             self.release_budget();
             destroyed += 1;
             if rc == ffi::OXPHP_SHARED_INVOKE_BAILOUT {
@@ -871,7 +1207,7 @@ impl PoolInner {
 
     /// Count `count` slots that left without `$destroy`, if there is one.
     fn record_skipped(&self, count: u64, reason: SkipReason) {
-        if !self.destroy_fcc().is_null() {
+        if self.has_destroy() {
             record_destroy_skipped(count, reason);
         }
     }
@@ -887,10 +1223,9 @@ impl PoolInner {
         if self.home == Some(me) {
             self.request_ended.store(true, Ordering::Release);
             self.close();
-            self.factory_fcc
-                .store(std::ptr::null_mut(), Ordering::Release);
-            self.destroy_fcc
-                .store(std::ptr::null_mut(), Ordering::Release);
+            // No request's open here: letting go of them frees nothing.
+            let set = self.callables().take();
+            drop(set);
         }
     }
 
@@ -1179,27 +1514,13 @@ impl SharedInner for PoolInner {
             self.record_skipped(forgotten, reason);
         }
 
-        // SAFETY: a non-null `factory_fcc` was emalloc'd by
-        // `oxphp_pool_fcc_new` when the pool was created, in the heap of
-        // request `created_in` (`end_request_on` nulls it when a pool with
-        // `home` outlives that request). `free` holds only while that
-        // request is the one open on this thread, so the heap is this
-        // thread's and has not been reset since. `destroy_fcc` is either
-        // NULL or an fcc from the same path. The swap frees each at most
-        // once; otherwise they are forgotten with that heap. Freeing one
-        // releases its callable, which can run destructors — PHP, which may
-        // not run while a bailout is held back (`on_shutdown_notify`): then
-        // they are forgotten too, and go with the heap of the request open
-        // here — at the end of the request the bailout ends, or, in worker
-        // mode and on an `oxphp_async()` thread, when the thread exits.
-        let free =
-            self.created_in != 0 && self.created_in == current_request() && !bailout_held_back();
-        for fcc in [&self.factory_fcc, &self.destroy_fcc] {
-            let fcc = fcc.swap(std::ptr::null_mut(), Ordering::AcqRel);
-            if free && !fcc.is_null() {
-                unsafe { ffi::oxphp_pool_fcc_free(fcc) };
-            }
-        }
+        // The callables are freed if this was their last holder and the
+        // request open here made them (`Callables`' `Drop`); otherwise they
+        // are forgotten, and go with that request's heap — at its end, or,
+        // in worker mode and on an `oxphp_async()` thread, when the thread
+        // exits. A pool `Shared\Registry` gave them to shares them.
+        let set = self.callables().take();
+        drop(set);
     }
 
     fn on_shutdown_notify(&self) {
@@ -1272,10 +1593,10 @@ impl SharedInnerPoolExt for dyn SharedInner {
 //
 // * `factory_callable_zval` / `destroy_callable_zval` on create: C
 //   allocates a `oxphp_pool_fcc_t` (ZVAL_COPY'd callable + cached fcc)
-//   and returns its heap pointer; Rust stores that pointer in
-//   `PoolInner.factory_fcc` / `.destroy_fcc`. Freed on pool drop only
-//   in the request that created the pool; dropped anywhere else, they
-//   are left to that request's end.
+//   and returns its heap pointer; Rust stores that pointer in the
+//   pool's `Callables`. Freed when the last reference to that set goes,
+//   only in the request that made it; dropped anywhere else, they are
+//   left to that request's end.
 // * Per-resource `slot_zv_heap`: C allocates at
 //   `oxphp_pool_factory_invoke` time (ZVAL_COPY of the factory's
 //   object return). Pool is the sole owner. `pool_acquire` hands the
@@ -1504,9 +1825,22 @@ pub unsafe extern "C" fn oxphp_shared_pool_acquire(
 
             // 2. Budget for a fresh factory invocation.
             if pool.try_reserve_budget() {
+                // Taken only for the call, never across a wait for a slot:
+                // the request that made the factory waits for the calls
+                // other threads make into it before it shuts down.
+                let Some(callables) = pool.use_callables() else {
+                    pool.release_budget();
+                    set_last_error(POOL_FACTORY_ENDED);
+                    break 'acquire Err(crate::plugins::ox_shared::error::SharedError::Closed);
+                };
                 let mut slot_heap: *mut std::ffi::c_void = std::ptr::null_mut();
-                let rc =
-                    unsafe { ffi::oxphp_pool_factory_invoke(pool.factory_fcc(), &mut slot_heap) };
+                // SAFETY: `callables` keeps the factory callable until it is
+                // dropped, right after the call, whatever the call returns:
+                // the guarded helper returns a bailout rather than raising it.
+                let rc = unsafe {
+                    ffi::oxphp_pool_factory_invoke(callables.set.factory, &mut slot_heap)
+                };
+                drop(callables);
                 if rc == 0 {
                     entry.registry.record_op(entry);
                     unsafe {
@@ -3055,6 +3389,429 @@ mod tests {
         })
         .join()
         .unwrap();
+    }
+
+    /// Run `f` on a thread of its own and fail, rather than hang, if it
+    /// has not returned within five seconds.
+    #[cfg(not(feature = "php"))]
+    fn finishes<T: Send + 'static>(what: &str, f: impl FnOnce() -> T + Send + 'static) -> T {
+        use std::sync::mpsc::{channel, RecvTimeoutError};
+        let (tx, rx) = channel();
+        let handle = thread::spawn(move || {
+            let _ = tx.send(f());
+        });
+        match rx.recv_timeout(Duration::from_secs(5)) {
+            Ok(value) => {
+                handle.join().unwrap();
+                value
+            }
+            Err(RecvTimeoutError::Timeout) => panic!("{what} did not return"),
+            Err(RecvTimeoutError::Disconnected) => {
+                // `f` panicked: report its panic.
+                handle.join().unwrap();
+                unreachable!()
+            }
+        }
+    }
+
+    /// A pool made by a request that has begun to shut down since, on a
+    /// thread that has exited.
+    #[cfg(not(feature = "php"))]
+    fn pool_of_a_closed_request() -> Arc<PoolInner> {
+        finishes("the creator", || {
+            open_request_token();
+            let p = inner_with_fccs(2);
+            end_callables_of_closing_request();
+            close_request_token();
+            p
+        })
+    }
+
+    /// The request that made a pool's callables waits, as it begins to shut
+    /// down, for the call another thread is making into them — and from
+    /// then on that thread makes no new one, while the request itself still
+    /// can.
+    #[cfg(not(feature = "php"))]
+    #[test]
+    fn closing_request_waits_for_a_call_another_thread_makes_into_its_callables() {
+        use crate::plugin::PluginPhpThreadHandler;
+        use crate::plugins::ox_shared::SharedThreadHooks;
+        use std::sync::mpsc::channel;
+        let (pool_tx, pool_rx) = channel();
+        let (close_tx, close_rx) = channel::<()>();
+        let closed = Arc::new(AtomicBool::new(false));
+        let creator = {
+            let closed = Arc::clone(&closed);
+            thread::spawn(move || {
+                open_request_token();
+                let p = inner_with_fccs(1);
+                pool_tx.send(Arc::clone(&p)).unwrap();
+                close_rx.recv().unwrap();
+                SharedThreadHooks.request_frame_closing();
+                closed.store(true, Ordering::SeqCst);
+                assert!(
+                    p.use_callables().is_some(),
+                    "its own shutdown still calls them"
+                );
+                assert!(!p.wants_callables(), "nor does it replace them itself");
+                close_request_token();
+            })
+        };
+        let p: Arc<PoolInner> = pool_rx.recv().unwrap();
+        assert!(
+            !p.wants_callables(),
+            "callables of an open request are kept"
+        );
+
+        let (entered_tx, entered_rx) = channel();
+        let (leave_tx, leave_rx) = channel::<()>();
+        let caller = {
+            let p = Arc::clone(&p);
+            thread::spawn(move || {
+                open_request_token();
+                let call = p.use_callables().expect("the creator's request is open");
+                assert!(call.counted.is_some());
+                entered_tx.send(()).unwrap();
+                leave_rx.recv().unwrap();
+                drop(call);
+            })
+        };
+        entered_rx.recv().unwrap();
+        close_tx.send(()).unwrap();
+        thread::sleep(Duration::from_millis(150));
+        assert!(
+            !closed.load(Ordering::SeqCst),
+            "the shutdown must not start while the call is in progress"
+        );
+        leave_tx.send(()).unwrap();
+        creator.join().unwrap();
+        assert!(closed.load(Ordering::SeqCst));
+        caller.join().unwrap();
+
+        let p2 = Arc::clone(&p);
+        assert!(
+            finishes("a later call", move || {
+                open_request_token();
+                p2.use_callables().is_none()
+            }),
+            "a request that has begun to shut down takes no new call"
+        );
+        assert!(p.wants_callables());
+    }
+
+    /// The request that made a pool's callables does not free them while it
+    /// waits, at the start of its shutdown, for another thread's call: no PHP
+    /// frame is there for what freeing them runs. Here the pool lets go of
+    /// them during the wait, and the call returning leaves the waiting
+    /// request as their only other holder.
+    #[cfg(not(feature = "php"))]
+    #[test]
+    fn the_closing_request_does_not_free_callables_let_go_of_during_its_wait() {
+        use crate::bridge::ffi::mock_pool_heap_calls;
+        use crate::plugin::PluginPhpThreadHandler;
+        use crate::plugins::ox_shared::SharedThreadHooks;
+        use std::sync::mpsc::channel;
+        let (pool_tx, pool_rx) = channel();
+        let (close_tx, close_rx) = channel::<()>();
+        let (freed_tx, freed_rx) = channel();
+        let creator = thread::spawn(move || {
+            open_request_token();
+            pool_tx.send(inner_with_fccs(1)).unwrap();
+            close_rx.recv().unwrap();
+            let before = mock_pool_heap_calls();
+            SharedThreadHooks.request_frame_closing();
+            freed_tx.send(mock_pool_heap_calls() - before).unwrap();
+            close_request_token();
+        });
+        let p: Arc<PoolInner> = pool_rx.recv().unwrap();
+
+        let (entered_tx, entered_rx) = channel();
+        let (leave_tx, leave_rx) = channel::<()>();
+        let caller = {
+            let p = Arc::clone(&p);
+            thread::spawn(move || {
+                open_request_token();
+                let call = p.use_callables().expect("the creator's request is open");
+                drop(p);
+                entered_tx.send(()).unwrap();
+                leave_rx.recv().unwrap();
+                drop(call);
+                close_request_token();
+            })
+        };
+        entered_rx.recv().unwrap();
+        close_tx.send(()).unwrap();
+        // The hook ends the lease only once it holds what it waits on.
+        while !p.callables().as_ref().is_some_and(|set| set.ended()) {
+            thread::yield_now();
+        }
+        p.on_drop();
+        drop(p);
+        leave_tx.send(()).unwrap();
+        caller.join().unwrap();
+        assert_eq!(
+            freed_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the shutdown must not wait once the call has returned"),
+            0,
+            "nothing is freed in the hook"
+        );
+        creator.join().unwrap();
+    }
+
+    /// A call whose thread exited without returning from it — its fiber was
+    /// dropped unresumed — does not hold up the shutdown.
+    #[cfg(not(feature = "php"))]
+    #[test]
+    fn a_call_left_by_an_exiting_thread_does_not_hold_up_the_shutdown() {
+        use crate::plugin::PluginPhpThreadHandler;
+        use crate::plugins::ox_shared::SharedThreadHooks;
+        use std::sync::mpsc::channel;
+        let (pool_tx, pool_rx) = channel();
+        let (close_tx, close_rx) = channel::<()>();
+        let (closed_tx, closed_rx) = channel();
+        let creator = thread::spawn(move || {
+            open_request_token();
+            let p = inner_with_fccs(1);
+            pool_tx.send(Arc::clone(&p)).unwrap();
+            close_rx.recv().unwrap();
+            SharedThreadHooks.request_frame_closing();
+            closed_tx.send(()).unwrap();
+            close_request_token();
+        });
+        let p: Arc<PoolInner> = pool_rx.recv().unwrap();
+        finishes("the caller", move || {
+            open_request_token();
+            std::mem::forget(p.use_callables().expect("the creator's request is open"));
+            SharedThreadHooks.thread_stopping();
+        });
+        close_tx.send(()).unwrap();
+        closed_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the shutdown must not wait for a thread that has exited");
+        creator.join().unwrap();
+    }
+
+    /// The request that made the callables is not counted in their lease:
+    /// its shutdown does not wait for a call of its own.
+    #[cfg(not(feature = "php"))]
+    #[test]
+    fn the_request_that_made_the_callables_does_not_wait_for_itself() {
+        finishes("the creator", || {
+            open_request_token();
+            let p = inner_with_fccs(1);
+            let own = p.use_callables().unwrap();
+            assert!(own.counted.is_none());
+            end_callables_of_closing_request();
+            drop(own);
+            close_request_token();
+        });
+    }
+
+    /// Callables a request makes once its shutdown has begun — in a
+    /// shutdown function or a destructor — are for that request alone; the
+    /// next request's are not.
+    #[cfg(not(feature = "php"))]
+    #[test]
+    fn callables_made_while_the_request_shuts_down_take_no_call_from_another_thread() {
+        finishes("the creator", || {
+            open_request_token();
+            end_callables_of_closing_request();
+            let late = inner_with_fccs(1);
+            assert!(late.use_callables().is_some());
+            close_request_token();
+            open_request_token();
+            let next = inner_with_fccs(1);
+            let (late_used, next_used) = thread::scope(|s| {
+                s.spawn(|| {
+                    open_request_token();
+                    (
+                        late.use_callables().is_some(),
+                        next.use_callables().is_some(),
+                    )
+                })
+                .join()
+                .unwrap()
+            });
+            assert!(!late_used, "made while its request was shutting down");
+            assert!(next_used, "made by an open request");
+            close_request_token();
+        });
+    }
+
+    /// A pool whose callables belong to a request that has begun to shut
+    /// down takes those of a pool made by the request open on the calling
+    /// thread. The first such pool wins; the pool that gave them shares
+    /// them, and they are freed once, by their last holder, in the request
+    /// that made them.
+    #[cfg(not(feature = "php"))]
+    #[test]
+    fn a_pool_takes_the_callables_of_the_request_that_asks_for_it_by_name() {
+        let p = pool_of_a_closed_request();
+        finishes("the adopter", move || {
+            open_request_token();
+            assert!(p.wants_callables());
+
+            // Not from a pool another request made, ...
+            let foreign = finishes("another request", || {
+                open_request_token();
+                let q = inner_with_fccs(1);
+                close_request_token();
+                q
+            });
+            assert!(!p.adopt_callables_from(&foreign));
+            // ... nor from one made while this request shuts down.
+            end_callables_of_closing_request();
+            let late = inner_with_fccs(1);
+            assert!(!p.adopt_callables_from(&late));
+            open_request_token();
+
+            let made = |factory: usize, destroy: usize| {
+                Arc::new(PoolInner::new(
+                    factory as *mut c_void,
+                    destroy as *mut c_void,
+                    1,
+                    Duration::from_secs(300),
+                ))
+            };
+            let q = made(0xFAC0_0062, 0xDE50_0062);
+            let other = made(0xFAC0_0063, 0xDE50_0063);
+            assert!(p.adopt_callables_from(&q));
+            assert_eq!(p.factory_fcc(), 0xFAC0_0062 as *mut c_void);
+            assert_eq!(p.destroy_fcc(), 0xDE50_0062 as *mut c_void);
+            assert!(!p.wants_callables());
+            assert!(!p.adopt_callables_from(&other), "the first pool wins");
+            assert_eq!(p.factory_fcc(), 0xFAC0_0062 as *mut c_void);
+            assert_eq!(other.factory_fcc(), 0xFAC0_0063 as *mut c_void);
+
+            let calls = crate::bridge::ffi::mock_pool_heap_calls();
+            q.on_drop();
+            assert_eq!(
+                crate::bridge::ffi::mock_pool_heap_calls(),
+                calls,
+                "shared with the pool that took them"
+            );
+            p.on_drop();
+            assert_eq!(
+                crate::bridge::ffi::mock_pool_heap_calls() - calls,
+                2,
+                "freed by their last holder"
+            );
+            close_request_token();
+        });
+    }
+
+    /// A pool with a home thread, or a closed one, takes no callables: no
+    /// other request can use it anyway.
+    #[cfg(not(feature = "php"))]
+    #[test]
+    fn a_pool_no_other_request_can_use_takes_no_callables() {
+        finishes("the adopter", || {
+            set_request_scope(RequestScope::EachRequest);
+            open_request_token();
+            let homed = inner_with_fccs(1);
+            end_callables_of_closing_request();
+            close_request_token();
+            open_request_token();
+            assert!(!homed.wants_callables());
+            set_request_scope(RequestScope::Thread);
+            let q = inner_with_fccs(1);
+            assert!(!homed.adopt_callables_from(&q));
+
+            let closed = pool_of_a_closed_request();
+            closed.close();
+            assert!(!closed.wants_callables());
+            assert!(!closed.adopt_callables_from(&q));
+            close_request_token();
+        });
+    }
+
+    /// An `acquire` that has to make a slot with a factory whose request has
+    /// begun to shut down is refused, says why, and gives back the budget
+    /// it reserved.
+    #[cfg(not(feature = "php"))]
+    #[test]
+    fn acquire_refuses_to_make_a_slot_with_a_factory_whose_request_ended() {
+        use crate::bridge::ffi::mock_pool_factory_mints;
+        let id = finishes("the creator", || {
+            open_request_token();
+            let id = register_pool_with_fccs(1, 0xFAC0_0064 as *mut c_void, std::ptr::null_mut());
+            end_callables_of_closing_request();
+            close_request_token();
+            id as usize
+        });
+        finishes("the caller", move || {
+            open_request_token();
+            let id = id as *const Entry;
+            // SAFETY: `register_pool_with_fccs` leaked one strong reference.
+            let pool = unsafe { &*id }.inner.as_any_pool().unwrap();
+            mock_pool_factory_mints(0x5107_0064 as *mut c_void);
+            let mut slot: *mut c_void = std::ptr::null_mut();
+            let mut owner: u64 = 0;
+            let rc = unsafe { oxphp_shared_pool_acquire(id, 0, &mut slot, &mut owner) };
+            mock_pool_factory_mints(std::ptr::null_mut());
+            assert_eq!(rc, SharedError::Closed.code());
+            assert!(slot.is_null());
+            let mut buf = [0u8; 512];
+            let len = unsafe {
+                crate::plugins::ox_shared::error::oxphp_shared_last_error(
+                    buf.as_mut_ptr().cast(),
+                    buf.len(),
+                )
+            };
+            assert_eq!(
+                std::str::from_utf8(&buf[..len]).unwrap(),
+                POOL_FACTORY_ENDED
+            );
+            assert_eq!(pool.size(), 0, "the budget it reserved is back");
+            close_request_token();
+        });
+    }
+
+    /// Slots freed on another thread go through the pool's `$destroy` while
+    /// the request that made it is open, and without it once that request
+    /// has begun to shut down; the skip is counted.
+    #[cfg(not(feature = "php"))]
+    #[test]
+    fn slots_are_freed_without_a_destroy_whose_request_ended() {
+        use crate::bridge::ffi::mock_pool_last_destroy_fcc;
+        use std::sync::mpsc::channel;
+        let (pool_tx, pool_rx) = channel();
+        let (close_tx, close_rx) = channel::<()>();
+        let (closed_tx, closed_rx) = channel::<()>();
+        let creator = thread::spawn(move || {
+            open_request_token();
+            let p = inner_with_fccs(2);
+            pool_tx.send(Arc::clone(&p)).unwrap();
+            close_rx.recv().unwrap();
+            end_callables_of_closing_request();
+            closed_tx.send(()).unwrap();
+            close_request_token();
+        });
+        let p: Arc<PoolInner> = pool_rx.recv().unwrap();
+        finishes("the other thread", move || {
+            open_request_token();
+            let me = current_thread_key();
+            park_under(&p, me);
+            assert_eq!(p.evict_all_on_current_thread(EvictReason::Manual), 1);
+            assert_eq!(
+                mock_pool_last_destroy_fcc(),
+                0xDE50_0061 as *mut c_void,
+                "its request is open"
+            );
+
+            close_tx.send(()).unwrap();
+            closed_rx.recv().unwrap();
+            park_under(&p, me);
+            park_under(&p, me);
+            let skipped = destroy_skipped_total(SkipReason::RequestEnded);
+            assert_eq!(p.evict_all_on_current_thread(EvictReason::Manual), 2);
+            assert!(mock_pool_last_destroy_fcc().is_null(), "freed without it");
+            assert!(destroy_skipped_total(SkipReason::RequestEnded) >= skipped + 2);
+            assert_eq!(p.size(), 0);
+            close_request_token();
+        });
+        creator.join().unwrap();
     }
 
     #[cfg(not(feature = "php"))]

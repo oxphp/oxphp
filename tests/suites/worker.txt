@@ -135,6 +135,15 @@ async/test_orphan_cpu_bound_cancelled_at_request_end
 # one written in a file only the other worker included is refused there.
 worker/test_pool_factory_from_file_peer_never_loaded
 
+# A pool bound to a name outlives the worker that created it. The other worker
+# keeps the slots idle on it, but makes no new one and evicts without $destroy
+# until Registry::pool() gives the pool its factory again. And the creator waits,
+# before it shuts its request down, for the other worker to leave its factory.
+worker/test_pool_orphaned_when_its_creator_exits >> ?action=trigger
+worker/test_pool_orphaned_when_its_creator_exits >> ?action=check
+worker/test_pool_creator_waits_for_a_peer_in_its_factory >> ?action=trigger
+worker/test_pool_creator_waits_for_a_peer_in_its_factory >> ?action=check
+
 # Last in the file on purpose: the gauge is written at the end of a request, so
 # a worker only has one to report once it has served something. By here the pool
 # has served the whole suite.

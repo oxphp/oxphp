@@ -63,6 +63,10 @@ impl PluginPhpThreadHandler for SharedThreadHooks {
         // Also returns the budget of slots the thread still had checked out.
         worker_liveness::unregister_worker();
         eviction::unregister(types::pool::current_thread_key());
+        // A pool callback this thread entered and never left — its fiber was
+        // dropped without being resumed — holds up the shutdown of the
+        // request that made it until here, as the thread exits.
+        types::pool::leave_leases_of_exiting_thread();
     }
 
     fn request_frame_opening(&self, scope: RequestScope) {
@@ -76,6 +80,12 @@ impl PluginPhpThreadHandler for SharedThreadHooks {
         if eviction::take_evict_request() {
             eviction::drain_stale_for_current_thread();
         }
+    }
+
+    fn request_frame_closing(&self) {
+        // The shutdown frees the pool callbacks this request made: other
+        // threads stop calling them first.
+        types::pool::end_callables_of_closing_request();
     }
 
     fn request_frame_closed(&self) {
