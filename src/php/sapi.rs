@@ -2484,14 +2484,6 @@ use crate::plugin::types::{MagicMethod, PhpType, Visibility};
 static METHOD_DISPATCH_MAP: OnceLock<Vec<HashMap<String, Box<dyn PluginNativeFunction>>>> =
     OnceLock::new();
 
-/// Magic dispatch: class_index → array of optional handlers.
-type MagicFn = Box<
-    dyn Fn(&mut crate::bridge::call::NativeCall) -> Result<(), crate::plugin::php::PhpError>
-        + Send
-        + Sync,
->;
-static MAGIC_DISPATCH_MAP: OnceLock<Vec<[Option<MagicFn>; MagicMethod::COUNT]>> = OnceLock::new();
-
 /// Dispatch callback for class method calls from C.
 /// Routes to the correct Rust handler based on class_index + method_name.
 ///
@@ -2719,7 +2711,6 @@ pub fn register_php_definitions(defs: PhpDefinitions) {
         .expect("Circular class inheritance in plugin definitions");
 
     let mut method_dispatch: Vec<HashMap<String, Box<dyn PluginNativeFunction>>> = Vec::new();
-    let mut magic_dispatch: Vec<[Option<MagicFn>; MagicMethod::COUNT]> = Vec::new();
     let mut class_metas: Vec<ClassMeta> = Vec::new();
 
     // Consume classes in topological order using Option-wrapped Vec.
@@ -2889,9 +2880,8 @@ pub fn register_php_definitions(defs: PhpDefinitions) {
         // `Box<dyn PluginNativeFunction>`, so re-box through a closure that
         // forwards the call — the blanket `Fn -> PluginNativeFunction` impl
         // then kicks in.
-        let mut magic_handlers = class.magic_handlers;
-        for (i, slot) in magic_handlers.iter_mut().enumerate() {
-            if let Some(handler) = slot.take() {
+        for (i, slot) in class.magic_handlers.into_iter().enumerate() {
+            if let Some(handler) = slot {
                 let magic =
                     MagicMethod::from_index(i).expect("MagicMethod::from_index out of range");
                 // Mirror the add_method skip above: only 0-arity magics
@@ -2906,11 +2896,6 @@ pub fn register_php_definitions(defs: PhpDefinitions) {
             }
         }
         method_dispatch.push(methods_map);
-
-        // Magic dispatch map is kept empty — magic handlers live in the
-        // method dispatch map above. The array is still populated so the
-        // per-class indexing assumed elsewhere stays in sync.
-        magic_dispatch.push(magic_handlers);
 
         // Build class meta for storage.
         if class.has_custom_storage {
@@ -2978,7 +2963,6 @@ pub fn register_php_definitions(defs: PhpDefinitions) {
 
     // 7. Populate static dispatch maps
     METHOD_DISPATCH_MAP.set(method_dispatch).ok();
-    MAGIC_DISPATCH_MAP.set(magic_dispatch).ok();
     CLASS_META.set(class_metas).ok();
 
     let total = interfaces.len() + attributes.len() + enums.len() + class_order.len() + fn_count;
