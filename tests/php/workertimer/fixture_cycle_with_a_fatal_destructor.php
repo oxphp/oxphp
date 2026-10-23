@@ -23,6 +23,8 @@ declare(strict_types=1);
 // by a suite. Included inside the worker's handler, where $requestCount is in
 // scope.
 
+require_once __DIR__ . '/../engine_fatal.php';
+
 header('Content-Type: application/json');
 
 if (($_GET['action'] ?? '') === 'raise_limit') {
@@ -50,7 +52,7 @@ if (!class_exists('OxphpWorkerTimerFatalCycle', false)) {
                 }
                 error_log(sprintf('oxphp-worker-shutdown-probe: finished after %.1fs', $ran));
             });
-            trigger_error('oxphp-worker-timer: a destructor the collector ran ended in a fatal error', E_USER_ERROR);
+            engine_fatal('OxphpWorkerTimerDestructorFatal');
         }
     }
 }

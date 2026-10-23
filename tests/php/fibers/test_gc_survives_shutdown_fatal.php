@@ -55,7 +55,7 @@ $t->assertTrue('the collector is enabled at all', gc_enabled());
 // the worker never got to serve would pass the check below on its own. Both
 // halves are asserted: the request ran, and its shutdown function fataled.
 $t->assertContains('the inner request armed its shutdown fatal', $resp, 'SHUTDOWN-FATAL-ARMED');
-$t->assertContains('and took it', $resp, 'fatal from a shutdown function');
+$t->assertContains('and took it', $resp, 'OxphpFatalFromAShutdownFunction');
 
 $t->assertGreaterThan(
     'the worker still collects cycles after a fatal in a shutdown function',

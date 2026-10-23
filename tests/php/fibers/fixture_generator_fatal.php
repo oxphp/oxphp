@@ -26,6 +26,8 @@ declare(strict_types=1);
 // requests, and a second unconditional declaration of the same name would fail
 // the request for a reason that has nothing to do with what is under test.
 
+require_once __DIR__ . '/../engine_fatal.php';
+
 if (!class_exists('OxphpGeneratorFatalProbe', false)) {
     class OxphpGeneratorFatalProbe
     {
@@ -51,7 +53,7 @@ if (!function_exists('oxphp_generator_that_fatals')) {
         yield 1;
 
         // Raised with the generator's frame in the chain behind this one.
-        trigger_error('fatal inside a running generator', E_USER_ERROR);
+        engine_fatal('OxphpFatalInsideAGenerator');
 
         yield 2; // not reached
     }
@@ -69,8 +71,10 @@ if (!function_exists('oxphp_generator_that_fatals')) {
     }
 }
 
-// Runs after the worker has released what the fatal abandoned.
+// Runs after the worker has released what the fatal abandoned. The last error
+// is the fatal, if the request ended in one.
 register_shutdown_function(static function (): void {
+    echo 'LAST-ERROR:', error_get_last()['message'] ?? 'none', "\n";
     echo 'GENERATOR-RELEASED:',
         OxphpGeneratorFatalProbe::$genWeak?->get() === null ? 'yes' : 'no', "\n";
     echo OxphpGeneratorFatalProbe::$weak?->get() !== null

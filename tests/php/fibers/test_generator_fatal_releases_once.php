@@ -40,6 +40,16 @@ fclose($sock);
 // leave no abandoned frames for the worker to get wrong.
 $t->assertNotContains('the inner request did not survive its fatal', $resp, 'NOT-REACHED');
 
+// Nor does an exception, which stops the fixture short of NOT-REACHED as well:
+// it unwinds the frames on its way out, which leaves the worker nothing to
+// release and every assertion below true. Only the fatal leaves its tag in the
+// last error the request saw.
+$t->assertContains(
+    'the inner request ended in a fatal, not in an exception',
+    $resp,
+    'LAST-ERROR:Abstract function OxphpFatalInsideAGenerator::f() cannot contain body'
+);
+
 // The generator is resumed by a method call, and the frame of an internal call
 // holds the object it was called on. Left there, the generator is never released
 // at all — which is a leak of its own, and it also hides the case below.

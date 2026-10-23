@@ -20,6 +20,8 @@ declare(strict_types=1);
 // by a suite. Included inside the worker's handler, where $requestCount is in
 // scope.
 
+require_once __DIR__ . '/../engine_fatal.php';
+
 header('Content-Type: application/json');
 
 if (!class_exists('OxphpSessionBailoutCycle', false)) {
@@ -48,7 +50,7 @@ if (!class_exists('OxphpSessionBailoutCycle', false)) {
                 'request_count' => \OxPHP\Server\Worker::current()->requestCount(),
                 'orphan_status' => $status,
             ]));
-            trigger_error('oxphp-session-bailout: a destructor the collector ran ended in a fatal error', E_USER_ERROR);
+            engine_fatal('OxphpSessionBailoutDestructorFatal');
         }
     }
 }

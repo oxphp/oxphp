@@ -25,11 +25,12 @@ declare(strict_types=1);
 
 // A worker never shuts a request down, so the error handler the TestCase of an
 // earlier request installed is still standing on this thread, and it throws on
-// every error it is handed. trigger_error() with E_USER_ERROR raises an
-// E_DEPRECATED first, as of PHP 8.4; the handler throws on that, and
-// trigger_error() returns with the exception without ever raising the
-// E_USER_ERROR. An exception is not the fatal this case is about.
+// every error it is handed. The fatal below is not handed to it. Cleared all
+// the same, so that a warning on the way cannot end this request in an
+// exception before the handle is armed.
 set_error_handler(null);
+
+require_once __DIR__ . '/../engine_fatal.php';
 
 if (!class_exists('OxPHPInputFatalOnCloseFilter', false)) {
     class OxPHPInputFatalOnCloseFilter extends php_user_filter
@@ -40,10 +41,7 @@ if (!class_exists('OxPHPInputFatalOnCloseFilter', false)) {
             // a close that reached the handle from one that never got to it.
             @file_put_contents('/tmp/oxphp-input-filter-close-fatal', (string) time());
 
-            trigger_error(
-                'fatal raised from a filter on php://input while its request was being finalized',
-                E_USER_ERROR
-            );
+            engine_fatal('OxphpFatalOnInputFilterClose');
         }
 
         /** @param resource $in @param resource $out */

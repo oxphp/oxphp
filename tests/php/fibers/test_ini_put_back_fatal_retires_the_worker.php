@@ -15,6 +15,7 @@ declare(strict_types=1);
 // on its own schedule — which nothing else in this profile asks for.
 
 require_once __DIR__ . '/ini_put_back_probe.php';
+require_once __DIR__ . '/../engine_fatal.php';
 
 set_error_handler(null);
 set_exception_handler(null);
@@ -27,8 +28,7 @@ if (!class_exists('OxphpIniPutBackFatal', false)) {
             $state = json_decode((string) file_get_contents(OxphpIniPutBackProbe::FATAL_STATE), true);
             $state['ran'] = true;
             file_put_contents(OxphpIniPutBackProbe::FATAL_STATE, json_encode($state));
-            // Deprecated as of PHP 8.4, and still a fatal.
-            trigger_error('a fatal in a destructor the ini put-back ran', E_USER_ERROR);
+            engine_fatal('OxphpFatalInADestructorTheIniPutBackRan');
         }
     }
 }

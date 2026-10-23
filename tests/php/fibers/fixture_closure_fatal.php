@@ -18,6 +18,8 @@ declare(strict_types=1);
 // requests, and a second unconditional declaration of the same name would fail
 // the request for a reason that has nothing to do with what is under test.
 
+require_once __DIR__ . '/../engine_fatal.php';
+
 if (!class_exists('OxphpClosureFatalProbe', false)) {
     class OxphpClosureFatalProbe
     {
@@ -35,7 +37,7 @@ if (!function_exists('oxphp_run_closure_that_fatals')) {
         // would read as held here with nothing leaked.
         $payload = 'captured';
         $fn = static function () use ($payload): void {
-            trigger_error("fatal inside a closure holding {$payload}", E_USER_ERROR);
+            engine_fatal('OxphpFatalInsideAClosure');
         };
 
         OxphpClosureFatalProbe::$weak = \WeakReference::create($fn);
@@ -47,8 +49,10 @@ if (!function_exists('oxphp_run_closure_that_fatals')) {
     }
 }
 
-// Runs after the worker has released what the fatal abandoned.
+// Runs after the worker has released what the fatal abandoned. The last error
+// is the fatal, if the request ended in one.
 register_shutdown_function(static function (): void {
+    echo 'LAST-ERROR:', error_get_last()['message'] ?? 'none', "\n";
     echo OxphpClosureFatalProbe::$weak?->get() === null
         ? "CLOSURE-FREED\n"
         : "CLOSURE-HELD\n";

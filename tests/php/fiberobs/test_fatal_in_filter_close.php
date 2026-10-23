@@ -29,12 +29,13 @@ declare(strict_types=1);
 
 // A worker never shuts a request down, so the error handler the TestCase of an
 // earlier request installed is still standing on this thread, and it throws on
-// every error it is handed. trigger_error() with E_USER_ERROR raises an
-// E_DEPRECATED first, as of PHP 8.4; the handler throws on that, and
-// trigger_error() returns with the exception without ever raising the
-// E_USER_ERROR. An exception unwinds cleanly and abandons nothing.
-// Both fatals below have to be fatals.
+// every error it is handed. The fatals below are not handed to it, but a warning
+// is, even one @ silences: the @unlink() below warns whenever there is no marker
+// left to remove, and a throw there would end this request in an exception
+// before anything is armed.
 set_error_handler(null);
+
+require_once __DIR__ . '/../engine_fatal.php';
 
 if (!class_exists('OxPHPFatalOnCloseFilter', false)) {
     class OxPHPFatalOnCloseFilter extends php_user_filter
@@ -45,10 +46,7 @@ if (!class_exists('OxPHPFatalOnCloseFilter', false)) {
             // walk that reached the handle from one that never got to it.
             @file_put_contents('/tmp/oxphp-filter-close-marker', (string) time());
 
-            trigger_error(
-                'fatal raised from a stream filter the recovery walk was releasing',
-                E_USER_ERROR
-            );
+            engine_fatal('OxphpFatalOnFilterClose');
         }
 
         /** @param resource $in @param resource $out */
@@ -81,7 +79,7 @@ function oxphp_fatal_under_open_filter(): void
     // leaves the filter alive until the stream is closed.
     stream_filter_append($handle, 'oxphp-fatal-on-close');
 
-    trigger_error('the request fatal', E_USER_ERROR);
+    engine_fatal('OxphpRequestFatal');
 }
 
 oxphp_fatal_under_open_filter();

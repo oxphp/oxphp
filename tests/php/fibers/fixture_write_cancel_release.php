@@ -48,6 +48,7 @@ declare(strict_types=1);
 // released by the frame walk afterwards, which ran it there.
 
 require_once __DIR__ . '/write_cancel_probe.php';
+require_once __DIR__ . '/../engine_fatal.php';
 
 if (!class_exists('OxphpWriteCancelDestructs', false)) {
     final class OxphpWriteCancelDestructs
@@ -109,12 +110,13 @@ if (!function_exists('oxphp_write_after_client_left')) {
 error_clear_last();
 
 if (($_GET['in'] ?? '') === 'shutdown') {
-    // Cleared so the fatal below is one, rather than whatever a handler an
-    // earlier request on this worker installed makes of it.
+    // The fatal below is not handed to an error handler. Cleared all the same,
+    // because anything else raised on the way to it would be, and a handler an
+    // earlier request on this worker installed may throw on it.
     set_error_handler(null);
 
     register_shutdown_function('oxphp_write_after_client_left');
-    trigger_error('fatal ahead of the shutdown function', E_USER_ERROR);
+    engine_fatal('OxphpFatalAheadOfTheShutdownFunction');
 }
 
 // Runs after the worker has dealt with the abandoned frames. Writes nothing:
