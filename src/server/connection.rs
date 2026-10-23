@@ -57,16 +57,26 @@ fn is_query_method(method: &Method) -> bool {
 /// target with no leading `/` such as `index.php`. That rule covers neither,
 /// and their `Host` stays as it came.
 ///
+/// The URI parser lets through an authority whose host is empty, such as
+/// `:80`, and RFC 9110 sections 4.2.1 and 4.2.2 have a recipient reject an
+/// `http` or `https` URI like that. It names no host to take, and the request
+/// is refused, an HTTP/2 `CONNECT` naming none included.
+///
 /// Over HTTP/2 a server may also treat a `Host` naming another host as
-/// malformed: that request is refused, as nginx refuses it. Returns `false`
-/// for it. Host names are compared without regard to case; ports are compared
-/// as written. HTTP/1.x has no such rule, and its `Host` is not looked at.
-fn host_from_authority(parts: &mut http::request::Parts) -> bool {
+/// malformed: that request is refused, as nginx refuses it. Host names are
+/// compared without regard to case; ports are compared as written. HTTP/1.x
+/// has no such rule, and its `Host` is not looked at.
+///
+/// A refused request gets a `400` with the body this returns.
+fn host_from_authority(parts: &mut http::request::Parts) -> Result<(), &'static [u8]> {
     let Some(authority) = parts.uri.authority() else {
-        return true;
+        return Ok(());
     };
     if parts.version != http::Version::HTTP_2 && parts.uri.scheme().is_none() {
-        return true;
+        return Ok(());
+    }
+    if authority.host().is_empty() {
+        return Err(b"400 Bad Request: empty host in the request target");
     }
     let authority = authority.as_str();
     let host = authority
@@ -79,13 +89,13 @@ fn host_from_authority(parts: &mut http::request::Parts) -> bool {
             .iter()
             .any(|line| !line.as_bytes().eq_ignore_ascii_case(host.as_bytes()))
     {
-        return false;
+        return Err(b"400 Bad Request: Host does not match the host and port in :authority");
     }
     // An authority is printable ASCII, which a field value always accepts.
     if let Ok(value) = header::HeaderValue::from_str(host) {
         parts.headers.insert(header::HOST, value);
     }
-    true
+    Ok(())
 }
 
 /// True when `method` is QUERY but the request carries no `Content-Type`.
@@ -648,14 +658,12 @@ async fn dispatch_request(
     coding: Option<compression::Coding>,
 ) -> Result<(Response<ResponseBody>, usize, PhpExecData), crate::types::BoxError> {
     // Before routing, so a static file is refused the same as a script.
-    if !host_from_authority(&mut parts) {
+    if let Err(reason) = host_from_authority(&mut parts) {
         return Ok((
             Response::builder()
                 .status(StatusCode::BAD_REQUEST)
                 .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
-                .body(full_body(Bytes::from_static(
-                    b"400 Bad Request: Host does not match the host and port in :authority",
-                )))?,
+                .body(full_body(Bytes::from_static(reason)))?,
             0,
             PhpExecData::default(),
         ));

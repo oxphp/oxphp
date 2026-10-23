@@ -347,3 +347,66 @@ async fn h2_authority_userinfo_is_not_part_of_the_host() {
         "the refused request must not reach the application"
     );
 }
+
+/// The URI parser lets through an authority whose host is empty, such as
+/// `:80`, and RFC 9110 section 4.2.1 has a recipient reject an `http` URI
+/// like that. Such a target names no host to take, and the request is
+/// refused before anything runs, over either protocol, a `CONNECT` included.
+#[tokio::test]
+async fn empty_host_in_the_target_is_refused() {
+    let fx = start().await;
+    for head in [
+        "GET http://:80/index.php HTTP/1.1\r\n\
+         Host: b.example\r\n\
+         Connection: close\r\n\r\n",
+        "GET http://u@:80/index.php HTTP/1.1\r\n\
+         Host: b.example\r\n\
+         Connection: close\r\n\r\n",
+        "GET http://:/index.php HTTP/1.1\r\n\
+         Host: b.example\r\n\
+         Connection: close\r\n\r\n",
+        "GET http://:80/index.php HTTP/1.0\r\n\r\n",
+    ] {
+        let (status, body) = get_h1(fx.addr, head).await;
+        assert_eq!(
+            status,
+            400,
+            "{head:?}: {:?}",
+            String::from_utf8_lossy(&body)
+        );
+        assert_eq!(body, b"400 Bad Request: empty host in the request target");
+    }
+    for target in ["http://:80/index.php", "http://u@:80/index.php"] {
+        let (status, body) = get_h2(fx.addr, target, &[]).await;
+        assert_eq!(
+            status,
+            400,
+            "{target}: {:?}",
+            String::from_utf8_lossy(&body)
+        );
+    }
+
+    let tcp = TcpStream::connect(fx.addr).await.unwrap();
+    let (send_req, conn) = h2::client::handshake(tcp).await.unwrap();
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
+    let req = Request::builder()
+        .method("CONNECT")
+        .uri(":443")
+        .body(())
+        .unwrap();
+    let mut send_req = send_req.ready().await.unwrap();
+    let (resp_fut, _) = send_req.send_request(req, true).unwrap();
+    assert_eq!(
+        resp_fut.await.unwrap().status().as_u16(),
+        400,
+        "CONNECT :443"
+    );
+
+    assert_eq!(
+        fx.executed.load(Ordering::SeqCst),
+        0,
+        "a refused request must not reach the application"
+    );
+}

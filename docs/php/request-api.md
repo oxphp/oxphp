@@ -113,7 +113,7 @@ $request->isSecure(): bool
 $request->host(): string
 ```
 
-Hostname from the `Host` header. Returns an empty string when the header is absent (HTTP/1.0 requests without a `Host` header). Over HTTP/2 the `Host` header is the request's `:authority`, and over HTTP/1.1 the host of a request target in absolute form (`GET http://example.com/path`), as described in [Superglobals](superglobals.md#standard-variables).
+Hostname from the `Host` header. Returns an empty string when the header is absent (an HTTP/1.0 request in origin form, `GET /path`, sent without a `Host` header). Over HTTP/2 the `Host` header is the request's `:authority`, and over HTTP/1.1 and HTTP/1.0 the host of a request target in absolute form (`GET http://example.com/path`), as described in [Superglobals](superglobals.md#standard-variables).
 
 ```php
 $request->port(): int
