@@ -9,6 +9,12 @@
 //! when `:authority` is present, and lets a server refuse a request whose
 //! `Host` names something else.
 //!
+//! HTTP/1.x has the same rule for a target in absolute form
+//! (`GET http://a.example/ HTTP/1.1`): RFC 9112 section 3.2.2 has an origin
+//! server ignore the `Host` header and take the host the target names, which
+//! hyper also puts in the request URI. Neither protocol counts the userinfo a
+//! target may carry before an `@` as part of the host.
+//!
 //! Nothing here needs PHP: the executor below hands back the `Host` field
 //! lines it was given, which is what the SAPI builds `HTTP_HOST`,
 //! `SERVER_NAME`, `SERVER_PORT` and the request object's host from.
@@ -195,16 +201,34 @@ async fn h2_without_authority_keeps_its_host() {
     assert_eq!(delivered(&body), ["b.example"]);
 }
 
-/// HTTP/1.1 keeps its `Host` header, even with an absolute-form target that
-/// names another authority: RFC 9112 gives that target a rule of its own, and
-/// this does not apply it.
+/// An HTTP/2 `CONNECT` carries `:authority` and no `:scheme` (RFC 9113
+/// section 8.5), and the authority is still its host: a `host` field naming
+/// another one is refused, though an HTTP/1.x target with no scheme keeps its
+/// `Host`.
 #[tokio::test]
-async fn h1_host_is_left_as_it_came() {
+async fn h2_connect_host_naming_another_authority_is_refused() {
     let fx = start().await;
-    let head = "GET http://a.example/index.php HTTP/1.1\r\n\
-                Host: b.example\r\n\
-                Connection: close\r\n\r\n";
-    let mut sock = TcpStream::connect(fx.addr).await.unwrap();
+    let tcp = TcpStream::connect(fx.addr).await.unwrap();
+    let (send_req, conn) = h2::client::handshake(tcp).await.unwrap();
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
+    let req = Request::builder()
+        .method("CONNECT")
+        .uri("a.example:443")
+        .header(HOST, "b.example")
+        .body(())
+        .unwrap();
+    let mut send_req = send_req.ready().await.unwrap();
+    let (resp_fut, _) = send_req.send_request(req, true).unwrap();
+    assert_eq!(resp_fut.await.unwrap().status().as_u16(), 400);
+    assert_eq!(fx.executed.load(Ordering::SeqCst), 0);
+}
+
+/// One HTTP/1.x request written to a raw socket as `head`, which the server
+/// must close the connection after. Returns the status and the body.
+async fn get_h1(addr: SocketAddr, head: &str) -> (u16, Vec<u8>) {
+    let mut sock = TcpStream::connect(addr).await.unwrap();
     sock.write_all(head.as_bytes()).await.unwrap();
     let mut buf = Vec::new();
     sock.read_to_end(&mut buf).await.unwrap();
@@ -213,7 +237,113 @@ async fn h1_host_is_left_as_it_came() {
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
         .expect("no end of response head");
-    let status = String::from_utf8_lossy(&buf[..split]);
-    assert!(status.starts_with("HTTP/1.1 200"), "{status}");
-    assert_eq!(delivered(&buf[split + 4..]), ["b.example"]);
+    let status_line = String::from_utf8_lossy(&buf[..split]).into_owned();
+    let status = status_line
+        .split(' ')
+        .nth(1)
+        .and_then(|code| code.parse().ok())
+        .unwrap_or_else(|| panic!("no status in {status_line:?}"));
+    (status, buf[split + 4..].to_vec())
+}
+
+/// An absolute-form target names the host, and replaces the `Host` header
+/// sent with it: RFC 9112 section 3.2.2 has an origin server ignore that
+/// header. A request that sent none, as HTTP/1.0 lets it, gets one the same
+/// way.
+#[tokio::test]
+async fn h1_absolute_form_target_is_the_host() {
+    let fx = start().await;
+    for head in [
+        "GET http://a.example:8443/index.php HTTP/1.1\r\n\
+         Host: b.example\r\n\
+         Connection: close\r\n\r\n",
+        "GET http://a.example:8443/index.php HTTP/1.0\r\n\r\n",
+    ] {
+        let (status, body) = get_h1(fx.addr, head).await;
+        assert_eq!(status, 200, "{head:?}");
+        assert_eq!(
+            delivered(&body),
+            ["a.example:8443"],
+            "{head:?}: the application must get the target's host as its Host"
+        );
+    }
+}
+
+/// The userinfo an absolute-form target may carry before an `@` is no part of
+/// its host, and does not reach the application in `Host`. The host follows
+/// the last `@`, where the URI parser looks for it too.
+#[tokio::test]
+async fn h1_absolute_form_userinfo_is_not_part_of_the_host() {
+    let fx = start().await;
+    for head in [
+        "GET http://u:p@a.example/index.php HTTP/1.1\r\n\
+         Host: a.example\r\n\
+         Connection: close\r\n\r\n",
+        "GET http://u:p@a.example/index.php HTTP/1.0\r\n\r\n",
+        "GET http://u@v@a.example/index.php HTTP/1.0\r\n\r\n",
+    ] {
+        let (status, body) = get_h1(fx.addr, head).await;
+        assert_eq!(status, 200, "{head:?}");
+        assert_eq!(delivered(&body), ["a.example"], "{head:?}");
+    }
+}
+
+/// The URI parser finds an authority in a target with no scheme as well: the
+/// authority-form one RFC 9112 keeps for `CONNECT`, and one that only lacks
+/// its leading `/`. Neither is the absolute form RFC 9112 section 3.2.2
+/// speaks of, and the `Host` header stays as it came. Asked with `GET`,
+/// because a successful answer to a `CONNECT` carries no body to read it
+/// from.
+#[tokio::test]
+async fn h1_target_without_scheme_keeps_its_host() {
+    let fx = start().await;
+    for target in ["a.example:80", "index.php"] {
+        let head = format!(
+            "GET {target} HTTP/1.1\r\n\
+             Host: b.example\r\n\
+             Connection: close\r\n\r\n"
+        );
+        let (status, body) = get_h1(fx.addr, &head).await;
+        assert_eq!(status, 200, "{target}");
+        assert_eq!(delivered(&body), ["b.example"], "{target}");
+    }
+}
+
+/// An origin-form target names no host, so the `Host` header stays as it
+/// came.
+#[tokio::test]
+async fn h1_origin_form_keeps_its_host() {
+    let fx = start().await;
+    let (status, body) = get_h1(
+        fx.addr,
+        "GET /index.php HTTP/1.1\r\n\
+         Host: b.example\r\n\
+         Connection: close\r\n\r\n",
+    )
+    .await;
+    assert_eq!(status, 200);
+    assert_eq!(delivered(&body), ["b.example"]);
+}
+
+/// Over HTTP/2 the userinfo is no part of the host either, and RFC 9113
+/// section 8.3.1 has a client leave it out of an `http` or `https`
+/// `:authority`. The application gets the host without it, a `host` field
+/// naming that host is no conflict, and a `host` field carrying the userinfo
+/// names something else.
+#[tokio::test]
+async fn h2_authority_userinfo_is_not_part_of_the_host() {
+    let fx = start().await;
+    let target = "http://u@a.example/index.php";
+    for host_lines in [&[][..], &["A.Example"]] {
+        let (status, body) = get_h2(fx.addr, target, host_lines).await;
+        assert_eq!(status, 200, "host {host_lines:?}");
+        assert_eq!(delivered(&body), ["a.example"], "host {host_lines:?}");
+    }
+    let (status, _) = get_h2(fx.addr, target, &["u@a.example"]).await;
+    assert_eq!(status, 400);
+    assert_eq!(
+        fx.executed.load(Ordering::SeqCst),
+        2,
+        "the refused request must not reach the application"
+    );
 }

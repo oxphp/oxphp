@@ -38,39 +38,51 @@ fn is_query_method(method: &Method) -> bool {
     method.as_str() == "QUERY"
 }
 
-/// Give an HTTP/2 request the `Host` header its `:authority` names.
+/// Give a request the `Host` header the authority of its target names.
 ///
-/// HTTP/2 carries the target host in the `:authority` pseudo-header, which
-/// hyper puts in the request URI and not among the headers, while
-/// `$_SERVER['HTTP_HOST']`, `SERVER_NAME`, `SERVER_PORT` and the request
+/// hyper puts that authority in the request URI and not among the headers,
+/// while `$_SERVER['HTTP_HOST']`, `SERVER_NAME`, `SERVER_PORT` and the request
 /// object's `host()` are read from `Host`, the last three unless a trusted
-/// proxy forwards a host. RFC 9113 section 8.3.1 forbids taking the target
-/// from a `Host` field when `:authority` is present, so the authority replaces
-/// one sent with it, and a server may treat a `Host` naming another authority
-/// as malformed: that request is refused, as nginx refuses it. Returns `false`
-/// for it. Host names are compared without regard to case; ports are compared
-/// as written.
+/// proxy forwards a host. An HTTP/2 request carries it in the `:authority`
+/// pseudo-header, and RFC 9113 section 8.3.1 forbids taking the target from a
+/// `Host` field when `:authority` is present. An HTTP/1.x request carries it
+/// in an absolute-form target (`GET http://example.com/ HTTP/1.1`), and RFC
+/// 9112 section 3.2.2 has an origin server ignore the `Host` header next to
+/// one. Either way the authority replaces a `Host` sent with it, less the
+/// userinfo it may carry before an `@`, which RFC 9112 section 3.2 leaves out
+/// of `Host`.
 ///
-/// HTTP/1.1 is left alone, absolute-form target included: RFC 9112 gives that
-/// target a rule of its own.
+/// The URI parser also finds an authority in an HTTP/1.x target with no
+/// scheme: the authority-form `CONNECT example.com:443`, and a malformed
+/// target with no leading `/` such as `index.php`. That rule covers neither,
+/// and their `Host` stays as it came.
+///
+/// Over HTTP/2 a server may also treat a `Host` naming another host as
+/// malformed: that request is refused, as nginx refuses it. Returns `false`
+/// for it. Host names are compared without regard to case; ports are compared
+/// as written. HTTP/1.x has no such rule, and its `Host` is not looked at.
 fn host_from_authority(parts: &mut http::request::Parts) -> bool {
-    if parts.version != http::Version::HTTP_2 {
-        return true;
-    }
     let Some(authority) = parts.uri.authority() else {
         return true;
     };
+    if parts.version != http::Version::HTTP_2 && parts.uri.scheme().is_none() {
+        return true;
+    }
     let authority = authority.as_str();
-    if parts
-        .headers
-        .get_all(header::HOST)
-        .iter()
-        .any(|line| !line.as_bytes().eq_ignore_ascii_case(authority.as_bytes()))
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+    if parts.version == http::Version::HTTP_2
+        && parts
+            .headers
+            .get_all(header::HOST)
+            .iter()
+            .any(|line| !line.as_bytes().eq_ignore_ascii_case(host.as_bytes()))
     {
         return false;
     }
     // An authority is printable ASCII, which a field value always accepts.
-    if let Ok(value) = header::HeaderValue::from_str(authority) {
+    if let Ok(value) = header::HeaderValue::from_str(host) {
         parts.headers.insert(header::HOST, value);
     }
     true
@@ -642,7 +654,7 @@ async fn dispatch_request(
                 .status(StatusCode::BAD_REQUEST)
                 .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
                 .body(full_body(Bytes::from_static(
-                    b"400 Bad Request: Host does not match :authority",
+                    b"400 Bad Request: Host does not match the host and port in :authority",
                 )))?,
             0,
             PhpExecData::default(),
