@@ -1099,8 +1099,10 @@ impl PoolInner {
         let mut destroyed = 0;
         let mut slots = slots.into_iter();
         // A `$destroy` this thread may not call any more is skipped: the
-        // slots are freed without it.
-        let callables = self.use_callables();
+        // slots are freed without it. With no `$destroy` there is nothing to
+        // enter the lease for, and the slots' own destructors, which run
+        // here either way, must not hold up the request that made it.
+        let callables = self.has_destroy().then(|| self.use_callables()).flatten();
         let destroy = callables
             .as_ref()
             .map_or(std::ptr::null_mut(), |c| c.set.destroy);
@@ -3812,6 +3814,49 @@ mod tests {
             close_request_token();
         });
         creator.join().unwrap();
+    }
+
+    /// Slots of a pool with no `$destroy` are freed on another thread
+    /// without entering the lease: nothing of the request that made the
+    /// callables is called, so the slots' own destructors must not hold up
+    /// its shutdown.
+    #[cfg(not(feature = "php"))]
+    #[test]
+    fn slots_of_a_pool_without_a_destroy_are_freed_outside_the_lease() {
+        use crate::bridge::ffi::mock_pool_destroy;
+        let p = finishes("the creator", || {
+            open_request_token();
+            Arc::new(PoolInner::new(
+                0xFAC0_0061 as *mut c_void,
+                std::ptr::null_mut(),
+                1,
+                Duration::from_secs(300),
+            ))
+        });
+        finishes("the other thread", move || {
+            open_request_token();
+            park_under(&p, current_thread_key());
+            let seen = Arc::new(Mutex::new(None));
+            {
+                let p = Arc::clone(&p);
+                let seen = Arc::clone(&seen);
+                mock_pool_destroy(Some(Box::new(move |_| {
+                    *seen.lock().unwrap() = p
+                        .callables()
+                        .as_ref()
+                        .map(|set| set.lease.lock().users.len());
+                    0
+                })));
+            }
+            assert_eq!(p.evict_all_on_current_thread(EvictReason::Manual), 1);
+            mock_pool_destroy(None);
+            assert_eq!(
+                *seen.lock().unwrap(),
+                Some(0),
+                "the slot was freed under a count in the lease"
+            );
+            close_request_token();
+        });
     }
 
     #[cfg(not(feature = "php"))]
