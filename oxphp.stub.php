@@ -1976,8 +1976,8 @@ namespace OxPHP\Shared {
     //          ├── TypeException
     //          │    └── CycleException
     //          ├── CapacityException
-    //          ├── ClosedException             (Channel / Once close paths)
-    //          ├── PoisonedException           (deprecated; Once only)
+    //          ├── ClosedException             (Pool acquires)
+    //          ├── PoisonedException           (Once Poison mode)
     //          ├── UninitializedException
     //          ├── InvalidOrderingException
     //          └── CorruptedMutexException
@@ -2004,16 +2004,25 @@ namespace OxPHP\Shared {
     class ValueTooLargeException extends SharedException {}
 
     /**
-     * A receive/send was attempted on a closed {@see Channel}, or a closed
-     * {@see Once} was accessed. (Pool surfaces this only on the internal
-     * shutdown-drain path; it is not part of Pool's user-facing surface,
-     * since Pool has no `close()`.)
+     * A {@see Pool} acquire — `acquire()`, `tryAcquire()`, `acquireTimeout()`,
+     * `with()` or `withTimeout()` — found the pool closed or out of reach.
+     * Stopping the server closes every pool that exists at that point.
+     * Outside worker mode a pool a request creates (or a script under
+     * `oxphp run`) serves only that request, and only until it ends; an
+     * acquire from any other request or from an `oxphp_async()` task throws
+     * this. A closed {@see Channel} does not throw it: it reports closure
+     * through {@see Channel\SendResult} and {@see Channel\RecvResult}, and
+     * `sendMany()` and `recvMany()` return a partial result.
      */
     class ClosedException extends SharedException {}
 
     /**
-     * @deprecated Once initializer panicked. Removed once Once migrates
-     *             to a Result-style API.
+     * A {@see Once} created with `Once\FailureMode::Poison` is poisoned for
+     * good once its factory throws or returns a value the cell cannot store;
+     * `get()`, `getOrInit()` and `trySet()` on it then throw this. The
+     * message names the class and message of that failure, and the code is
+     * its code when that is an int, 0 otherwise. A fatal error in the
+     * factory resets the cell instead of poisoning it.
      */
     class PoisonedException extends SharedException {}
 
