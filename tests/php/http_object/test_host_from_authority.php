@@ -4,8 +4,10 @@ $t = new TestCase('host_from_authority', 'http_object');
 
 // The runner asks for h2.example:8443 over HTTP/1.1 and over HTTP/2. Over
 // HTTP/2 curl sends the host as the :authority pseudo-header and no Host
-// field, so everything below has to come from the :authority. Every way PHP
-// reads the host gives the same answer on both.
+// field, so everything below has to come from the :authority. The h1abs case
+// names it in an absolute-form target, next to a Host header naming
+// other.example, so everything has to come from the target. Every way PHP
+// reads the host gives the same answer in each case.
 
 $req = oxphp_http_request();
 $case = $_GET['case'] ?? '';

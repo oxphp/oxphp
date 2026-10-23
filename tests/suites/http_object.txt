@@ -10,6 +10,7 @@ http_object/test_scheme
 http_object/test_host
 http_object/test_host_from_authority >> ?case=h1 | GET | -H "Host: h2.example:8443" | |
 http_object/test_host_from_authority >> ?case=h2 | GET | --http2-prior-knowledge -H "Host: h2.example:8443" | |
+http_object/test_host_from_authority >> ?case=h1abs | GET | --request-target http://h2.example:8443/tests/http_object/test_host_from_authority.php?case=h1abs -H "Host: other.example" | |
 http_object/test_port
 http_object/test_query_string >> ?key=val&num=42
 http_object/test_query_parsed >> ?key=val&num=42
