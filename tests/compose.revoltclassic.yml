@@ -1,6 +1,6 @@
 # revolt/event-loop in traditional mode — the counterpart to compose.revolt.yml.
 #
-# No WORKER_FILE, so requests are not fiberized: \Fiber::getCurrent() is null
+# No worker mode, so requests are not fiberized: \Fiber::getCurrent() is null
 # inside one and Revolt classifies the request as {main}. That is what keeps
 # EventLoop::run() usable here, and pinning it is the point of this profile —
 # the worker-mode profile asserts the opposite, and the two together record

@@ -70,19 +70,12 @@ impl SharedConfig {
 /// Settings still read, only to tell the operator they do nothing, with what
 /// to reach for instead.
 ///
-/// - `SHUTDOWN_TIMEOUT_SECONDS`: `SharedRegistry::drain` is synchronous, and
-///   the overall shutdown deadline is owned by the connection-drain loop in
-///   `main.rs`.
 /// - `SOFT_LIMIT_RATIO`: nothing ever acted on the threshold; the saturation
 ///   gauge is where an alert on it belongs.
 /// - `POISON_STRICT`: no primitive consulted it. An exception thrown inside a
 ///   `Mutex` closure never poisons the mutex, and whether a throwing `Once`
 ///   factory is terminal is chosen per instance by its constructor argument.
-const DEPRECATED_KEYS: [(&str, &str); 3] = [
-    (
-        "SHUTDOWN_TIMEOUT_SECONDS",
-        "graceful shutdown is bounded by DRAIN_TIMEOUT_SECONDS",
-    ),
+const DEPRECATED_KEYS: [(&str, &str); 2] = [
     (
         "SOFT_LIMIT_RATIO",
         "alert on oxphp_shared_capacity_saturation instead",
@@ -98,9 +91,8 @@ const DEPRECATED_KEYS: [(&str, &str); 3] = [
 /// Only the documented public form (`SHARED_*`) and the plugin-prefixed
 /// fallback (`OX_SHARED_*`) count. The bare-key tier of `shared_env` is the
 /// last-resort fallback for active settings and was never part of a
-/// deprecation's documented surface, so an unrelated
-/// `SHUTDOWN_TIMEOUT_SECONDS` set for some other piece of software is not
-/// reported.
+/// deprecation's documented surface, so an unrelated `SOFT_LIMIT_RATIO` set
+/// for some other piece of software is not reported.
 fn deprecated_env_name(ctx: &PluginContext, key: &str) -> Option<String> {
     let public = format!("SHARED_{key}");
     if std::env::var(&public).is_ok() {
@@ -371,11 +363,7 @@ mod tests {
     /// other software.
     #[test]
     fn deprecated_settings_are_reported_as_ignored() {
-        for (key, value) in [
-            ("SOFT_LIMIT_RATIO", "0.5"),
-            ("SHUTDOWN_TIMEOUT_SECONDS", "5"),
-            ("POISON_STRICT", "true"),
-        ] {
+        for (key, value) in [("SOFT_LIMIT_RATIO", "0.5"), ("POISON_STRICT", "true")] {
             for var in [format!("SHARED_{key}"), format!("OX_SHARED_{key}")] {
                 let log = from_ctx_log_with(key, &var, value);
                 assert!(

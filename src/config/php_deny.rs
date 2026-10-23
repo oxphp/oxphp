@@ -119,39 +119,37 @@ impl PhpDeny {
     /// request through one trusted script and never execute arbitrary `.php`
     /// files directly, so the deny-list is redundant by construction (and in
     /// Framework mode would break application routes ending in `.php`).
-    ///
-    /// `PHP_DENY_DIRS` is accepted as a deprecated alias and emits a startup
-    /// warning. When both are set, `PHP_DENY_PATHS` wins and `PHP_DENY_DIRS`
-    /// is reported as ignored.
     pub fn from_env(document_root: &Path, mode: RoutingModeKind) -> Result<Option<Self>, BoxError> {
-        let (raw, source) = match Self::resolve_env_source() {
-            Some(v) => v,
-            None => return Ok(None),
-        };
+        let raw = std::env::var("PHP_DENY_PATHS").unwrap_or_default();
+        let raw = raw.trim();
+        if raw.is_empty() {
+            return Ok(None);
+        }
 
         match mode {
             RoutingModeKind::Framework => {
                 tracing::warn!(
-                    "{source} is set but the front controller already blocks direct .php execution, \
-                     and denying would break framework routes ending in .php — ignoring {source}"
+                    "PHP_DENY_PATHS is set but the front controller already blocks direct .php execution, \
+                     and denying would break framework routes ending in .php — ignoring PHP_DENY_PATHS"
                 );
                 return Ok(None);
             }
             RoutingModeKind::Worker => {
                 tracing::warn!(
-                    "{source} is set but worker mode dispatches every non-static request to the \
-                     worker script and never executes arbitrary .php files directly — ignoring {source}"
+                    "PHP_DENY_PATHS is set but worker mode dispatches every non-static request to the \
+                     worker script and never executes arbitrary .php files directly — ignoring PHP_DENY_PATHS"
                 );
                 return Ok(None);
             }
             RoutingModeKind::Traditional | RoutingModeKind::Spa => {}
         }
 
-        let (matcher, patterns) =
-            match super::compile_glob_csv(&raw, source).map_err(|e| -> BoxError { e.into() })? {
-                Some(v) => v,
-                None => return Ok(None),
-            };
+        let (matcher, patterns) = match super::compile_glob_csv(raw, "PHP_DENY_PATHS")
+            .map_err(|e| -> BoxError { e.into() })?
+        {
+            Some(v) => v,
+            None => return Ok(None),
+        };
 
         let fallback = deny_fallback_from_env(document_root)?;
         reject_self_denied(&fallback, &matcher, &patterns)?;
@@ -184,37 +182,6 @@ impl PhpDeny {
 
     pub fn fallback(&self) -> &DenyFallback {
         &self.fallback
-    }
-
-    /// Pick the active env var and emit a deprecation warning when the
-    /// legacy `PHP_DENY_DIRS` alias is used.
-    ///
-    /// Precedence: `PHP_DENY_PATHS` (non-empty) > `PHP_DENY_DIRS` (non-empty).
-    /// When both are set non-empty, `PHP_DENY_PATHS` wins and `PHP_DENY_DIRS`
-    /// is reported as ignored — values are *not* merged to avoid surprising
-    /// operators who set the new variable expecting it to be authoritative.
-    fn resolve_env_source() -> Option<(String, &'static str)> {
-        let new_raw = std::env::var("PHP_DENY_PATHS").unwrap_or_default();
-        let new_trim = new_raw.trim();
-        let old_raw = std::env::var("PHP_DENY_DIRS").unwrap_or_default();
-        let old_trim = old_raw.trim();
-
-        match (new_trim.is_empty(), old_trim.is_empty()) {
-            (true, true) => None,
-            (false, true) => Some((new_trim.to_string(), "PHP_DENY_PATHS")),
-            (true, false) => {
-                tracing::warn!(
-                    "PHP_DENY_DIRS is deprecated, use PHP_DENY_PATHS instead — the alias will be removed in a future release"
-                );
-                Some((old_trim.to_string(), "PHP_DENY_DIRS"))
-            }
-            (false, false) => {
-                tracing::warn!(
-                    "PHP_DENY_PATHS and PHP_DENY_DIRS are both set — PHP_DENY_PATHS wins, PHP_DENY_DIRS is ignored (the deprecated alias)"
-                );
-                Some((new_trim.to_string(), "PHP_DENY_PATHS"))
-            }
-        }
     }
 }
 
@@ -415,11 +382,10 @@ mod tests {
     use tempfile::TempDir;
 
     fn with_env<F: FnOnce()>(vars: &[(&str, Option<&str>)], f: F) {
-        // Defense-in-depth: clear PHP_DENY_PATHS and PHP_DENY_DIRS first so
-        // an inherited shell value can't poison a test that omits them from
-        // `vars`. Tests opt in by re-setting them (later entries win).
-        let mut all: Vec<(&str, Option<&str>)> =
-            vec![("PHP_DENY_PATHS", None), ("PHP_DENY_DIRS", None)];
+        // Defense-in-depth: clear PHP_DENY_PATHS first so an inherited shell
+        // value can't poison a test that omits it from `vars`. Tests opt in by
+        // re-setting it (later entries win).
+        let mut all: Vec<(&str, Option<&str>)> = vec![("PHP_DENY_PATHS", None)];
         all.extend_from_slice(vars);
         crate::config::test_env::with_env(&all, f);
     }
@@ -692,58 +658,19 @@ mod tests {
         );
     }
 
-    // --- Deprecated `PHP_DENY_DIRS` alias ---
-
     #[test]
-    fn deprecated_dirs_alias_still_works() {
+    fn the_old_dirs_name_is_not_read() {
+        // `PHP_DENY_DIRS` was this variable's name in earlier releases. It is
+        // not read any more, so it builds no deny-list.
         with_env(
             &[
-                ("PHP_DENY_PATHS", None),
                 ("PHP_DENY_DIRS", Some("/uploads/**")),
                 ("PHP_DENY_FALLBACK", None),
             ],
             || {
                 let dir = TempDir::new().unwrap();
-                let deny = PhpDeny::from_env(dir.path(), RoutingModeKind::Traditional)
-                    .unwrap()
-                    .unwrap();
-                assert_eq!(deny.matches("uploads/shell.php"), Some("uploads/**"));
-            },
-        );
-    }
-
-    #[test]
-    fn deprecated_dirs_alias_empty_is_unset() {
-        with_env(
-            &[
-                ("PHP_DENY_PATHS", None),
-                ("PHP_DENY_DIRS", Some("")),
-                ("PHP_DENY_FALLBACK", None),
-            ],
-            || {
-                let dir = TempDir::new().unwrap();
                 let deny = PhpDeny::from_env(dir.path(), RoutingModeKind::Traditional).unwrap();
-                assert!(deny.is_none());
-            },
-        );
-    }
-
-    #[test]
-    fn paths_wins_when_both_set() {
-        with_env(
-            &[
-                ("PHP_DENY_PATHS", Some("/uploads/**")),
-                ("PHP_DENY_DIRS", Some("/cache/**")),
-                ("PHP_DENY_FALLBACK", None),
-            ],
-            || {
-                let dir = TempDir::new().unwrap();
-                let deny = PhpDeny::from_env(dir.path(), RoutingModeKind::Traditional)
-                    .unwrap()
-                    .unwrap();
-                // PHP_DENY_PATHS wins → /uploads/** is active, /cache/** is not.
-                assert_eq!(deny.matches("uploads/x.php"), Some("uploads/**"));
-                assert_eq!(deny.matches("cache/x.php"), None);
+                assert!(deny.is_none(), "PHP_DENY_DIRS must not build a deny-list");
             },
         );
     }

@@ -124,7 +124,8 @@ start_container() {
 	# hanging up mid-request would need to check the budget rather than assume
 	# it.
 	docker run -d --name "$1" \
-		-e WORKER_FILE="/var/www/html/${5:-worker_drain.php}" \
+		-e WORKER_MODE_ENABLED=true \
+		-e ENTRY_FILE="/var/www/html/${5:-worker_drain.php}" \
 		-e DOCUMENT_ROOT=/var/www/html \
 		-e PHP_WORKERS="${4:-1}" \
 		-e ASYNC_WORKERS=2 \

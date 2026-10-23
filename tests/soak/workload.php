@@ -3,11 +3,11 @@
  * Synthetic pool workload for pool_soak.sh.
  *
  * Keeps 10 pools alive across every request (handles bound to
- * apcu-style per-worker globals via the WORKER_FILE trick — set
- * WORKER_FILE=/tests/soak/workload.php for this to actually run as
- * outer-scope). Each GET / drives `acquire + work + release` on a
- * randomly chosen pool; the "work" is a 50 us busy loop so the slot
- * genuinely transitions idle → in_use → idle on a real time axis.
+ * apcu-style per-worker globals via worker mode — set
+ * WORKER_MODE_ENABLED=true and ENTRY_FILE=/tests/soak/workload.php for this
+ * to actually run as outer-scope). Each GET / drives `acquire + work +
+ * release` on a randomly chosen pool; the "work" is a 50 us busy loop so
+ * the slot genuinely transitions idle → in_use → idle on a real time axis.
  *
  * Knobs (read from env so the compose file can set them):
  *   SOAK_POOL_COUNT       number of Shared\Pool instances (default 10)

@@ -31,7 +31,8 @@ services:
     environment:
       LOG_LEVEL: error
       INTERNAL_ADDR: 0.0.0.0:9090
-      WORKER_FILE: /var/www/html/worker/worker_entry.php
+      WORKER_MODE_ENABLED: "true"
+      ENTRY_FILE: /var/www/html/worker/worker_entry.php
       PHP_WORKERS: "1"
       ASYNC_WORKERS: 1
       RUNTIME_HOOKS: "1"

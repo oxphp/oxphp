@@ -291,7 +291,7 @@ mod tests {
     /// and those tests would fail somewhere else entirely. `SHARED_MAX_BYTES=0`
     /// reproduces it: sixty-one failures across map, pool, channel and
     /// registry, all pointing at code that is fine.
-    const CONFIG_KEYS: [&str; 17] = [
+    const CONFIG_KEYS: [&str; 16] = [
         "ENABLED",
         "MAX_ENTRIES",
         "MAX_BYTES",
@@ -308,7 +308,6 @@ mod tests {
         "LOCK_POLL_INTERVAL_MS",
         "PREVIEW_STRING_LIMIT",
         "PREVIEW_ARRAY_LIMIT",
-        "SHUTDOWN_TIMEOUT_SECONDS",
     ];
 
     /// Run `f` with every [`CONFIG_KEYS`] entry cleared in all three spellings

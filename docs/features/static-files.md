@@ -22,8 +22,8 @@ When a request matches a static file:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `STATIC_MAX_AGE` | `30d` | `Cache-Control: max-age` for static files. Accepts `30s`, `5m`, `2h`, `30d`, `1w`, `1y`, a bare number of seconds (e.g. `3600`), or `off` to disable caching headers entirely. Replaces deprecated `STATIC_CACHE_TTL`. |
-| `STATIC_REVALIDATE` | `off` | Set to `on` to enable mtime revalidation on the in-memory content cache (re-checks each file at most once per 3 seconds; changes become visible within that window). Replaces deprecated `STATIC_CACHE` (where `off` had the inverse meaning). |
+| `STATIC_MAX_AGE` | `30d` | `Cache-Control: max-age` for static files. Accepts `30s`, `5m`, `2h`, `30d`, `1w`, `1y`, a bare number of seconds (e.g. `3600`), or `off` to disable caching headers entirely. |
+| `STATIC_REVALIDATE` | `off` | Set to `on` to enable mtime revalidation on the in-memory content cache (re-checks each file at most once per 3 seconds; changes become visible within that window). |
 
 ## MIME Detection
 

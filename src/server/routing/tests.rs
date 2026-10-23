@@ -1677,7 +1677,6 @@ mod deny_file_integration {
         let entry_path = entry_file.map(|name| dir.path().join(name));
         let mut vars: Vec<(&str, Option<&str>)> = vec![
             ("PHP_DENY_PATHS", None),
-            ("PHP_DENY_DIRS", None),
             ("PHP_DENY_FALLBACK", None),
             ("SYMLINK_ALLOW_PATHS", None),
         ];

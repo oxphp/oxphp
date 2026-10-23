@@ -1,4 +1,4 @@
-# Framework routing mode: INDEX_FILE=index.php.
+# Framework routing mode: ENTRY_FILE=index.php.
 # All requests are routed through the front controller (index.php).
 # Direct .php access is blocked. The framework fixture replaces the public root.
 #
@@ -24,7 +24,7 @@ services:
     environment:
       LOG_LEVEL: error
       INTERNAL_ADDR: 0.0.0.0:9090
-      INDEX_FILE: index.php
+      ENTRY_FILE: index.php
     volumes:
       - ./fixtures/framework:/var/www/html/public
       - ./fixtures/static:/var/www/html/public/assets

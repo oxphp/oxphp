@@ -29,7 +29,8 @@ services:
       LOG_LEVEL: error
       INTERNAL_ADDR: 0.0.0.0:9090
       SUPERGLOBALS_ENABLED: "false"
-      WORKER_FILE: /var/www/html/worker/worker_entry.php
+      WORKER_MODE_ENABLED: "true"
+      ENTRY_FILE: /var/www/html/worker/worker_entry.php
     volumes:
       - ../www:/var/www/html
       - ./php:/var/www/html/public/tests

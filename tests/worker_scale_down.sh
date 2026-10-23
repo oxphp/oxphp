@@ -53,7 +53,8 @@ trap cleanup EXIT
 # scale-down cooldown instead of the 30s default.
 start_pool() {
 	docker run -d --name "$1" \
-		-e WORKER_FILE=/var/www/html/worker_scale.php \
+		-e WORKER_MODE_ENABLED=true \
+		-e ENTRY_FILE=/var/www/html/worker_scale.php \
 		-e DOCUMENT_ROOT=/var/www/html \
 		-e PHP_WORKERS=1:2 \
 		-e PHP_WORKERS_IDLE_SECONDS=1 \
