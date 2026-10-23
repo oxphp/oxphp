@@ -63,7 +63,8 @@ docker run -d --name "$NAME" \
     -p "${PORT_APP}:80" -p "${PORT_INT}:9090" \
     -e LOG_LEVEL=info \
     -e INTERNAL_ADDR=0.0.0.0:9090 \
-    -e WORKER_FILE=/var/www/html/worker/entry.php \
+    -e WORKER_MODE_ENABLED=true \
+    -e ENTRY_FILE=/var/www/html/worker/entry.php \
     -e PHP_WORKERS="$WORKERS" \
     -e TOKIO_WORKERS=2 \
     -e EXECUTOR=sapi \

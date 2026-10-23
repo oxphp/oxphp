@@ -249,42 +249,24 @@ fn normalize_internal_addr(addr: &str) -> String {
     trimmed.to_string()
 }
 
-/// Resolve `static_max_age` from new and legacy env values.
-/// `new` is `STATIC_MAX_AGE`, `legacy` is the deprecated `STATIC_CACHE_TTL`.
-/// Both are expected to be non-empty (callers strip empty/unset upstream).
-/// New value wins. When both are unset, defaults to 30 days. Garbage values
-/// surface as a startup error tagged with the variable that supplied them.
-fn resolve_static_max_age(
-    new: Option<&str>,
-    legacy: Option<&str>,
-) -> Result<Option<u64>, crate::types::BoxError> {
-    if let Some(val) = new {
-        return parse_duration(val)
-            .map_err(|e| -> crate::types::BoxError { format!("STATIC_MAX_AGE: {e}").into() });
+/// Resolve `static_max_age` from the `STATIC_MAX_AGE` value, expected to be
+/// non-empty (callers strip empty/unset upstream). When unset, defaults to 30
+/// days. Garbage values surface as a startup error naming the variable.
+fn resolve_static_max_age(value: Option<&str>) -> Result<Option<u64>, crate::types::BoxError> {
+    match value {
+        Some(val) => parse_duration(val)
+            .map_err(|e| -> crate::types::BoxError { format!("STATIC_MAX_AGE: {e}").into() }),
+        None => Ok(Some(2_592_000)),
     }
-    if let Some(val) = legacy {
-        return parse_duration(val)
-            .map_err(|e| -> crate::types::BoxError { format!("STATIC_CACHE_TTL: {e}").into() });
-    }
-    Ok(Some(2_592_000))
 }
 
-/// Resolve `static_revalidate` from new and legacy env values.
-/// `new` is `STATIC_REVALIDATE` (strictly parsed boolean — invalid values are
-/// rejected with a startup error). `legacy` is the deprecated `STATIC_CACHE`
-/// where the value `off` historically meant "enable mtime revalidation"
-/// (kept lenient on purpose, since it is a compatibility shim). New value
-/// wins; default is `false`.
-fn resolve_static_revalidate(
-    new: Option<&str>,
-    legacy: Option<&str>,
-) -> Result<bool, crate::types::BoxError> {
-    if let Some(val) = new {
-        return parse_bool_strict(val)
-            .map_err(|e| -> crate::types::BoxError { format!("STATIC_REVALIDATE: {e}").into() });
-    }
-    match legacy {
-        Some(val) => Ok(val.eq_ignore_ascii_case("off")),
+/// Resolve `static_revalidate` from the `STATIC_REVALIDATE` value (strictly
+/// parsed boolean — invalid values are rejected with a startup error).
+/// Default is `false`.
+fn resolve_static_revalidate(value: Option<&str>) -> Result<bool, crate::types::BoxError> {
+    match value {
+        Some(val) => parse_bool_strict(val)
+            .map_err(|e| -> crate::types::BoxError { format!("STATIC_REVALIDATE: {e}").into() }),
         None => Ok(false),
     }
 }
@@ -353,12 +335,7 @@ fn compression_from_env() -> Result<Levels, crate::types::BoxError> {
         // bytes after the upgrade than before it.
         zstd: compression_level("COMPRESSION_ZSTD_LEVEL", 19, 6)?,
     };
-    resolve_compression(
-        text_knob("COMPRESSION_ENCODINGS")?.as_deref(),
-        text_knob("COMPRESSION_LEVEL")?.as_deref(),
-        levels,
-        text_knob("COMPRESSION_BROTLI_LEVEL")?.is_some(),
-    )
+    resolve_compression(text_knob("COMPRESSION_ENCODINGS")?.as_deref(), levels)
 }
 
 /// Read a compression knob whose value is text rather than a number. An
@@ -394,35 +371,8 @@ fn parse_text_knob(
 /// ordering can express both.
 fn resolve_compression(
     encodings: Option<&str>,
-    legacy_level: Option<&str>,
-    mut levels: Levels,
-    brotli_level_set: bool,
+    levels: Levels,
 ) -> Result<Levels, crate::types::BoxError> {
-    if let Some(val) = legacy_level {
-        let level = match val.trim().parse::<i32>() {
-            Ok(level) if (0..=11).contains(&level) => level,
-            _ => {
-                return Err(
-                    format!("COMPRESSION_LEVEL must be 0-11 (got {val:?}), 0 = disabled").into(),
-                );
-            }
-        };
-        tracing::warn!(
-            "COMPRESSION_LEVEL is deprecated: use COMPRESSION_BROTLI_LEVEL for brotli's quality and COMPRESSION_ENCODINGS to choose which codings are offered"
-        );
-        if level == 0 {
-            // The switch it has always been. A deployment that set it to turn
-            // compression off must not start emitting zstd because this server
-            // learned a coding it had never heard of.
-            return Ok(Levels::default());
-        }
-        // An explicit COMPRESSION_BROTLI_LEVEL is the newer statement of the
-        // same thing, so it wins over the variable it replaces.
-        if !brotli_level_set {
-            levels.brotli = level;
-        }
-    }
-
     let Some(val) = encodings.map(str::trim).filter(|val| !val.is_empty()) else {
         return Ok(levels);
     };
@@ -686,14 +636,6 @@ impl Config {
         )?
         .map(std::sync::Arc::new);
 
-        // Parsed-but-ignored deprecation. Drop in a future release once telemetry
-        // shows zero downstream usage.
-        if std::env::var_os("WORKER_MAX_REQUESTS").is_some() {
-            tracing::warn!(
-                "WORKER_MAX_REQUESTS is deprecated and ignored — \
-                 use WORKER_MAX_MEMORY_MIB or Worker::scheduleExit()"
-            );
-        }
         let worker_max_memory_mib = std::env::var("WORKER_MAX_MEMORY_MIB")
             .ok()
             .and_then(|s| s.parse::<u64>().ok())
@@ -703,33 +645,12 @@ impl Config {
         // bool parser, so Docker Compose substitutions like `FOO=${FOO}`
         // with a missing host var fall back to defaults instead of erroring.
         let strip_empty = |s: String| (!s.trim().is_empty()).then_some(s);
-        let new_max_age = std::env::var("STATIC_MAX_AGE").ok().and_then(strip_empty);
-        let new_revalidate = std::env::var("STATIC_REVALIDATE")
+        let max_age = std::env::var("STATIC_MAX_AGE").ok().and_then(strip_empty);
+        let revalidate = std::env::var("STATIC_REVALIDATE")
             .ok()
             .and_then(strip_empty);
-        let legacy_ttl = std::env::var("STATIC_CACHE_TTL").ok().and_then(strip_empty);
-        let legacy_cache = std::env::var("STATIC_CACHE").ok().and_then(strip_empty);
-
-        if legacy_ttl.is_some() {
-            tracing::warn!("STATIC_CACHE_TTL is deprecated, use STATIC_MAX_AGE instead");
-            if new_max_age.is_some() {
-                tracing::warn!(
-                    "both STATIC_CACHE_TTL and STATIC_MAX_AGE set; STATIC_MAX_AGE takes precedence"
-                );
-            }
-        }
-        if legacy_cache.is_some() {
-            tracing::warn!("STATIC_CACHE is deprecated, use STATIC_REVALIDATE instead");
-            if new_revalidate.is_some() {
-                tracing::warn!(
-                    "both STATIC_CACHE and STATIC_REVALIDATE set; STATIC_REVALIDATE takes precedence"
-                );
-            }
-        }
-
-        let static_max_age = resolve_static_max_age(new_max_age.as_deref(), legacy_ttl.as_deref())?;
-        let static_revalidate =
-            resolve_static_revalidate(new_revalidate.as_deref(), legacy_cache.as_deref())?;
+        let static_max_age = resolve_static_max_age(max_age.as_deref())?;
+        let static_revalidate = resolve_static_revalidate(revalidate.as_deref())?;
 
         let (async_workers, async_queue_capacity, async_max_fibers) = resolve_async_pool_env()?;
 
@@ -1016,40 +937,17 @@ impl Config {
     }
 }
 
-/// Resolve `ENTRY_FILE` and `WORKER_MODE_ENABLED` from the environment, taking
-/// the deprecated `INDEX_FILE` / `WORKER_FILE` variables into account.
-///
-/// Precedence: `ENTRY_FILE` > `WORKER_FILE` > `INDEX_FILE`. Worker mode is
-/// enabled when `WORKER_MODE_ENABLED=true` *or* when the legacy `WORKER_FILE`
-/// is set. Old vars trigger `tracing::warn!` lines pointing at the new names.
+/// Resolve `ENTRY_FILE` and `WORKER_MODE_ENABLED` from the environment.
 fn resolve_entry_and_mode(
     document_root: &Path,
 ) -> Result<(Option<PathBuf>, bool), crate::types::BoxError> {
     let entry_file_env = std::env::var("ENTRY_FILE").ok().filter(|s| !s.is_empty());
-    let worker_mode_explicit = parse_env_bool("WORKER_MODE_ENABLED", false)?;
+    let worker_mode_enabled = parse_env_bool("WORKER_MODE_ENABLED", false)?;
 
-    let legacy_worker_file = std::env::var("WORKER_FILE").ok().filter(|s| !s.is_empty());
-    let legacy_index_file = std::env::var("INDEX_FILE").ok().filter(|s| !s.is_empty());
-
-    if let Some(ref wf) = legacy_worker_file {
-        tracing::warn!(
-            "WORKER_FILE is deprecated — use WORKER_MODE_ENABLED=true and ENTRY_FILE={wf}"
-        );
-    }
-    if let Some(ref idx) = legacy_index_file {
-        tracing::warn!("INDEX_FILE is deprecated — use ENTRY_FILE={idx}");
-    }
-
-    let raw = entry_file_env
-        .or_else(|| legacy_worker_file.clone())
-        .or(legacy_index_file);
-
-    let entry_file = match raw {
+    let entry_file = match entry_file_env {
         Some(value) => Some(resolve_entry_file(&value, document_root)?),
         None => None,
     };
-
-    let worker_mode_enabled = worker_mode_explicit || legacy_worker_file.is_some();
 
     Ok((entry_file, worker_mode_enabled))
 }
@@ -1124,8 +1022,8 @@ mod tests {
         }
     }
 
-    fn resolve(encodings: Option<&str>, legacy: Option<&str>) -> Levels {
-        resolve_compression(encodings, legacy, shipped_levels(), false).expect("valid")
+    fn resolve(encodings: Option<&str>) -> Levels {
+        resolve_compression(encodings, shipped_levels()).expect("valid")
     }
 
     #[test]
@@ -1179,12 +1077,10 @@ mod tests {
             "{err}"
         );
 
-        // The two text-valued knobs read the same way — they were the pair
-        // that still fell back.
-        for name in ["COMPRESSION_ENCODINGS", "COMPRESSION_LEVEL"] {
-            let err = parse_text_knob(name, unreadable()).expect_err("nor is an unreadable set");
-            assert!(err.to_string().contains(name), "{err}");
-        }
+        // The text-valued knob reads the same way.
+        let err = parse_text_knob("COMPRESSION_ENCODINGS", unreadable())
+            .expect_err("nor is an unreadable set");
+        assert!(err.to_string().contains("COMPRESSION_ENCODINGS"), "{err}");
         assert_eq!(
             parse_text_knob("COMPRESSION_ENCODINGS", Ok(" ".into())).unwrap(),
             None
@@ -1193,7 +1089,7 @@ mod tests {
 
     #[test]
     fn compression_offers_every_coding_by_default() {
-        let levels = resolve(None, None);
+        let levels = resolve(None);
         for coding in Coding::ALL {
             assert!(levels.level(coding) > 0, "{} is not offered", coding.name());
         }
@@ -1201,20 +1097,20 @@ mod tests {
 
     #[test]
     fn compression_encodings_withdraws_the_codings_it_leaves_out() {
-        let levels = resolve(Some("zstd, gzip"), None);
+        let levels = resolve(Some("zstd, gzip"));
         assert_eq!(levels.brotli, 0);
         assert_eq!(levels.gzip, 6);
         assert_eq!(levels.zstd, 6);
         // Spelled the way a settings file reads rather than the way the header
         // does, and in whatever case and spacing it was typed.
-        assert_eq!(resolve(Some(" BROTLI "), None).brotli, 5);
-        assert_eq!(resolve(Some(" BROTLI "), None).zstd, 0);
+        assert_eq!(resolve(Some(" BROTLI ")).brotli, 5);
+        assert_eq!(resolve(Some(" BROTLI ")).zstd, 0);
     }
 
     #[test]
-    fn compression_can_be_switched_off_without_the_deprecated_variable() {
+    fn compression_encodings_off_switches_every_coding_off() {
         for spelling in ["off", "none", "OFF"] {
-            let levels = resolve(Some(spelling), None);
+            let levels = resolve(Some(spelling));
             for coding in Coding::ALL {
                 assert_eq!(levels.level(coding), 0, "{spelling} left {coding:?} on");
             }
@@ -1225,15 +1121,15 @@ mod tests {
     fn an_empty_encodings_list_is_an_unset_one() {
         // `COMPRESSION_ENCODINGS=${VAR:-}` must not silently turn compression
         // off — "off" is how that is asked for.
-        assert_eq!(resolve(Some(""), None).zstd, 6);
-        assert_eq!(resolve(Some("  "), None).zstd, 6);
+        assert_eq!(resolve(Some("")).zstd, 6);
+        assert_eq!(resolve(Some("  ")).zstd, 6);
     }
 
     #[test]
     fn an_unknown_coding_is_a_startup_error() {
         // A typo that quietly withdrew a coding would show up as a bandwidth
         // bill, months later.
-        let err = resolve_compression(Some("zstd, deflate"), None, shipped_levels(), false)
+        let err = resolve_compression(Some("zstd, deflate"), shipped_levels())
             .expect_err("deflate is not a coding this server produces");
         assert!(err.to_string().contains("deflate"), "{err}");
     }
@@ -1244,40 +1140,45 @@ mod tests {
             brotli: 0,
             ..shipped_levels()
         };
-        let resolved = resolve_compression(Some("br, zstd"), None, levels, true).expect("valid");
+        let resolved = resolve_compression(Some("br, zstd"), levels).expect("valid");
         assert_eq!(resolved.brotli, 0);
         assert_eq!(resolved.zstd, 6);
     }
 
     #[test]
-    fn the_deprecated_level_variable_keeps_both_of_its_meanings() {
-        // Zero meant "no compression at all" when brotli was the only coding,
-        // and a deployment that set it must not start emitting zstd.
-        let off = resolve(None, Some("0"));
-        for coding in Coding::ALL {
-            assert_eq!(off.level(coding), 0, "{coding:?} survived the off switch");
+    fn the_old_static_and_compression_names_are_not_read() {
+        // Each of these changed the result while it was read:
+        // `STATIC_CACHE_TTL=off` dropped the Cache-Control header,
+        // `STATIC_CACHE=off` turned revalidation on, `COMPRESSION_LEVEL=0`
+        // switched every coding off and a level from 1 to 11 set brotli's.
+        // Unread, they leave the defaults in place.
+        for level in ["0", "9"] {
+            test_env::with_env(
+                &[
+                    ("STATIC_MAX_AGE", None),
+                    ("STATIC_REVALIDATE", None),
+                    ("STATIC_CACHE_TTL", Some("off")),
+                    ("STATIC_CACHE", Some("off")),
+                    ("COMPRESSION_ENCODINGS", None),
+                    ("COMPRESSION_BROTLI_LEVEL", None),
+                    ("COMPRESSION_GZIP_LEVEL", None),
+                    ("COMPRESSION_ZSTD_LEVEL", None),
+                    ("COMPRESSION_LEVEL", Some(level)),
+                ],
+                || {
+                    let config = Config::from_env().unwrap();
+                    assert_eq!(config.static_max_age, Some(2_592_000));
+                    assert!(!config.static_revalidate);
+                    for coding in Coding::ALL {
+                        assert_eq!(
+                            config.compression.level(coding),
+                            shipped_levels().level(coding),
+                            "COMPRESSION_LEVEL={level}, {coding:?}"
+                        );
+                    }
+                },
+            );
         }
-        // Anything else named brotli's quality, and still does.
-        let raised = resolve(None, Some("9"));
-        assert_eq!(raised.brotli, 9);
-        assert_eq!(raised.zstd, 6);
-    }
-
-    #[test]
-    fn an_explicit_brotli_level_wins_over_the_variable_it_replaces() {
-        let levels = Levels {
-            brotli: 11,
-            ..shipped_levels()
-        };
-        let resolved = resolve_compression(None, Some("2"), levels, true).expect("valid");
-        assert_eq!(resolved.brotli, 11);
-    }
-
-    #[test]
-    fn an_out_of_range_legacy_level_is_still_rejected() {
-        let err = resolve_compression(None, Some("12"), shipped_levels(), false)
-            .expect_err("brotli quality stops at 11");
-        assert!(err.to_string().contains("COMPRESSION_LEVEL"), "{err}");
     }
 
     #[test]
@@ -1648,12 +1549,10 @@ mod tests {
     fn deny_file_env<'a>(
         root: &'a str,
         entry_file: Option<&'a str>,
-    ) -> [(&'static str, Option<&'a str>); 6] {
+    ) -> [(&'static str, Option<&'a str>); 4] {
         [
             ("DOCUMENT_ROOT", Some(root)),
             ("ENTRY_FILE", entry_file),
-            ("INDEX_FILE", None),
-            ("WORKER_FILE", None),
             ("WORKER_MODE_ENABLED", None),
             ("PHP_DENY_FALLBACK", None),
         ]
@@ -1789,98 +1688,58 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_static_max_age_uses_new_when_set() {
-        assert_eq!(
-            resolve_static_max_age(Some("1h"), None).unwrap(),
-            Some(3600)
-        );
-    }
-
-    #[test]
-    fn test_resolve_static_max_age_falls_back_to_legacy() {
-        assert_eq!(
-            resolve_static_max_age(None, Some("1d")).unwrap(),
-            Some(86_400)
-        );
-    }
-
-    #[test]
-    fn test_resolve_static_max_age_new_wins_over_legacy() {
-        assert_eq!(
-            resolve_static_max_age(Some("1h"), Some("2h")).unwrap(),
-            Some(3600)
-        );
+    fn test_resolve_static_max_age_uses_value_when_set() {
+        assert_eq!(resolve_static_max_age(Some("1h")).unwrap(), Some(3600));
     }
 
     #[test]
     fn test_resolve_static_max_age_default_is_30d() {
-        assert_eq!(resolve_static_max_age(None, None).unwrap(), Some(2_592_000));
+        assert_eq!(resolve_static_max_age(None).unwrap(), Some(2_592_000));
     }
 
     #[test]
     fn test_resolve_static_max_age_off_disables_header() {
-        assert_eq!(resolve_static_max_age(Some("off"), None).unwrap(), None);
-        assert_eq!(resolve_static_max_age(None, Some("off")).unwrap(), None);
+        assert_eq!(resolve_static_max_age(Some("off")).unwrap(), None);
     }
 
     #[test]
     fn test_resolve_static_max_age_garbage_errors_with_var_name() {
-        let err = resolve_static_max_age(Some("garbage"), None).unwrap_err();
+        let err = resolve_static_max_age(Some("garbage")).unwrap_err();
         assert!(err.to_string().contains("STATIC_MAX_AGE"));
-        let err = resolve_static_max_age(None, Some("garbage")).unwrap_err();
-        assert!(err.to_string().contains("STATIC_CACHE_TTL"));
     }
 
     #[test]
-    fn test_resolve_static_revalidate_new_on() {
-        assert!(resolve_static_revalidate(Some("on"), None).unwrap());
-        assert!(resolve_static_revalidate(Some("true"), None).unwrap());
-        assert!(resolve_static_revalidate(Some("1"), None).unwrap());
-        assert!(resolve_static_revalidate(Some("yes"), None).unwrap());
+    fn test_resolve_static_revalidate_on() {
+        assert!(resolve_static_revalidate(Some("on")).unwrap());
+        assert!(resolve_static_revalidate(Some("true")).unwrap());
+        assert!(resolve_static_revalidate(Some("1")).unwrap());
+        assert!(resolve_static_revalidate(Some("yes")).unwrap());
     }
 
     #[test]
-    fn test_resolve_static_revalidate_new_off() {
-        assert!(!resolve_static_revalidate(Some("off"), None).unwrap());
-        assert!(!resolve_static_revalidate(Some("false"), None).unwrap());
-        assert!(!resolve_static_revalidate(Some("0"), None).unwrap());
-        assert!(!resolve_static_revalidate(Some("no"), None).unwrap());
+    fn test_resolve_static_revalidate_off() {
+        assert!(!resolve_static_revalidate(Some("off")).unwrap());
+        assert!(!resolve_static_revalidate(Some("false")).unwrap());
+        assert!(!resolve_static_revalidate(Some("0")).unwrap());
+        assert!(!resolve_static_revalidate(Some("no")).unwrap());
     }
 
     #[test]
-    fn test_resolve_static_revalidate_new_garbage_errors() {
-        let err = resolve_static_revalidate(Some("garbage"), None).unwrap_err();
+    fn test_resolve_static_revalidate_garbage_errors() {
+        let err = resolve_static_revalidate(Some("garbage")).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("STATIC_REVALIDATE"), "msg: {msg}");
         assert!(msg.contains("garbage"), "msg: {msg}");
     }
 
     #[test]
-    fn test_resolve_static_revalidate_new_empty_errors() {
-        assert!(resolve_static_revalidate(Some(""), None).is_err());
-    }
-
-    #[test]
-    fn test_resolve_static_revalidate_legacy_off_means_revalidate() {
-        assert!(resolve_static_revalidate(None, Some("off")).unwrap());
-        assert!(resolve_static_revalidate(None, Some("OFF")).unwrap());
-    }
-
-    #[test]
-    fn test_resolve_static_revalidate_legacy_other_values_no_revalidate() {
-        assert!(!resolve_static_revalidate(None, Some("on")).unwrap());
-        assert!(!resolve_static_revalidate(None, Some("")).unwrap());
-    }
-
-    #[test]
-    fn test_resolve_static_revalidate_new_wins_over_legacy() {
-        assert!(!resolve_static_revalidate(Some("off"), Some("off")).unwrap());
-        assert!(resolve_static_revalidate(Some("on"), Some("anything")).unwrap());
+    fn test_resolve_static_revalidate_empty_errors() {
+        assert!(resolve_static_revalidate(Some("")).is_err());
     }
 
     #[test]
     fn test_resolve_static_revalidate_default_is_false() {
-        assert!(!resolve_static_revalidate(None, None).unwrap());
+        assert!(!resolve_static_revalidate(None).unwrap());
     }
 }
 
@@ -1956,8 +1815,6 @@ mod entry_file_tests {
             &[
                 ("ENTRY_FILE", Some("index.php")),
                 ("WORKER_MODE_ENABLED", None),
-                ("WORKER_FILE", None),
-                ("INDEX_FILE", None),
             ],
             || {
                 let (entry, worker) = resolve_entry_and_mode(dir.path()).unwrap();
@@ -1974,8 +1831,6 @@ mod entry_file_tests {
             &[
                 ("ENTRY_FILE", Some("worker.php")),
                 ("WORKER_MODE_ENABLED", Some("true")),
-                ("WORKER_FILE", None),
-                ("INDEX_FILE", None),
             ],
             || {
                 let (entry, worker) = resolve_entry_and_mode(dir.path()).unwrap();
@@ -1993,8 +1848,6 @@ mod entry_file_tests {
                 &[
                     ("ENTRY_FILE", Some("w.php")),
                     ("WORKER_MODE_ENABLED", Some(val)),
-                    ("WORKER_FILE", None),
-                    ("INDEX_FILE", None),
                 ],
                 || {
                     let (_, worker) = resolve_entry_and_mode(dir.path()).unwrap();
@@ -2015,8 +1868,6 @@ mod entry_file_tests {
                 &[
                     ("ENTRY_FILE", Some("w.php")),
                     ("WORKER_MODE_ENABLED", Some(val)),
-                    ("WORKER_FILE", None),
-                    ("INDEX_FILE", None),
                 ],
                 || {
                     let (_, worker) = resolve_entry_and_mode(dir.path()).unwrap();
@@ -2037,8 +1888,6 @@ mod entry_file_tests {
                 &[
                     ("ENTRY_FILE", Some("w.php")),
                     ("WORKER_MODE_ENABLED", Some(val)),
-                    ("WORKER_FILE", None),
-                    ("INDEX_FILE", None),
                 ],
                 || {
                     let res = resolve_entry_and_mode(dir.path());
@@ -2066,8 +1915,6 @@ mod entry_file_tests {
                 &[
                     ("ENTRY_FILE", Some("w.php")),
                     ("WORKER_MODE_ENABLED", Some(val)),
-                    ("WORKER_FILE", None),
-                    ("INDEX_FILE", None),
                 ],
                 || {
                     let (_, worker) = resolve_entry_and_mode(dir.path()).unwrap();
@@ -2081,61 +1928,25 @@ mod entry_file_tests {
     }
 
     #[test]
-    fn env_legacy_worker_file_implies_worker_mode() {
-        let dir = make_root_with(&["legacy_worker.php"]);
-        with_env(
-            &[
-                ("ENTRY_FILE", None),
-                ("WORKER_MODE_ENABLED", None),
-                ("WORKER_FILE", Some("legacy_worker.php")),
-                ("INDEX_FILE", None),
-            ],
-            || {
-                let (entry, worker) = resolve_entry_and_mode(dir.path()).unwrap();
-                assert!(entry.is_some(), "WORKER_FILE should backfill entry_file");
-                assert!(worker, "WORKER_FILE should imply worker mode");
-            },
-        );
-    }
-
-    #[test]
-    fn env_legacy_index_file_maps_to_entry() {
-        let dir = make_root_with(&["index.php"]);
-        with_env(
-            &[
-                ("ENTRY_FILE", None),
-                ("WORKER_MODE_ENABLED", None),
-                ("WORKER_FILE", None),
-                ("INDEX_FILE", Some("index.php")),
-            ],
-            || {
-                let (entry, worker) = resolve_entry_and_mode(dir.path()).unwrap();
-                assert!(entry.is_some());
-                assert!(!worker, "INDEX_FILE alone should not enable worker mode");
-            },
-        );
-    }
-
-    #[test]
-    fn env_new_wins_over_legacy() {
-        let dir = make_root_with(&["new.php", "legacy.php"]);
-        with_env(
-            &[
-                ("ENTRY_FILE", Some("new.php")),
-                ("WORKER_MODE_ENABLED", None),
-                ("WORKER_FILE", Some("legacy.php")),
-                ("INDEX_FILE", Some("legacy.php")),
-            ],
-            || {
-                let (entry, _worker) = resolve_entry_and_mode(dir.path()).unwrap();
-                let entry = entry.expect("entry_file should be set");
-                assert!(
-                    entry.ends_with("new.php"),
-                    "ENTRY_FILE must win, got {}",
-                    entry.display()
-                );
-            },
-        );
+    fn env_worker_file_and_index_file_are_not_read() {
+        // Earlier releases mapped both onto ENTRY_FILE, and WORKER_FILE also
+        // turned worker mode on. Neither is read now, so a deployment still
+        // setting one routes as if it set nothing.
+        let dir = make_root_with(&["index.php", "worker.php"]);
+        for (var, value) in [("WORKER_FILE", "worker.php"), ("INDEX_FILE", "index.php")] {
+            with_env(
+                &[
+                    ("ENTRY_FILE", None),
+                    ("WORKER_MODE_ENABLED", None),
+                    (var, Some(value)),
+                ],
+                || {
+                    let (entry, worker) = resolve_entry_and_mode(dir.path()).unwrap();
+                    assert_eq!(entry, None, "{var} must not select an entry script");
+                    assert!(!worker, "{var} must not enable worker mode");
+                },
+            );
+        }
     }
 
     // ── Config::validate matrix ──

@@ -37,7 +37,8 @@ services:
       # the runner can assert that a line is there, not that one is missing.
       LOG_LEVEL: info
       INTERNAL_ADDR: 0.0.0.0:9090
-      WORKER_FILE: /var/www/html/worker/worker_entry.php
+      WORKER_MODE_ENABLED: "true"
+      ENTRY_FILE: /var/www/html/worker/worker_entry.php
       # One worker, so the request after a recycle is answered by the
       # replacement and its requestCount() says so.
       PHP_WORKERS: "1"

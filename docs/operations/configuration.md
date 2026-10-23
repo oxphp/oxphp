@@ -133,19 +133,7 @@ At startup the server logs the count, what set it, and the resulting `PHP_WORKER
 |----------|---------|-------------|
 | `WORKER_MAX_MEMORY_MIB` | `0` | Maximum memory in MiB per worker before recycling. `0` = unlimited |
 
-Set `WORKER_MODE_ENABLED=true` and point `ENTRY_FILE` at your worker bootstrap script (e.g. `ENTRY_FILE=worker.php` or `ENTRY_FILE=../worker.php`). PHP workers then stay alive across requests, keeping bootstrap state (autoloaders, database connections) in memory. Workers are recycled automatically when they exceed `WORKER_MAX_MEMORY_MIB` or take three consecutive requests that came apart, and on demand when the application calls [`Worker::scheduleExit()`](../php/worker-class.md#scheduleexit); see [Recycling](../features/worker-mode.md#recycling) for what counts towards the third. The `WORKER_MAX_REQUESTS` knob from earlier releases is deprecated and ignored — set neither, or migrate to `Worker::scheduleExit()`.
-
-### Deprecated: `INDEX_FILE` and `WORKER_FILE`
-
-The legacy `INDEX_FILE` and `WORKER_FILE` variables are still parsed for backwards compatibility. When set, they emit a `WARN` log line at startup and map onto the new model:
-
-| Legacy | Equivalent today |
-|---|---|
-| `INDEX_FILE=index.php` | `ENTRY_FILE=index.php` |
-| `INDEX_FILE=index.html` | `ENTRY_FILE=index.html` |
-| `WORKER_FILE=/path/worker.php` | `WORKER_MODE_ENABLED=true ENTRY_FILE=/path/worker.php` |
-
-If both old and new are set, `ENTRY_FILE` / `WORKER_MODE_ENABLED` win. Migrate at your convenience; the deprecated forms will be removed in a future release.
+Set `WORKER_MODE_ENABLED=true` and point `ENTRY_FILE` at your worker bootstrap script (e.g. `ENTRY_FILE=worker.php` or `ENTRY_FILE=../worker.php`). PHP workers then stay alive across requests, keeping bootstrap state (autoloaders, database connections) in memory. Workers are recycled automatically when they exceed `WORKER_MAX_MEMORY_MIB` or take three consecutive requests that came apart, and on demand when the application calls [`Worker::scheduleExit()`](../php/worker-class.md#scheduleexit); see [Recycling](../features/worker-mode.md#recycling) for what counts towards the third.
 
 ## SAPI / PHP
 
@@ -192,7 +180,7 @@ PHP execution time is bounded by PHP's own `max_execution_time` ini directive (a
 |----------|---------|-------------|
 | `FRAME_OPTIONS` | `SAMEORIGIN` | Clickjacking protection. `SAMEORIGIN` allows framing only by pages on the same origin, `DENY` blocks all framing, `off` disables (use when managing framing via your own CSP). Any other value falls back to the `SAMEORIGIN` default with a startup warning. Sets both `X-Frame-Options` and `Content-Security-Policy: frame-ancestors` on every response. See [Clickjacking protection](#clickjacking-protection) below for the emitted header values, how server headers defer to application-set ones, and guidance on choosing a value |
 | `TRUSTED_PROXIES` | *(unset)* | Trusted reverse proxy networks: a comma-separated mix of CIDRs, bare IPs and the keywords `private` and `cloudflare` (e.g. `private,cloudflare`). When set, OxPHP extracts the real client IP from `Forwarded` ([RFC 7239](https://www.rfc-editor.org/rfc/rfc7239)) or `X-Forwarded-For` headers using the rightmost-non-trusted algorithm; with `cloudflare`, a request whose forwarding chain shows it arrived from a Cloudflare edge takes it from `CF-Connecting-IP` instead. Also processes `X-Forwarded-Proto` and `X-Forwarded-Host` for `$_SERVER['HTTPS']`, `REQUEST_SCHEME`, `SERVER_NAME`, and `SERVER_PORT`. Unset = feature disabled |
-| `PHP_DENY_PATHS` | *(unset)* | Comma-separated glob patterns whose `.php` files must never execute via direct URI (e.g. `/uploads/**,/cache/**,/admin/legacy.php`). Patterns may target whole directories or single files. Applies in the direct-mapping modes — Traditional and SPA; ignored with a startup warning in Framework and Worker modes, which never execute arbitrary `.php` files directly. Also covers scripts reached through directory-index resolution (`/uploads/` → `uploads/index.php`). For direct `.php` URIs, matching happens before disk I/O, so denied paths produce the same response whether the file exists or not (no existence oracle). The legacy name `PHP_DENY_DIRS` is accepted as a deprecated alias and emits a startup `WARN`. See [PHP Execution Deny-List](../security/php-deny.md) |
+| `PHP_DENY_PATHS` | *(unset)* | Comma-separated glob patterns whose `.php` files must never execute via direct URI (e.g. `/uploads/**,/cache/**,/admin/legacy.php`). Patterns may target whole directories or single files. Applies in the direct-mapping modes — Traditional and SPA; ignored with a startup warning in Framework and Worker modes, which never execute arbitrary `.php` files directly. Also covers scripts reached through directory-index resolution (`/uploads/` → `uploads/index.php`). For direct `.php` URIs, matching happens before disk I/O, so denied paths produce the same response whether the file exists or not (no existence oracle). See [PHP Execution Deny-List](../security/php-deny.md) |
 | `PHP_DENY_FALLBACK` | `404` | What to return on a `PHP_DENY_PATHS` match or a `.oxphpdeny` deny rule. Either an HTTP status `400`–`599` (pairs with `ERROR_PAGES_DIR` for custom HTML) or a `/`-prefixed URI path to a PHP fallback script inside `DOCUMENT_ROOT`. The fallback script receives `OXPHP_DENIED_PATH` and `OXPHP_DENIED_PATTERN` in `$_SERVER`. Validated at startup: the script must exist, canonicalize inside `DOCUMENT_ROOT`, and must not itself match `PHP_DENY_PATHS` (loop prevention). A `.oxphpdeny` rule may cover the script; in worker mode `.oxphpdeny` deny rules take a status code only. See [Path Deny Rules](../security/oxphpdeny.md) |
 | `SYMLINK_ALLOW_PATHS` | *(unset)* | Comma-separated list of absolute paths under which symlinks are permitted to escape `DOCUMENT_ROOT`. Each entry must already exist on disk; relative paths and missing paths abort startup. Unset = no symlink escapes allowed. See [Symlink Allow-Paths](../security/symlink-allow-paths.md) |
 
@@ -243,13 +231,12 @@ The same precedence applies to `X-Content-Type-Options`, which OxPHP sets to `no
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `STATIC_MAX_AGE` | `30d` | `Cache-Control: max-age` for static files. Accepts: `30s`, `5m`, `2h`, `30d`, `1w`, `1y`, bare seconds (`3600`), or `off` to disable the header. Replaces deprecated `STATIC_CACHE_TTL`. |
-| `STATIC_REVALIDATE` | `off` | Boolean — see [Boolean values](#boolean-values). Set truthy to enable mtime revalidation on the in-memory content cache: the file's modification time is re-checked at most once every 3 seconds per file (not per request) and stale entries are evicted automatically, so changes become visible within 3 seconds. Replaces deprecated `STATIC_CACHE` (where `off` had the inverse meaning). |
+| `STATIC_MAX_AGE` | `30d` | `Cache-Control: max-age` for static files. Accepts: `30s`, `5m`, `2h`, `30d`, `1w`, `1y`, bare seconds (`3600`), or `off` to disable the header. |
+| `STATIC_REVALIDATE` | `off` | Boolean — see [Boolean values](#boolean-values). Set truthy to enable mtime revalidation on the in-memory content cache: the file's modification time is re-checked at most once every 3 seconds per file (not per request) and stale entries are evicted automatically, so changes become visible within 3 seconds. |
 | `COMPRESSION_ENCODINGS` | `br,zstd,gzip` | Content codings the server offers, comma-separated: `br` (or `brotli`), `zstd`, `gzip`. An unknown name is a startup error. Set the whole value to `off` (or `none`) to switch compression off entirely — it is not a list token, so `br,off` is an error rather than a switch. An empty assignment is treated as unset and restores the default. The order written here is ignored — cached static files prefer Brotli, whose cost is paid once, and everything else prefers Zstandard. See [Compression](../features/compression.md#choosing-a-coding) |
-| `COMPRESSION_BROTLI_LEVEL` | `5` | Brotli quality (0–11). Replaces deprecated `COMPRESSION_LEVEL` |
+| `COMPRESSION_BROTLI_LEVEL` | `5` | Brotli quality (0–11) |
 | `COMPRESSION_ZSTD_LEVEL` | `6` | Zstandard compression level (0–19) |
 | `COMPRESSION_GZIP_LEVEL` | `6` | Gzip compression level (0–9) |
-| `COMPRESSION_LEVEL` | *(unset)* | Deprecated name for `COMPRESSION_BROTLI_LEVEL`; emits a startup `WARN`. `COMPRESSION_LEVEL=0` keeps its older meaning and disables every coding, not just Brotli. An explicit `COMPRESSION_BROTLI_LEVEL` wins over a non-zero value — but not over `0`, which switches compression off whatever else is set |
 
 A coding is offered when `COMPRESSION_ENCODINGS` lists it **and** its level is not `0`; either one alone withdraws it. A level outside its range, or one that is not a number, aborts startup with an error naming the variable — nothing is clamped.
 

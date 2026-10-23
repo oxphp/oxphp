@@ -144,16 +144,6 @@ Honest list of what this feature does *not* do:
 - **No regex.** Patterns are globs only — anchored, with `*`/`**`/`?`/`[abc]`/`{a,b}` operators. Use multiple comma-separated patterns instead of `(a|b)`.
 - **No effect on `include` / `require` / `eval`.** The deny-list governs *direct URI* execution only. A vulnerable script that does `include $_GET['page']` can still load PHP from anywhere readable by the server.
 
-## Deprecated Alias
-
-The legacy `PHP_DENY_DIRS` variable is accepted as a deprecated alias and emits a startup warning:
-
-```
-WARN PHP_DENY_DIRS is deprecated, use PHP_DENY_PATHS instead — the alias will be removed in a future release
-```
-
-When both are set, `PHP_DENY_PATHS` wins and `PHP_DENY_DIRS` is reported as ignored. Values are not merged.
-
 ## See Also
 
 - [Path Deny Rules](oxphpdeny.md) — keep any path, static or PHP, from being served, in every routing mode

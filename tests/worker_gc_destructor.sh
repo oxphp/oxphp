@@ -69,7 +69,8 @@ trap cleanup EXIT
 start_container() {
 	# start_container <name>
 	docker run -d --name "$1" \
-		-e WORKER_FILE=/var/www/html/worker.php \
+		-e WORKER_MODE_ENABLED=true \
+		-e ENTRY_FILE=/var/www/html/worker.php \
 		-e DOCUMENT_ROOT=/var/www/html \
 		-e PHP_WORKERS=1 \
 		-e ASYNC_WORKERS=2 \

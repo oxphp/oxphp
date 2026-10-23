@@ -1,4 +1,4 @@
-# Traditional routing mode: no INDEX_FILE set.
+# Traditional routing mode: no ENTRY_FILE set.
 # Direct file mapping — / resolves to index.php or index.html.
 # Static test fixtures and upload fixtures are mounted alongside the web root.
 #

@@ -25,8 +25,6 @@ Worker mode runs persistent PHP workers that bootstrap once and handle multiple 
 | `ENTRY_FILE` | *(unset)* | Path to the worker bootstrap script. Resolved against `DOCUMENT_ROOT` when relative; `..` segments and absolute paths are allowed (worker bootstraps living outside the public document root are a supported layout) |
 | `WORKER_MAX_MEMORY_MIB` | `0` | Maximum PHP memory per worker in MiB before recycling. `0` = unlimited |
 
-> **Migrating from `WORKER_FILE`:** the legacy variable is still parsed (with a startup `WARN`) and behaves as `WORKER_MODE_ENABLED=true ENTRY_FILE=$WORKER_FILE`. New deployments should use the explicit pair; the legacy form will be removed in a future release.
-
 For application-driven recycling, call [`OxPHP\Server\Worker::scheduleExit()`](../php/worker-class.md#scheduleexit) from inside a request handler. The worker exits cleanly after the current request completes.
 
 ## Writing a Worker Script

@@ -61,7 +61,7 @@ start_container() {
 	metrics=$(free_port)
 	local mode=()
 	if [ "$1" = worker ]; then
-		mode=(-e WORKER_FILE=/var/www/html/worker.php)
+		mode=(-e WORKER_MODE_ENABLED=true -e ENTRY_FILE=/var/www/html/worker.php)
 	fi
 	# The shortest drain: SIGTERM, a second, then the deadline's unwind and
 	# the two seconds the process gives it.
@@ -69,7 +69,7 @@ start_container() {
 		mode=(-e DRAIN_TIMEOUT_SECONDS=1)
 	fi
 	if [ "$1" = parked ]; then
-		mode=(-e WORKER_FILE=/var/www/html/worker-cleanup.php -e DRAIN_TIMEOUT_SECONDS=1)
+		mode=(-e WORKER_MODE_ENABLED=true -e ENTRY_FILE=/var/www/html/worker-cleanup.php -e DRAIN_TIMEOUT_SECONDS=1)
 	fi
 	# The queue wait is raised so a request that arrives before the worker
 	# thread is up waits for it rather than being answered 529 — a

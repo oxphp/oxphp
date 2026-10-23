@@ -36,7 +36,8 @@ services:
       # server can explain a rotating pool.
       LOG_LEVEL: warn
       INTERNAL_ADDR: 0.0.0.0:9090
-      WORKER_FILE: /var/www/html/worker/worker_entry.php
+      WORKER_MODE_ENABLED: "true"
+      ENTRY_FILE: /var/www/html/worker/worker_entry.php
       # One worker, so three fatals in a row are three fatals on the same
       # worker. With the default pool they would be spread across it and the
       # breaker's threshold would never be reached by any single one.

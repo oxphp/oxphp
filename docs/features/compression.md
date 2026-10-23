@@ -122,7 +122,6 @@ Compression along that path assumes a compressible type and a client that negoti
 | `COMPRESSION_BROTLI_LEVEL` | `5` | Brotli quality (0–11) |
 | `COMPRESSION_ZSTD_LEVEL` | `6` | Zstandard level (0–19) |
 | `COMPRESSION_GZIP_LEVEL` | `6` | Gzip level (0–9) |
-| `COMPRESSION_LEVEL` | *(unset)* | Deprecated name for `COMPRESSION_BROTLI_LEVEL`, kept for existing deployments together with the second meaning it carried when Brotli was the only coding: `COMPRESSION_LEVEL=0` switches off all compression. Setting it logs a warning at startup. An explicit `COMPRESSION_BROTLI_LEVEL` overrides a non-zero value — but not `COMPRESSION_LEVEL=0`, which switches everything off whatever else is set |
 
 A coding is offered when it is listed in `COMPRESSION_ENCODINGS` **and** its level is not `0`; either one alone withdraws it. A withdrawn coding is gone from the whole feature: it is never negotiated, never compressed on the request path, and never built as a stored copy.
 

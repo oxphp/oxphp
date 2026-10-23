@@ -38,9 +38,6 @@ services:
       # Resolved against DOCUMENT_ROOT (relative paths and `..` allowed).
       # - ENTRY_FILE=index.php
 
-      # Legacy: INDEX_FILE is still parsed but emits a startup WARN.
-      # Use ENTRY_FILE instead.
-
       # PHP executor backend.
       #   sapi  — execute PHP via custom SAPI (default, requires php feature)
       #   stub  — return static response without PHP (benchmarking)
@@ -169,10 +166,6 @@ services:
       # Workers then use persistent mode (no php_request_shutdown between requests).
       # - WORKER_MODE_ENABLED=true
       # - ENTRY_FILE=/var/www/html/worker.php
-
-      # Legacy: WORKER_FILE is still parsed but emits a startup WARN. It maps
-      # onto WORKER_MODE_ENABLED=true ENTRY_FILE=$WORKER_FILE — use the
-      # explicit pair above instead.
 
       # Max memory (MB) before recycling a worker (0 = unlimited).
       # - WORKER_MAX_MEMORY_MIB=0

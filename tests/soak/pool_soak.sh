@@ -84,7 +84,8 @@ docker compose -p "$PROJECT_NAME" "${COMPOSE_FILES[@]}" build >/dev/null
 echo "[soak] booting with PHP_WORKERS=${SOAK_WORKERS_MIN}:${SOAK_WORKERS_MAX}"
 PHP_WORKERS="${SOAK_WORKERS_MIN}:${SOAK_WORKERS_MAX}" \
     PHP_WORKERS_IDLE_SECONDS="$SOAK_WORKERS_IDLE" \
-    WORKER_FILE=/tests/soak/workload.php \
+    WORKER_MODE_ENABLED=true \
+    ENTRY_FILE=/tests/soak/workload.php \
     SOAK_POOL_COUNT="$SOAK_POOL_COUNT" \
     SOAK_POOL_MAX_SIZE="$SOAK_POOL_MAX_SIZE" \
     SOAK_IDLE_TIMEOUT="$SOAK_IDLE_TIMEOUT" \

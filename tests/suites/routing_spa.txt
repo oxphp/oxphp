@@ -1,5 +1,5 @@
 # profile: spa
-# description: SPA routing mode (INDEX_FILE=index.html)
+# description: SPA routing mode (ENTRY_FILE=index.html)
 
 routing/test_missing_to_html
 routing/test_php_still_executes
