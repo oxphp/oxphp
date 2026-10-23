@@ -87,7 +87,12 @@ $t->assertSame('its shutdown function no longer saw it waiting', $waiter['waitin
 
 $t->assertTrue('the pool outlived the worker', in_array($name, Registry::keys(), true));
 if (in_array($name, Registry::keys(), true)) {
-    $p = Registry::pool($name, static fn (): Pool => throw new \LogicException('the pool is gone'));
+    // The pool's factory went with the worker that made it: the name hands
+    // the pool this one.
+    $p = Registry::pool(
+        $name,
+        static fn (): Pool => new Pool(factory: static fn (): \stdClass => new \stdClass(), maxSize: 1)
+    );
     $t->assertSame('nor does the pool, on the worker that replaced it', $p->stats()->waiting(), 0);
 }
 

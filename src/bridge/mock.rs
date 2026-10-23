@@ -1054,6 +1054,14 @@ thread_local! {
     static MOCK_POOL_PARK: std::cell::RefCell<Option<MockPoolPark>> =
         const { std::cell::RefCell::new(None) };
     static MOCK_DEFERRED_BAILOUT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static MOCK_POOL_DESTROY_FCC: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Host tests: the `$destroy` handle the calling thread's last guarded
+/// destroy was given; null means the slot was freed without one.
+#[cfg(test)]
+pub fn mock_pool_last_destroy_fcc() -> *mut c_void {
+    MOCK_POOL_DESTROY_FCC.with(|f| f.get()) as *mut c_void
 }
 
 /// Host tests: run `hook` as the fiber park of a saturated acquire on the
@@ -1140,12 +1148,13 @@ pub unsafe fn oxphp_pool_slot_free(_slot_zv_heap: *mut c_void) {
 /// As under OXPHP_SHARED_RUN_GUARDED: a bailout the hook stands for is held
 /// back, and while one is, the call is refused without running anything.
 pub unsafe fn oxphp_pool_destroy_invoke_guarded(
-    _destroy_fcc_heap: *mut c_void,
+    destroy_fcc_heap: *mut c_void,
     slot_zv_heap: *mut c_void,
 ) -> c_int {
     if MOCK_DEFERRED_BAILOUT.get() {
         return OXPHP_SHARED_INVOKE_BAILOUT;
     }
+    MOCK_POOL_DESTROY_FCC.with(|f| f.set(destroy_fcc_heap as usize));
     count_pool_heap_call();
     let rc = run_mock_pool_destroy(slot_zv_heap);
     if rc == OXPHP_SHARED_INVOKE_BAILOUT {

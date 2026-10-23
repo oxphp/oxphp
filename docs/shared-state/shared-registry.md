@@ -25,7 +25,7 @@ It is the answer to the question *"how do I share one `Shared\Map` across all wo
 ```
 
 - The **first** caller of `Registry::map($key, $factory)` for an unbound key runs the factory and pins the resulting entry under the name.
-- Every subsequent caller — same thread, other workers, later requests — receives the same entry. The factory is **not** re-run; it is ignored on a hit.
+- Every subsequent caller — same thread, other workers, later requests — receives the same entry. The factory is **not** re-run; it is ignored on a hit. The one exception is a `Shared\Pool` whose factory belonged to a request that has ended: `pool()` and `global()` then run the factory and give the bound pool the factory and destroy callbacks of the pool it returns — see [Shared\Pool — When the worker that created a pool exits](shared-pool.md#when-the-worker-that-created-a-pool-exits).
 - Concurrent first-touches block on a per-key gate: exactly **one** thread runs the factory, the others wait and get the winner's entry. No double resource acquisition for connection pools.
 
 Identity-by-name complements identity-by-handle. Anonymous (`new Shared\*()`) and named entries coexist in the same process-global registry. The names index simply adds a string lookup on top.
@@ -62,7 +62,8 @@ namespace OxPHP\Shared;
 
 final class Registry
 {
-    // Typed get-or-create. On hit, the factory is ignored; on miss it
+    // Typed get-or-create. On hit, the factory is ignored (except to give
+    // a pool new callbacks, see above); on miss it
     // runs at most once across all workers (block-losers) and must
     // return a fresh instance of the matching type.
     public static function map(string $key, callable $factory): Map;
@@ -141,7 +142,7 @@ If you rotate keys (per-tenant entries that come and go, key-versioning), addres
 | `Shared\SharedException` (bind race) | A peer creator was already settled into the slot while this thread's factory was running (the factory's entry was NOT pinned under the key). Retry the call. |
 | `Shared\SharedException` (pool without worker mode) | `Registry::pool()` called from an HTTP request served without worker mode, or `Registry::global()` there whose factory returned a `Shared\Pool`; or either of them in a task whose factory returned a pool such a request created. The call binds nothing. See [Shared\Pool — Outside worker mode](shared-pool.md#outside-worker-mode). |
 | `\InvalidArgumentException` (SPL) | Empty `$key`. Argument validation, distinct from domain type errors. |
-| *(factory's exception)* | If the factory throws, the slot is aborted (Creating → absent, waiters wake to retry) and the original exception propagates to the creator. A fatal error inside the factory aborts the slot the same way, and still ends the request. |
+| *(factory's exception)* | If the factory throws, the slot is aborted (Creating → absent, waiters wake to retry) and the original exception propagates to the creator. A fatal error inside the factory aborts the slot the same way, and still ends the request. A factory that a hit runs to give a `Shared\Pool` new callbacks propagates its exception the same way, and the pool keeps the callbacks it had. |
 
 `Shared\DeadlockException` extends `OxPHP\Async\AsyncException` — `catch (AsyncException)` sweeps it together with bounded-wait timeouts elsewhere in `Shared\*`. The two distinct `DeadlockException` cases share the class; tell them apart by the message (`"reentrant get-or-create"` vs `"waited too long … cross-key cycle"`).
 

@@ -15,7 +15,9 @@
 //!          ├── ValueTooLargeException                  Map value over the per-value cap
 //!          ├── ClosedException                         Pool acquire on a closed pool, or outside
 //!          │                                            worker mode from an oxphp_async() task
-//!          │                                            or a request other than its creator
+//!          │                                            or a request other than its creator, or
+//!          │                                            one that needs a new slot once the
+//!          │                                            request that made the factory has ended
 //!          ├── PoisonedException                       Once Poison-mode failure
 //!          │                                            (first-class, not deprecated)
 //!          ├── UninitializedException

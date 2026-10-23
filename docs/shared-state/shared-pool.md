@@ -17,7 +17,7 @@ A Pool gives each PHP worker thread its own lane of ready-to-use resources, enfo
 - **Destroy callback on eviction.** An optional `destroy($resource)` closure runs when the pool drops a slot on the thread holding it (idle timeout, manual eviction, the pool going away there). It does not run at server stop unless you ask for it — see [When the destroy callback is skipped](#when-the-destroy-callback-is-skipped).
 - **Idle-timeout eviction.** In worker mode, slots sitting idle longer than `idleTimeoutMs` are destroyed by the worker thread holding them, which a background scheduler wakes for it. Set `idleTimeoutMs: 0` to disable idle eviction entirely. Slots held elsewhere are not evicted this way — see [Idle-timeout eviction](#idle-timeout-eviction).
 - **RAII handles.** `acquire()` returns a `Handle`; the slot returns to the pool automatically when the handle goes out of scope (including on exception), or earlier via `$handle->release()`.
-- **Shareable.** In worker mode a pool survives request boundaries and is shared by handle (`use ($pool)` in closures). Outside worker mode it lasts only as long as the request that creates it — see [Outside worker mode](#outside-worker-mode).
+- **Shareable.** In worker mode a pool survives request boundaries and is shared by handle (`use ($pool)` in closures). Its factory and destroy callback still end with the worker that created the pool — see [When the worker that created a pool exits](#when-the-worker-that-created-a-pool-exits). Outside worker mode a pool lasts only as long as the request that creates it — see [Outside worker mode](#outside-worker-mode).
 
 ## API Reference
 
@@ -208,6 +208,28 @@ A pool created inside a task started with `oxphp_async()` is not tied to a reque
 
 To keep database connections open across requests without worker mode, use the driver's persistent connections instead of a pool — for PDO, `PDO::ATTR_PERSISTENT => true`, which keeps a connection open in each PHP worker thread for the next request on that thread that connects with the same DSN and credentials. To share one pool across requests, run the application in [worker mode](../features/worker-mode.md).
 
+## When the worker that created a pool exits
+
+A pool's factory and destroy callback belong to the PHP request that created the pool, like every closure that request makes, and PHP frees them when that request ends. In worker mode that request is the worker's script, which runs for as long as the worker does, so it ends when the worker is [recycled](../features/worker-mode.md#recycling), when a dynamic pool retires it, and when the server stops. In a task started with `oxphp_async()` it is the request of the task's thread, which lasts as long as that thread. The pool itself lives on wherever another worker still holds it — under a name, in a `Shared\Map`, or in a variable of its own — so the callbacks end before the pool does:
+
+- Once the script of the request that created the pool has run to its end — `oxphp_worker()` has returned and the code after it has run — that request waits for the calls other threads are making into the factory or the destroy callback to return. Only then do its shutdown functions and destructors run and PHP free its memory. The wait has no limit: a callback that waits in turn for something the exiting worker gives up only as it shuts down — a lock it releases in a destructor, say — keeps that worker from exiting at all. After 5 seconds of waiting the server logs a warning.
+- From then on no other thread calls them. The slots that already exist are still handed out and given back as before. An acquire that has to make a new slot throws `ClosedException`, saying that the pool's factory belonged to a request that has ended. A slot that another thread destroys — with `evict()` or by idle eviction — goes without `$destroy`, and is counted in `oxphp_shared_pool_destroy_skipped_total{reason="request_ended"}`.
+- The request that created the pool can still call them itself while it shuts down, in its shutdown functions and its destructors.
+
+A pool bound to a name gets new callbacks from the next call to `Registry::pool()` or `Registry::global()` for that name that is made in a request that is not shutting down. That call runs its factory, and the bound pool takes the factory and the destroy callback of the pool the factory returns — not its `maxSize` or its `idleTimeoutMs` — when that pool was created by the request making the call; a pool the factory got from elsewhere, such as another name, gives it none. The call returns the bound pool, as on any other hit. From then on new slots come from the new factory, and the new destroy callback is called for every slot of the pool, including the slots the old factory made. If the factory returns anything but a pool, the call throws `TypeException`, and if it throws, the exception propagates; either way the bound pool keeps the callbacks it had. When the workers call `Registry::pool()` for the name as they boot, the replacement of the worker that created the pool gives it new callbacks as soon as it boots. Until then, the other workers can only use the slots that exist; one that calls `Registry::pool()` again — inside the request handler, say — gives the pool its own callbacks first:
+
+```php
+oxphp_worker(function () {
+    $db = Registry::pool('db', fn () => new Pool(
+        factory: fn () => new PDO(getenv('DB_DSN')),
+        maxSize: 16,
+    ));
+    // ...
+});
+```
+
+A pool not bound to a name never gets new callbacks: once the request that created it has ended, it hands out the slots it has, and an acquire that needs a new one throws `ClosedException`.
+
 ## Idle-timeout eviction
 
 Idle-timeout eviction works in worker mode. A background scheduler looks at every pool twice a second, and when a worker holds a slot that has been idle longer than `idleTimeoutMs`, it wakes that worker. As soon as the worker has no request in flight it destroys every slot of its own that has been idle that long, in every pool, calling `$destroy` for each, and the budget is released at the same point. A worker waiting for its next request does this at once and serves no request for it; one that always has a request in flight — one carrying long-lived streams, say — does it the next time it has none. Once the server has begun its graceful shutdown the eviction no longer runs, so that a fatal error in `$destroy` cannot retire a worker and have the pool boot a replacement in the middle of the drain: a slot that goes stale during the drain stays in the pool like every other idle slot, and the server's stop does not call `$destroy` for it — see [When the destroy callback is skipped](#when-the-destroy-callback-is-skipped).
@@ -228,7 +250,7 @@ Tune `idleTimeoutMs` to the cost of recreation:
 
 `$destroy` is called only on the thread that holds the slot, and only while PHP code is running there: every PHP thread has a memory heap of its own, which no other thread may free into, and a callback with no PHP code to return to would turn an exception it throws into a fatal error, or hand it to your exception handler from inside the pool's teardown. Anywhere else the slot is let go without it, and PHP frees the object in it when the request of the thread holding it ends, as it frees every object still alive at that point:
 
-- **Server stop.** The shutdown closes every pool but destroys no slot: it runs on a thread that holds none. In worker mode, to have `$destroy` called for the slots a worker holds, call `evict()` after `oxphp_worker()` returns — the code after it runs on that worker once its loop has ended, the server's stop among the reasons — on a pool that worker created itself:
+- **Server stop.** The shutdown closes every pool but destroys no slot: it runs on a thread that holds none. In worker mode, to have `$destroy` called for the slots a worker holds, call `evict()` after `oxphp_worker()` returns — the code after it runs on that worker once its loop has ended, the server's stop among the reasons:
 
   ```php
   $pool = new Pool(factory: ..., destroy: ...);
@@ -241,7 +263,9 @@ Tune `idleTimeoutMs` to the cost of recreation:
   $pool->evict();
   ```
 
-  Not on a pool bound to a name with `Registry::pool()`: one worker creates it for all of them, its destroy callback is that worker's closure, and PHP frees the closure when that worker's script ends — which at a stop can be before another worker's loop has ended, if that one was still finishing a request.
+  On a pool bound to a name with `Registry::pool()`, the destroy callback belongs to the worker that created the pool, or to the one that last gave it new callbacks, and a worker whose loop ends after that worker's script has ended — at a stop, one that was still finishing a request — lets its slots go without it: see the next case.
+
+- **The request that created the pool has ended.** In worker mode and in tasks started with `oxphp_async()`, once the request that created the pool has begun to shut down, no other thread calls its destroy callback, and the slots other threads destroy go without it — see [When the worker that created a pool exits](#when-the-worker-that-created-a-pool-exits).
 
 - **The end of a request.** A pool whose last reference goes away while its request is ending — once a worker's script has run to its end, say — goes away with no PHP code running, so `$destroy` is not called for the slots of its own thread either. Outside worker mode this is how a pool a request creates ends, unless the request lets go of it earlier — see [Outside worker mode](#outside-worker-mode).
 - **Slots another thread holds.** When the pool's last reference goes away on one thread, the idle slots another thread holds — another worker's, or a task's started with `oxphp_async()` — are let go there and then. Their objects stay alive until that thread's request ends, which for a worker or a task's thread is when the thread exits, and until then a connection in one stays open without counting against `maxSize`.
@@ -258,6 +282,8 @@ Every acquire variant first tries to satisfy the request immediately — reuse a
 | Idle slot in the local thread's queue       | reused immediately    | reused immediately | reused immediately                        |
 | No idle slot, but below `maxSize`           | factory mints a slot  | factory mints a slot | factory mints a slot                    |
 | Saturated (at `maxSize`, all in use)        | waits **forever**     | returns `null`     | waits up to `$ms`, then `OperationTimeoutException` |
+
+Once the request that created the pool has ended, the factory is no longer called, and the second row throws `ClosedException` instead — see [When the worker that created a pool exits](#when-the-worker-that-created-a-pool-exits).
 
 `$ms` must be `> 0`; `0` or negative raises `TypeException`. There is deliberately no float-seconds form and no "infinite" sentinel argument — use the bare `acquire()` for an unbounded wait.
 
@@ -276,7 +302,7 @@ A task cancelled while its wait is suspended — because the side awaiting it ga
 | `OperationTimeoutException` | `acquireTimeout` / `withTimeout` exceeded `$ms` without a free slot. **Extends `Async\AsyncException`, not `SharedException`.** |
 | `TypeException`            | Non-positive `maxSize`, negative `idleTimeoutMs`, `$ms <= 0`, or a factory that returned a non-object. |
 | `StaleHandleException`     | `Handle::get()` after the handle was released.                       |
-| `ClosedException`          | Any acquire on a closed pool (server shutdown), and outside worker mode any acquire on a pool a request created that is not made by that request while it runs — see [Outside worker mode](#outside-worker-mode). |
+| `ClosedException`          | Any acquire on a closed pool (server shutdown); an acquire that has to make a new slot once the request that created the pool has ended — see [When the worker that created a pool exits](#when-the-worker-that-created-a-pool-exits); and outside worker mode any acquire on a pool a request created that is not made by that request while it runs — see [Outside worker mode](#outside-worker-mode). |
 | `SharedException`          | `Registry::pool()` called from an HTTP request served without worker mode, and `Registry::global()` there when its factory returns a pool; either of them in a task when the factory returns a pool such a request created — see [Outside worker mode](#outside-worker-mode). |
 | `UninitializedException`   | A method call on a pool wrapper that has not finished `__construct`. |
 | `Async\AsyncException`     | An acquire in an `oxphp_async()` task that was cancelled while its wait was suspended — see [What a wait holds](#what-a-wait-holds). |

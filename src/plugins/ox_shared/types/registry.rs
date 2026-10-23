@@ -693,6 +693,9 @@ fn registry_get_or_create(
             // so write_shared_to_retval keeps it alive across the
             // portbuf-deserialise wrap; Drop balances the +1.
             let arc = unsafe { Arc::from_raw(ptr) };
+            if let Some(pool) = arc.inner.as_any_pool() {
+                rearm_pool(call, factory_arg, &key, pool)?;
+            }
             let owned = SharedRefOwned::from_arc(arc);
             write_shared_to_retval(call, owned)
         }
@@ -732,201 +735,255 @@ fn registry_get_or_create(
             // the names index. Only the happy path commits.
             let mut creating = CreatingGuard::new(registry(), key.clone(), gate);
 
-            // 2. Run the user's factory via the portable invoke. If the
-            //    factory returned a Shared\* wrapper, the C shim retains
-            //    its Entry via oxphp_shared_handle_clone before destroying
-            //    the wrapper so our lookup(id) below cannot race against
-            //    Entry::drop. The +1 strong ref is "owned by the buffer";
-            //    `_retain_release` (an RAII guard below) drops it after we
-            //    finish all operations that need the entry alive.
-            let callable_zv = unsafe { call.raw_arg_ptr(factory_arg) };
-            let mut out_buf: *mut u8 = std::ptr::null_mut();
-            let mut out_len: usize = 0;
-            let mut retained_entry: *const std::os::raw::c_void = std::ptr::null();
-            let invoke_rc = unsafe {
-                bridge_ffi::oxphp_shared_invoke_0_portbuf(
-                    callable_zv,
-                    &mut out_buf,
-                    &mut out_len,
-                    &mut retained_entry,
-                )
-            };
-            // RAII: drop the C-side retain when we leave this scope, no
-            // matter which arm we exit through. Constructed from a raw
-            // ptr that may be null — the guard's Drop no-ops in that case.
-            struct RetainGuard(*const std::os::raw::c_void);
-            impl Drop for RetainGuard {
-                fn drop(&mut self) {
-                    if !self.0.is_null() {
-                        // The C side bumped strong_count via
-                        // oxphp_shared_handle_clone; balance with
-                        // Arc::from_raw which decrements on drop.
-                        unsafe { drop(Arc::from_raw(self.0 as *const Entry)) };
-                    }
-                }
-            }
-            let _retain_release = RetainGuard(retained_entry);
-            match invoke_rc {
-                x if x == bridge_ffi::OXPHP_SHARED_INVOKE_OK => {
-                    let bytes = unsafe { std::slice::from_raw_parts(out_buf, out_len) };
-                    let parsed = portbuf_to_sv(bytes).and_then(|raw| raw_to_owned(raw, registry()));
-                    unsafe { bridge_ffi::oxphp_portable_free(out_buf) };
-
-                    match parsed {
-                        Ok(SharedValue::Shared(owned)) => {
-                            let actual_tag = owned.type_tag;
-                            // Type guard for typed methods. `creating` aborts
-                            // on the early return via Drop.
-                            if let Some(want) = want_tag {
-                                if actual_tag != want {
-                                    return Err(PhpError::Exception {
-                                        class: "OxPHP\\Shared\\TypeException".into(),
-                                        message: format!(
-                                            "Shared\\Registry: factory for key '{key}' returned \
-                                             {} but the typed method requires {}",
-                                            actual_tag.name(),
-                                            want.name()
-                                        ),
-                                        code: 0,
-                                    });
-                                }
-                            }
-                            // 3. Bind: take a fresh Arc via lookup (cheap; the
-                            // entry IS alive because `owned` holds a strong ref).
-                            let arc = match registry().lookup(owned.id) {
-                                Ok(a) => a,
-                                Err(_) => {
-                                    return Err(PhpError::Exception {
-                                        class: "OxPHP\\Shared\\SharedException".into(),
-                                        message: "Shared\\Registry: factory entry vanished".into(),
-                                        code: 0,
-                                    });
-                                }
-                            };
-                            if actual_tag == SharedType::Pool {
-                                refuse_pool_binding(arc.inner.as_any_pool())?;
-                            }
-                            // 4. Bind. Only the Ok path commits the guard;
-                            //    every error path returns early so the
-                            //    guard's Drop settles our gate as aborted
-                            //    AND best-effort-removes the slot (no-op if
-                            //    drain or a peer already cleared it). That
-                            //    closes the drain-race deadlock where a
-                            //    waiter who cloned our gate before
-                            //    `drain.names.clear()` would otherwise
-                            //    block until GATE_WAIT_TIMEOUT.
-                            match registry().name_bind(&key, arc, actual_tag) {
-                                Ok(()) => {
-                                    creating.commit();
-                                }
-                                Err(BindError::ForeignCreator) => {
-                                    // The slot we opened was settle_aborted
-                                    // and reused by a peer mid-factory.
-                                    // Returning the factory's entry to PHP
-                                    // would hand back a wrapper whose entry
-                                    // is NOT pinned under `key`, silently
-                                    // breaking identity-by-name. Surface as
-                                    // SharedException; the caller can retry.
-                                    return Err(PhpError::Exception {
-                                        class: "OxPHP\\Shared\\SharedException".into(),
-                                        message: format!(
-                                            "Shared\\Registry: bind for key '{key}' raced — \
-                                             slot was reset and is now owned by another creator"
-                                        ),
-                                        code: 0,
-                                    });
-                                }
-                                Err(BindError::ShuttingDown) => {
-                                    return Err(PhpError::Exception {
-                                        class: "OxPHP\\Shared\\SharedException".into(),
-                                        message: format!(
-                                            "Shared\\Registry: cannot bind '{key}' — registry \
-                                             is draining (process shutdown)"
-                                        ),
-                                        code: 0,
-                                    });
-                                }
-                                Err(BindError::AlreadyBound) => {
-                                    return Err(PhpError::Exception {
-                                        class: "OxPHP\\Shared\\SharedException".into(),
-                                        message: format!(
-                                            "Shared\\Registry: bind for key '{key}' rejected — \
-                                             slot is already bound (internal invariant violation)"
-                                        ),
-                                        code: 0,
-                                    });
-                                }
-                                Err(BindError::NoCreatingSlot) => {
-                                    return Err(PhpError::Exception {
-                                        class: "OxPHP\\Shared\\SharedException".into(),
-                                        message: format!(
-                                            "Shared\\Registry: bind for key '{key}' rejected — \
-                                             no Creating slot (internal invariant violation)"
-                                        ),
-                                        code: 0,
-                                    });
-                                }
-                            }
-                            // 5. Return the wrapper — `owned`'s strong ref
-                            // outlives the portbuf-deserialise inside.
-                            write_shared_to_retval(call, owned)
-                        }
-                        _ => Err(PhpError::Exception {
-                            class: "OxPHP\\Shared\\TypeException".into(),
-                            message: format!(
-                                "Shared\\Registry: factory for key '{key}' must return a \
-                                 Shared\\* instance"
-                            ),
-                            code: 0,
-                        }),
-                    }
-                }
-                x if x == bridge_ffi::OXPHP_SHARED_INVOKE_PHP_THREW => {
-                    if !out_buf.is_null() {
-                        unsafe { bridge_ffi::oxphp_portable_free(out_buf) };
-                    }
-                    // EG(exception) is pending — propagate. PhpError::Custom
-                    // signals the framework to surface the existing exception
-                    // instead of overwriting it. `creating` aborts on drop.
-                    Err(PhpError::Custom("Shared\\Registry: factory threw".into()))
-                }
-                x if x == bridge_ffi::OXPHP_SHARED_INVOKE_BAILOUT => {
-                    // A fatal error or a cancelled write ended the request
-                    // in the factory call or around it — resolving the
-                    // factory, or freeing a value it returned that could not
-                    // be stored. The dispatch stub raises it again and
-                    // nothing is thrown; `creating` aborts on drop, so the
-                    // key is free for the next caller.
-                    Err(PhpError::Custom(
-                        "Shared\\Registry: factory ended by a bailout".into(),
-                    ))
-                }
-                x if x == bridge_ffi::OXPHP_SHARED_INVOKE_BAD_RETURN => {
-                    if !out_buf.is_null() {
-                        unsafe { bridge_ffi::oxphp_portable_free(out_buf) };
-                    }
-                    Err(PhpError::Exception {
+            // 2. Run the user's factory. `creating` aborts on an error.
+            let owned = run_factory(call, factory_arg, &key)?;
+            let actual_tag = owned.type_tag;
+            // Type guard for typed methods. `creating` aborts
+            // on the early return via Drop.
+            if let Some(want) = want_tag {
+                if actual_tag != want {
+                    return Err(PhpError::Exception {
                         class: "OxPHP\\Shared\\TypeException".into(),
                         message: format!(
-                            "Shared\\Registry: factory for key '{key}' returned a \
-                             non-serialisable value (closure, resource, or non-Shareable \
-                             object) — must return a Shared\\* instance"
+                            "Shared\\Registry: factory for key '{key}' returned \
+                             {} but the typed method requires {}",
+                            actual_tag.name(),
+                            want.name()
                         ),
                         code: 0,
-                    })
-                }
-                _ => {
-                    if !out_buf.is_null() {
-                        unsafe { bridge_ffi::oxphp_portable_free(out_buf) };
-                    }
-                    Err(PhpError::Exception {
-                        class: "OxPHP\\Shared\\TypeException".into(),
-                        message: "Shared\\Registry: factory argument is not a valid callable"
-                            .into(),
-                        code: 0,
-                    })
+                    });
                 }
             }
+            // 3. Bind: take a fresh Arc via lookup (cheap; the
+            // entry IS alive because `owned` holds a strong ref).
+            let arc = match registry().lookup(owned.id) {
+                Ok(a) => a,
+                Err(_) => {
+                    return Err(PhpError::Exception {
+                        class: "OxPHP\\Shared\\SharedException".into(),
+                        message: "Shared\\Registry: factory entry vanished".into(),
+                        code: 0,
+                    });
+                }
+            };
+            if actual_tag == SharedType::Pool {
+                refuse_pool_binding(arc.inner.as_any_pool())?;
+            }
+            // 4. Bind. Only the Ok path commits the guard;
+            //    every error path returns early so the
+            //    guard's Drop settles our gate as aborted
+            //    AND best-effort-removes the slot (no-op if
+            //    drain or a peer already cleared it). That
+            //    closes the drain-race deadlock where a
+            //    waiter who cloned our gate before
+            //    `drain.names.clear()` would otherwise
+            //    block until GATE_WAIT_TIMEOUT.
+            match registry().name_bind(&key, arc, actual_tag) {
+                Ok(()) => {
+                    creating.commit();
+                }
+                Err(BindError::ForeignCreator) => {
+                    // The slot we opened was settle_aborted
+                    // and reused by a peer mid-factory.
+                    // Returning the factory's entry to PHP
+                    // would hand back a wrapper whose entry
+                    // is NOT pinned under `key`, silently
+                    // breaking identity-by-name. Surface as
+                    // SharedException; the caller can retry.
+                    return Err(PhpError::Exception {
+                        class: "OxPHP\\Shared\\SharedException".into(),
+                        message: format!(
+                            "Shared\\Registry: bind for key '{key}' raced — \
+                             slot was reset and is now owned by another creator"
+                        ),
+                        code: 0,
+                    });
+                }
+                Err(BindError::ShuttingDown) => {
+                    return Err(PhpError::Exception {
+                        class: "OxPHP\\Shared\\SharedException".into(),
+                        message: format!(
+                            "Shared\\Registry: cannot bind '{key}' — registry \
+                             is draining (process shutdown)"
+                        ),
+                        code: 0,
+                    });
+                }
+                Err(BindError::AlreadyBound) => {
+                    return Err(PhpError::Exception {
+                        class: "OxPHP\\Shared\\SharedException".into(),
+                        message: format!(
+                            "Shared\\Registry: bind for key '{key}' rejected — \
+                             slot is already bound (internal invariant violation)"
+                        ),
+                        code: 0,
+                    });
+                }
+                Err(BindError::NoCreatingSlot) => {
+                    return Err(PhpError::Exception {
+                        class: "OxPHP\\Shared\\SharedException".into(),
+                        message: format!(
+                            "Shared\\Registry: bind for key '{key}' rejected — \
+                             no Creating slot (internal invariant violation)"
+                        ),
+                        code: 0,
+                    });
+                }
+            }
+            // 5. Return the wrapper — `owned`'s strong ref
+            // outlives the portbuf-deserialise inside.
+            write_shared_to_retval(call, owned)
+        }
+    }
+}
+
+thread_local! {
+    /// The pools whose factory argument is running on this thread to give
+    /// them new callables: a factory that gets the same name again is
+    /// handed the pool as it is.
+    static REARMING: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Give a pool found under `key` the callables of the pool the factory
+/// argument returns, when the ones it has belong to a request that has
+/// begun to shut down ([`PoolInner::wants_callables`]). Only the callables
+/// are taken: the returned pool's `maxSize` and `idleTimeout` are not.
+fn rearm_pool(
+    call: &mut NativeCall,
+    factory_arg: u32,
+    key: &str,
+    pool: &PoolInner,
+) -> Result<(), PhpError> {
+    let me = pool as *const PoolInner as usize;
+    if !pool.wants_callables() || REARMING.with(|r| r.borrow().contains(&me)) {
+        return Ok(());
+    }
+    struct Rearming(usize);
+    impl Drop for Rearming {
+        fn drop(&mut self) {
+            REARMING.with(|r| r.borrow_mut().retain(|p| *p != self.0));
+        }
+    }
+    REARMING.with(|r| r.borrow_mut().push(me));
+    let _rearming = Rearming(me);
+    let owned = run_factory(call, factory_arg, key)?;
+    let from = registry().lookup(owned.id).ok();
+    let Some(from) = from.as_ref().and_then(|arc| arc.inner.as_any_pool()) else {
+        return Err(PhpError::Exception {
+            class: "OxPHP\\Shared\\TypeException".into(),
+            message: format!(
+                "Shared\\Registry: factory for key '{key}' returned {} but the key \
+                 is bound to a Pool",
+                owned.type_tag.name()
+            ),
+            code: 0,
+        });
+    };
+    refuse_pool_binding(Some(from))?;
+    pool.adopt_callables_from(from);
+    Ok(())
+}
+
+/// Run the factory argument of a get-or-create call and take the
+/// `Shared\\*` instance it returned.
+fn run_factory(
+    call: &mut NativeCall,
+    factory_arg: u32,
+    key: &str,
+) -> Result<SharedRefOwned, PhpError> {
+    // If the factory returned a Shared\* wrapper, the C shim retains
+    // its Entry via oxphp_shared_handle_clone before destroying the
+    // wrapper so the parse below cannot race against Entry::drop. The
+    // +1 strong ref is "owned by the buffer"; `_retain_release` (an RAII
+    // guard below) drops it once the parsed value holds its own.
+    let callable_zv = unsafe { call.raw_arg_ptr(factory_arg) };
+    let mut out_buf: *mut u8 = std::ptr::null_mut();
+    let mut out_len: usize = 0;
+    let mut retained_entry: *const std::os::raw::c_void = std::ptr::null();
+    let invoke_rc = unsafe {
+        bridge_ffi::oxphp_shared_invoke_0_portbuf(
+            callable_zv,
+            &mut out_buf,
+            &mut out_len,
+            &mut retained_entry,
+        )
+    };
+    // RAII: drop the C-side retain when we leave this scope, no
+    // matter which arm we exit through. Constructed from a raw
+    // ptr that may be null — the guard's Drop no-ops in that case.
+    struct RetainGuard(*const std::os::raw::c_void);
+    impl Drop for RetainGuard {
+        fn drop(&mut self) {
+            if !self.0.is_null() {
+                // The C side bumped strong_count via
+                // oxphp_shared_handle_clone; balance with
+                // Arc::from_raw which decrements on drop.
+                unsafe { drop(Arc::from_raw(self.0 as *const Entry)) };
+            }
+        }
+    }
+    let _retain_release = RetainGuard(retained_entry);
+    match invoke_rc {
+        x if x == bridge_ffi::OXPHP_SHARED_INVOKE_OK => {
+            let bytes = unsafe { std::slice::from_raw_parts(out_buf, out_len) };
+            let parsed = portbuf_to_sv(bytes).and_then(|raw| raw_to_owned(raw, registry()));
+            unsafe { bridge_ffi::oxphp_portable_free(out_buf) };
+
+            match parsed {
+                Ok(SharedValue::Shared(owned)) => Ok(owned),
+                _ => Err(PhpError::Exception {
+                    class: "OxPHP\\Shared\\TypeException".into(),
+                    message: format!(
+                        "Shared\\Registry: factory for key '{key}' must return a \
+                         Shared\\* instance"
+                    ),
+                    code: 0,
+                }),
+            }
+        }
+        x if x == bridge_ffi::OXPHP_SHARED_INVOKE_PHP_THREW => {
+            if !out_buf.is_null() {
+                unsafe { bridge_ffi::oxphp_portable_free(out_buf) };
+            }
+            // EG(exception) is pending — propagate. PhpError::Custom
+            // signals the framework to surface the existing exception
+            // instead of overwriting it. `creating` aborts on drop.
+            Err(PhpError::Custom("Shared\\Registry: factory threw".into()))
+        }
+        x if x == bridge_ffi::OXPHP_SHARED_INVOKE_BAILOUT => {
+            // A fatal error or a cancelled write ended the request
+            // in the factory call or around it — resolving the
+            // factory, or freeing a value it returned that could not
+            // be stored. The dispatch stub raises it again and
+            // nothing is thrown; a get-or-create that was creating
+            // the key aborts it, so the key is free for the next caller.
+            Err(PhpError::Custom(
+                "Shared\\Registry: factory ended by a bailout".into(),
+            ))
+        }
+        x if x == bridge_ffi::OXPHP_SHARED_INVOKE_BAD_RETURN => {
+            if !out_buf.is_null() {
+                unsafe { bridge_ffi::oxphp_portable_free(out_buf) };
+            }
+            Err(PhpError::Exception {
+                class: "OxPHP\\Shared\\TypeException".into(),
+                message: format!(
+                    "Shared\\Registry: factory for key '{key}' returned a \
+                     non-serialisable value (closure, resource, or non-Shareable \
+                     object) — must return a Shared\\* instance"
+                ),
+                code: 0,
+            })
+        }
+        _ => {
+            if !out_buf.is_null() {
+                unsafe { bridge_ffi::oxphp_portable_free(out_buf) };
+            }
+            Err(PhpError::Exception {
+                class: "OxPHP\\Shared\\TypeException".into(),
+                message: "Shared\\Registry: factory argument is not a valid callable".into(),
+                code: 0,
+            })
         }
     }
 }

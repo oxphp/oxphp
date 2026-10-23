@@ -30,7 +30,7 @@ pub enum RequestScope {
 /// Handlers receive the events that put state on the thread —
 /// `thread_started`, `request_frame_opening`, `request_frame_opened` and
 /// `fiber_resumed` — in plugin init order, and those that take it off —
-/// `thread_stopping`,
+/// `thread_stopping`, `request_frame_closing`,
 /// `request_frame_closed`, `fiber_parked` and `fiber_dropped` — in the reverse
 /// order, so a plugin that depends on another has its own state put on after,
 /// and taken off before, the state it depends on.
@@ -77,6 +77,12 @@ pub trait PluginPhpThreadHandler: Send + Sync {
     fn request_frame_opened(&self, scope: RequestScope) {
         let _ = scope;
     }
+
+    /// The PHP request on this thread is about to be shut down:
+    /// `php_request_shutdown` has not run yet, and what the request
+    /// allocated is still there. The shutdown runs userland code — shutdown
+    /// functions, destructors, session handlers — after this event.
+    fn request_frame_closing(&self) {}
 
     /// The PHP request on this thread has been shut down
     /// (`php_request_shutdown` has returned): what the request allocated is
@@ -163,6 +169,12 @@ impl PhpThreadHandlers {
     pub fn request_frame_opened(&self, scope: RequestScope) {
         for h in &self.0 {
             h.request_frame_opened(scope);
+        }
+    }
+
+    pub fn request_frame_closing(&self) {
+        for h in self.0.iter().rev() {
+            h.request_frame_closing();
         }
     }
 
@@ -304,6 +316,9 @@ mod tests {
         fn request_frame_opened(&self, scope: RequestScope) {
             self.push(&format!("opened({scope:?})"));
         }
+        fn request_frame_closing(&self) {
+            self.push("closing");
+        }
         fn request_frame_closed(&self) {
             self.push("closed");
         }
@@ -353,6 +368,7 @@ mod tests {
         h.fiber_parked(7);
         h.fiber_resumed(7);
         h.fiber_dropped(7);
+        h.request_frame_closing();
         h.request_frame_closed();
         h.thread_stopping();
         assert_eq!(
@@ -372,6 +388,8 @@ mod tests {
                 "b:resumed(7)",
                 "b:dropped(7)",
                 "a:dropped(7)",
+                "b:closing",
+                "a:closing",
                 "b:closed",
                 "a:closed",
                 "b:stopping",
@@ -392,6 +410,7 @@ mod tests {
         h.fiber_parked(1);
         h.fiber_resumed(1);
         h.fiber_dropped(1);
+        h.request_frame_closing();
         h.request_frame_closed();
         h.thread_stopping();
         assert!(h.value_leaving_thread(b"x").is_none());

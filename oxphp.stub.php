@@ -1733,10 +1733,17 @@ namespace OxPHP\Shared {
      * the thread holding a slot, while PHP code runs there: on eviction, or
      * when the pool goes away on that thread. It does not run at server
      * stop — in worker mode call evict() after oxphp_worker() returns for
-     * that, on a pool the worker created itself (not one from
-     * Registry::pool()). `maxSize` is a hard budget — once it
+     * that. `maxSize` is a hard budget — once it
      * is reached, acquire waits for a free slot (see the namespace-level
      * timeout convention).
+     *
+     * Factory and destroy belong to the request that created the pool: in
+     * worker mode the worker's script, in an `oxphp_async()` task the task
+     * thread's request. Once that request has begun to shut down, no other
+     * thread calls them: an acquire that has to make a new slot throws
+     * ClosedException, and slots other threads destroy go without destroy.
+     * A pool bound to a name gets new ones from the next
+     * Registry::pool() or Registry::global() call for that name.
      *
      * Outside worker mode a pool that a request creates lasts only as long
      * as that request: only that request can acquire from it, and when it
@@ -1763,7 +1770,7 @@ namespace OxPHP\Shared {
         /**
          * Acquire a slot, waiting forever. Always returns a Handle.
          *
-         * @throws ClosedException If the pool is closed, or if a request created it outside worker mode and this is not that request, or that request has ended.
+         * @throws ClosedException If the pool is closed, or if a request created it outside worker mode and this is not that request, or that request has ended, or if it has to make a new slot and its factory belonged to a request that has ended.
          * @throws \OxPHP\Async\AsyncException If the async task the call runs in is cancelled while the wait is suspended.
          */
         public function acquire(): Pool\Handle {}
@@ -1771,7 +1778,7 @@ namespace OxPHP\Shared {
         /**
          * Non-blocking acquire. Returns a Handle, or null if the pool is saturated.
          *
-         * @throws ClosedException If the pool is closed, or if a request created it outside worker mode and this is not that request, or that request has ended.
+         * @throws ClosedException If the pool is closed, or if a request created it outside worker mode and this is not that request, or that request has ended, or if it has to make a new slot and its factory belonged to a request that has ended.
          */
         public function tryAcquire(): ?Pool\Handle {}
 
@@ -1780,7 +1787,7 @@ namespace OxPHP\Shared {
          *
          * @throws OperationTimeoutException On deadline expiry (extends Async\AsyncException, NOT SharedException).
          * @throws TypeException If `$ms <= 0`.
-         * @throws ClosedException If the pool is closed, or if a request created it outside worker mode and this is not that request, or that request has ended.
+         * @throws ClosedException If the pool is closed, or if a request created it outside worker mode and this is not that request, or that request has ended, or if it has to make a new slot and its factory belonged to a request that has ended.
          * @throws \OxPHP\Async\AsyncException If the async task the call runs in is cancelled while the wait is suspended.
          */
         public function acquireTimeout(int $ms): Pool\Handle {}
@@ -1790,7 +1797,7 @@ namespace OxPHP\Shared {
          * raw pooled resource, and release the slot afterward — even if
          * `$body` throws. Returns whatever `$body` returns.
          *
-         * @throws ClosedException If the pool is closed, or if a request created it outside worker mode and this is not that request, or that request has ended.
+         * @throws ClosedException If the pool is closed, or if a request created it outside worker mode and this is not that request, or that request has ended, or if it has to make a new slot and its factory belonged to a request that has ended.
          * @throws \OxPHP\Async\AsyncException If the async task the call runs in is cancelled while the wait is suspended.
          */
         public function with(callable $body): mixed {}
@@ -1800,7 +1807,7 @@ namespace OxPHP\Shared {
          *
          * @throws OperationTimeoutException On deadline expiry.
          * @throws TypeException If `$ms <= 0`.
-         * @throws ClosedException If the pool is closed, or if a request created it outside worker mode and this is not that request, or that request has ended.
+         * @throws ClosedException If the pool is closed, or if a request created it outside worker mode and this is not that request, or that request has ended, or if it has to make a new slot and its factory belonged to a request that has ended.
          * @throws \OxPHP\Async\AsyncException If the async task the call runs in is cancelled while the wait is suspended.
          */
         public function withTimeout(callable $body, int $ms): mixed {}
@@ -1823,7 +1830,10 @@ namespace OxPHP\Shared {
      *
      * Get-or-create semantics: the factory runs **exactly once** per
      * successful bind (block-losers across worker threads). On hit, the
-     * factory is ignored. The bound entry is pinned for the process
+     * factory is ignored, except by {@see pool()} and {@see global()} for
+     * a `Shared\Pool` whose factory belonged to a request that has ended:
+     * they run it and give the bound pool the factory and destroy of the
+     * pool it returns. The bound entry is pinned for the process
      * lifetime — invalidate by mutating in place (`$map->clear()`,
      * `$counter->set(0)`) or unbind the namespace key with `remove()`.
      *
@@ -1890,6 +1900,12 @@ namespace OxPHP\Shared {
         /**
          * Typed get-or-create for `Shared\Pool`. See {@see map()} for the full exception list.
          *
+         * On a hit on a pool whose factory belonged to a request that has
+         * ended, runs `$factory()` and gives the bound pool the factory
+         * and destroy of the pool it returns, not its `maxSize` or
+         * `idleTimeoutMs`, when the calling request created that pool;
+         * returns the bound pool. {@see global()} does the same.
+         *
          * @throws SharedException When called from an HTTP request served
          *                         without worker mode, before the factory
          *                         runs and whether or not `$key` is bound:
@@ -1904,7 +1920,10 @@ namespace OxPHP\Shared {
         /**
          * Untyped escape hatch. Returns whatever is bound under `$key`
          * (no type guard). On miss, runs `$factory()` which must return
-         * any `Shareable`. Does NOT raise `TypeException` on hit; every
+         * any `Shareable`. Does NOT raise `TypeException` on hit, except
+         * on a pool whose factory belonged to a request that has ended:
+         * there it runs `$factory()` as {@see pool()} does, and throws
+         * `TypeException` when that returns anything but a pool. Every
          * other exception from {@see map()} still applies.
          *
          * @throws SharedException When called from an HTTP request served
@@ -2010,9 +2029,14 @@ namespace OxPHP\Shared {
      * Outside worker mode a pool a request creates (or a script under
      * `oxphp run`) serves only that request, and only until it ends; an
      * acquire from any other request or from an `oxphp_async()` task throws
-     * this. A closed {@see Channel} does not throw it: it reports closure
-     * through {@see Channel\SendResult} and {@see Channel\RecvResult}, and
-     * `sendMany()` and `recvMany()` return a partial result.
+     * this. In worker mode and in `oxphp_async()` tasks an acquire that has
+     * to make a new slot throws it once the request that created the pool
+     * has ended, since the factory belonged to that request — until
+     * {@see Registry::pool()} or {@see Registry::global()} gives a pool
+     * bound to a name a new one. A closed {@see Channel} does not throw it:
+     * it reports closure through {@see Channel\SendResult} and
+     * {@see Channel\RecvResult}, and `sendMany()` and `recvMany()` return a
+     * partial result.
      */
     class ClosedException extends SharedException {}
 

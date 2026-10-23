@@ -69,13 +69,18 @@ pub(crate) unsafe fn open_request(scope: RequestScope) -> bool {
     true
 }
 
-/// Shut down the PHP request open on this thread, then tell plugins it has
-/// closed — after `php_request_shutdown` has reset the request heap, and
-/// before any other request can start on the thread.
+/// Tell plugins the PHP request open on this thread is about to close, shut
+/// it down, then tell plugins it has closed — after `php_request_shutdown`
+/// has reset the request heap, and before any other request can start on
+/// the thread.
 ///
 /// # Safety
 /// A request opened by [`open_request`] is open on this thread.
 pub(crate) unsafe fn close_request() {
+    // Still open: a plugin that panics here would unwind past the shutdown.
+    let request_open = crate::executor::AbortOnUnwind("with a PHP request open");
+    installed().request_frame_closing();
+    drop(request_open);
     bindings::php_request_shutdown(std::ptr::null_mut());
     installed().request_frame_closed();
 }
