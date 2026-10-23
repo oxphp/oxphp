@@ -54,6 +54,8 @@ Cookie: session=xyz          -> HTTP_COOKIE
 
 A header whose name contains an underscore (`_`) or a dot (`.`) is not added to `$_SERVER`. PHP turns a dot in a `$_SERVER` key into an underscore, so `X_Forwarded_For` and `X.Forwarded.For` would both arrive as `HTTP_X_FORWARDED_FOR`, the key of the `X-Forwarded-For` header — and a client could set a key that the application expects only from a proxy in front of it, such as `HTTP_X_AUTHENTICATED_USER` from an authentication proxy that sets `X-Authenticated-User`. nginx drops such headers by default as well (`underscores_in_headers off`, `ignore_invalid_headers on`). To read one, use the [request object](request-api.md#headers) with the name as it was sent: `$request->header('X_Api_Key')`.
 
+A header sent as several field lines with the same name — an `X-Forwarded-For` line from each of two proxies, say — is one key, its lines joined with `, ` in the order they arrived, as HTTP lets a recipient combine them (RFC 9110 §5.3), and the [request object](request-api.md#headers) holds the same value. `Cookie` lines are joined with `; `, the separator of a cookie list. A header with a byte outside ASCII on any of its lines is left out of `$_SERVER` and of the request object, the same as a header sent as one such line. `Content-Type`, `Host` and `Content-Length` hold one value only and are the exception to both: `CONTENT_TYPE`, `HTTP_HOST` and `CONTENT_LENGTH`, and the request object's values for them, are their first line, whatever the later lines hold.
+
 ### Behind a Reverse Proxy
 
 When `TRUSTED_PROXIES` is configured and the request peer is in the trusted set, OxPHP rewrites the following `$_SERVER` keys from forwarded headers (`X-Forwarded-*` or RFC 7239 `Forwarded`):
