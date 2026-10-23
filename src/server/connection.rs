@@ -38,6 +38,44 @@ fn is_query_method(method: &Method) -> bool {
     method.as_str() == "QUERY"
 }
 
+/// Give an HTTP/2 request the `Host` header its `:authority` names.
+///
+/// HTTP/2 carries the target host in the `:authority` pseudo-header, which
+/// hyper puts in the request URI and not among the headers, while
+/// `$_SERVER['HTTP_HOST']`, `SERVER_NAME`, `SERVER_PORT` and the request
+/// object's `host()` are read from `Host`, the last three unless a trusted
+/// proxy forwards a host. RFC 9113 section 8.3.1 forbids taking the target
+/// from a `Host` field when `:authority` is present, so the authority replaces
+/// one sent with it, and a server may treat a `Host` naming another authority
+/// as malformed: that request is refused, as nginx refuses it. Returns `false`
+/// for it. Host names are compared without regard to case; ports are compared
+/// as written.
+///
+/// HTTP/1.1 is left alone, absolute-form target included: RFC 9112 gives that
+/// target a rule of its own.
+fn host_from_authority(parts: &mut http::request::Parts) -> bool {
+    if parts.version != http::Version::HTTP_2 {
+        return true;
+    }
+    let Some(authority) = parts.uri.authority() else {
+        return true;
+    };
+    let authority = authority.as_str();
+    if parts
+        .headers
+        .get_all(header::HOST)
+        .iter()
+        .any(|line| !line.as_bytes().eq_ignore_ascii_case(authority.as_bytes()))
+    {
+        return false;
+    }
+    // An authority is printable ASCII, which a field value always accepts.
+    if let Ok(value) = header::HeaderValue::from_str(authority) {
+        parts.headers.insert(header::HOST, value);
+    }
+    true
+}
+
 /// True when `method` is QUERY but the request carries no `Content-Type`.
 /// Per RFC 10008 §4 such a request lacks media-type information and is
 /// malformed, so it is rejected with a 4xx (we use 400 Bad Request). 415
@@ -587,7 +625,7 @@ async fn await_queued(
 
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_request(
-    parts: http::request::Parts,
+    mut parts: http::request::Parts,
     body: Incoming,
     server: &Server,
     remote_addr: SocketAddr,
@@ -597,6 +635,20 @@ async fn dispatch_request(
     cancel_state: std::sync::Arc<crate::bridge::cancel::CancellationState>,
     coding: Option<compression::Coding>,
 ) -> Result<(Response<ResponseBody>, usize, PhpExecData), crate::types::BoxError> {
+    // Before routing, so a static file is refused the same as a script.
+    if !host_from_authority(&mut parts) {
+        return Ok((
+            Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                .body(full_body(Bytes::from_static(
+                    b"400 Bad Request: Host does not match :authority",
+                )))?,
+            0,
+            PhpExecData::default(),
+        ));
+    }
+
     let uri_path = parts.uri.path();
     let route_result = server
         .route_config
