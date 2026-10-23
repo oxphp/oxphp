@@ -220,9 +220,6 @@ void oxphp_bridge_class_add_method(int class_handle, const char *name,
     const int *param_optional,
     const char * const *param_defaults);
 
-/** Set a magic method handler flag. magic_type is the MagicMethod enum ordinal (0-16). */
-void oxphp_bridge_class_set_magic(int class_handle, int magic_type, int has_handler);
-
 /** Enable custom object storage for a class. */
 void oxphp_bridge_class_enable_custom_object(int class_handle);
 
@@ -312,9 +309,6 @@ int oxphp_bridge_get_class_method_param_optional(int class_index, int method_ind
 
 /** Get class method parameter default as a PHP literal (NULL if none). */
 const char *oxphp_bridge_get_class_method_param_default(int class_index, int method_index, int param_index);
-
-/** Get magic method handler flag. magic_type is MagicMethod enum ordinal. */
-int oxphp_bridge_get_class_magic(int class_index, int magic_type);
 
 /* ─── Plugin Interface Registry (global, NOT __thread) ──────── */
 

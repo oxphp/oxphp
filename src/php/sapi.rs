@@ -2826,13 +2826,8 @@ pub fn register_php_definitions(defs: PhpDefinitions) {
             // `clone $obj` runs only the `clone_obj` handler and never calls
             // the user's `__clone` magic handler, which is why
             // `test_map_forbidden_clone` failed silently before this change.
-            //
-            // The legacy `set_magic` flag is kept for now in case any
-            // C-side code still reads it, but the dispatch now goes
-            // through the regular method path.
             for i in 0..MagicMethod::COUNT {
                 if class.magic_handlers[i].is_some() {
-                    crate::bridge::ffi::oxphp_bridge_class_set_magic(handle, i as c_int, 1);
                     let magic =
                         MagicMethod::from_index(i).expect("MagicMethod::from_index out of range");
                     let (req, total) = magic.arity();
@@ -2844,12 +2839,12 @@ pub fn register_php_definitions(defs: PhpDefinitions) {
                     // it trips a MINIT-time fatal like "Method ::__get()
                     // must take exactly 1 argument". Until the C side
                     // gains per-method arg_info, skip non-zero-arity
-                    // magics and fall back to the legacy `set_magic` flag
-                    // path (currently a no-op observer). `__clone` and
-                    // other 0-arity magics go through the full add_method
-                    // path so `zend_do_link_class` caches them into the
-                    // class entry (required for `clone $obj` to invoke
-                    // the user handler).
+                    // magics: such a handler is not installed on the
+                    // class at all. `__clone` and other 0-arity magics
+                    // go through the full add_method path so
+                    // `zend_do_link_class` caches them into the class
+                    // entry (required for `clone $obj` to invoke the
+                    // user handler).
                     if (req, total) != (0, 0) {
                         continue;
                     }

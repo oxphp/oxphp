@@ -746,12 +746,6 @@ pub unsafe fn oxphp_bridge_get_class_method_param_optional(
 ) -> c_int {
     0
 }
-pub unsafe fn oxphp_bridge_class_set_magic(
-    _class_handle: c_int,
-    _magic_type: c_int,
-    _has_handler: c_int,
-) {
-}
 pub unsafe fn oxphp_bridge_class_enable_custom_object(_class_handle: c_int) {}
 
 // ─── Plugin Interface Registry ──────────────────────────────

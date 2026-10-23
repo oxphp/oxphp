@@ -160,8 +160,6 @@ int oxphp_bridge_get_plugin_fn_total(int index) {
  *  same thread. No concurrent access.
  * ═══════════════════════════════════════════════════════════ */
 
-#define MAGIC_METHOD_COUNT 17
-
 /* Sub-entries for class properties, constants, and methods. */
 
 typedef struct {
@@ -219,9 +217,6 @@ typedef struct {
     oxphp_class_method_t *methods;
     int method_count;
     int method_capacity;
-
-    /* Magic method flags (1 = has handler, indexed by MagicMethod enum) */
-    int magic_handlers[MAGIC_METHOD_COUNT];
 } oxphp_plugin_class_entry_t;
 
 static oxphp_plugin_class_entry_t *plugin_classes = NULL;
@@ -340,12 +335,6 @@ void oxphp_bridge_class_add_method(int h, const char *name,
             }
         }
     }
-}
-
-void oxphp_bridge_class_set_magic(int h, int magic_type, int has_handler) {
-    if (h < 0 || h >= plugin_class_count) return;
-    if (magic_type < 0 || magic_type >= MAGIC_METHOD_COUNT) return;
-    plugin_classes[h].magic_handlers[magic_type] = has_handler;
 }
 
 void oxphp_bridge_class_enable_custom_object(int h) {
@@ -494,11 +483,6 @@ const char *oxphp_bridge_get_class_method_param_default(int ci, int mi, int pi) 
     oxphp_class_method_t *m = &plugin_classes[ci].methods[mi];
     if (pi < 0 || pi >= m->total_params || !m->param_defaults) return NULL;
     return m->param_defaults[pi];
-}
-int oxphp_bridge_get_class_magic(int ci, int mt) {
-    if (ci < 0 || ci >= plugin_class_count) return 0;
-    if (mt < 0 || mt >= MAGIC_METHOD_COUNT) return 0;
-    return plugin_classes[ci].magic_handlers[mt];
 }
 
 /* ═══════════════════════════════════════════════════════════
