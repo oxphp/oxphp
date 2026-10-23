@@ -660,7 +660,6 @@ extern "C" {
         method_index: c_int,
         param_index: c_int,
     ) -> c_int;
-    pub fn oxphp_bridge_class_set_magic(class_handle: c_int, magic_type: c_int, has_handler: c_int);
     pub fn oxphp_bridge_class_enable_custom_object(class_handle: c_int);
 
     // ─── Plugin Interface Registry ──────────────────────────────
