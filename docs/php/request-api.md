@@ -244,7 +244,7 @@ $data = $request->payload();        // ["name" => "Alice", "role" => "admin"]
 $request->header(string $name, ?string $default = null): ?string
 ```
 
-Returns the raw header value. Header names are case-insensitive. For multi-value headers (`Accept`, `X-Forwarded-For`), the full header line is returned as a single string — parsing is your responsibility.
+Returns the raw header value. Header names are case-insensitive. A list such as `Accept` or `X-Forwarded-For` comes back as one string — parsing it is your responsibility — and a header sent as several lines with the same name comes back as one string too, its lines joined the way [`$_SERVER` joins them](superglobals.md#http-request-headers).
 
 The name is matched as sent, without the `HTTP_` mapping of `$_SERVER`: `header('X_Api_Key')` does not return an `X-Api-Key` header. This is also how to read a header whose name contains `_` or `.`, which [`$_SERVER` leaves out](superglobals.md#http-request-headers); `headers()` lists those too.
 
@@ -258,7 +258,7 @@ Returns `true` if the named header is present.
 $request->headers(): array
 ```
 
-Returns all headers as an associative array. Each key is the header name as received (no normalization), and each value is the raw header string.
+Returns all headers as an associative array. Each key is the header name as received (no normalization), and each value is the header's value, its lines joined as `header()` joins them when it was sent as several.
 
 ```php
 <?php

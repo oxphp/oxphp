@@ -19,6 +19,12 @@ http_object/test_header_single
 http_object/test_header_default
 http_object/test_headers_all
 http_object/test_has_header
+http_object/test_header_repeated_field_lines >> ?case=h1 | GET | -H "X-Foo: one" -H "X-Foo: two" -H "X-Forwarded-For: 198.51.100.1" -H "X-Forwarded-For: 203.0.113.9" | |
+http_object/test_header_repeated_field_lines >> ?case=h2 | GET | --http2-prior-knowledge -H "X-Foo: one" -H "X-Foo: two" -H "X-Forwarded-For: 198.51.100.1" -H "X-Forwarded-For: 203.0.113.9" | |
+http_object/test_header_repeated_content_type >> ?case=h1 | POST | -H "Content-Type: text/plain" -H "Content-Type: text/x-second" -d "body" | |
+http_object/test_header_repeated_content_type >> ?case=h2 | POST | --http2-prior-knowledge -H "Content-Type: text/plain" -H "Content-Type: text/x-second" -d "body" | |
+http_object/test_header_repeated_non_ascii_line >> ?case=h1 | GET | -H "X-Ok: yes" -H "X-Bin: ok" -H $'X-Bin: \xff' | |
+http_object/test_header_repeated_non_ascii_line >> ?case=h2 | GET | --http2-prior-knowledge -H "X-Ok: yes" -H "X-Bin: ok" -H $'X-Bin: \xff' | |
 http_object/test_cookie_method | GET | -b "name=testvalue" | |
 http_object/test_cookies_all | GET | -b "a=1; b=2" | |
 http_object/test_cookie_percent_decoded | GET | -b "name=%D0%9F%D1%80%D0%B8%D0%B2%D0%B5%D1%82; plus=a+b; space=a%20b; %D0%BA%D0%BB%D1%8E%D1%87=%D0%B7%D0%BD%D0%B0%D1%87" | |

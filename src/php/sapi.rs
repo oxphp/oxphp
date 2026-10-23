@@ -14,7 +14,7 @@ use crate::async_types::{AsyncResult, AsyncTask, CancelShared, PromiseCleanup};
 use crate::executor::idle_clock::LastActive;
 use crate::metrics::{WorkerMetrics, WorkerStats};
 use crate::php::bindings::{self, *};
-use crate::php::request_decode::{parse_query_pairs, url_decode, value_ptr};
+use crate::php::request_decode::{header_field_value, parse_query_pairs, url_decode, value_ptr};
 use crate::php::response_spool::{self, Spool, Spooled};
 use crate::php::stream_wait::{NoRoom, StreamSender};
 use crate::plugin::php::{PluginNativeFunction, PluginNativeFunctionDef};
@@ -1097,10 +1097,8 @@ fn fill_request_data(req: &ScriptRequest) {
             }
 
             // CONTENT_TYPE and CONTENT_LENGTH (no HTTP_ prefix per CGI spec)
-            if let Some(ct) = req.headers.get(header::CONTENT_TYPE) {
-                if let Ok(ct_str) = ct.to_str() {
-                    push_server_var(vars, "CONTENT_TYPE", ct_str);
-                }
+            if let Some(ct) = header_field_value(&req.headers, &header::CONTENT_TYPE) {
+                push_server_var(vars, "CONTENT_TYPE", &ct);
             }
             if let Some(cl) = req.headers.get(header::CONTENT_LENGTH) {
                 if let Ok(cl_str) = cl.to_str() {
@@ -1108,11 +1106,11 @@ fn fill_request_data(req: &ScriptRequest) {
                 }
             }
 
-            // Request headers as HTTP_{UPPER_SNAKE_CASE}
+            // Request headers as HTTP_{UPPER_SNAKE_CASE}, one key per name
             // (except Content-Type and Content-Length which are handled above without HTTP_ prefix,
             // and names with `_` or `.`, skipped below)
             let mut header_buf = String::with_capacity(64);
-            for (name, value) in req.headers.iter() {
+            for name in req.headers.keys() {
                 if name == header::CONTENT_TYPE || name == header::CONTENT_LENGTH {
                     continue;
                 }
@@ -1124,7 +1122,7 @@ fn fill_request_data(req: &ScriptRequest) {
                 if name.as_str().bytes().any(|b| b == b'_' || b == b'.') {
                     continue;
                 }
-                let Ok(val_str) = value.to_str() else {
+                let Some(val_str) = header_field_value(&req.headers, name) else {
                     continue;
                 };
 
@@ -1137,7 +1135,7 @@ fn fill_request_data(req: &ScriptRequest) {
                         b.to_ascii_uppercase() as char
                     });
                 }
-                push_server_var(vars, &header_buf, val_str);
+                push_server_var(vars, &header_buf, &val_str);
             }
 
             // REQUEST_TIME and REQUEST_TIME_FLOAT from bridge (set in setup_request_tls)
@@ -1163,11 +1161,8 @@ fn fill_request_data(req: &ScriptRequest) {
             CString::new(req.query_string.as_str()).ok()
         };
 
-        data.content_type_string = req
-            .headers
-            .get(header::CONTENT_TYPE)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| CString::new(s).ok());
+        data.content_type_string = header_field_value(&req.headers, &header::CONTENT_TYPE)
+            .and_then(|s| CString::new(s.as_ref()).ok());
 
         data.body = req.body.clone();
         data.body_offset = 0;
@@ -1265,12 +1260,12 @@ fn fill_request_data(req: &ScriptRequest) {
             data.full_uri_str = format!("{scheme}://{}{port_part}{path}{qs_part}", data.host_str);
         }
 
-        // Store raw headers for object API iteration
+        // Store raw headers for object API iteration, one entry per name
         data.headers_raw.clear();
-        for (name, value) in req.headers.iter() {
-            if let Ok(v) = value.to_str() {
+        for name in req.headers.keys() {
+            if let Some(v) = header_field_value(&req.headers, name) {
                 data.headers_raw
-                    .push((name.as_str().to_owned(), v.to_owned()));
+                    .push((name.as_str().to_owned(), v.into_owned()));
             }
         }
 
@@ -6626,6 +6621,96 @@ mod tests {
         );
         // No `clear_request_data`: it writes `SG(request_info)` too. The slot
         // is thread-local and the harness runs each test on its own thread.
+    }
+
+    /// Fill the request slot from a request carrying `lines`, each appended as
+    /// a field line of its own the way hyper and h2 store them.
+    fn fill_with_header_lines(lines: &[(http::HeaderName, &[u8])]) {
+        unsafe { bindings::oxphp_bridge_set_superglobals_enabled(true) };
+        let mut headers = http::HeaderMap::new();
+        for (name, value) in lines {
+            headers.append(name, http::HeaderValue::from_bytes(value).unwrap());
+        }
+        let mut req = queued_request(None).script;
+        req.headers = headers;
+        // Not `set_request_data`: see `denied_path_server_var_keeps_leading_slash`.
+        fill_request_data(&req);
+    }
+
+    /// Every `$_SERVER` value registered under `key`, in registration order.
+    fn server_var_values(key: &str) -> Vec<String> {
+        REQUEST_DATA.with(|rd| {
+            rd.borrow()
+                .server_vars
+                .iter()
+                .filter(|(k, _)| k.as_bytes() == key.as_bytes())
+                .map(|(_, v)| v.to_str().unwrap().to_owned())
+                .collect()
+        })
+    }
+
+    /// Every object-API header value stored under `name`.
+    fn raw_header_values(name: &str) -> Vec<String> {
+        REQUEST_DATA.with(|rd| {
+            rd.borrow()
+                .headers_raw
+                .iter()
+                .filter(|(k, _)| k == name)
+                .map(|(_, v)| v.clone())
+                .collect()
+        })
+    }
+
+    #[test]
+    fn repeated_header_lines_reach_php_as_one_joined_value() {
+        let x_foo = http::HeaderName::from_static("x-foo");
+        fill_with_header_lines(&[(x_foo.clone(), b"one"), (x_foo, b"two")]);
+        assert_eq!(server_var_values("HTTP_X_FOO"), ["one, two"]);
+        assert_eq!(raw_header_values("x-foo"), ["one, two"]);
+    }
+
+    #[test]
+    fn repeated_header_with_a_non_ascii_line_is_left_out_whole() {
+        let x_bin = http::HeaderName::from_static("x-bin");
+        fill_with_header_lines(&[(x_bin.clone(), b"ok"), (x_bin, b"\x80")]);
+        assert!(server_var_values("HTTP_X_BIN").is_empty());
+        assert!(raw_header_values("x-bin").is_empty());
+    }
+
+    #[test]
+    fn repeated_content_type_reaches_php_as_its_first_line() {
+        let ct = header::CONTENT_TYPE;
+        fill_with_header_lines(&[(ct.clone(), b"text/plain"), (ct, b"text/x-second")]);
+        assert_eq!(server_var_values("CONTENT_TYPE"), ["text/plain"]);
+        assert_eq!(raw_header_values("content-type"), ["text/plain"]);
+        // What `SG(request_info).content_type` is pointed at: the value PHP
+        // picks the body parser and takes a multipart boundary from.
+        REQUEST_DATA.with(|rd| {
+            assert_eq!(
+                rd.borrow().content_type_string.as_deref(),
+                Some(c"text/plain")
+            );
+        });
+    }
+
+    #[test]
+    fn repeated_host_reaches_php_as_its_first_line() {
+        let host = header::HOST;
+        fill_with_header_lines(&[(host.clone(), b"a.example"), (host, b"b.example:8443")]);
+        assert_eq!(server_var_values("HTTP_HOST"), ["a.example"]);
+        assert_eq!(raw_header_values("host"), ["a.example"]);
+        assert_eq!(server_var_values("SERVER_NAME"), ["a.example"]);
+    }
+
+    #[test]
+    fn repeated_content_length_reaches_php_as_its_first_line() {
+        // The shape HTTP/2 can deliver: h2 frames the body by the first line
+        // and keeps the rest in the map. hyper never delivers it over HTTP/1.
+        let cl = header::CONTENT_LENGTH;
+        fill_with_header_lines(&[(cl.clone(), b"5"), (cl, b"7")]);
+        assert_eq!(server_var_values("CONTENT_LENGTH"), ["5"]);
+        assert_eq!(raw_header_values("content-length"), ["5"]);
+        REQUEST_DATA.with(|rd| assert_eq!(rd.borrow().content_length, 5));
     }
 
     /// `take_from_queue` moves a process-wide tick, so every test that reads it
