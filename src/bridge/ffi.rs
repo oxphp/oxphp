@@ -4,9 +4,12 @@
 use std::os::raw::{c_char, c_int, c_void};
 
 /// Returned by a fiber suspend point when the resume that ended it delivered a
-/// pending PHP exception — the fiber is unwinding, not carrying on. Callers must
-/// return without raising an error of their own: one is already in flight, and
-/// adding a second would replace the real cause with a synthetic one.
+/// pending PHP exception, or when the request or task has run out of memory and
+/// may not wait there (`oxphp_park_refused_for_oom()` in the extension) —
+/// usually with the exception PHP raised for it pending, but not always: code
+/// on the way out may have dropped it. Callers must return to PHP at once
+/// without raising an error of their own: where one is in flight, a second
+/// would replace the real cause with a synthetic one.
 pub const OXPHP_FIBER_UNWIND: c_int = -9;
 
 #[allow(dead_code)]
@@ -370,8 +373,8 @@ extern "C" {
 
     // ── Async plugin helpers ──
     pub fn oxphp_ht_has_non_shareable_objects(ht: *mut c_void) -> c_int;
-    // A suspend point returns FIBER_UNWIND when the resume that ended it
-    // delivered a pending PHP exception. See the constant below.
+    // A suspend point returns FIBER_UNWIND when the fiber is unwinding. See
+    // the constant at the top of this file.
     pub fn oxphp_bridge_fiber_await(promise_id: i64, timeout: f64, retval: *mut c_void) -> c_int;
     pub fn oxphp_bridge_in_fiber() -> c_int;
     /// 1 when the request or async task running on this thread has an
@@ -559,9 +562,9 @@ extern "C" {
     /// Park the calling fiber for `duration_us` while `Shared\Pool::acquire`
     /// waits for a slot. 1 parked, 0 nothing here to park (wait on the thread
     /// instead), -1 the async task was cancelled, `OXPHP_FIBER_UNWIND` the
-    /// fiber is being destroyed, `OXPHP_SHARED_INVOKE_BAILOUT` the server
-    /// ended the request while it was parked — held back for the dispatch
-    /// stub, as above. Only from a plugin handler.
+    /// fiber is unwinding (see the constant), `OXPHP_SHARED_INVOKE_BAILOUT`
+    /// the server ended the request while it was parked — held back for the
+    /// dispatch stub, as above. Only from a plugin handler.
     pub fn oxphp_pool_park_guarded(duration_us: u64) -> c_int;
 
     // Shared\Pool\Handle rust_data wrapper helpers. Handle storage

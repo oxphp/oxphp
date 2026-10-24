@@ -2,7 +2,9 @@
 
 declare(strict_types=1);
 
-// Driven by worker/test_shared_pool_idle_eviction. Parks slots in a pool with a
+// Driven by worker/test_shared_pool_idle_eviction,
+// worker/test_shared_pool_idle_eviction_oom and
+// worker/test_shared_pool_idle_eviction_after_oom. Parks slots in a pool with a
 // short idle timeout and returns, which leaves the worker that ran it with
 // nothing to do but wait for its next request. Answers with that worker's id.
 
@@ -271,6 +273,60 @@ switch ($case) {
         $older->get()->fatal = true;
         $older->release();
         $newer->release();
+        break;
+
+    case 'oom':
+        // One idle slot, whose $destroy runs out of memory. Only one: calling a
+        // second $destroy after it fails with an error of its own, which is a
+        // fatal, and would retire the worker whatever became of the first.
+        $calls = Registry::counter("pool-idle-oom-calls-$run", static fn (): Counter => new Counter());
+        $p = Registry::pool("pool-idle-oom-$run", static fn (): Pool => new Pool(
+            factory: static fn (): \stdClass => new \stdClass(),
+            destroy: static function (\stdClass $r) use ($calls): void {
+                $calls->add();
+                $s = 'x';
+                for (;;) {
+                    $s .= $s;
+                }
+            },
+            maxSize: 1,
+            idleTimeoutMs: 1000,
+        ));
+        $p->tryAcquire()->release();
+        break;
+
+    case 'oom_before':
+        // One idle slot, whose $destroy only counts, and an object left in $_GET
+        // whose destructor runs out of memory. A worker drops a request's
+        // superglobals after it has sent the response, with no request current,
+        // so the destructor runs then: before the eviction, which waits for the
+        // slot to go stale. Anonymous: a named class declared here would be
+        // declared again by the next request on this worker to run this case.
+        $calls = Registry::counter("pool-idle-before-calls-$run", static fn (): Counter => new Counter());
+        $dropped = Registry::counter("pool-idle-before-dropped-$run", static fn (): Counter => new Counter());
+        $p = Registry::pool("pool-idle-before-$run", static fn (): Pool => new Pool(
+            factory: static fn (): \stdClass => new \stdClass(),
+            destroy: static function (\stdClass $r) use ($calls): void {
+                $calls->add();
+            },
+            maxSize: 1,
+            idleTimeoutMs: 1000,
+        ));
+        $p->tryAcquire()->release();
+        $_GET['held'] = new class ($dropped) {
+            public function __construct(private Counter $dropped)
+            {
+            }
+
+            public function __destruct()
+            {
+                $this->dropped->add();
+                $s = 'x';
+                for (;;) {
+                    $s .= $s;
+                }
+            }
+        };
         break;
 
     case 'none':

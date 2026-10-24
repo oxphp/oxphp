@@ -42,9 +42,12 @@ worker/test_request_state_after_reuse >> ?probe=42
 worker/test_request_autoglobal_refresh >> ?probe=alpha
 worker/test_request_autoglobal_refresh >> ?probe=beta
 
-# Retires the worker it does not run on, as test_worker_class_schedule_exit
-# retires its own; ahead of that one, because it needs both workers up.
+# The first two retire the worker they do not run on, as
+# test_worker_class_schedule_exit retires its own; all three come ahead of that
+# one, because they need both workers up.
 worker/test_shared_pool_idle_eviction
+worker/test_shared_pool_idle_eviction_oom
+worker/test_shared_pool_idle_eviction_after_oom
 
 worker/test_worker_class_exit_reason
 worker/test_worker_class_schedule_exit

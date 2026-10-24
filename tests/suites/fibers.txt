@@ -36,6 +36,13 @@ fibers/test_oom_before_a_park_stays_with_its_request >> ?park=await
 fibers/test_oom_before_a_park_stays_with_its_request >> ?park=any
 fibers/test_oom_before_a_park_stays_with_its_request >> ?park=task
 fibers/test_oom_in_the_session_write_stays_with_its_request
+fibers/test_oom_in_a_superglobal_destructor_spares_a_parked_request
+fibers/test_oom_in_a_superglobal_destructor_spares_the_next_request
+fibers/test_oom_in_a_superglobal_destructor_spares_the_next_request_probe
+fibers/test_oom_at_the_end_of_a_task_spares_the_next_task >> ?case=handled
+fibers/test_oom_at_the_end_of_a_task_spares_the_next_task >> ?case=pending
+fibers/test_oom_in_a_filter_close_after_a_fatal_runs_the_shutdown_functions
+fibers/test_oom_while_a_connection_closes_does_not_run_on
 fibers/test_memory_limit_retires_a_worker_it_cannot_return_to | GET | | 500 |
 fibers/test_memory_limit_retires_a_worker_it_cannot_return_to_probe
 # These three end a request inside a Fiber, which leaves the fiber that served
