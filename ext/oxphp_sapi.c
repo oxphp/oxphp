@@ -3517,6 +3517,13 @@ static oxphp_stream_claim_result oxphp_db_await_owner(void *key, oxphp_request_f
  * entry its own destruction removes. */
 static __thread HashTable *oxphp_pdo_users = NULL;
 
+/* An entry in that table: the last user, and the handle the object is on. The
+ * handle is only ever compared, never followed. */
+typedef struct {
+    oxphp_pdo_teardown user;
+    const pdo_dbh_t *dbh;
+} oxphp_pdo_user;
+
 static void oxphp_pdo_user_dtor(zval *zv)
 {
     pefree(Z_PTR_P(zv), 1);
@@ -3531,15 +3538,16 @@ static void oxphp_pdo_user_set(zend_object *obj, const oxphp_request_fiber *fibe
     }
 
     zend_ulong key = (zend_ulong) (uintptr_t) obj;
-    oxphp_pdo_teardown *user = zend_hash_index_find_ptr(oxphp_pdo_users, key);
-    if (user == NULL) {
+    oxphp_pdo_user *entry = zend_hash_index_find_ptr(oxphp_pdo_users, key);
+    if (entry == NULL) {
         if (!add) return;
-        user = pecalloc(1, sizeof(*user), 1);
-        zend_hash_index_add_new_ptr(oxphp_pdo_users, key, user);
+        entry = pecalloc(1, sizeof(*entry), 1);
+        zend_hash_index_add_new_ptr(oxphp_pdo_users, key, entry);
     }
-    user->fiber = fiber;
-    user->fiber_id = fiber != NULL ? fiber->fiber_id : 0;
-    user->set = true;
+    if (add) entry->dbh = php_pdo_dbh_fetch_inner(obj);
+    entry->user.fiber = fiber;
+    entry->user.fiber_id = fiber != NULL ? fiber->fiber_id : 0;
+    entry->user.set = true;
 }
 
 /* Hand back and forget the entry for an object being destroyed. The table goes
@@ -3551,10 +3559,10 @@ static oxphp_pdo_teardown oxphp_pdo_user_take(zend_object *obj)
     if (oxphp_pdo_users == NULL) return found;
 
     zend_ulong key = (zend_ulong) (uintptr_t) obj;
-    oxphp_pdo_teardown *user = zend_hash_index_find_ptr(oxphp_pdo_users, key);
-    if (user == NULL) return found;
+    oxphp_pdo_user *entry = zend_hash_index_find_ptr(oxphp_pdo_users, key);
+    if (entry == NULL) return found;
 
-    found = *user;
+    found = entry->user;
     zend_hash_index_del(oxphp_pdo_users, key);
     if (zend_hash_num_elements(oxphp_pdo_users) == 0) {
         zend_hash_destroy(oxphp_pdo_users);
@@ -4314,15 +4322,17 @@ static oxphp_pdo_teardown *oxphp_pdo_teardown_here(void)
                                        : &oxphp_pdo_teardown_outside;
 }
 
-/* PDO's object destructor calls the two methods below on a pooled handle before
- * it looks at how many objects still share it, so dropping any one object
- * reaches the driver as if it were the last. That is harmless where every object
- * on a handle belongs to one request, as in a classic SAPI, and is not where
- * requests share one: an object dropped by one request would roll back the
- * transaction another has open on the connection, and run the driver's
- * end-of-request cleanup under a request still using it — pdo_mysql's frees the
- * result the holder is parked reading, and pdo_sqlite's unregisters the holder's
- * SQL functions.
+/* PDO's object destructor calls the two methods below on a pooled handle without
+ * asking which request the object belongs to. Before PHP 8.4.27 and 8.5.12 it
+ * did not look at how many objects still share the handle either, so dropping
+ * any one object reached the driver as if it were the last; those releases send
+ * the rollback for the last object only, and still run the cleanup for every
+ * one. That is harmless where every object on a handle belongs to one request,
+ * as in a classic SAPI, and is not where requests share one: an object dropped
+ * by one request would roll back the transaction another has open on the
+ * connection, and run the driver's end-of-request cleanup under a request still
+ * using it — pdo_mysql's frees the result the holder is parked reading, and
+ * pdo_sqlite's unregisters the holder's SQL functions.
  *
  * So while a request or task holds the connection, the destructor reaches the
  * driver only for an object the holder was the last to have a use for — built
@@ -4333,8 +4343,9 @@ static oxphp_pdo_teardown *oxphp_pdo_teardown_here(void)
  * holder's to clean up; skipped, its transaction would stay open on the pooled
  * connection for whoever takes it next. Any other object is skipped rather than
  * put off: the state on the connection is the holder's, and the holder's own
- * objects still clean up after it. On a connection nobody holds, every object
- * does both, as before.
+ * objects still clean up after it. On a connection nobody holds, no object is
+ * skipped for being someone else's. From PHP 8.4.27 and 8.5.12 on, how many
+ * objects share the handle matters too: see oxphp_pdo_rollback_beside_others.
  *
  * Not covered: a holder parked inside a call through one of its objects while
  * another of its objects is freed elsewhere gets the cleanup under that call —
@@ -4430,10 +4441,79 @@ static void oxphp_pdo_persistent_shutdown(pdo_dbh_t *dbh)
 static zend_object_handlers oxphp_pdo_obj_handlers;
 static const zend_object_handlers *oxphp_pdo_obj_orig = NULL;
 
+/* Whether the running PHP holds the destructor's rollback back while other
+ * objects share a pooled handle, as 8.4.27 and 8.5.12 on do. Asked of the library
+ * at run time rather than of the headers at build time: an extension built
+ * against an earlier patch release loads into a later one unchanged. */
+static bool oxphp_pdo_engine_holds_rollback_back(void)
+{
+    unsigned int id = php_version_id();
+    return id >= 80512 || (id >= 80427 && id < 80500);
+}
+
+/* Whether the request or task an object being destroyed belongs to keeps another
+ * object on the same handle, through which it can go on with a transaction open
+ * there. Kept means built by that request or task, or reached by a claimed call
+ * of its since: an object an earlier request left in a static property counts
+ * once such a call goes through it, so one that opens a transaction through a
+ * local object and means to finish it through such a property loses it when the
+ * local object goes.
+ *
+ * A fiber that holds nothing cannot go on. Short of a statement prepared in an
+ * earlier request, or a call let through unclaimed — once its wait for the
+ * connection gave up, or when the claim table could not grow — a transaction is
+ * opened through a claimed call, and a fiber holds what it has claimed to the end
+ * of its request or task; so one open on a connection nobody holds is not its
+ * own. Code outside every fiber takes no claims, so for it a connection nobody
+ * holds says nothing. */
+static bool oxphp_pdo_owner_keeps_another(pdo_dbh_t *dbh, const oxphp_pdo_teardown *dying)
+{
+    if (!dying->set || oxphp_pdo_users == NULL) return false;
+    if (dying->fiber != NULL && oxphp_claim_owner(dbh) == NULL) return false;
+
+    oxphp_pdo_user *entry;
+    ZEND_HASH_FOREACH_PTR(oxphp_pdo_users, entry) {
+        if (entry->dbh == dbh && entry->user.fiber == dying->fiber
+            && entry->user.fiber_id == dying->fiber_id) {
+            return true;
+        }
+    } ZEND_HASH_FOREACH_END();
+    return false;
+}
+
+/* PHP 8.4.27 and 8.5.12 hold the destructor's rollback back while other objects
+ * share the pooled handle: the persistent list keeps one reference, and the rest
+ * are taken to be the same script's, which goes on with the transaction through
+ * them. Under a worker they are as often objects an earlier request left in a
+ * static property, and the transaction of the request whose object went would
+ * stay open on the connection for whoever takes it next. So the rollback is sent
+ * here, ahead of PDO's destructor and the way PDO sent it before those releases,
+ * for an object the holder rule above lets reach the driver and whose own request
+ * or task keeps no other object on the handle. */
+static void oxphp_pdo_rollback_beside_others(zend_object *obj, const oxphp_pdo_teardown *dying)
+{
+    if (!oxphp_pdo_engine_holds_rollback_back()) return;
+
+    pdo_dbh_t *dbh = php_pdo_dbh_fetch_inner(obj);
+    if (dbh == NULL || dbh->refcount <= 2 || dbh->driver_data == NULL
+        || dbh->methods == NULL || dbh->methods->rollback == NULL) {
+        return;
+    }
+    bool in_txn = dbh->methods->in_transaction != NULL ? dbh->methods->in_transaction(dbh)
+                                                        : dbh->in_txn;
+    if (!in_txn || !oxphp_pdo_teardown_is_holders(dbh)
+        || oxphp_pdo_owner_keeps_another(dbh, dying)) {
+        return;
+    }
+    dbh->methods->rollback(dbh);
+    dbh->in_txn = false;
+}
+
 /* Says whose object this is for the two methods above, which the destructor
- * calls first. They can run PHP code — a warning from a failed rollback reaches
- * the application's error handler — and that code can drop another object here,
- * so the slot is put back as it was rather than cleared. A bailout out of the
+ * calls first, and, from PHP 8.4.27 and 8.5.12 on, for the rollback sent ahead
+ * of it. They can run PHP code — a warning from a failed rollback reaches the
+ * application's error handler — and that code can drop another object here, so
+ * the slot is put back as it was rather than cleared. A bailout out of the
  * destructor leaves it standing; every wrapped object sets it before the two
  * methods run, so only an unwrapped one could read it. */
 static void oxphp_pdo_free_obj(zend_object *obj)
@@ -4441,6 +4521,7 @@ static void oxphp_pdo_free_obj(zend_object *obj)
     oxphp_pdo_teardown *dying = oxphp_pdo_teardown_here();
     oxphp_pdo_teardown outer = *dying;
     *dying = oxphp_pdo_user_take(obj);
+    oxphp_pdo_rollback_beside_others(obj, dying);
     oxphp_pdo_obj_orig->free_obj(obj);
     *dying = outer;
 }
