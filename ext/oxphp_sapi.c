@@ -6681,7 +6681,10 @@ static void oxphp_serve_loop(zend_fcall_info *fci, zend_fcall_info_cache *fcc)
                 /* An error reported past memory_limit left the allocator counting
                  * more than the limit as in use even after its caches were handed
                  * back, so memory_limit cannot be put back in force, and as a rule
-                 * this worker enforces no limit at all — see
+                 * this worker enforces no limit at all up to PHP 8.4.26 / 8.5.11,
+                 * and fails every request that needs memory it does not already
+                 * hold from 8.4.27 / 8.5.12 — or, at PHP's hard memory limit, which
+                 * what it holds brings that much closer, ends the process — see
                  * oxphp_fiber_heap_back_under_limit(). What is still counted is
                  * memory something holds, which the worker cannot make it let go
                  * of; a fresh worker starts without it. Not only once warmed up,

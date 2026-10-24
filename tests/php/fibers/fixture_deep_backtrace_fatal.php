@@ -7,8 +7,8 @@ declare(strict_types=1);
 // fibers/test_memory_limit_holds_after_a_deep_fatal_on_its_own and
 // fibers/test_memory_limit_retires_a_worker_it_cannot_return_to.
 //
-// ?step=fatal runs out of memory 400,000 calls down. From PHP 8.5 the engine
-// takes a backtrace of a fatal, every frame of it, unless fatal_error_backtraces
+// ?step=fatal runs out of memory 400,000 calls down. From PHP 8.5 to 8.5.11 the
+// engine takes a backtrace of a fatal, every frame of it, unless fatal_error_backtraces
 // is off, and it takes it while PHP's allocator has set memory_limit aside to
 // report the error: that backtrace is allocated with no limit, a couple of
 // hundred megabytes of it at this depth.
@@ -19,8 +19,12 @@ declare(strict_types=1);
 // ?step=stash does the same and, from a shutdown function, which runs while the
 // backtrace is still held and the allocator therefore enforces no limit, puts
 // 200 MiB into the worker's shared state, where it outlives the request, and
-// records what it did in a file for the line that follows it. Only on PHP 8.5:
-// before it there is no backtrace to hold the limit off.
+// records what it did in a file for the line that follows it. Only on PHP 8.5,
+// and only before 8.5.12: before 8.5 there is no backtrace to hold the limit
+// off, and from 8.5.12 the engine puts an out-of-memory error off until it can
+// unwind the request, and stops that backtrace at its first frame. The releases
+// that put it off (8.4.27 and 8.5.12) are the first to know
+// memory_hard_limit_percent, which is what tells them apart here.
 //
 // ?step=probe reports how much the allocator counts as in use, then asks for
 // 200 MiB more than a 128M memory_limit could ever grant. Where the limit is
@@ -81,7 +85,7 @@ register_shutdown_function(static function () use ($stash, &$sharedState): void 
     if (!$stash) {
         return;
     }
-    if (PHP_VERSION_ID >= 80500) {
+    if (PHP_VERSION_ID >= 80500 && ini_get('memory_hard_limit_percent') === false) {
         $sharedState['deep_backtrace_stash'] = str_repeat('x', 200 << 20);
     }
     file_put_contents('/tmp/oxphp-deep-backtrace-stash', json_encode([
