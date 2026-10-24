@@ -80,4 +80,22 @@ $h = $child->pool()->acquire();
 $t->assertSame('the factory still works on the worker thread', $h->get()->v, 1);
 $h->release();
 
+// $this can be a closure: bound with no scope, it is called as the call it
+// makes, not checked by its class, which is built in.
+$innerLine = __LINE__ + 1;
+$inner = fn (): object => (object) ['v' => asyncdecl_this_helper(1)];
+$bound = new \OxPHP\Shared\Pool(
+    factory: \Closure::bind(fn (): object => ($this)(), $inner, null),
+    destroy: null,
+    maxSize: 1,
+);
+$t->assertSame(
+    '($this)() with a closure bound as $this',
+    asyncdecl_acquire_in_task($bound),
+    asyncdecl_refused('asyncdecl_this_helper', __FILE__, $innerLine),
+);
+$h = $bound->acquire();
+$t->assertSame('the bound closure calls $this on the worker thread', $h->get()->v, 2);
+$h->release();
+
 $t->done();

@@ -4976,9 +4976,9 @@ static zend_string *oxphp_value_missing_here(zval *zv, HashTable *seen) {
 }
 
 /* `fn` called with `obj` as $this and `called_scope` as static. Its body is
- * checked, then, for a closure, what it captured, then the class of $this if
- * the body uses $this, then the classes self and static stand for if the body
- * calls a method or creates an object through them. */
+ * checked, then, for a closure, what it captured, then $this if the body uses
+ * it, as any object it reaches, then the classes self and static stand for if
+ * the body calls a method or creates an object through them. */
 static zend_string *oxphp_call_missing_here(const zend_function *fn, zend_object *obj,
                                             zend_class_entry *called_scope, HashTable *seen) {
     if (fn->type != ZEND_USER_FUNCTION) {
@@ -5017,7 +5017,7 @@ static zend_string *oxphp_call_missing_here(const zend_function *fn, zend_object
         }
     }
     if ((uses & OXPHP_USES_THIS) && obj) {
-        missing = oxphp_class_missing_here(obj->ce, seen);
+        missing = oxphp_object_missing_here(obj, seen);
         if (missing) {
             return missing;
         }
@@ -5034,12 +5034,12 @@ static zend_string *oxphp_call_missing_here(const zend_function *fn, zend_object
 /* The same check for a stored callable, a Shared\Pool factory or $destroy.
  * Unlike a task, such a callable can carry objects and a class with it, so
  * what it reaches through them is checked too: the objects and closures it
- * captured, and arrays of them; the class of $this, and the classes self and
- * static stand for, when its body uses them (above); for __call() or
- * __callStatic(), which has no body of its own, called directly or through a
- * closure made from the method name, the class; and for [$closure, '__invoke'],
- * the closure. A class is checked whole: every method and property hook it and
- * its parents declare, __destruct() included, whichever the call takes.
+ * captured, and arrays of them; $this, and the classes self and static stand
+ * for, when its body uses them (above); for __call() or __callStatic(), which
+ * has no body of its own, called directly or through a closure made from the
+ * method name, the class; and for [$closure, '__invoke'], the closure. A class
+ * is checked whole: every method and property hook it and its parents
+ * declare, __destruct() included, whichever the call takes.
  *
  * Other ways a callable reaches code are not checked: among them an object's
  * properties, a class's static properties or constants, the static variables
