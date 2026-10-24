@@ -13,23 +13,28 @@ require_once __DIR__ . '/../test_helper.php';
 // and this line runs on its replacement.
 //
 // Before PHP 8.5 the fatal takes no backtrace, the shutdown function keeps
-// nothing, and the worker has no reason to go.
+// nothing, and the worker has no reason to go. Nor from 8.5.12, whose fatal
+// takes no more than the first frame of one when it reports running out of
+// memory — the fixture says how the two are told apart.
 
 $t = new TestCase('memory_limit_retires_a_worker_it_cannot_return_to_probe', 'fibers');
+
+$backtraceHoldsTheLimitOff = PHP_VERSION_ID >= 80500 && ini_get('memory_hard_limit_percent') === false;
 
 $file = '/tmp/oxphp-deep-backtrace-stash';
 $state = is_file($file) ? json_decode((string) file_get_contents($file), true) : null;
 $t->assertTrue('the previous line left its state', is_array($state));
 $t->meta('state', $state);
 
-// What the rest stands on: the previous line ran out of memory, and on 8.5 its
-// shutdown function was given the memory it kept.
+// What the rest stands on: the previous line ran out of memory, and where the
+// backtrace held the limit off its shutdown function was given the memory it
+// kept.
 $t->assertContains('the previous line ran out of memory', (string) ($state['last_error'] ?? ''), 'Allowed memory size');
-$expectStashed = PHP_VERSION_ID >= 80500 ? 200 << 20 : 0;
+$expectStashed = $backtraceHoldsTheLimitOff ? 200 << 20 : 0;
 $t->assertSame('its shutdown function kept what it asked for', $state['stashed'] ?? null, $expectStashed);
 
 $replaced = OxPHP\Server\Worker::current()->startTime() > (float) ($state['worker_started'] ?? INF);
-$t->assertSame('a worker started after it serves this request', $replaced, PHP_VERSION_ID >= 80500);
+$t->assertSame('a worker started after it serves this request', $replaced, $backtraceHoldsTheLimitOff);
 $t->assertTrue('and holds nothing the previous line kept', !isset($sharedState['deep_backtrace_stash']));
 
 // The limit is enforced on the worker serving this request. The probe runs as

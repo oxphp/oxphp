@@ -66,11 +66,16 @@ try {
 }
 $t->meta('task asking for more than the limit', $given ?? $enforced);
 
-$t->assertTrue('the deep task ended in a fatal', $fatalMessage !== null);
+// Out of memory, not merely ended: from PHP 8.4.27 / 8.5.12 the engine unwinds
+// a task that runs out of memory with the exception exit() raises, and a task
+// taken for one that exited would hand its awaiter a message of some other kind.
+$t->assertContains('the deep task ended in a fatal', (string) $fatalMessage, 'Allowed memory size');
 
 [$real, $limit] = $heap;
 $t->assertTrue('the allocator counts less than memory_limit as in use after it', $real <= $limit);
-$t->assertTrue('a later task is refused more than the limit', $enforced !== null);
+// Refused by the limit rather than not run at all, which a thread left unable
+// to call anything would also throw for.
+$t->assertContains('a later task is refused more than the limit', (string) $enforced, 'Allowed memory size');
 $t->assertNull('rather than given it', $given);
 
 $t->done();

@@ -141,10 +141,42 @@ static __thread bool oxphp_fatal_bailed = false;
 
 /* Reads engine state, writes nothing but the record and allocates nothing: this
  * runs inside the error callback, which the engine may reach with its memory
- * limit already spent. */
+ * limit already spent.
+ *
+ * Nothing is recorded for a bailout raised while the engine reports running out
+ * of memory, which from PHP 8.4.27 / 8.5.12 it does later than the allocation
+ * that ran out, from a point where it can unwind the code that did: it reports
+ * the error inside a zend_try of its own, which swallows the bailout the report
+ * ends in, and then unwinds that code with the exception exit() raises, freeing
+ * every frame of it. A frame recorded here would be freed memory by the time
+ * any recovery walked from it.
+ * SYNC: php-src/Zend/zend_alloc.c zend_handle_delayed_oom() */
 static void oxphp_record_bailout_frame(void) {
+#ifdef ZEND_HAS_OOM
+    if (EG(delayed_oom).state == ZEND_OOM_STATE_HANDLING) {
+        return;
+    }
+#endif
     oxphp_bailout_frame.context = EG(current_fiber_context);
     oxphp_bailout_frame.frame = EG(current_execute_data);
+}
+
+/* The engine has reported running out of memory on this thread and nothing has
+ * recovered from it since. The bailout that report ended in never left the
+ * engine, so no zend_catch here saw it; what is left of it is the engine's note
+ * that it reported one, and until that note is cleared zend_call_function()
+ * refuses to call anything — every shutdown function, output callback and
+ * handler after it, on every request this thread serves. The engine clears it
+ * as it shuts a request down, which a worker does not do, so
+ * oxphp_recover_from_bailout() clears it, and each place a request or a task
+ * runs user code asks this afterwards and recovers as from any other fatal.
+ * SYNC: php-src/main/main.c php_request_shutdown() */
+static bool oxphp_engine_reported_oom(void) {
+#ifdef ZEND_HAS_OOM
+    return EG(delayed_oom).state == ZEND_OOM_STATE_HANDLED;
+#else
+    return false;
+#endif
 }
 
 /* A generator that was running in a fiber a bailout is leaving, called from the
@@ -304,18 +336,20 @@ static void oxphp_fiber_hand_on_bailout_frame(zend_fiber_context *destroying) {
  * limit is in force again. Per thread, as the heap is.
  *
  * Everything the engine allocates to report that error is allocated with the
- * limit set aside, and from PHP 8.5, unless fatal_error_backtraces is off,
- * that includes a backtrace of every frame on the stack, which after a runaway
- * recursion can be larger than the limit itself. Freeing it takes little off
- * what the allocator counts as in use: most of it is small blocks, whose pages
- * stay with their size class until the allocator's caches are collected.
- * While that count is above the limit, the room left under the limit, an
- * unsigned difference, wraps, and the allocator refuses nothing. The engine
- * resets the count as it shuts a request down; a worker shuts none down, and
- * nor does a thread of the async pool.
+ * limit set aside, and on PHP 8.5.0 to 8.5.11, unless fatal_error_backtraces is
+ * off, that includes a backtrace of every frame on the stack, which after a
+ * runaway recursion can be larger than the limit itself. Freeing it takes
+ * little off what the allocator counts as in use: most of it is small blocks,
+ * whose pages stay with their size class until the allocator's caches are
+ * collected. While that count is above the limit, the room left under the
+ * limit, an unsigned difference, wraps, and the allocator refuses nothing —
+ * up to PHP 8.4.26 / 8.5.11, which do not check for a count already past the
+ * limit. The engine resets the count as it shuts a request down; a worker
+ * shuts none down, and nor does a thread of the async pool.
  *
  * SYNC: php-src/Zend/zend_alloc.c zend_mm_safe_error() and the limit checks in
- *       zend_mm_alloc_pages(), zend_mm_alloc_huge(), zend_mm_realloc_huge() */
+ *       zend_mm_alloc_pages(), zend_mm_alloc_huge(), zend_mm_realloc_huge();
+ *       from 8.4.27 / 8.5.12 zend_mm_check_limit() */
 static __thread bool oxphp_heap_past_limit = false;
 
 bool oxphp_fiber_heap_back_under_limit(void) {
@@ -805,6 +839,19 @@ static void oxphp_gc_unprotect_after_bailout(bool protect) {
  * logged: without a line here a worker retired for this reads, everywhere it
  * can be read, as an application that asked to be recycled. */
 static void oxphp_recover_from_bailout(const oxphp_vm_stack_mark *mark) {
+    /* First, the engine's note that it reported running out of memory — see
+     * oxphp_engine_reported_oom(). Ahead of everything below because some of it
+     * runs user code, which the engine would refuse to call while the note
+     * stands; the engine clears it as the first step of a request shutdown, for
+     * the shutdown functions that follow. Only once reported: its message has
+     * been freed by then, while a note still waiting to be reported owns its
+     * message, and clearing it would lose the report and leak the message. */
+#ifdef ZEND_HAS_OOM
+    if (EG(delayed_oom).state == ZEND_OOM_STATE_HANDLED) {
+        EG(delayed_oom).state = ZEND_OOM_STATE_NONE;
+    }
+#endif
+
     /* The operation the fatal interrupted is over, whatever it was in the middle of:
      * the names it left on the fiber go first, ahead of anything below that can run
      * userland, because that userland can wait on a stream of its own and a wait
@@ -3155,7 +3202,15 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
                 fiber->task_fci.retval = &fiber->task_retval;
                 fiber->task_fci.param_count = fiber->task_argc;
                 fiber->task_fci.params = fiber->task_args;
-                if (zend_call_function(&fiber->task_fci, &fiber->task_fcc) != SUCCESS) {
+                zend_result called = zend_call_function(&fiber->task_fci, &fiber->task_fcc);
+                /* A task that ran out of memory is a fatal, as in the request
+                 * branch below: the exception it was unwound with is the one
+                 * exit() raises, and taken as the task's outcome it would hand
+                 * the awaiter an exit instead. */
+                if (oxphp_engine_reported_oom()) {
+                    zend_bailout();
+                }
+                if (called != SUCCESS) {
                     fiber->task_exc_class = strdup("RuntimeException");
                     fiber->task_exc_message = strdup("Failed to call async closure");
                 } else if (EG(exception)) {
@@ -3321,6 +3376,21 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
             fiber->fci->params = NULL;
             if (zend_call_function(fiber->fci, fiber->fcc) == SUCCESS) {
                 zval_ptr_dtor(&retval);
+            }
+            /* Ran out of memory: the engine reported it and swallowed the
+             * bailout, then unwound the handler with the exception exit()
+             * raises — which nothing in userland can catch, so a handler that
+             * returns with the report standing is a handler it ended. Raised
+             * again here, into the arm below, so the request is filed as the
+             * fatal it was and the recovery runs before the shutdown functions,
+             * which the engine would otherwise refuse to call. A report left
+             * standing by user code the worker ran outside any request's
+             * windows — a destructor the cycle collector called between two
+             * requests, say — is not this handler's, and where it gets this
+             * far it is filed against the request this handler serves all the
+             * same. */
+            if (oxphp_engine_reported_oom()) {
+                zend_bailout();
             }
             if (EG(exception)) {
                 if (!zend_is_unwind_exit(EG(exception)) && !zend_is_graceful_exit(EG(exception))) {
@@ -3725,6 +3795,20 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
             oxphp_file_late_bailout(fiber, &mark, "bailout putting back ini");
         }
         oxphp_report_late_exception(fiber, &mark);
+
+        /* Running out of memory in a window above that watches for a bailout
+         * through a catch of its own or by the frame it left — an output
+         * callback on the final flush, a session save handler, the release of a
+         * fatal's backtrace, an ini handler — is seen by none of them: the
+         * engine swallows that bailout itself, and puts that frame back. (The
+         * shutdown functions are watched by the flag the bailout raises, which
+         * does see it.) Asked once, past the last of those windows, so the
+         * request that ran out is the one filed for it, and the next one on
+         * this worker is not handed an engine that refuses to call its
+         * handler. */
+        if (oxphp_engine_reported_oom()) {
+            oxphp_file_late_bailout(fiber, &mark, "out-of-memory error after the handler");
+        }
 
         /* The environment variables it set with putenv() end last, past every
          * point above that can run user code — a shutdown function, a save
