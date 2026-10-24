@@ -30,7 +30,7 @@ COPY docker/php.ini /usr/local/etc/php/conf.d/zz-app.ini
 COPY --chown=www-data:www-data . /var/www/html/public
 ```
 
-PHP reads every `.ini` file in that directory in alphabetical order and the last value wins, so the `zz-` prefix makes yours apply after the image's own files. Mounting the file as a volume works too — see [PHP configuration](docker.md#php-configuration). The rest maps onto environment variables:
+PHP reads every `.ini` file in that directory in alphabetical order and the last value wins, so the `zz-` prefix makes yours apply after the image's own files. Mounting the file as a volume works too — see [PHP configuration](docker.md#php-configuration). One difference comes with `memory_limit`: on PHP 8.4.27 / 8.5.12 and later, a request that takes its thread's memory past PHP's hard limit above it ends the whole OxPHP process, where under PHP-FPM it ends one child — see [Memory limits](docker.md#memory-limits). The rest maps onto environment variables:
 
 | nginx / PHP-FPM | OxPHP |
 |---|---|

@@ -109,7 +109,7 @@ Most PHP applications move from nginx + PHP-FPM without code changes: the defaul
 - **PHP extension functions** — `oxphp_*()` helpers for streaming, early response, async, tracing, and request access — see [PHP functions reference](docs/php/functions.md)
 - **Plugin system** with typed event dispatch, priority ordering, and PHP function registration
 - **Attribute-based decorators** — intercept function/method calls via PHP 8+ attributes with zero overhead on undecorated code; supports `TARGET_FUNCTION`, `TARGET_METHOD`, `TARGET_CLASS` — see [Decorators](docs/features/decorators.md)
-- **Crash isolation** — a fatal error in one request does not take down the server
+- **Crash isolation** — a fatal error in one request does not take down the server. The exception is PHP's hard memory limit, on PHP 8.4.27 / 8.5.12 and later: an allocation past it ends the whole process — see [Memory limits](docs/getting-started/docker.md#memory-limits)
 
 ### Worker Model
 - **Worker mode** — persistent PHP workers that stay alive across requests; autoloaders, service containers, and DB connections are initialized once and reused — see [Worker mode](docs/features/worker-mode.md)
@@ -237,7 +237,7 @@ flowchart TD
 ```
 
 - **Async HTTP server** — multi-threaded by default, tunable via `TOKIO_WORKERS`
-- **PHP worker pool** — each worker is a dedicated OS thread; a crash in one worker does not affect the others
+- **PHP worker pool** — each worker is a dedicated OS thread; a crash in one worker does not affect the others, except an allocation past PHP's hard memory limit on PHP 8.4.27 / 8.5.12 and later, which ends the whole process — see [Memory limits](docs/getting-started/docker.md#memory-limits)
 - Requests wait in a bounded queue between the HTTP server and the PHP workers; a request that waits longer than `QUEUE_WAIT_TIMEOUT_MS` for a worker is refused with 529
 - **Async pool** — separate threads for `oxphp_async()` tasks, preventing slowdowns in the main worker pool
 - **Worker mode** — persistent PHP workers that stay alive between requests; autoloaders and DB connections are shared across all requests handled by that worker
