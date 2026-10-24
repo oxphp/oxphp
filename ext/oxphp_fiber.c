@@ -222,11 +222,15 @@ static bool oxphp_report_pending_oom(void) {
  * before it switches into a fiber, so one standing here is this fiber's own: it
  * is being unwound with the exception exit() raises, and C code on the way out
  * — a stream closing, which writes out what its filters hold — has reached a
- * wait. Parked, the fiber would lose that exception, which a fiber switch does
- * not carry and oxphp_fiber_enter() clears, and the thread's next switch into a
- * fiber would recover from the report: the fiber would resume past the frame it
- * was leaving, as if the call had returned. Refused, the wait ends at once and
- * the unwind goes on. Internal code that drops that exception — a
+ * wait. Parked in a sleep, an await or a yield, the fiber would lose that
+ * exception, which a fiber switch does not carry and oxphp_fiber_enter()
+ * clears, and the thread's next switch into a fiber would recover from the
+ * report: the fiber would resume past the frame it was leaving, as if the call
+ * had returned. A socket wait sets the exception aside across its park and puts
+ * it back, so the unwind would go on there, but only when the wait ended — for
+ * the stream closing above, with no room on it, at the stream's timeout.
+ * Refused, the wait ends at once and the unwind goes on. Internal code that
+ * drops that exception — a
  * RecursiveIteratorIterator with CATCH_GET_CHILD drops any a child iterator
  * raises — leaves the fiber running its code with nothing pending, and every
  * wait it reaches then ends at once as well.
