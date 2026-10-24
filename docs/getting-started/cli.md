@@ -131,6 +131,7 @@ The `run` role applies CLI-oriented defaults before your `-d` overrides and `php
 | `255` | Fatal error, uncaught exception, or parse error. |
 | `1` | The script path could not be opened (`oxphp: Could not open input file: <path>`). |
 | `2` | An invalid `-d` argument. |
+| `137` | PHP's hard memory limit, on PHP 8.4.27 / 8.5.12 and later: an allocation past the hard limit PHP sets above `memory_limit` that PHP cannot refuse ends the process, and stderr has a `Hard memory limit of … bytes exhausted` line — see [Memory limits](docker.md#memory-limits). A container the kernel kills for running out of memory exits with `137` too, without that line. |
 
 The unopenable-file case is checked before engine startup, so a missing or unreadable script fails fast with the `php`-style message rather than spinning up the engine to die with a compile error.
 
