@@ -147,10 +147,12 @@ static __thread bool oxphp_fatal_bailed = false;
  * of memory, which from PHP 8.4.27 / 8.5.12 it does later than the allocation
  * that ran out, from a point where it can unwind the code that did: it reports
  * the error inside a zend_try of its own, which swallows the bailout the report
- * ends in, and then unwinds that code with the exception exit() raises, freeing
- * every frame of it. A frame recorded here would be freed memory by the time
- * any recovery walked from it.
- * SYNC: php-src/Zend/zend_alloc.c zend_handle_delayed_oom() */
+ * ends in, and then unwinds that code with the exception exit() raises: every
+ * frame of it on the VM stack is freed on the way, and the frame of a generator
+ * it passes through, left allocated, still links to them. A recovery walking
+ * from a frame recorded here would walk freed memory.
+ * SYNC: php-src/Zend/zend_alloc.c zend_handle_delayed_oom();
+ *       php-src/Zend/zend_generators.c zend_generator_close() */
 static void oxphp_record_bailout_frame(void) {
 #ifdef ZEND_HAS_OOM
     if (EG(delayed_oom).state == ZEND_OOM_STATE_HANDLING) {
@@ -168,8 +170,12 @@ static void oxphp_record_bailout_frame(void) {
  * refuses to call anything — every shutdown function, output callback and
  * handler after it, on every request this thread serves. The engine clears it
  * as it shuts a request down, which a worker does not do, so
- * oxphp_recover_from_bailout() clears it, and each place a request or a task
- * runs user code asks this afterwards and recovers as from any other fatal.
+ * oxphp_recover_from_bailout() clears it. Some windows reach that recovery
+ * through CG(unclean_shutdown), which the swallowed bailout still raises — a
+ * request's shutdown functions do; this is asked where the recovery has to
+ * start before the user code that follows: after a request's handler and the
+ * exception it left uncaught, after a task's callable, and past the last of a
+ * request's late windows.
  * SYNC: php-src/main/main.c php_request_shutdown() */
 static bool oxphp_engine_reported_oom(void) {
 #ifdef ZEND_HAS_OOM
@@ -3377,21 +3383,6 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
             if (zend_call_function(fiber->fci, fiber->fcc) == SUCCESS) {
                 zval_ptr_dtor(&retval);
             }
-            /* Ran out of memory: the engine reported it and swallowed the
-             * bailout, then unwound the handler with the exception exit()
-             * raises — which nothing in userland can catch, so a handler that
-             * returns with the report standing is a handler it ended. Raised
-             * again here, into the arm below, so the request is filed as the
-             * fatal it was and the recovery runs before the shutdown functions,
-             * which the engine would otherwise refuse to call. A report left
-             * standing by user code the worker ran outside any request's
-             * windows — a destructor the cycle collector called between two
-             * requests, say — is not this handler's, and where it gets this
-             * far it is filed against the request this handler serves all the
-             * same. */
-            if (oxphp_engine_reported_oom()) {
-                zend_bailout();
-            }
             if (EG(exception)) {
                 if (!zend_is_unwind_exit(EG(exception)) && !zend_is_graceful_exit(EG(exception))) {
                     fiber->handler_threw = true;
@@ -3428,6 +3419,27 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
                  * and zend_call_function returns SUCCESS without calling
                  * anything while an exception is pending. */
                 oxphp_discard_pending_exception();
+            }
+            /* Ran out of memory: the engine reported it and swallowed the
+             * bailout, then unwound the code that ran out with the exception
+             * exit() raises — which nothing in userland can catch, so a
+             * handler that returns with the report standing is a handler it
+             * ended. Raised again here, into the arm below, so the request is
+             * filed as the fatal it was and the recovery runs before the
+             * shutdown functions, which the engine would otherwise refuse to
+             * call. Asked after the exception above has been let go of, not
+             * before: letting go of an uncaught one runs its destructor and
+             * those of what its trace holds, user code that can run out of
+             * memory too, and nothing after this would recover from that ahead
+             * of the shutdown functions. Where the handler itself ran out, all
+             * there is to let go of is the exception exit() raises, which runs
+             * no user code. A report left standing by user code the worker ran
+             * outside any request's windows — a destructor the cycle collector
+             * called between two requests, say — is not this handler's, and
+             * where it gets this far it is filed against the request this
+             * handler serves all the same. */
+            if (oxphp_engine_reported_oom()) {
+                zend_bailout();
             }
         } zend_catch {
             oxphp_fiber_forget_io_names(fiber);

@@ -29,6 +29,7 @@ fibers/test_memory_limit_holds_after_a_deep_fatal_on_its_own | GET | | 500 |
 fibers/test_memory_limit_holds_after_a_deep_fatal_on_its_own_probe
 fibers/test_async_task_memory_limit_holds_after_a_deep_fatal
 fibers/test_oom_in_an_output_callback_keeps_the_worker
+fibers/test_oom_in_an_exception_destructor_runs_the_shutdown_functions
 fibers/test_memory_limit_retires_a_worker_it_cannot_return_to | GET | | 500 |
 fibers/test_memory_limit_retires_a_worker_it_cannot_return_to_probe
 # These three end a request inside a Fiber, which leaves the fiber that served
