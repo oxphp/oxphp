@@ -1,10 +1,11 @@
 # A PHP fatal raised from inside a SAPI callback that is walking the
-# per-request state.
+# per-request state, on the PHP releases that still raise one there.
 #
 # The callback behind `OxPHP\Http\Request::headers()` hands every header to PHP
 # one at a time, so it allocates on the Zend heap while it is reading state the
 # server owns. A request that arrives with a large header and drives the heap
-# to its ceiling turns that into a fatal in exactly that spot — see
+# to its ceiling turns that into a fatal in exactly that spot up to PHP 8.4.26 /
+# 8.5.11; later releases raise it once the callback has returned — see
 # php/bailout/test_headers_bailout.php.
 #
 # The profile is otherwise ordinary traditional routing; bailout.ini only caps

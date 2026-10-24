@@ -4,23 +4,35 @@ declare(strict_types=1);
 
 // `OxPHP\Http\Request::headers()` walks the per-request state the server holds
 // and hands each header to PHP one at a time, so it allocates on the Zend heap
-// in the middle of reading that state. An allocation that hits memory_limit
-// raises a fatal, and a PHP fatal unwinds by longjmp: it skips every
-// destructor between the failed allocation and PHP's own handler. If the
-// server is still holding a read of its request state when that happens, the
-// read is never given back, and the next access to that state takes down the
-// whole process instead of failing this one request — PHP reads the request
-// body through that same state from request shutdown, on every request.
+// in the middle of reading that state. Up to PHP 8.4.26 / 8.5.11 an allocation
+// that hits memory_limit raises a fatal on the spot, and a PHP fatal unwinds
+// by longjmp: it skips every destructor between the failed allocation and
+// PHP's own handler. If the server is still holding a read of its request
+// state when that happens, the read is never given back, and the next access
+// to that state takes down the whole process instead of failing this one
+// request — PHP reads the request body through that same state from request
+// shutdown, on every request.
 //
-// The trap: fill the memory the allocator has mapped, forbid it from mapping
-// more, and then ask for the headers. One of them (sent by the runner, see
-// suites/bailout.txt) is far larger than the tail left over, so copying it is
-// the allocation that cannot be served.
+// From PHP 8.4.27 / 8.5.12 the allocation that crosses memory_limit is granted
+// and the fatal is raised once headers() has returned: the walk runs to its
+// end — unless the process ends first, past PHP's hard memory limit or on the
+// system refusing the memory — and the window above is never entered. On those
+// releases this request still ends in the same fatal on the same line, and
+// what holds the rule that no read of the request state is alive while PHP
+// copies a header is the unit test
+// pair_callbacks_hand_out_pairs_with_the_request_data_borrow_released in
+// src/php/sapi.rs.
+//
+// The trap: fill the memory the allocator has mapped, set memory_limit to
+// exactly that, and then ask for the headers. One of them (sent by the runner,
+// see suites/bailout.txt) is far larger than the tail left over, so copying it
+// is the allocation that crosses the limit.
 //
 // This request is expected to answer 500 — the fatal is real. What it proves
 // is checked by test_worker_survives_bailout.php, which runs next and reads
-// the marker written below: on a server carrying the defect that request is
-// answered by nobody, because the process is gone.
+// the marker written below: on a server carrying the defect, on the releases
+// where the window is reached, that request is answered by nobody, because the
+// process is gone.
 //
 // No TestCase here — it installs a fatal handler of its own, and this test has
 // to inspect the fatal itself.
@@ -45,8 +57,9 @@ const PAD_HEADER_BYTES = 120000;
 
 $request = oxphp_http_request();
 $trapLine = 0;
+$chunkBytes = 0;
 
-register_shutdown_function(static function () use (&$trapLine): void {
+register_shutdown_function(static function () use (&$trapLine, &$chunkBytes): void {
     // The trap leaves the heap with no headroom at all, and writing the marker
     // needs some back.
     ini_set('memory_limit', '64M');
@@ -54,6 +67,7 @@ register_shutdown_function(static function () use (&$trapLine): void {
     file_put_contents(MARKER_PATH, json_encode([
         'expected_line'  => $trapLine,
         'expected_bytes' => PAD_HEADER_BYTES,
+        'chunk_bytes'    => $chunkBytes,
         'error'          => error_get_last(),
     ]));
 });
@@ -78,8 +92,10 @@ for ($i = 0; $i < $fill; $i++) {
     $ballast[] = str_repeat('x', BLOCK_BYTES + ($i % 8));
 }
 
-// Now forbid a further chunk. The first call drops chunks the allocator has
-// cached — it reports success without applying the limit — and the second one
+// Now set the limit to what is mapped, so that a further chunk crosses it. The
+// first call drops chunks the allocator has cached — up to PHP 8.4.26 / 8.5.11
+// it reports success without applying the limit; later releases apply the
+// value asked for, which is above what is left mapped — and the second one
 // applies the limit to what is actually mapped. The failure of the first is
 // expected and would otherwise stand as the request's last error.
 @ini_set('memory_limit', (string) (memory_get_usage(true) - 1));

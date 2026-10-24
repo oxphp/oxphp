@@ -10,10 +10,15 @@ require_once __DIR__ . '/../test_helper.php';
 // previous request left behind has to record a memory_limit fatal on the
 // headers() call, not somewhere earlier in userland. Without that the run
 // proves nothing — the window this test exists to cover was never entered.
+// From PHP 8.4.27 / 8.5.12 it is not entered even then; see below.
 //
 // Second, show the server is still there and its per-request state is still
-// usable. State left behind by the longjmp would have aborted the process, so
-// on a server carrying the defect this request is answered by nobody.
+// usable. Up to PHP 8.4.26 / 8.5.11, where the fatal unwinds out of the walk
+// by longjmp, state left behind by that longjmp would have aborted the
+// process, so on a server carrying the defect this request is answered by
+// nobody. Later releases raise the fatal once the walk has returned (see
+// test_headers_bailout.php), and there this request checks only that the
+// thread that took the fatal goes on serving and can read its request state.
 
 $t = new TestCase('worker_survives_bailout', 'bailout');
 
@@ -39,13 +44,28 @@ $t->assertSame(
 // the method around it, so pin the allocation that failed as well: only the
 // copy of the padding header is anywhere near this size, and that copy happens
 // one entry at a time inside the callback under test.
+//
+// That holds up to PHP 8.4.26 / 8.5.11. From 8.4.27 / 8.5.12 an allocation
+// served from a fresh chunk reports the chunk's size, whatever it asked for:
+// the number then says only that the limit was crossed by an allocation that
+// did not fit in what was left of the mapped memory, and the line is all that
+// places it on the headers() call. Those releases are the first to know
+// memory_hard_limit_percent, which is what tells them apart here.
 preg_match('/tried to allocate (\d+) bytes/', (string) ($error['message'] ?? ''), $m);
 $tried = (int) ($m[1] ?? 0);
-$expected = (int) ($recorded['expected_bytes'] ?? 0);
-$t->assertTrue(
-    "the failed allocation is the padding header copy (tried {$tried}, header {$expected})",
-    $expected > 0 && $tried >= $expected && $tried < $expected + 8192
-);
+if (ini_get('memory_hard_limit_percent') === false) {
+    $expected = (int) ($recorded['expected_bytes'] ?? 0);
+    $t->assertTrue(
+        "the failed allocation is the padding header copy (tried {$tried}, header {$expected})",
+        $expected > 0 && $tried >= $expected && $tried < $expected + 8192
+    );
+} else {
+    $chunk = (int) ($recorded['chunk_bytes'] ?? 0);
+    $t->assertTrue(
+        "the allocation past the limit took a fresh chunk (tried {$tried}, chunk {$chunk})",
+        $chunk > 0 && $tried === $chunk
+    );
+}
 
 // php://input reads the same per-request state, and PHP reads it once more
 // from request shutdown on every request.

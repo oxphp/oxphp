@@ -1,5 +1,5 @@
 # profile: bailout
-# description: PHP fatal raised inside a SAPI callback walking the request state
+# description: PHP fatal raised inside a SAPI callback walking the request state (up to PHP 8.4.26 / 8.5.11; later releases raise it once the callback has returned)
 
 # The padding header travels as a single curl argument, and Linux refuses any
 # one argument over 128 KiB before curl even starts — keep it below that.
