@@ -8,3 +8,5 @@ routing/test_all_to_index >> /index.php/news/local | GET | | 200 | content-type:
 routing/test_direct_php_to_index | GET | | 200 | content-type:application/json
 routing/test_static_still_served >> /assets/style.css | GET | | 200 | content-type:text/css
 routing/test_index_php_executes >> /index.php | GET | | 200 | content-type:application/json
+routing/test_all_to_index >> /?case=empty-path | GET | --request-target "http://fw.example?case=empty-path" | 200 | content-type:application/json
+routing/test_target_without_slash_refused >> /index.php | GET | --request-target index.php | 400 |
