@@ -610,7 +610,8 @@ typedef struct _oxphp_request_fiber {
                                      * timeout elapses while suspended; checked at the await suspend
                                      * point, which unwinds the await as a timeout instead of a result */
     uint64_t await_deadline_ns;     /* CLOCK_MONOTONIC deadline for the current AWAIT suspend.
-                                     * 0 = no deadline (timeout <= 0, i.e. wait forever). */
+                                     * 0 = no deadline (the await has no timeout and waits forever;
+                                     * see oxphp_fiber_suspend_for_await for which ones set none). */
     _Atomic(uint8_t) *cancel_cell;  /* borrowed: &CancelShared.cancelled (Rust AtomicBool).
                                      * The awaiter sets it cross-thread and kicks vm_interrupt; the
                                      * interrupt handler reads it to unwind a CPU-bound task fiber.

@@ -7645,6 +7645,14 @@ int oxphp_in_oxphp_fiber(void) {
             && oxphp_fiber_owns_current_context(oxphp_current_fiber)) ? 1 : 0;
 }
 
+/* Longest await timeout, in seconds, that sets a deadline: 1e9 s, about 31.7
+ * years. A longer one, INF included, waits without a limit. Kept equal to
+ * AWAIT_TIMEOUT_MAX_SECS in src/async_types.rs, which applies the same rule
+ * to the awaits Rust times. It also keeps the conversion below defined: a
+ * double past UINT64_MAX cannot be cast to uint64_t, and 1e9 s in nanoseconds
+ * leaves the sum with the current time far below it. */
+#define OXPHP_AWAIT_TIMEOUT_MAX_S 1e9
+
 /* Fiber-aware await helper. Called from Rust handler via FFI.
  * Returns: 0 = fiber handled it (retval populated), 1 = not in fiber (caller does blocking),
  *         -1 = error (exception details in bridge TLS), -2 = timeout */
@@ -7664,11 +7672,12 @@ int oxphp_fiber_suspend_for_await(int64_t promise_id, double timeout, void *retv
     self->suspend_data.promise_id = promise_id;
 
     /* Arm a per-call deadline so the scheduler can unwind this await if the
-     * awaited promise does not settle in time. timeout <= 0 means "wait
-     * forever" (no deadline). Without this the cooperative fiber path would
-     * ignore the timeout entirely and block until the promise settles or the
-     * outer await budget elapsed — losing the inner timeout in composition. */
-    if (timeout > 0.0) {
+     * awaited promise does not settle in time. A timeout <= 0, NAN, or one
+     * above OXPHP_AWAIT_TIMEOUT_MAX_S means "wait forever" (no deadline).
+     * Without this the cooperative fiber path would ignore the timeout
+     * entirely and block until the promise settles or the outer await budget
+     * elapsed — losing the inner timeout in composition. */
+    if (timeout > 0.0 && timeout <= OXPHP_AWAIT_TIMEOUT_MAX_S) {
         struct timespec ts;
         clock_gettime(CLOCK_MONOTONIC, &ts);
         uint64_t now_ns = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;

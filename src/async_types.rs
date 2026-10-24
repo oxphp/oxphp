@@ -7,8 +7,27 @@
 use std::ffi::c_void;
 use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use crate::php::worker_registry::InterruptTarget;
+
+/// Longest `$timeout`, in seconds, that an `oxphp_async_await*()` call waits
+/// out: 10⁹ s, about 31.7 years. A longer one sets no limit at all. The cap
+/// keeps every deadline that is set within what `Instant` can hold, and within
+/// the nanosecond deadline the C side computes for an await in a fiber, which
+/// applies the same cap (`OXPHP_AWAIT_TIMEOUT_MAX_S` in `ext/oxphp_sapi.c`).
+pub const AWAIT_TIMEOUT_MAX_SECS: f64 = 1e9;
+
+/// The limit an `oxphp_async_await*()` `$timeout` sets, or `None` when it sets
+/// none: zero, a negative value, `NAN`, and anything above
+/// [`AWAIT_TIMEOUT_MAX_SECS`], `INF` included.
+pub fn await_timeout(secs: f64) -> Option<Duration> {
+    if secs > 0.0 && secs <= AWAIT_TIMEOUT_MAX_SECS {
+        Duration::try_from_secs_f64(secs).ok()
+    } else {
+        None
+    }
+}
 
 /// Shared cancellation state for a single async task, reachable from both the
 /// originating PHP worker (the awaiter) and the async worker running the task.
@@ -349,5 +368,27 @@ mod tests {
     fn test_async_result_send_trait() {
         fn assert_send<T: Send>() {}
         assert_send::<AsyncResult>();
+    }
+
+    #[test]
+    fn test_await_timeout_sets_a_limit_only_up_to_the_cap() {
+        assert_eq!(await_timeout(0.5), Some(Duration::from_millis(500)));
+        assert_eq!(
+            await_timeout(AWAIT_TIMEOUT_MAX_SECS),
+            Some(Duration::from_secs(1_000_000_000))
+        );
+        for secs in [
+            0.0,
+            -0.0,
+            -1.0,
+            f64::NAN,
+            f64::INFINITY,
+            f64::NEG_INFINITY,
+            1e300,
+            i64::MAX as f64,
+            AWAIT_TIMEOUT_MAX_SECS.next_up(),
+        ] {
+            assert_eq!(await_timeout(secs), None, "timeout {secs}");
+        }
     }
 }
