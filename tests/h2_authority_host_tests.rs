@@ -351,7 +351,8 @@ async fn h2_authority_userinfo_is_not_part_of_the_host() {
 /// The URI parser lets through an authority whose host is empty, such as
 /// `:80`, and RFC 9110 section 4.2.1 has a recipient reject an `http` URI
 /// like that. Such a target names no host to take, and the request is
-/// refused before anything runs, over either protocol, a `CONNECT` included.
+/// refused before anything runs: an absolute-form one over HTTP/1.x, and an
+/// `:authority` over HTTP/2, a `CONNECT` included.
 #[tokio::test]
 async fn empty_host_in_the_target_is_refused() {
     let fx = start().await;
