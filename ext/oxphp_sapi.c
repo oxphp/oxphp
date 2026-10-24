@@ -1445,6 +1445,11 @@ static int oxphp_fiber_sleep_us(uint64_t duration_us)
      * suspend points carry the same guard, and oxphp_park_blocked beside it:
      * the server's own "do not park here", which leaves userland fibers alone. */
     if (zend_fiber_switch_blocked() || oxphp_park_blocked) return 0;
+    /* A request that ran past memory_limit is handed its error before it
+     * parks, not after: the requests the thread runs meanwhile would otherwise
+     * be the ones the engine reports it into — see oxphp_report_pending_oom().
+     * The other three suspend points ask the same, after the same guard. */
+    if (oxphp_report_pending_oom()) return OXPHP_FIBER_UNWIND;
 
     uint64_t duration_ms = (duration_us + 999) / 1000; /* round up */
     if (duration_ms == 0) duration_ms = 1;
@@ -1505,6 +1510,8 @@ static int oxphp_fiber_io_wait(struct pollfd *fds, struct oxphp_io_owner *owners
     /* Switching blocked — see oxphp_fiber_sleep_us. */
     if (zend_fiber_switch_blocked() || oxphp_park_blocked) return 0;
     if (fds == NULL || owners == NULL || nfds == 0 || nfds > OXPHP_MAX_WAIT_FDS) return 0;
+    /* Out of memory and not reported yet — see oxphp_fiber_sleep_us. */
+    if (oxphp_report_pending_oom()) return OXPHP_FIBER_UNWIND;
 
     oxphp_request_fiber *self = oxphp_current_fiber;
 
@@ -7566,6 +7573,8 @@ int oxphp_fiber_suspend_for_await(int64_t promise_id, double timeout, void *retv
     /* Switching blocked — see oxphp_fiber_sleep_us. Returns this function's own
      * "not suspendable" code, not 0, which here means "done via fiber". */
     if (zend_fiber_switch_blocked() || oxphp_park_blocked) return 1;
+    /* Out of memory and not reported yet — see oxphp_fiber_sleep_us. */
+    if (oxphp_report_pending_oom()) return OXPHP_FIBER_UNWIND;
 
     oxphp_request_fiber *self = oxphp_current_fiber;
     self->suspend_reason = OXPHP_SUSPEND_AWAIT;
@@ -7626,6 +7635,8 @@ int oxphp_fiber_suspend_for_yield(void) {
     }
     /* Switching blocked — see oxphp_fiber_sleep_us. */
     if (zend_fiber_switch_blocked() || oxphp_park_blocked) return 0;
+    /* Out of memory and not reported yet — see oxphp_fiber_sleep_us. */
+    if (oxphp_report_pending_oom()) return OXPHP_FIBER_UNWIND;
 
     oxphp_request_fiber *self = oxphp_current_fiber;
     uint64_t timer_id = oxphp_bridge_timer_register(1); /* ~1ms; resumed by tick */
