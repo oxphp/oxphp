@@ -185,6 +185,34 @@ static bool oxphp_engine_reported_oom(void) {
 #endif
 }
 
+/* An allocation on this thread went past memory_limit and the engine has not
+ * reported it yet. From PHP 8.4.27 / 8.5.12 it lets such an allocation through
+ * and reports the error at the next point that looks for it: a call through
+ * zend_call_function(), or the VM's next interrupt check — which an internal
+ * function such as sleep() reaches only once it has returned. A request that
+ * runs out and then parks has not returned yet, and the thread runs other
+ * requests meanwhile: the first of them to reach such a point had the error
+ * reported into it — a request being started died before its handler ran,
+ * and never answered — while the request that ran out resumed to find it
+ * reported already, and carried on.
+ *
+ * So the error is reported here, into what is running now: at a suspend point,
+ * before a request or task parks there, and in a request's late windows, before
+ * its end parks it. With a frame current, as it always is on a request or task
+ * fiber, the engine unwinds that frame with the exception exit() raises and
+ * leaves the exception pending; it does not bail out, and only with no frame
+ * current would it. True if there was an error to report.
+ * SYNC: php-src/Zend/zend_alloc.c zend_handle_delayed_oom() */
+bool oxphp_report_pending_oom(void) {
+#ifdef ZEND_HAS_OOM
+    if (EG(delayed_oom).state == ZEND_OOM_STATE_PENDING) {
+        zend_handle_delayed_oom();
+        return true;
+    }
+#endif
+    return false;
+}
+
 /* A generator that was running in a fiber a bailout is leaving, called from the
  * observer below while that fiber's frames are still allocated.
  *
@@ -3735,6 +3763,21 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
             oxphp_report_late_exception(fiber, &mark);
         }
 
+        /* Running out of memory in a window above where the engine looks for
+         * the error nowhere — the files save handler and the serializer it
+         * writes are C code — leaves it not reported yet. It is reported here,
+         * while the request's own settings stand, so it is displayed and logged
+         * as the request set display_errors, log_errors and error_log; and
+         * ahead of the release of a fatal's backtrace and of the check of
+         * memory_limit below, which let go of what reporting an error past the
+         * limit leaves on the thread. The exception its report leaves pending,
+         * the one exit() raises, has nothing to log and is dropped at once, so
+         * no step below runs with it standing. The request is filed for the
+         * error past the last of them, with the rest. */
+        if (oxphp_report_pending_oom()) {
+            oxphp_discard_pending_exception();
+        }
+
 #if PHP_VERSION_ID >= 80500
         /* Let go of the backtrace of this request's last fatal where the engine
          * lets go of it in any other SAPI: as the executor is shut down, after
@@ -3817,7 +3860,20 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
          * does see it.) Asked once, past the last of those windows, so the
          * request that ran out is the one filed for it, and the next one on
          * this worker is not handed an engine that refuses to call its
-         * handler. */
+         * handler.
+         *
+         * One not reported yet is reported after the session write. What the
+         * C code of the steps since then can still leave unreported — an ini
+         * handler putting a directive back, the report of an exception — is
+         * reported here, before this fiber's park would hand it to whatever
+         * runs next on the thread, and filed below like the rest. The
+         * exception its report leaves pending is dropped before that filing:
+         * the recovery it runs takes an exception it finds standing for its
+         * caller's, and the engine calls none of the user code that recovery
+         * runs while one is. */
+        if (oxphp_report_pending_oom()) {
+            oxphp_discard_pending_exception();
+        }
         if (oxphp_engine_reported_oom()) {
             oxphp_file_late_bailout(fiber, &mark, "out-of-memory error after the handler");
         }

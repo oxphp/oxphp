@@ -1067,6 +1067,12 @@ int     oxphp_async_sched_cancel(int64_t fiber_id);
 #define OXPHP_EXCEPTION_DRAIN_LIMIT 16u
 void    oxphp_discard_pending_exception(void);
 
+/* ─── Running out of memory, not reported yet ────────────
+ * Report an allocation past memory_limit that the engine let through and has
+ * not reported yet, into the request or task running now; true if there was
+ * one. See the definition in oxphp_fiber.c. */
+bool    oxphp_report_pending_oom(void);
+
 #if PHP_VERSION_ID >= 80500
 /* Let go of the backtrace PHP 8.5 keeps of the last fatal error on this thread,
  * which the engine frees, short of the next error, as a request is shut down —
