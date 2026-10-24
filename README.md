@@ -109,14 +109,14 @@ Most PHP applications move from nginx + PHP-FPM without code changes: the defaul
 - **PHP extension functions** — `oxphp_*()` helpers for streaming, early response, async, tracing, and request access — see [PHP functions reference](docs/php/functions.md)
 - **Plugin system** with typed event dispatch, priority ordering, and PHP function registration
 - **Attribute-based decorators** — intercept function/method calls via PHP 8+ attributes with zero overhead on undecorated code; supports `TARGET_FUNCTION`, `TARGET_METHOD`, `TARGET_CLASS` — see [Decorators](docs/features/decorators.md)
-- **Crash isolation** — a fatal error in one request does not take down the server. The exception is PHP's hard memory limit, on PHP 8.4.27 / 8.5.12 and later: an allocation past it ends the whole process — see [Memory limits](docs/getting-started/docker.md#memory-limits)
+- **Fatal-error isolation** — a fatal error in one request does not take down the server. The exception is PHP's hard memory limit, on PHP 8.4.27 / 8.5.12 and later: an allocation past it ends the whole process — see [Memory limits](docs/getting-started/docker.md#memory-limits). A native crash, such as a segmentation fault in PHP or in an extension, is not a fatal error and ends the whole process as well
 
 ### Worker Model
 - **Worker mode** — persistent PHP workers that stay alive across requests; autoloaders, service containers, and DB connections are initialized once and reused — see [Worker mode](docs/features/worker-mode.md)
 - **Fiber multiplexing** — each worker handles multiple concurrent requests via PHP Fibers; `oxphp_sleep()` and `oxphp_async_await()` yield the current fiber instead of blocking the worker thread — see [Fiber multiplexing](docs/features/fiber-multiplexing.md)
 - **Runtime hooks** — `RUNTIME_HOOKS=sleep,streams,net` makes native `sleep()`/`usleep()`, blocking TCP reads, `stream_select()`, connects, TLS waits and reads on local sockets suspend the fiber instead of the worker thread, so unmodified PDO MySQL, mysqli and phpredis code benefits — see [Runtime hooks](docs/operations/configuration.md#runtime-hooks)
 - **Automatic recycling** — in worker mode a worker is recycled when it passes `WORKER_MAX_MEMORY_MIB`, when the application calls `Worker::scheduleExit()`, or after three consecutive requests come apart, a fatal error being the usual one — see [Recycling](docs/features/worker-mode.md#recycling)
-- **Worker health monitoring** — crashed workers are automatically detected and replaced; a static pool refills to its configured count, a dynamic one to its minimum
+- **Worker health monitoring** — workers that die unexpectedly are automatically detected and replaced; a static pool refills to its configured count, a dynamic one to its minimum
 - **Early response** via `oxphp_finish_request()` — send the response and keep running background work — see [Early response](docs/features/early-response.md)
 
 ### Async Promises
