@@ -4774,25 +4774,34 @@ void oxphp_async_drop_execution_timer(void) {
  * The whole body is checked, a branch the call never takes included, along
  * with every closure or function declared inside it, a closure in a
  * parameter's default value included. A closure in an attribute's arguments
- * is not: it only runs if the code creates the attribute through reflection. */
-static zend_string *oxphp_op_array_missing_here(const zend_op_array *op);
+ * is not: it only runs if the code creates the attribute through reflection.
+ *
+ * When `uses` is not NULL, OXPHP_USES_* flags are added to it for what the
+ * same code reaches without naming it (oxphp_pool_callable_missing_here). */
+static zend_string *oxphp_op_array_missing_here(const zend_op_array *op, uint32_t *uses);
+
+/* The body uses $this. */
+#define OXPHP_USES_THIS (1u << 0)
+/* The body calls a method, or creates an object, through self::, static:: or
+ * parent::. */
+#define OXPHP_USES_SCOPE (1u << 1)
 
 #if PHP_VERSION_ID >= 80500
 /* PHP 8.5 accepts a static closure in a constant expression, such as a
  * parameter's default value. The compiler keeps that closure inside the
  * expression (ZEND_AST_OP_ARRAY) rather than in dynamic_func_defs, and
  * evaluating the default creates it, so its body is checked as well. */
-static zend_string *oxphp_const_ast_missing_here(zend_ast *ast) {
+static zend_string *oxphp_const_ast_missing_here(zend_ast *ast, uint32_t *uses) {
     if (!ast) {
         return NULL;
     }
     if (ast->kind == ZEND_AST_OP_ARRAY) {
-        return oxphp_op_array_missing_here(zend_ast_get_op_array(ast)->op_array);
+        return oxphp_op_array_missing_here(zend_ast_get_op_array(ast)->op_array, uses);
     }
     if (zend_ast_is_list(ast)) {
         zend_ast_list *list = zend_ast_get_list(ast);
         for (uint32_t i = 0; i < list->children; i++) {
-            zend_string *missing = oxphp_const_ast_missing_here(list->child[i]);
+            zend_string *missing = oxphp_const_ast_missing_here(list->child[i], uses);
             if (missing) {
                 return missing;
             }
@@ -4803,7 +4812,7 @@ static zend_string *oxphp_const_ast_missing_here(zend_ast *ast) {
         return NULL;
     }
     for (uint32_t i = 0; i < zend_ast_get_num_children(ast); i++) {
-        zend_string *missing = oxphp_const_ast_missing_here(ast->child[i]);
+        zend_string *missing = oxphp_const_ast_missing_here(ast->child[i], uses);
         if (missing) {
             return missing;
         }
@@ -4812,7 +4821,10 @@ static zend_string *oxphp_const_ast_missing_here(zend_ast *ast) {
 }
 #endif
 
-static zend_string *oxphp_op_array_missing_here(const zend_op_array *op) {
+static zend_string *oxphp_op_array_missing_here(const zend_op_array *op, uint32_t *uses) {
+    if (uses && (op->fn_flags & ZEND_ACC_USES_THIS)) {
+        *uses |= OXPHP_USES_THIS;
+    }
     for (uint32_t i = 0; i < op->last; i++) {
         const zend_op *opline = &op->opcodes[i];
         const zval *name;
@@ -4822,7 +4834,7 @@ static zend_string *oxphp_op_array_missing_here(const zend_op_array *op) {
             case ZEND_RECV_INIT: {
                 zval *dflt = RT_CONSTANT(opline, opline->op2);
                 if (Z_TYPE_P(dflt) == IS_CONSTANT_AST) {
-                    zend_string *missing = oxphp_const_ast_missing_here(Z_ASTVAL_P(dflt));
+                    zend_string *missing = oxphp_const_ast_missing_here(Z_ASTVAL_P(dflt), uses);
                     if (missing) {
                         return missing;
                     }
@@ -4856,11 +4868,20 @@ static zend_string *oxphp_op_array_missing_here(const zend_op_array *op) {
                         Z_STRVAL_P(name), ZSTR_VAL(op->filename), opline->lineno);
                 }
                 break;
+            case ZEND_INIT_STATIC_METHOD_CALL:
+            case ZEND_NEW:
+                /* self, static and parent compile to an unused op1; a class
+                 * named in the code is a constant, and an expression a
+                 * variable. */
+                if (uses && opline->op1_type == IS_UNUSED) {
+                    *uses |= OXPHP_USES_SCOPE;
+                }
+                break;
         }
     }
 
     for (uint32_t i = 0; i < op->num_dynamic_func_defs; i++) {
-        zend_string *missing = oxphp_op_array_missing_here(op->dynamic_func_defs[i]);
+        zend_string *missing = oxphp_op_array_missing_here(op->dynamic_func_defs[i], uses);
         if (missing) {
             return missing;
         }
@@ -4868,14 +4889,180 @@ static zend_string *oxphp_op_array_missing_here(const zend_op_array *op) {
     return NULL;
 }
 
-/* The same check for a stored callable. Internal functions exist on every
- * thread, and a trampoline (__call, __callStatic) has no body of its own. */
-static zend_string *oxphp_function_missing_here(const zend_function *fn) {
-    if (fn->type != ZEND_USER_FUNCTION
-     || (fn->common.fn_flags & ZEND_ACC_CALL_VIA_TRAMPOLINE)) {
+/* Record `p` in `seen`. Returns false when it already was there. */
+static bool oxphp_first_visit(HashTable *seen, const void *p) {
+    return zend_hash_index_add_empty_element(seen, (zend_ulong)(uintptr_t)p) != NULL;
+}
+
+/* `fn` if `ce` declares it rather than inherits it, and it has a body. */
+static zend_string *oxphp_own_function_missing_here(const zend_function *fn,
+                                                    const zend_class_entry *ce) {
+    if (fn->common.scope != ce || fn->type != ZEND_USER_FUNCTION) {
         return NULL;
     }
-    return oxphp_op_array_missing_here(&fn->op_array);
+    return oxphp_op_array_missing_here(&fn->op_array, NULL);
+}
+
+/* Every method and property hook `ce` declares, and every one its parents
+ * declare. A trait's methods and hooks are copied into the class that uses
+ * it, with that class as their scope. A built-in class has no body to check,
+ * and its parents are built in too. */
+static zend_string *oxphp_class_missing_here(zend_class_entry *ce, HashTable *seen) {
+    for (; ce && ce->type == ZEND_USER_CLASS; ce = ce->parent) {
+        if (!oxphp_first_visit(seen, ce)) {
+            return NULL;
+        }
+        zend_string *missing;
+        zend_function *fn;
+        ZEND_HASH_MAP_FOREACH_PTR(&ce->function_table, fn) {
+            missing = oxphp_own_function_missing_here(fn, ce);
+            if (missing) {
+                return missing;
+            }
+        } ZEND_HASH_FOREACH_END();
+        /* A hook is kept with its property, not in the method table. */
+        zend_property_info *prop;
+        ZEND_HASH_MAP_FOREACH_PTR(&ce->properties_info, prop) {
+            for (uint32_t i = 0; prop->hooks && i < ZEND_PROPERTY_HOOK_COUNT; i++) {
+                if (prop->hooks[i]) {
+                    missing = oxphp_own_function_missing_here(prop->hooks[i], ce);
+                    if (missing) {
+                        return missing;
+                    }
+                }
+            }
+        } ZEND_HASH_FOREACH_END();
+    }
+    return NULL;
+}
+
+static zend_string *oxphp_call_missing_here(const zend_function *fn, zend_object *obj,
+                                            zend_class_entry *called_scope, HashTable *seen);
+
+/* An object a callback reaches: a closure as the call it makes, any other
+ * object by its class. Its properties are not looked at. */
+static zend_string *oxphp_object_missing_here(zend_object *obj, HashTable *seen) {
+    if (obj->ce != zend_ce_closure) {
+        return oxphp_class_missing_here(obj->ce, seen);
+    }
+    if (!oxphp_first_visit(seen, obj)) {
+        return NULL;
+    }
+    zend_class_entry *called_scope;
+    zend_function *fn;
+    zend_object *this_obj;
+    obj->handlers->get_closure(obj, &called_scope, &fn, &this_obj, true);
+    return oxphp_call_missing_here(fn, this_obj, called_scope, seen);
+}
+
+/* A value a closure captured: an object, or what an array holds, through
+ * references. */
+static zend_string *oxphp_value_missing_here(zval *zv, HashTable *seen) {
+    ZVAL_DEREF(zv);
+    if (Z_TYPE_P(zv) == IS_OBJECT) {
+        return oxphp_object_missing_here(Z_OBJ_P(zv), seen);
+    }
+    if (Z_TYPE_P(zv) != IS_ARRAY || !oxphp_first_visit(seen, Z_ARRVAL_P(zv))) {
+        return NULL;
+    }
+    zval *item;
+    ZEND_HASH_FOREACH_VAL_IND(Z_ARRVAL_P(zv), item) {
+        zend_string *missing = oxphp_value_missing_here(item, seen);
+        if (missing) {
+            return missing;
+        }
+    } ZEND_HASH_FOREACH_END();
+    return NULL;
+}
+
+/* `fn` called with `obj` as $this and `called_scope` as static. Its body is
+ * checked, then, for a closure, what it captured, then the class of $this if
+ * the body uses $this, then the classes self and static stand for if the body
+ * calls a method or creates an object through them. */
+static zend_string *oxphp_call_missing_here(const zend_function *fn, zend_object *obj,
+                                            zend_class_entry *called_scope, HashTable *seen) {
+    if (fn->type != ZEND_USER_FUNCTION) {
+        /* A built-in function of a script class: a closure made from a method
+         * only __call() or __callStatic() answers ($obj->make(...),
+         * Closure::fromCallable()), which calls the magic method of its
+         * scope, or an enum's cases(), from() or tryFrom(). The class it is
+         * called on is checked as well: the magic method reaches that class's
+         * methods through $this, and it need not be a child of the scope
+         * (self::make(...) in a closure bound to an object of another class). */
+        if (fn->common.scope && fn->common.scope->type == ZEND_USER_CLASS) {
+            zend_string *missing = oxphp_class_missing_here(fn->common.scope, seen);
+            return missing ? missing : oxphp_class_missing_here(called_scope, seen);
+        }
+        return NULL;
+    }
+    uint32_t uses = 0;
+    zend_string *missing = oxphp_op_array_missing_here(&fn->op_array, &uses);
+    if (missing) {
+        return missing;
+    }
+    /* A closure's captured values, and its static variables, are in a table
+     * of its own. A closure made from a function (Closure::fromCallable(),
+     * f(...)) points at that function's static variables instead, which hold
+     * nothing it captured. */
+    if ((fn->common.fn_flags & (ZEND_ACC_CLOSURE | ZEND_ACC_FAKE_CLOSURE)) == ZEND_ACC_CLOSURE) {
+        HashTable *vars = ZEND_MAP_PTR_GET(fn->op_array.static_variables_ptr);
+        if (vars) {
+            zval *zv;
+            ZEND_HASH_FOREACH_VAL(vars, zv) {
+                missing = oxphp_value_missing_here(zv, seen);
+                if (missing) {
+                    return missing;
+                }
+            } ZEND_HASH_FOREACH_END();
+        }
+    }
+    if ((uses & OXPHP_USES_THIS) && obj) {
+        missing = oxphp_class_missing_here(obj->ce, seen);
+        if (missing) {
+            return missing;
+        }
+    }
+    if (uses & OXPHP_USES_SCOPE) {
+        missing = oxphp_class_missing_here(fn->common.scope, seen);
+        if (!missing) {
+            missing = oxphp_class_missing_here(called_scope, seen);
+        }
+    }
+    return missing;
+}
+
+/* The same check for a stored callable, a Shared\Pool factory or $destroy.
+ * Unlike a task, such a callable can carry objects and a class with it, so
+ * what it reaches through them is checked too: the objects and closures it
+ * captured, and arrays of them; the class of $this, and the classes self and
+ * static stand for, when its body uses them (above); for __call() or
+ * __callStatic(), which has no body of its own, called directly or through a
+ * closure made from the method name, the class; and for [$closure, '__invoke'],
+ * the closure. A class is checked whole: every method and property hook it and
+ * its parents declare, __destruct() included, whichever the call takes.
+ *
+ * Other ways a callable reaches code are not checked: among them an object's
+ * properties, a class's static properties or constants, the static variables
+ * of a function or method, a built-in object that holds others (ArrayObject,
+ * a Generator), an object a parameter's default value creates, a string
+ * callable that names a method through self, static or parent, and a class a
+ * closure names once it has run, since every thread shares a closure's
+ * run-time cache and the class it found there. */
+static zend_string *oxphp_pool_callable_missing_here(const zend_fcall_info_cache *fcc) {
+    const zend_function *fn = fcc->function_handler;
+    HashTable seen;
+    zend_hash_init(&seen, 8, NULL, NULL, 0);
+    zend_string *missing;
+    if (!(fn->common.fn_flags & ZEND_ACC_CALL_VIA_TRAMPOLINE)) {
+        missing = oxphp_call_missing_here(fn, fcc->object, fcc->called_scope, &seen);
+    } else if (fcc->object && fcc->object->ce == zend_ce_closure) {
+        missing = oxphp_object_missing_here(fcc->object, &seen);
+    } else {
+        /* The class the call names, or the class of the object it is made on. */
+        missing = oxphp_class_missing_here(fcc->called_scope, &seen);
+    }
+    zend_hash_destroy(&seen);
+    return missing;
 }
 
 /* === Code compiled for another thread: cover its MAP_PTR slots here === */
@@ -4980,7 +5167,7 @@ int oxphp_reconstruct_async_closure(
     zend_function func;
 
     /* The task runs on a thread that never ran the script it came from. */
-    zend_string *missing = oxphp_op_array_missing_here(op_array);
+    zend_string *missing = oxphp_op_array_missing_here(op_array, NULL);
     if (missing) {
         *exc_class = strdup("Error");
         *exc_message = strdup(ZSTR_VAL(missing));
@@ -7187,7 +7374,7 @@ static int oxphp_pool_factory_invoke_unguarded(void *fcc_heap, void **out_slot_z
 
     /* An acquire can run the factory on a thread that never ran its script:
      * a task's, or another worker thread's when the pool is shared. */
-    zend_string *missing = oxphp_function_missing_here(heap->fcc.function_handler);
+    zend_string *missing = oxphp_pool_callable_missing_here(&heap->fcc);
     if (missing) {
         zend_throw_error(NULL, "%s", ZSTR_VAL(missing));
         zend_string_release_ex(missing, 0);
@@ -7347,7 +7534,7 @@ static int oxphp_pool_destroy_invoke_unguarded(void *destroy_fcc_heap, void *slo
 
         /* $destroy can run on a thread that never ran its script, a task's or
          * another worker thread's. Handled the way a throw from it is. */
-        zend_string *missing = oxphp_function_missing_here(heap->fcc.function_handler);
+        zend_string *missing = oxphp_pool_callable_missing_here(&heap->fcc);
         if (missing) {
             oxphp_bridge_capture_fatal(ZSTR_VAL(missing), ZSTR_LEN(missing));
             zend_string_release_ex(missing, 0);
