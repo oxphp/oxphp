@@ -145,6 +145,13 @@ hooksdb/test_persistent_dtor_leaves_transaction_to_holders_other_handle
 # returns false and leaves the holder's transaction alone.
 hooksdb/test_persistent_rollback_refused_on_held_connection
 
+# A destructor that reads from the server while an exception unwinds — PDO
+# rolling back an open transaction, a statement skipping the rest of an
+# unbuffered result — leaves the exception for the caller's catch, in a request
+# and in a task, and an exit() unwinding the same way still ends the request.
+# The worker goes on serving other requests while the destructor waits.
+hooksdb/test_exception_survives_a_destructor_read
+
 # A shared connection beside the one session a worker keeps open at a time. A
 # request with its session open waits for the connection as any other does —
 # the request holding it goes on running and gives it back. And where the request
