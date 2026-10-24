@@ -1542,18 +1542,42 @@ static int oxphp_fiber_io_wait(struct pollfd *fds, struct oxphp_io_owner *owners
     self->suspend_data.io.expired = false;
     self->suspend_data.io.deadline_ns = deadline_ns;
 
+    /* An internal destructor run while the VM unwinds can wait here with an
+     * exception pending — PDO rolling back the transaction its object still
+     * has open, mysqlnd reading off the rest of an unbuffered result. Zend does
+     * not carry EG(exception) across a fiber switch, and the scheduler clears
+     * what it finds pending once the fiber has parked, so the wait would come
+     * back with the exception gone and the unwind would end there, the caller
+     * going on as though the throwing call had returned. So it is set aside for
+     * the suspension, as zend_objects_destroy_object() sets it aside around a
+     * userland __destruct, and put back on every way out that goes on running
+     * this code. It is dropped on the three that do not: the fiber torn down
+     * while parked and a drain kill end the request or the task, and a resume
+     * that comes with an exception already pending — left on the thread by PHP
+     * run outside any request or task — unwinds it with that one instead. */
+    zend_object *pending = EG(exception);
+    const zend_op *pending_opline = EG(opline_before_exception);
+    EG(exception) = NULL;
+
     oxphp_current_fiber = NULL;
     if (oxphp_fiber_park(self) != 0) {
         /* Unwinding: an exception is already pending. Return to PHP without
          * adding one of our own so the VM tears the request down through the
          * loop's zend_try, which already recognises a graceful exit. */
+        if (pending != NULL) OBJ_RELEASE(pending);
         return OXPHP_FIBER_UNWIND;
     }
     /* --- RESUMED once one descriptor is ready or the deadline passed, OR
      * force-resumed by the scheduler when the task was cancelled (awaiter gave
      * up) or the server is draining. */
     if (self->drain_kill) {
+        if (pending != NULL) OBJ_RELEASE(pending);
         oxphp_fiber_drain_bail();
+    }
+    /* oxphp_fiber_park() returned 0, so nothing is pending now. */
+    if (pending != NULL) {
+        EG(exception) = pending;
+        EG(opline_before_exception) = pending_opline;
     }
     if (oxphp_fiber_take_cancel(self)) {
         return -1; /* cancelled */
@@ -2714,7 +2738,9 @@ static int oxphp_net_park(struct pollfd *fds, unsigned long nfds, int timeout_ms
              * lowered where the connect ends. */
             if (oxphp_current_fiber == NULL) oxphp_bridge_net_set_abort(1);
         }
-        /* An unwind has its exception already; a cancellation has none yet. */
+        /* An unwind has its exception already. A cancellation has none of its
+         * own: one it finds pending is what the wait set aside, and PHP chains
+         * the cancellation onto it, or keeps it alone if it is an exit(). */
         if (rc == -1) {
             oxphp_throw_exception("OxPHP\\Async\\AsyncException", "Async task cancelled", 0);
         }
@@ -5268,10 +5294,8 @@ static bool oxphp_select_collect(zval *arr, short events, bool buffered_is_ready
         /* The fetch php_stream_from_zval_no_verify() performs, minus the type
          * name that makes it raise a TypeError. Native raises exactly one for an
          * element that is not a live stream and then follows its own error path;
-         * a second one from here would chain onto it, and parking a fiber with
-         * an exception already pending is worse than that: Zend does not carry
-         * EG(exception) across a fiber switch, so it would surface in whichever
-         * fiber the scheduler resumes next — another request. */
+         * a second one from here would chain onto it, and a fiber parked with it
+         * pending would wait out a call native fails at once. */
         php_stream *stream = (php_stream *) zend_fetch_resource2_ex(
             elem, NULL, php_file_le_stream(), php_file_le_pstream());
         if (stream == NULL) return false;

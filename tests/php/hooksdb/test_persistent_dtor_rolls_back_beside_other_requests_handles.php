@@ -32,8 +32,8 @@ $fetch = static function (string $query): string {
 // connection — by unset(), and by an exception unwinding the frame it lives in.
 // The request also keeps a handle of its own on another connection, and runs on
 // the fiber the earlier request ran on: neither makes the kept handle its own.
-// Whether the exception still reaches its catch once a rollback has been sent
-// while it unwinds is a question of its own, not asked here.
+// An exception the rollback is sent and read under still reaches the catch
+// around the call.
 foreach (['unset', 'throw'] as $how) {
     $key = 'dtor-own-' . $how . '-' . bin2hex(random_bytes(4));
     $aside = 'dtor-own-aside-' . bin2hex(random_bytes(4));
@@ -49,6 +49,11 @@ foreach (['unset', 'throw'] as $how) {
         "{$how}: the handle was dropped the way this case means",
         $dropped,
         $how === 'throw' ? 'threw:true' : 'threw:false'
+    );
+    $t->assertContains(
+        "{$how}: the catch around the call ran only for the exception",
+        $dropped,
+        $how === 'throw' ? 'caught:true' : 'caught:false'
     );
     $t->assertSame("{$how}: and the transaction was checked on the connection it was opened on", $c[2] ?? 'none', $c[1] ?? 'unseen');
     $t->assertContains(
