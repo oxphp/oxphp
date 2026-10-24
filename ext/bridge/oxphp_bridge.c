@@ -7512,6 +7512,14 @@ void oxphp_pool_slot_free(void *slot_zv_heap) {
  *    `oxphp_bridge_capture_fatal` (operator-visible via the
  *    thread-local pop path) and clear the exception so the
  *    caller can go on to the next slot.
+ *  - If an exception is already in flight — the pool's last
+ *    reference went away while a throw or an exit() was on its way
+ *    out of a function, a built-in one included, or a destructor threw
+ *    as the slot before this one was freed — it is set aside while
+ *    $destroy runs and put back after, as the engine does around a
+ *    destructor. Left set, it would keep the engine from calling
+ *    $destroy, and the clearing above would take it for $destroy's own
+ *    and clear it in the middle of the unwinding.
  *
  * Frees `slot_zv_heap` (zval_ptr_dtor + efree) and returns
  * OXPHP_SHARED_INVOKE_SKIPPED when a $destroy was given and no PHP
@@ -7525,6 +7533,29 @@ static int oxphp_pool_destroy_invoke_unguarded(void *destroy_fcc_heap, void *slo
 
     if (destroy_fcc_heap && EG(current_execute_data)) {
         oxphp_pool_fcc_t *heap = (oxphp_pool_fcc_t *)destroy_fcc_heap;
+
+        /* An exception set on entry is not $destroy's: it was in flight
+         * already — the caller's, or one a destructor threw as the slot
+         * before this one was freed. Set aside step for step as
+         * zend_objects_destroy_object() sets one aside around a destructor:
+         * a frame of PHP code is pointed back at the instruction it was
+         * running, so that it reads as running it while $destroy does and a
+         * throw out of $destroy is recorded against it (an internal
+         * function's frame gets the same write, as the engine gives it
+         * there), and the exception is out of EG(exception) for the call. A
+         * bailout before it is put back leaves it set aside, as the engine
+         * leaves the one it set aside around a destructor. */
+        zend_execute_data *frame = EG(current_execute_data);
+        zend_object *pending = EG(exception);
+        const zend_op *pending_opline_before = NULL;
+        if (pending) {
+            if (frame->func && ZEND_USER_CODE(frame->func->common.type)) {
+                zend_rethrow_exception(frame);
+            }
+            frame->opline = EG(opline_before_exception);
+            pending_opline_before = EG(opline_before_exception);
+            EG(exception) = NULL;
+        }
 
         zval args[1];
         ZVAL_COPY(&args[0], slot);
@@ -7556,6 +7587,23 @@ static int oxphp_pool_destroy_invoke_unguarded(void *destroy_fcc_heap, void *slo
                     Z_STRVAL_P(msg_zv), Z_STRLEN_P(msg_zv));
             }
             zend_clear_exception();
+        }
+
+        /* Put back once the clearing above is done with $destroy's own. An
+         * exception set here was thrown by a destructor that clearing ran,
+         * and the one set aside is chained to it, as the engine chains it to
+         * one a destructor throws. What is released below — $destroy's
+         * return value, then the slot — is released with an exception set
+         * again, and the engine guards any destructor that runs there from it
+         * itself. */
+        if (pending) {
+            frame->opline = EG(exception_op);
+            EG(opline_before_exception) = pending_opline_before;
+            if (EG(exception)) {
+                zend_exception_set_previous(EG(exception), pending);
+            } else {
+                EG(exception) = pending;
+            }
         }
 
         zval_ptr_dtor(&ret_zv);

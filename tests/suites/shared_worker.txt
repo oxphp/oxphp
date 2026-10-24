@@ -32,3 +32,6 @@ shared/test_once_init_single_init
 shared/test_once_cross_thread
 shared/test_map_compare_and_set_concurrent
 shared/test_registry_remove_race_double_factory
+# A pool let go of while an exception or exit() unwinds the frame holding it,
+# on a worker thread: the same test runs in the shared suite without worker mode.
+shared/test_pool_destroy_during_unwind
