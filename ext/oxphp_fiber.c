@@ -394,13 +394,15 @@ bool oxphp_fiber_heap_back_under_limit(void) {
      * which lowers the count, then set the limit again, which also hands back
      * the chunks the allocator keeps in reserve where that is enough, and is
      * refused while more than the limit is still counted. Where handing those
-     * chunks back is what brings the count under memory_limit, that call
-     * succeeds without setting the limit, and the one in force can be lower
+     * chunks back is what brings the count under memory_limit, that call can
+     * succeed without setting the limit, and the one in force can be lower
      * than memory_limit's value: PHP 8.5 takes a memory_limit above
      * max_memory_limit as max_memory_limit without setting it, and putting
      * back a limit a request lowered is refused, and its value taken all the
      * same, while more than that value is counted. Set a second time, it is
-     * set: nothing is counted above it any more.
+     * set: nothing is counted above it any more. Only up to PHP 8.4.26 /
+     * 8.5.11 does the first call leave it unset; from 8.4.27 / 8.5.12 on it
+     * sets it there too, and the second sets the same value again.
      * Allocator calls only — no user code runs, so nothing here can bail out.
      * SYNC: php-src/Zend/zend_alloc.c zend_mm_gc(), zend_set_memory_limit();
      *       php-src/main/main.c OnChangeMemoryLimit() */
