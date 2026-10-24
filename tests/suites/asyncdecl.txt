@@ -16,6 +16,12 @@ asyncdecl/test_task_named_class_not_found
 asyncdecl/test_pool_factory_anonymous_class_in_task
 asyncdecl/test_pool_factory_calls_function_in_task
 asyncdecl/test_pool_destroy_calls_function_in_task
+# A factory or $destroy that a task runs leaves no garbage root of itself on the
+# task's thread, which a later request there would crash on.
+asyncdecl/test_pool_callable_leaves_no_gc_root_in_task
+asyncdecl/test_pool_leaves_its_closure_collectable
+asyncdecl/test_pool_callable_calls_the_object_it_was_given
+asyncdecl/test_pool_callable_copy_shares_what_its_closure_set
 asyncdecl/test_pool_internal_factory_in_task
 asyncdecl/test_pool_factory_first_run_by_request
 # A task's idle slot, when the pool goes away on the worker thread.
@@ -52,5 +58,10 @@ asyncdecl/test_preloaded_file_required_again
 asyncdecl/test_pool_named_factory_created_after_task_started
 asyncdecl/test_task_nested_closure_of_late_file
 asyncdecl/test_task_default_value_closure_of_late_file
+
+# A pool bound to a name whose factory and $destroy a task ran, then its
+# worker exits; a collection on the pool's threads after that.
+asyncdecl/test_pool_registry_callable_in_task_outlives_its_creator >> ?action=trigger
+asyncdecl/test_pool_registry_callable_in_task_outlives_its_creator >> ?action=check
 
 asyncdecl/test_server_alive

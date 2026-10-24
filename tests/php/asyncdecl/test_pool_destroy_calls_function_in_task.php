@@ -11,8 +11,8 @@ function asyncdecl_destroy_helper(object $r): void
 // A task's evict() runs $destroy on the task's thread for the slots that thread
 // holds idle. A $destroy that calls a function of this file is skipped the way
 // one that throws is: the slot is dropped all the same and evict() counts it.
-// On this worker thread, where the function exists, a $destroy of the same
-// shape runs.
+// One that calls only built-in code runs there. On this worker thread, where
+// the function exists, a $destroy that calls it runs.
 $t = new TestCase('test_pool_destroy_calls_function_in_task', 'asyncdecl');
 
 $ran = new \OxPHP\Shared\Counter();
@@ -34,9 +34,26 @@ $t->assertTrue('the task returns', $ok);
 $t->assertSame('the task\'s slot was idle, evict() dropped it, and none is left', $result, [1, 1, 0]);
 $t->assertSame('$destroy did not start', $ran->get(), 0);
 
-// The slot is minted and evicted on this worker thread, not in a task: a
-// $destroy that a task's evict() does run crashes the server at a later
-// request, for a reason that has nothing to do with this test.
+// The $destroy looks its counter up by name instead of capturing it: an object
+// a callback captured is still left among the task thread's garbage roots.
+$key = 'asyncdecl-destroy-ran-in-task-' . bin2hex(random_bytes(4));
+$ranInTask = \OxPHP\Shared\Registry::counter($key, static fn (): \OxPHP\Shared\Counter => new \OxPHP\Shared\Counter());
+$taskPool = new \OxPHP\Shared\Pool(
+    factory: static fn (): object => new \stdClass(),
+    destroy: static function (object $r) use ($key): void {
+        \OxPHP\Shared\Registry::counter($key, static fn (): \OxPHP\Shared\Counter => new \OxPHP\Shared\Counter())->add();
+    },
+    maxSize: 1,
+);
+[$ok, $result] = asyncdecl_settle(oxphp_async(static function () use ($taskPool): array {
+    $taskPool->acquire()->release();
+    return [$taskPool->evict(), $taskPool->stats()->size()];
+}));
+
+$t->assertTrue('in a task: the task returns', $ok);
+$t->assertSame('in a task: evict() dropped the slot', $result, [1, 0]);
+$t->assertSame('in a task: a $destroy calling only built-in code ran once', $ranInTask->get(), 1);
+
 $ranHere = new \OxPHP\Shared\Counter();
 $herePool = new \OxPHP\Shared\Pool(
     factory: static fn (): object => new \stdClass(),
