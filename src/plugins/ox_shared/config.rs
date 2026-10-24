@@ -39,15 +39,6 @@ pub enum LockDiagnosticsLevel {
 
 impl SharedConfig {
     pub fn from_ctx(ctx: &PluginContext) -> Result<Self, PluginError> {
-        for (key, advice) in DEPRECATED_KEYS {
-            if let Some(name) = deprecated_env_name(ctx, key) {
-                tracing::warn!(
-                    env_var = %name,
-                    "{name} is deprecated and ignored; {advice}"
-                );
-            }
-        }
-
         Ok(Self {
             enabled: shared_bool(ctx, "ENABLED", true)?,
             max_entries: parse_usize(shared_value(ctx, "MAX_ENTRIES"), 100_000),
@@ -64,43 +55,6 @@ impl SharedConfig {
             preview_string_limit: parse_usize(shared_value(ctx, "PREVIEW_STRING_LIMIT"), 256),
             preview_array_limit: parse_usize(shared_value(ctx, "PREVIEW_ARRAY_LIMIT"), 20),
         })
-    }
-}
-
-/// Settings still read, only to tell the operator they do nothing, with what
-/// to reach for instead.
-///
-/// - `SOFT_LIMIT_RATIO`: nothing ever acted on the threshold; the saturation
-///   gauge is where an alert on it belongs.
-/// - `POISON_STRICT`: no primitive consulted it. An exception thrown inside a
-///   `Mutex` closure never poisons the mutex, and whether a throwing `Once`
-///   factory is terminal is chosen per instance by its constructor argument.
-const DEPRECATED_KEYS: [(&str, &str); 2] = [
-    (
-        "SOFT_LIMIT_RATIO",
-        "alert on oxphp_shared_capacity_saturation instead",
-    ),
-    (
-        "POISON_STRICT",
-        "pass Once\\FailureMode::Poison to the Once constructor instead",
-    ),
-];
-
-/// The spelling under which a deprecated `key` is set, if it is.
-///
-/// Only the documented public form (`SHARED_*`) and the plugin-prefixed
-/// fallback (`OX_SHARED_*`) count. The bare-key tier of `shared_env` is the
-/// last-resort fallback for active settings and was never part of a
-/// deprecation's documented surface, so an unrelated `SOFT_LIMIT_RATIO` set
-/// for some other piece of software is not reported.
-fn deprecated_env_name(ctx: &PluginContext, key: &str) -> Option<String> {
-    let public = format!("SHARED_{key}");
-    if std::env::var(&public).is_ok() {
-        Some(public)
-    } else if ctx.config_prefixed(key).is_some() {
-        Some(format!("OX_SHARED_{key}"))
-    } else {
-        None
     }
 }
 
@@ -307,76 +261,5 @@ mod tests {
             msg.contains("OX_SHARED_TEST_FLAG"),
             "error must name the actual env var, got: {msg}"
         );
-    }
-
-    #[derive(Clone, Default)]
-    struct Captured(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
-
-    impl std::io::Write for Captured {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.lock().unwrap().extend_from_slice(buf);
-            Ok(buf.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Captured {
-        type Writer = Captured;
-
-        fn make_writer(&'a self) -> Self::Writer {
-            self.clone()
-        }
-    }
-
-    /// Run `SharedConfig::from_ctx` with `var=value` as the only spelling of
-    /// `key` set, and return what it logged.
-    fn from_ctx_log_with(key: &str, var: &str, value: &str) -> String {
-        let public = format!("SHARED_{key}");
-        let prefixed = format!("OX_SHARED_{key}");
-        let vars: Vec<(&str, Option<&str>)> = [public.as_str(), prefixed.as_str(), key]
-            .into_iter()
-            .map(|n| (n, (n == var).then_some(value)))
-            .collect();
-
-        let captured = Captured::default();
-        let subscriber = tracing_subscriber::fmt()
-            .with_writer(captured.clone())
-            .with_max_level(tracing::Level::WARN)
-            .with_ansi(false)
-            .finish();
-        crate::config::test_env::with_env(&vars, || {
-            tracing::subscriber::with_default(subscriber, || {
-                with_ctx!(|ctx: &PluginContext| SharedConfig::from_ctx(ctx).expect("config"))
-            })
-        });
-
-        let bytes = captured.0.lock().unwrap().clone();
-        String::from_utf8(bytes).expect("utf-8 log")
-    }
-
-    /// None of these settings drives anything, so a deployment still carrying
-    /// one is told so at startup, under whichever of the two documented
-    /// spellings it used — and not under the bare key, which may belong to
-    /// other software.
-    #[test]
-    fn deprecated_settings_are_reported_as_ignored() {
-        for (key, value) in [("SOFT_LIMIT_RATIO", "0.5"), ("POISON_STRICT", "true")] {
-            for var in [format!("SHARED_{key}"), format!("OX_SHARED_{key}")] {
-                let log = from_ctx_log_with(key, &var, value);
-                assert!(
-                    log.contains("WARN")
-                        && log.contains(&format!("{var} is deprecated and ignored")),
-                    "{var} must log a deprecation WARN, got: {log}"
-                );
-            }
-            let log = from_ctx_log_with(key, key, value);
-            assert!(
-                !log.contains(&format!("{key} is deprecated")),
-                "bare {key} must not be reported, got: {log}"
-            );
-        }
     }
 }
