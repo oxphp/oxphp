@@ -258,7 +258,7 @@ Returns `true` if the named header is present.
 $request->headers(): array
 ```
 
-Returns all headers as an associative array. Each key is the header name as received (no normalization), and each value is the header's value, its lines joined as `header()` joins them when it was sent as several.
+Returns all headers as an associative array. Each key is the header name in lowercase — a client's `Content-Type` is listed as `content-type`, over HTTP/1.1 and HTTP/2 alike — so look a key up in lowercase, or use `header()`, which ignores case. Each value is the header's value, its lines joined as `header()` joins them when it was sent as several.
 
 ```php
 <?php
@@ -270,7 +270,7 @@ if ($request->hasHeader('Authorization')) {
 }
 
 $all = $request->headers();
-// ["Content-Type" => "application/json", "Accept" => "...", ...]
+// ["content-type" => "application/json", "accept" => "...", ...]
 ```
 
 ---
