@@ -207,8 +207,7 @@ async fn h2_without_authority_keeps_its_host() {
 
 /// An HTTP/2 `CONNECT` carries `:authority` and no `:scheme` (RFC 9113
 /// section 8.5), and the authority is still its host: a `host` field naming
-/// another one is refused, though an HTTP/1.x target with no scheme keeps its
-/// `Host`.
+/// another one is refused.
 #[tokio::test]
 async fn h2_connect_host_naming_another_authority_is_refused() {
     let fx = start().await;
@@ -322,35 +321,15 @@ async fn h1_absolute_form_userinfo_is_not_part_of_the_host() {
     }
 }
 
-/// The URI parser finds an authority in a target with no scheme as well: the
-/// authority-form one RFC 9112 keeps for `CONNECT`, and one that only lacks
-/// its leading `/`. Neither is the absolute form RFC 9112 section 3.2.2
-/// speaks of, and the `Host` header stays as it came. Asked with `GET`,
-/// because a `CONNECT` never reaches the application.
-#[tokio::test]
-async fn h1_target_without_scheme_keeps_its_host() {
-    let fx = start().await;
-    for target in ["a.example:80", "index.php"] {
-        let head = format!(
-            "GET {target} HTTP/1.1\r\n\
-             Host: b.example\r\n\
-             Connection: close\r\n\r\n"
-        );
-        let (status, body) = get_h1(fx.addr, &head).await;
-        assert_eq!(status, 200, "{target}");
-        assert_eq!(delivered(&body), ["b.example"], "{target}");
-    }
-}
-
 /// What the server answers a `CONNECT` with.
 const CONNECT_REFUSED: (u16, &str) = (501, "501 Not Implemented: CONNECT is not supported");
 
 /// A `CONNECT` asks for a tunnel, and the server opens none: it is answered
 /// with `501`, which RFC 9110 section 9.1 has an origin server send for a
 /// method it does not implement, and the application is not run. That holds
-/// for the authority-form target RFC 9112 keeps for `CONNECT`, which would
-/// route as `/`, and for an origin-form one naming a script, which the
-/// HTTP/1.1 parser lets through with the method.
+/// for the authority-form target RFC 9112 keeps for `CONNECT`, and for an
+/// origin-form one naming a script, which the HTTP/1.1 parser lets through
+/// with the method.
 #[tokio::test]
 async fn h1_connect_is_refused_before_anything_runs() {
     let fx = start().await;

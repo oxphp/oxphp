@@ -35,4 +35,15 @@ if ($scriptName !== '' && $path === $scriptName) {
     $t->assertKeyMissing('PATH_INFO absent for app route', $_SERVER, 'PATH_INFO');
 }
 
+// Reached by an absolute-form target with an empty path,
+// `GET http://fw.example?case=empty-path`: the path is equivalent to `/`, and
+// REQUEST_URI carries it in front of the query.
+if (($_GET['case'] ?? '') === 'empty-path') {
+    $t->assertSame(
+        'REQUEST_URI of an absolute-form target with no path',
+        $_SERVER['REQUEST_URI'] ?? '',
+        '/?case=empty-path'
+    );
+}
+
 $t->done();

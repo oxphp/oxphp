@@ -55,7 +55,8 @@ fn is_query_method(method: &Method) -> bool {
 /// The URI parser also finds an authority in an HTTP/1.x target with no
 /// scheme: the authority-form `CONNECT example.com:443`, and a malformed
 /// target with no leading `/` such as `index.php`. That rule covers neither,
-/// and their `Host` stays as it came.
+/// and their `Host` stays as it came; the first is refused further on as a
+/// `CONNECT`, the second by `check_request_target`.
 ///
 /// The URI parser lets through an authority whose host is empty, such as
 /// `:80`, and RFC 9110 sections 4.2.1 and 4.2.2 have a recipient reject an
@@ -94,6 +95,78 @@ fn host_from_authority(parts: &mut http::request::Parts) -> Result<(), &'static 
     // An authority is printable ASCII, which a field value always accepts.
     if let Ok(value) = header::HeaderValue::from_str(host) {
         parts.headers.insert(header::HOST, value);
+    }
+    Ok(())
+}
+
+/// Refuse a request target in none of the forms its method may take, or an
+/// absolute URI with no host, and give an absolute-form target with an empty
+/// path the path `/`.
+///
+/// RFC 9112 section 3.2 gives an HTTP/1.x request target four forms: a path
+/// starting with `/` (origin-form), an absolute URI (absolute-form), the
+/// `host:port` of a `CONNECT` (authority-form) and the `*` of a server-wide
+/// `OPTIONS` (asterisk-form). The URI parser takes `*` with any method, and
+/// reads any other target with neither a leading `/` nor a `scheme://` as an
+/// authority-form one, whatever the method, where it parses as one at all:
+/// `index.php`, `mailto:u@x` and `:80` get through. Of these `mailto:u@x` is
+/// an absolute URI, but one with no host, which RFC 9110 sections 4.2.1 and
+/// 4.2.2 give every `http` and `https` URI. An HTTP/2 request carries
+/// the target in `:path`, which RFC 9113 section 8.3.1 has start with `/`
+/// unless it is the `*` of an `OPTIONS`; the HTTP/2 layer does not look at how
+/// it starts, and lets a request with no `:authority` leave it out. A `:path`
+/// holding only a fragment reaches this as an empty one, which is refused
+/// without an `:authority` and read as `/` with one.
+/// RFC 9112 section 3 has a server answer an invalid request line with `400`
+/// or a redirect rather than correct it and serve the request, and nginx
+/// refuses every one of these with `400`, `OPTIONS *` too. A `CONNECT` has
+/// been answered by the time this runs, so its authority-form target never
+/// gets here.
+///
+/// An absolute-form target may have an empty path, as `http://example.com?x=1`
+/// has. The same request in origin-form carries the path `/`, which RFC 9112
+/// section 3.2.1 has a client send for an empty one, so the path and query
+/// become `/?x=1` and `REQUEST_URI` starts with a `/` as it does for that
+/// request; the path the router and the request object read was `/` already.
+/// An empty path with no query reads as `/` as it is, the server-wide
+/// `OPTIONS` of RFC 9112 section 3.2.4 among them, and is left alone.
+///
+/// A refused request gets a `400` with the body this returns.
+fn check_request_target(parts: &mut http::request::Parts) -> Result<(), &'static [u8]> {
+    const INVALID: &[u8] = b"400 Bad Request: invalid request target";
+    // None for an authority with no scheme in front of it.
+    let Some(target) = parts.uri.path_and_query().map(|pq| pq.as_str()) else {
+        return Err(INVALID);
+    };
+    if target == "*" {
+        return if parts.method == Method::OPTIONS {
+            Ok(())
+        } else {
+            Err(INVALID)
+        };
+    }
+    // An empty path and query reads as `/` here. Over HTTP/2 it also comes of
+    // a `:path` left out, which the HTTP/2 layer allows without an
+    // `:authority`, or of one holding only a fragment, which the parser drops;
+    // without an `:authority` such a URI has no path at all.
+    if target.starts_with('/') && !parts.uri.path().is_empty() {
+        return Ok(());
+    }
+    if parts.version == http::Version::HTTP_2 {
+        return Err(INVALID);
+    }
+    // Over HTTP/1.x what is left is an absolute-form target whose authority is
+    // followed by a query: the parser ends the authority at a `/`, `?` or `#`
+    // and drops the fragment, and an empty path and query reads as `/`. A `/`
+    // in front of a query that parsed is a path and query that parses, and a
+    // scheme and an authority with it make a URI.
+    let path_and_query = format!("/{target}");
+    let mut uri = parts.uri.clone().into_parts();
+    if let Ok(path_and_query) = path_and_query.parse() {
+        uri.path_and_query = Some(path_and_query);
+        if let Ok(uri) = http::Uri::from_parts(uri) {
+            parts.uri = uri;
+        }
     }
     Ok(())
 }
@@ -694,6 +767,19 @@ async fn dispatch_request(
             refusal.body(full_body(Bytes::from_static(
                 b"501 Not Implemented: CONNECT is not supported",
             )))?,
+            0,
+            PhpExecData::default(),
+        ));
+    }
+
+    // After the CONNECT refusal: the authority-form target of a CONNECT is one
+    // this would refuse.
+    if let Err(reason) = check_request_target(&mut parts) {
+        return Ok((
+            Response::builder()
+                .status(StatusCode::BAD_REQUEST)
+                .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+                .body(full_body(Bytes::from_static(reason)))?,
             0,
             PhpExecData::default(),
         ));

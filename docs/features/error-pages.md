@@ -53,7 +53,7 @@ OxPHP swaps the body of every 4xx or 5xx that reaches the response pipeline. The
 
 | File | Status | When OxPHP returns it |
 |------|--------|-----------------------|
-| `400.html` | Bad Request | A `QUERY` request (RFC 10008) sent without a `Content-Type` header; an HTTP/2 request whose `Host` header names a host or port other than the one its `:authority` names; a request whose absolute-form target or HTTP/2 `:authority` names an empty host (`http://:80/`) |
+| `400.html` | Bad Request | A `QUERY` request (RFC 10008) sent without a `Content-Type` header; an HTTP/2 request whose `Host` header names a host or port other than the one its `:authority` names; a request whose absolute-form target or HTTP/2 `:authority` names an empty host (`http://:80/`); a request target in none of the forms HTTP gives it (`GET index.php`, an HTTP/2 `:path` without a leading `/`, an HTTP/2 request with neither a `:path` nor an `:authority`, `*` with a method other than `OPTIONS`) |
 | `404.html` | Not Found | No matching file or route; a blocked dotfile (`.env`, `.git/`); a direct `.php` request in Framework mode; the default `PHP_DENY_PATHS` fallback |
 | `413.html` | Payload Too Large | The request body exceeds the maximum size |
 | `416.html` | Range Not Satisfiable | An unsatisfiable `Range` header on a static file (`Content-Range` is preserved) |

@@ -22,6 +22,8 @@ Every request runs through a shared pipeline before the mode-specific logic kick
 
 A `CONNECT` request never reaches this pipeline: it asks for a tunnel, which OxPHP does not open. It is refused before routing with `501 Not Implemented`, and an HTTP/1.1 connection closes after that answer. A malformed one gets `400 Bad Request` instead (see [Error Pages](error-pages.md#status-codes-worth-providing)), and an HTTP/2 one with a non-zero `content-length` never reaches OxPHP: the connection it arrived on is closed, along with every other request in flight on it.
 
+Neither does a request target in none of the forms HTTP gives it: a target with neither a leading `/` nor a `scheme://` in front, as in `GET index.php`, an HTTP/2 `:path` without a leading `/`, an HTTP/2 request with neither a `:path` nor an `:authority`, or `*` with a method other than `OPTIONS` is refused before routing with `400 Bad Request` (see [Superglobals](../php/superglobals.md#standard-variables)). An HTTP/2 request with an `:authority` and no `:path` never reaches OxPHP: the HTTP/2 layer resets its stream. An absolute-form target with an empty path, as in `GET http://example.com?page=2`, is routed as `/`.
+
 The classification step is the key efficiency: the disk check for static assets (`/style.css`, `/logo.png`) is performed **once** in the shared layer for `OtherExtension` URIs, so all three modes pay the same cost.
 
 ## Configuration
