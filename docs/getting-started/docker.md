@@ -376,6 +376,29 @@ In development, set `opcache.validate_timestamps = 1` and `opcache.revalidate_fr
 
 See [OPcache](../php/opcache.md) for recommended settings and JIT configuration.
 
+### Memory limits
+
+PHP counts memory per thread: each worker, and each thread of the `oxphp_async()` pool, has its own `memory_limit`. Running past it raises PHP's `Allowed memory size … exhausted` fatal error, and the server goes on.
+
+From PHP 8.4.27 and 8.5.12 on, PHP has a hard limit above it: `memory_hard_limit_percent` percent of `memory_limit` — by default twice the limit, or the limit plus 1 GiB for a limit above 1 GiB. An allocation that would take a thread's memory past the hard limit makes PHP end the process on the spot, with no hook for the server to stop it — unless it is one PHP is able to refuse, such as `str_repeat()` asked for more than is left, which fails with the usual error. Under PHP-FPM it ends one child process; under OxPHP it ends the server, in every routing mode, and every request in flight on every worker ends with it. The process exits with code 137, and the only trace is one line on stderr:
+
+```
+Hard memory limit of 134217728 bytes exhausted (tried to allocate 125833216 bytes) in /var/www/html/public/report.php on line 7
+```
+
+One large allocation is enough — doubling a string that takes nearly all of `memory_limit` (`$s . $s`), say — and so is the last of many small ones made by an internal function that keeps allocating before PHP gets to report the error.
+
+To move the hard limit, set `memory_hard_limit_percent` (`100` or more, or `-1` for the default) in your own `.ini` file:
+
+```ini
+memory_limit = 128M
+memory_hard_limit_percent = 400
+```
+
+The lower the value, the closer the hard limit sits to `memory_limit`: at `100` the two are equal, and running past `memory_limit` ends the server unless PHP can refuse the allocation. A higher value only moves the limit: a request that overshoots `memory_limit` but stays under the new hard limit ends with the usual fatal error instead of ending the server, as long as the memory is there. Each thread's PHP memory may now grow to `memory_limit` × `memory_hard_limit_percent` / 100 before PHP steps in, so size it against what the container has to spare beyond the other workers' usual use: where the memory is not there, the kernel ends the process when the container runs out — with the same exit code 137, and without PHP's line naming the script; Docker reports the container as `OOMKilled`.
+
+Bringing the server back after such an exit is left to the container runtime or process supervisor — `restart: unless-stopped` in the [Compose example](#production) above, say.
+
 ## Health Checks
 
 Add a Docker health check to let Docker or your orchestrator monitor container health. This requires `INTERNAL_ADDR` to be set.
