@@ -27,6 +27,18 @@ asyncdecl/test_pool_trampoline_destroy_called_twice
 asyncdecl/test_pool_trampoline_callable_freed_with_the_pool
 asyncdecl/test_pool_trampoline_factory_in_task
 asyncdecl/test_pool_trampoline_leaves_no_attributes_in_the_slot
+# A factory or $destroy reaching a function of the test file other than through
+# its own body: through an object or a closure it captured, $this, self::,
+# static::, new static, __call(), __callStatic() or a closure's __invoke, or
+# through the __destruct() of the slots it makes. Each took the whole process
+# down before.
+asyncdecl/test_pool_factory_reaches_function_through_captured_object
+asyncdecl/test_pool_factory_reaches_function_through_its_scope
+asyncdecl/test_pool_factory_reaches_function_through_this
+asyncdecl/test_pool_factory_reaches_function_through_captured_closure
+asyncdecl/test_pool_factory_reaches_function_through_a_trampoline
+asyncdecl/test_pool_slot_destructor_reaches_function_in_task
+asyncdecl/test_pool_destroy_reaches_function_through_captured_object
 
 # Preloaded code exists on every thread.
 asyncdecl/test_task_class_named_like_preloaded
