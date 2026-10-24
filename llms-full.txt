@@ -559,6 +559,8 @@ From PHP 8.4.27 and 8.5.12 on, PHP has a hard limit above it: `memory_hard_limit
 Hard memory limit of 134217728 bytes exhausted (tried to allocate 125833216 bytes) in /var/www/html/public/report.php on line 7
 ```
 
+The line number in it can be wrong: PHP gives the last line it recorded, and some operations — a concatenation such as `$s . $s` among them — allocate without recording their own, so the line given can be that of a statement that ran earlier.
+
 One large allocation is enough — doubling a string that takes nearly all of `memory_limit` (`$s . $s`), say — and so is the last of many small ones made by an internal function that keeps allocating before PHP gets to report the error.
 
 To move the hard limit, set `memory_hard_limit_percent` (`100` or more, or `-1` for the default) in your own `.ini` file:
@@ -887,7 +889,7 @@ COPY docker/php.ini /usr/local/etc/php/conf.d/zz-app.ini
 COPY --chown=www-data:www-data . /var/www/html/public
 ```
 
-PHP reads every `.ini` file in that directory in alphabetical order and the last value wins, so the `zz-` prefix makes yours apply after the image's own files. Mounting the file as a volume works too — see [PHP configuration](docker.md#php-configuration). One difference comes with `memory_limit`: on PHP 8.4.27 / 8.5.12 and later, a request that takes its thread's memory past PHP's hard limit above it ends the whole OxPHP process, where under PHP-FPM it ends one child — see [Memory limits](docker.md#memory-limits). The rest maps onto environment variables:
+PHP reads every `.ini` file in that directory in alphabetical order and the last value wins, so the `zz-` prefix makes yours apply after the image's own files. Mounting the file as a volume works too — see [PHP configuration](docker.md#php-configuration). The rest maps onto environment variables:
 
 | nginx / PHP-FPM | OxPHP |
 |---|---|
@@ -907,6 +909,7 @@ PHP reads every `.ini` file in that directory in alphabetical order and the last
 **4. Check the behaviour differences.**
 
 - **`max_execution_time` counts wall-clock time.** Under PHP-FPM time spent waiting on a database or an HTTP call is not charged; under thread-safe PHP it is. A slow endpoint that never hit the limit before can start returning `504` — see [Timeouts](../features/timeouts.md#wall-clock-not-cpu-time).
+- **PHP's hard memory limit ends the whole server.** On PHP 8.4.27 / 8.5.12 and later, a request that takes its thread's memory past the hard limit PHP sets above `memory_limit` ends the whole OxPHP process, where under PHP-FPM it ends one child — see [Memory limits](docker.md#memory-limits).
 - **`php_sapi_name()` returns `cli-server`.** Code that branches on `fpm-fcgi` needs another check: `function_exists('oxphp_request_id')`.
 - **A few `$_SERVER` keys differ.** `SERVER_ADDR`, `PATH_TRANSLATED` and `REDIRECT_STATUS` are not set, and `PHP_AUTH_USER` / `PHP_AUTH_PW` are not extracted — read `HTTP_AUTHORIZATION` — see [Differences from PHP-FPM](../php/superglobals.md#differences-from-php-fpm).
 - **Framing is restricted by default.** Responses carry `X-Frame-Options: SAMEORIGIN` and a matching `frame-ancestors` policy; set `FRAME_OPTIONS=off` if you manage framing elsewhere or embed the app in another origin.
@@ -16439,7 +16442,7 @@ For details, see [Internal Server](../features/internal-server.md).
 
 OxPHP provides several guarantees to keep your application running reliably in production:
 
-- **Request isolation** — if a PHP script crashes or triggers a fatal error, only that single request is affected. The server continues handling all other requests normally, and the crashed worker is brought back as described below. The exception is an allocation past PHP's hard memory limit, on PHP 8.4.27 / 8.5.12 and later: PHP ends the whole server process, and bringing it back is left to the container runtime or process supervisor — see [Memory limits](../getting-started/docker.md#memory-limits).
+- **Request isolation** — if a PHP script triggers a fatal error, only that single request is affected. The server continues handling all other requests normally, and a worker that has to be replaced is brought back as described below. The exception is an allocation past PHP's hard memory limit, on PHP 8.4.27 / 8.5.12 and later: PHP ends the whole server process, and bringing it back is left to the container runtime or process supervisor — see [Memory limits](../getting-started/docker.md#memory-limits).
 - **Automatic worker respawn** — OxPHP monitors the health of all PHP workers and replaces one that dies unexpectedly, without manual intervention. A static pool refills to its configured count, so the replacement is one-for-one; a dynamic pool refills only to its minimum, and a worker lost above that is regained by ordinary scale-up. The exception is a bug in OxPHP itself that brings down a worker, or an `oxphp_async()` pool thread, while a PHP request is open on it: that stops the whole server, because the request cannot be shut down safely, and restarting it is left to the container runtime or process supervisor.
 - **Backpressure protection** — the bounded request queue prevents overload. When the server is at capacity, new requests receive a 529 response with a `Retry-After` header rather than queueing indefinitely and causing cascading timeouts.
 - **Path traversal protection** — all URL paths are sanitized before filesystem access. Percent-encoded traversal attempts, `..` segments, and paths that escape the document root are blocked.

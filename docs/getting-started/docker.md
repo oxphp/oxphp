@@ -386,6 +386,8 @@ From PHP 8.4.27 and 8.5.12 on, PHP has a hard limit above it: `memory_hard_limit
 Hard memory limit of 134217728 bytes exhausted (tried to allocate 125833216 bytes) in /var/www/html/public/report.php on line 7
 ```
 
+The line number in it can be wrong: PHP gives the last line it recorded, and some operations — a concatenation such as `$s . $s` among them — allocate without recording their own, so the line given can be that of a statement that ran earlier.
+
 One large allocation is enough — doubling a string that takes nearly all of `memory_limit` (`$s . $s`), say — and so is the last of many small ones made by an internal function that keeps allocating before PHP gets to report the error.
 
 To move the hard limit, set `memory_hard_limit_percent` (`100` or more, or `-1` for the default) in your own `.ini` file:

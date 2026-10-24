@@ -237,7 +237,7 @@ flowchart TD
 ```
 
 - **Async HTTP server** — multi-threaded by default, tunable via `TOKIO_WORKERS`
-- **PHP worker pool** — each worker is a dedicated OS thread; a crash in one worker does not affect the others, except an allocation past PHP's hard memory limit on PHP 8.4.27 / 8.5.12 and later, which ends the whole process — see [Memory limits](docs/getting-started/docker.md#memory-limits)
+- **PHP worker pool** — each worker is a dedicated OS thread; a fatal error in one worker does not affect the others, except an allocation past PHP's hard memory limit on PHP 8.4.27 / 8.5.12 and later, which ends the whole process — see [Memory limits](docs/getting-started/docker.md#memory-limits)
 - Requests wait in a bounded queue between the HTTP server and the PHP workers; a request that waits longer than `QUEUE_WAIT_TIMEOUT_MS` for a worker is refused with 529
 - **Async pool** — separate threads for `oxphp_async()` tasks, preventing slowdowns in the main worker pool
 - **Worker mode** — persistent PHP workers that stay alive between requests; autoloaders and DB connections are shared across all requests handled by that worker
