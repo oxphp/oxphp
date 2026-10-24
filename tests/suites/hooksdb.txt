@@ -134,6 +134,13 @@ hooksdb/test_persistent_dtor_under_streaming_holder
 hooksdb/test_persistent_dtor_gc_keeps_holder_transaction
 hooksdb/test_persistent_dtor_gc_rolls_back_orphaned_transaction
 hooksdb/test_persistent_dtor_follows_last_user
+# From PHP 8.4.27 and 8.5.12 on, PDO keeps a pooled connection's transaction open
+# while other handles on it remain. A request's own handle dropped beside an
+# earlier request's kept one — by unset(), by an exception, or after the request
+# that opened the transaction has ended — still rolls it back; a request that
+# drops one of two handles of its own still keeps the transaction for the other.
+hooksdb/test_persistent_dtor_rolls_back_beside_other_requests_handles
+hooksdb/test_persistent_dtor_leaves_transaction_to_holders_other_handle
 # PDO::rollBack() from a request whose wait for a held connection gave up
 # returns false and leaves the holder's transaction alone.
 hooksdb/test_persistent_rollback_refused_on_held_connection
