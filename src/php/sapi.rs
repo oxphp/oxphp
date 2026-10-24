@@ -1673,7 +1673,10 @@ unsafe extern "C" fn cli_log_message(message: *const c_char, _syslog_type: c_int
 ///
 /// The `REQUEST_DATA` borrow is projected to a raw slice and released before
 /// the first call into PHP. `php_register_variable_safe` allocates on the Zend
-/// heap, and an allocation that hits `memory_limit` raises a fatal — which
+/// heap, and up to PHP 8.4.26 / 8.5.11 an allocation that hits `memory_limit`
+/// raises a fatal on the spot. On any release it can also raise a warning,
+/// which runs the script's error handler, if it has set one, from inside this
+/// loop, and an `E_USER_ERROR` raised there is a fatal too. Either fatal
 /// unwinds by longjmp, straight out of this frame, running no Rust destructor
 /// on the way. A borrow guard still alive at that point would leave
 /// `REQUEST_DATA` borrowed for the rest of this thread's life, and the next
@@ -5981,7 +5984,8 @@ type PairsCb = unsafe extern "C" fn(*const c_char, usize, *const c_char, usize, 
 /// borrow already released.
 ///
 /// `cb` builds a PHP array, so it allocates on the Zend heap for every entry
-/// and can longjmp out of this frame on a fatal — see
+/// and, up to PHP 8.4.26 / 8.5.11, can longjmp out of this frame on a fatal
+/// raised by one of those allocations — see
 /// `oxphp_register_server_variables` for why no borrow guard may be alive
 /// across that. `project` runs under the borrow and hands back only the list's
 /// address and length; the list is rebuilt only between requests, so it stays
@@ -6690,6 +6694,56 @@ mod tests {
         assert_eq!(server_var_values("CONTENT_LENGTH"), ["5"]);
         assert_eq!(raw_header_values("content-length"), ["5"]);
         REQUEST_DATA.with(|rd| assert_eq!(rd.borrow().content_length, 5));
+    }
+
+    /// Pushes onto the `Vec<bool>` behind `seen`, for every pair it is handed,
+    /// whether `REQUEST_DATA` could be borrowed mutably at that moment.
+    unsafe extern "C" fn push_whether_request_data_is_free(
+        _key: *const c_char,
+        _key_len: usize,
+        _val: *const c_char,
+        _val_len: usize,
+        seen: *mut c_void,
+    ) {
+        let free = REQUEST_DATA.with(|rd| rd.try_borrow_mut().is_ok());
+        (*seen.cast::<Vec<bool>>()).push(free);
+    }
+
+    /// Up to PHP 8.4.26 / 8.5.11 an allocation past `memory_limit` while PHP
+    /// copies a pair longjmps out of the walk, past every destructor in it: a
+    /// `REQUEST_DATA` guard alive there stays taken for good. The bailout
+    /// profile drives that end to end, but only on those releases — later ones
+    /// let the allocation through and report the error once the call has
+    /// returned, or end the process, past PHP's hard memory limit or on the
+    /// system refusing the memory — so this holds the rule on any engine.
+    #[test]
+    fn pair_callbacks_hand_out_pairs_with_the_request_data_borrow_released() {
+        let mut req = queued_request(None).script;
+        req.headers
+            .insert(header::COOKIE, HeaderValue::from_static("a=1"));
+        req.query_string = "q=1".to_string();
+        // Not `set_request_data`: see `denied_path_server_var_keeps_leading_slash`.
+        fill_request_data(&req);
+
+        let walks: [(&str, unsafe extern "C" fn(PairsCb, *mut c_void)); 3] = [
+            ("headers", req_headers_all_cb),
+            ("cookies", req_cookies_all_cb),
+            ("query", req_query_params_all_cb),
+        ];
+        for (name, walk) in walks {
+            let mut seen: Vec<bool> = Vec::new();
+            unsafe {
+                walk(
+                    push_whether_request_data_is_free,
+                    (&mut seen as *mut Vec<bool>).cast(),
+                )
+            };
+            assert!(!seen.is_empty(), "{name}: no pair was handed out");
+            assert!(
+                seen.iter().all(|&free| free),
+                "{name}: a pair was handed out with REQUEST_DATA borrowed"
+            );
+        }
     }
 
     /// `take_from_queue` moves a process-wide tick, so every test that reads it
