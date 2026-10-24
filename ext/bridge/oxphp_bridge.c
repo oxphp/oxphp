@@ -7256,11 +7256,13 @@ int oxphp_shared_invoke_2_ret_stop(zval *callable,
  *
  *  oxphp_pool_fcc_t is emalloc'd at pool_create and holds a
  *  ZVAL_COPY of the callable, which keeps a closure alive, and with
- *  it the function and the $this the fcc points to. Any other
- *  fcc.object gets no reference of its own: it stays alive while the
- *  callable holds it — $object in [$object, 'method'], unless by
- *  reference — and not at all when the engine took it from the
- *  $this of the code creating the pool. The callable is resolved
+ *  it the function and the $this the fcc points to. A closure, and
+ *  the closure of [$closure, '__invoke'], is held as the pool's own
+ *  copy of it (oxphp_pool_own_closure), which the fcc then points to.
+ *  Any other fcc.object gets no reference of its own: it stays alive
+ *  while the callable holds it — $object in [$object, 'method'],
+ *  unless by reference — and not at all when the engine took it from
+ *  the $this of the code creating the pool. The callable is resolved
  *  once, on the thread creating the pool, and called through
  *  oxphp_pool_call_fcc on whichever thread runs the factory or
  *  $destroy.
@@ -7279,6 +7281,56 @@ typedef struct {
     zval callable_zv; /* keeps the Closure/callable op_array alive */
 } oxphp_pool_fcc_t;
 
+/* The pool's own copy of a closure it stores: the same body, $this and
+ * captured values. `clone` copies the closure's table of variables, and the
+ * copy turns a variable that only the closure holds a reference to into a
+ * plain value: one captured by reference whose variable outside has gone
+ * away, or a `static` a call has already set. The copy would not share it,
+ * and the first call of a copy whose `static` has a non-constant initializer
+ * would crash, expecting a reference there. Such a slot gets the closure's
+ * reference back. A `static` not set yet is set in the copy's own table when
+ * the copy runs it, with a reference made in the memory of the thread running
+ * it, unless the closure was made from a function or method, as f(...) makes
+ * one, which uses the function's table.
+ *
+ * A call to a closure takes a reference to it and drops it when the call
+ * returns (zend_call_function(), the VM's leave helper), and a drop that
+ * leaves references puts the object in the garbage collector's buffer of
+ * possible roots of the thread making the call, writing that buffer's index
+ * into the object. A factory or $destroy runs on any PHP thread, and each
+ * thread has a buffer of its own: an entry in another thread's buffer points
+ * at an object the creating request frees, and that request, freeing it,
+ * takes it out of its own buffer by the other buffer's index. The copy is
+ * marked not collectable, which the engine checks before it adds an object it
+ * releases as a root (GC_MAY_LEAK), so no call on any thread adds it. The
+ * collector still frees a cycle through the copy when it starts from another
+ * object in it; a cycle with no other object it could start from, as keeping
+ * what Closure::getCurrent() returns can make, stays until the request ends. */
+static void oxphp_pool_own_closure(zval *out, zend_object *closure) {
+    zend_object *copy = closure->handlers->clone_obj(closure);
+    const zend_function *func = zend_get_closure_method_def(closure);
+    if (func->type == ZEND_USER_FUNCTION) {
+        HashTable *from = ZEND_MAP_PTR_GET(func->op_array.static_variables_ptr);
+        HashTable *to = ZEND_MAP_PTR_GET(
+            zend_get_closure_method_def(copy)->op_array.static_variables_ptr);
+        /* zend_array_dup() keeps every slot at its index: nothing is ever
+         * deleted from the table, and ZEND_BIND_STATIC finds a slot by its
+         * offset. */
+        if (from && to && from != to) {
+            for (uint32_t i = 0; i < from->nNumUsed; i++) {
+                zval *ref = &from->arData[i].val;
+                zval *slot = &to->arData[i].val;
+                if (Z_ISREF_P(ref) && !Z_ISREF_P(slot)) {
+                    zval_ptr_dtor(slot);
+                    ZVAL_COPY(slot, ref);
+                }
+            }
+        }
+    }
+    ZVAL_OBJ(out, copy);
+    GC_ADD_FLAGS(copy, GC_NOT_COLLECTABLE);
+}
+
 /* Allocate a fcc_heap from a user callable. Returns 0 on success
  * with `*out_fcc_heap` populated, -1 if `callable` is not a valid
  * PHP callable. The caller must pair with oxphp_pool_fcc_free. */
@@ -7287,14 +7339,31 @@ int oxphp_pool_fcc_new(void *callable_zval, void **out_fcc_heap) {
     *out_fcc_heap = NULL;
 
     zval *callable = (zval *)callable_zval;
+    zval stored;
+    if (Z_TYPE_P(callable) == IS_OBJECT && Z_OBJCE_P(callable) == zend_ce_closure) {
+        oxphp_pool_own_closure(&stored, Z_OBJ_P(callable));
+    } else {
+        ZVAL_COPY(&stored, callable);
+    }
     zend_fcall_info fci;
     zend_fcall_info_cache fcc;
     char *err = NULL;
-    if (zend_fcall_info_init(callable, 0, &fci, &fcc, NULL, &err) != SUCCESS) {
+    if (zend_fcall_info_init(&stored, 0, &fci, &fcc, NULL, &err) != SUCCESS) {
         if (err) efree(err);
+        zval_ptr_dtor(&stored);
         return -1;
     }
     if (err) efree(err);
+
+    /* [$closure, '__invoke'] calls the closure it is made on. */
+    if ((fcc.function_handler->common.fn_flags & ZEND_ACC_CALL_VIA_TRAMPOLINE)
+            && fcc.object && fcc.object->ce == zend_ce_closure) {
+        zval copy;
+        oxphp_pool_own_closure(&copy, fcc.object);
+        fcc.object = Z_OBJ(copy);
+        zval_ptr_dtor(&stored);
+        ZVAL_COPY_VALUE(&stored, &copy);
+    }
 
     /* A callable reaching __call() or __callStatic() resolves to a
      * trampoline, which the engine builds for a single call, in a slot of
@@ -7314,7 +7383,7 @@ int oxphp_pool_fcc_new(void *callable_zval, void **out_fcc_heap) {
 
     oxphp_pool_fcc_t *heap = emalloc(sizeof(oxphp_pool_fcc_t));
     heap->fcc = fcc;
-    ZVAL_COPY(&heap->callable_zv, callable);
+    ZVAL_COPY_VALUE(&heap->callable_zv, &stored);
     *out_fcc_heap = (void *)heap;
     oxphp_publish_map_ptr_last();
     return 0;
