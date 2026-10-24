@@ -30,7 +30,7 @@ COPY docker/php.ini /usr/local/etc/php/conf.d/zz-app.ini
 COPY --chown=www-data:www-data . /var/www/html/public
 ```
 
-PHP reads every `.ini` file in that directory in alphabetical order and the last value wins, so the `zz-` prefix makes yours apply after the image's own files. Mounting the file as a volume works too — see [PHP configuration](docker.md#php-configuration). One difference comes with `memory_limit`: on PHP 8.4.27 / 8.5.12 and later, a request that takes its thread's memory past PHP's hard limit above it ends the whole OxPHP process, where under PHP-FPM it ends one child — see [Memory limits](docker.md#memory-limits). The rest maps onto environment variables:
+PHP reads every `.ini` file in that directory in alphabetical order and the last value wins, so the `zz-` prefix makes yours apply after the image's own files. Mounting the file as a volume works too — see [PHP configuration](docker.md#php-configuration). The rest maps onto environment variables:
 
 | nginx / PHP-FPM | OxPHP |
 |---|---|
@@ -50,6 +50,7 @@ PHP reads every `.ini` file in that directory in alphabetical order and the last
 **4. Check the behaviour differences.**
 
 - **`max_execution_time` counts wall-clock time.** Under PHP-FPM time spent waiting on a database or an HTTP call is not charged; under thread-safe PHP it is. A slow endpoint that never hit the limit before can start returning `504` — see [Timeouts](../features/timeouts.md#wall-clock-not-cpu-time).
+- **PHP's hard memory limit ends the whole server.** On PHP 8.4.27 / 8.5.12 and later, a request that takes its thread's memory past the hard limit PHP sets above `memory_limit` ends the whole OxPHP process, where under PHP-FPM it ends one child — see [Memory limits](docker.md#memory-limits).
 - **`php_sapi_name()` returns `cli-server`.** Code that branches on `fpm-fcgi` needs another check: `function_exists('oxphp_request_id')`.
 - **A few `$_SERVER` keys differ.** `SERVER_ADDR`, `PATH_TRANSLATED` and `REDIRECT_STATUS` are not set, and `PHP_AUTH_USER` / `PHP_AUTH_PW` are not extracted — read `HTTP_AUTHORIZATION` — see [Differences from PHP-FPM](../php/superglobals.md#differences-from-php-fpm).
 - **Framing is restricted by default.** Responses carry `X-Frame-Options: SAMEORIGIN` and a matching `frame-ancestors` policy; set `FRAME_OPTIONS=off` if you manage framing elsewhere or embed the app in another origin.
