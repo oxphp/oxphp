@@ -161,13 +161,16 @@ hooksdb/test_exception_survives_a_destructor_read
 hooksdb/test_session_holder_waits_for_a_claim
 hooksdb/test_session_slot_claim_cycle_breaks
 
-# Last, because both of these end by destroying the connection they hold: a fiber
+# Last, because these end by destroying the connection they hold: a fiber
 # parked inside a socket read holds the stream across the suspension, and another
 # fiber closing that same stream frees it under the reader. Once through a raw
 # resource, where nothing serialises the close at all, and once through the client
-# call that does wait but is bounded and eventually delegates.
+# call that does wait but is bounded and eventually delegates. The third is the
+# second with the read made by a destructor while an exception unwinds: the fatal
+# still ends the request, and does not report that exception as uncaught.
 hooksdb/test_stream_closed_under_parked_reader
 hooksdb/test_shared_mysqli_close_under_parked_reader
+hooksdb/test_shared_mysqli_close_under_unwinding_reader
 
 # After everything else, because the first of these retires the worker. A
 # persistent connection belongs to the thread that opened it, and a thread that

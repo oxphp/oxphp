@@ -3068,9 +3068,11 @@ void oxphp_bridge_set_fiber_fd_wait(oxphp_fiber_fd_wait_fn_t fn) {
  * Not with an exception pending in a request fiber: an output handler that
  * threw on the way here, whose output PHP then hands on without it and
  * flushes. Zend does not carry EG(exception) across a fiber switch, and the
- * scheduler clears what it finds pending once the fiber has parked, so the
- * flush would come back with the exception gone and the script carry on as
- * though the handler had returned. The flush does not wait there at all: the
+ * scheduler clears what it finds pending once the fiber has parked. The wait
+ * on `room_fd` sets the exception aside for the suspension and puts it back;
+ * the fiber sleep does not, and a flush that slept would come back with the
+ * exception gone and the script carry on as though the handler had returned.
+ * The flush does not wait there at all: the
  * output is left for the next flush, or for the end of the request, which hands
  * it to the stream without waiting. Waiting on the thread would keep the
  * exception too, but hold every other request on the thread until the client
