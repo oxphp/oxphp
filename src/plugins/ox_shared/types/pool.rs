@@ -1744,10 +1744,10 @@ pub unsafe extern "C" fn oxphp_shared_pool_create(
 ///
 /// `timeout_ms`: -1 = wait forever, 0 = try only, >0 = milliseconds.
 ///
-/// Returns `OXPHP_FIBER_UNWIND` when the fiber was destroyed while parked:
-/// the caller returns to PHP without raising anything, and the VM unwinds
-/// with the exit already pending. Its value is also `SharedError::Cycle`'s,
-/// which no pool path returns, so callers check for it before mapping codes.
+/// Returns `OXPHP_FIBER_UNWIND` when the park returned it — the fiber is
+/// unwinding, see the constant: the caller returns to PHP without raising
+/// anything. Its value is also `SharedError::Cycle`'s, which no pool path
+/// returns, so callers check for it before mapping codes.
 ///
 /// # Safety
 /// `out_slot_zv_heap` and `out_owner_tid` must be valid for writes.
@@ -1917,8 +1917,8 @@ pub unsafe extern "C" fn oxphp_shared_pool_acquire(
                     // Nothing here to park: wait on the thread, below, for
                     // the rest of this call.
                     0 => can_park = false,
-                    // A pending exit, not an error: this acquire has no
-                    // outcome to record.
+                    // Unwinding — see OXPHP_FIBER_UNWIND — not an error:
+                    // this acquire has no outcome to record.
                     ffi::OXPHP_FIBER_UNWIND => {
                         unwound = true;
                         return Ok(());
@@ -2633,7 +2633,7 @@ fn pool_acquire_impl(
     let rc =
         unsafe { oxphp_shared_pool_acquire(entry_ptr, timeout_ms, &mut slot_heap, &mut owner) };
     if rc == ffi::OXPHP_FIBER_UNWIND {
-        // The fiber was destroyed while parked; the exit is already pending.
+        // The fiber is unwinding — see OXPHP_FIBER_UNWIND.
         return Ok(());
     }
     if rc != 0 {
@@ -2675,8 +2675,7 @@ fn pool_with_impl(call: &mut NativeCall, timeout_ms: i64) -> Result<(), PhpError
     let body_zv = unsafe { call.raw_arg_ptr(0) };
     let rc = unsafe { oxphp_shared_pool_with(entry_ptr, timeout_ms, body_zv, call.retval_ptr()) };
     if rc == ffi::OXPHP_FIBER_UNWIND {
-        // The acquire's fiber was destroyed while parked; the exit is
-        // already pending.
+        // The acquire's fiber is unwinding — see OXPHP_FIBER_UNWIND.
         return Ok(());
     }
     if rc != 0 {

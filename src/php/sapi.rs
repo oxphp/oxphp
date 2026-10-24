@@ -4879,10 +4879,11 @@ enum Yielded {
     /// Cancelled while yielded. The cancellation exception is in bridge TLS;
     /// the caller aborts with -1.
     Cancelled,
-    /// The fiber is being torn down and an exception is already pending. The
-    /// caller must return without adding one of its own and without yielding
-    /// again — the fiber is no longer the current one, so a second yield would
-    /// report "outside a fiber" and turn the unwind into a synthetic error.
+    /// The fiber is unwinding — see `OXPHP_FIBER_UNWIND`. The caller must
+    /// return without adding an error of its own and without yielding again —
+    /// a fiber being torn down is no longer the current one, so a second
+    /// yield would report "outside a fiber" and turn the unwind into a
+    /// synthetic error.
     Unwinding,
 }
 

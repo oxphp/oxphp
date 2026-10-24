@@ -248,8 +248,8 @@ fn handler_await(call: &mut NativeCall, enabled: bool) -> Result<(), PhpError> {
     match fiber_rc {
         // 0 = done via fiber, retval already written
         0 => Ok(()),
-        // The fiber is unwinding with an exception already pending in PHP.
-        // Return without raising one of our own so the real cause survives.
+        // Unwinding — see OXPHP_FIBER_UNWIND. Return without raising an
+        // exception of our own, so the real cause survives.
         ffi::OXPHP_FIBER_UNWIND => Ok(()),
         // 1 = not in a fiber, fall through to blocking path
         1 => {
@@ -356,8 +356,8 @@ fn handler_await_all(call: &mut NativeCall, enabled: bool) -> Result<(), PhpErro
                 strand_promises(&ids[i..]);
                 return Err(async_err("Async task cancelled"));
             }
-            // Unwinding with an exception already pending: abandon the rest of
-            // the set as the other bail arms do, but raise nothing.
+            // Unwinding — see OXPHP_FIBER_UNWIND: abandon the rest of the set
+            // as the other bail arms do, but raise nothing.
             ffi::OXPHP_FIBER_UNWIND => {
                 strand_promises(&ids[i..]);
                 return Ok(());
@@ -458,8 +458,8 @@ fn handler_await_race(call: &mut NativeCall, enabled: bool) -> Result<(), PhpErr
             unsafe { ffi::oxphp_arr_add_zval(retval, c"value".as_ptr(), winner_ptr) };
             Ok(())
         }
-        // The request fiber is unwinding (its worker is going away). An
-        // exception is already pending; adding one here would chain onto it.
+        // The fiber is unwinding — see OXPHP_FIBER_UNWIND. Raise nothing:
+        // where an exception is pending, one added here would chain onto it.
         ffi::OXPHP_FIBER_UNWIND => Ok(()),
         -2 => Err(timeout_err(
             "oxphp_async_await_race(): all promises timed out",
@@ -556,7 +556,7 @@ fn handler_await_any(call: &mut NativeCall, enabled: bool) -> Result<(), PhpErro
         // zend_throw_exception unconditionally, OVERRIDING EG(exception) with
         // a generic AsyncException. Don't do that.
         -2 | -3 => Ok(()),
-        // As in await_race: the fiber is unwinding with an exception pending.
+        // As in await_race: the fiber is unwinding — see OXPHP_FIBER_UNWIND.
         ffi::OXPHP_FIBER_UNWIND => Ok(()),
         -4 => Err(async_err(format!(
             "oxphp_async_await_any(): unknown or already-awaited promise id {}",

@@ -2501,10 +2501,10 @@ int oxphp_pool_destroy_invoke_guarded(void *destroy_fcc_heap, void *slot_zv_heap
  * plugin handler only. Returns 1 when it parked, 0 when there is nothing here
  * to park (outside an oxphp fiber, or where a switch is not possible: the
  * caller waits on the thread instead), -1 when the async task was cancelled
- * while parked, OXPHP_FIBER_UNWIND (-9, oxphp_fiber.h) when the fiber is
- * being destroyed with the exit pending that the VM unwinds it with, and
- * OXPHP_SHARED_INVOKE_BAILOUT when the server ended the request while it was
- * parked — held back for the dispatch stub, as for the helpers above. */
+ * while parked, OXPHP_FIBER_UNWIND (-9, see its definition in oxphp_fiber.h)
+ * when the fiber is unwinding, and OXPHP_SHARED_INVOKE_BAILOUT when the
+ * server ended the request while it was parked — held back for the dispatch
+ * stub, as for the helpers above. */
 int oxphp_pool_park_guarded(uint64_t duration_us);
 
 /* Shared\Pool\Handle rust_data wrapper helpers. See

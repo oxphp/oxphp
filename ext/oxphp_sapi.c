@@ -1448,8 +1448,10 @@ static int oxphp_fiber_sleep_us(uint64_t duration_us)
     /* A request that ran past memory_limit is handed its error before it
      * parks, not after: the requests the thread runs meanwhile would otherwise
      * be the ones the engine reports it into — see oxphp_report_pending_oom().
-     * The other three suspend points ask the same, after the same guard. */
-    if (oxphp_report_pending_oom()) return OXPHP_FIBER_UNWIND;
+     * And one being unwound for it does not park at all, or it would resume past
+     * the frame it was leaving — see oxphp_park_refused_for_oom(). The other
+     * three suspend points ask the same, after the same guard. */
+    if (oxphp_park_refused_for_oom()) return OXPHP_FIBER_UNWIND;
 
     uint64_t duration_ms = (duration_us + 999) / 1000; /* round up */
     if (duration_ms == 0) duration_ms = 1;
@@ -1510,8 +1512,8 @@ static int oxphp_fiber_io_wait(struct pollfd *fds, struct oxphp_io_owner *owners
     /* Switching blocked — see oxphp_fiber_sleep_us. */
     if (zend_fiber_switch_blocked() || oxphp_park_blocked) return 0;
     if (fds == NULL || owners == NULL || nfds == 0 || nfds > OXPHP_MAX_WAIT_FDS) return 0;
-    /* Out of memory and not reported yet — see oxphp_fiber_sleep_us. */
-    if (oxphp_report_pending_oom()) return OXPHP_FIBER_UNWIND;
+    /* Out of memory — see oxphp_fiber_sleep_us. */
+    if (oxphp_park_refused_for_oom()) return OXPHP_FIBER_UNWIND;
 
     oxphp_request_fiber *self = oxphp_current_fiber;
 
@@ -2344,8 +2346,8 @@ static ssize_t oxphp_sockop_read_plain(php_stream *stream, char *buf, size_t cou
         oxphp_io_op_pop(self, &outer);
 
         if (rc == OXPHP_FIBER_UNWIND) {
-            /* Unwinding with an exception already pending — return the read's
-             * error value and add nothing of our own. */
+            /* Unwinding — see OXPHP_FIBER_UNWIND — return the read's error
+             * value and add nothing of our own. */
             return -1;
         }
         if (rc == 0) {
@@ -4024,8 +4026,8 @@ static oxphp_stream_claim_result oxphp_pdo_ctor_gate_await(oxphp_request_fiber *
     for (;;) {
         int rc = oxphp_fiber_sleep_us(step_us);
         if (rc == OXPHP_FIBER_UNWIND) {
-            /* Unwinding with an exception already pending — the request is being
-             * torn down, so return to PHP and add nothing of our own. The caller
+            /* Unwinding — see OXPHP_FIBER_UNWIND — the request is being torn
+             * down, so return to PHP and add nothing of our own. The caller
              * returns on this the same way it does on a cancellation. */
             return OXPHP_CLAIM_THREW;
         }
@@ -5498,8 +5500,8 @@ static void oxphp_hooked_stream_select(zend_execute_data *execute_data, zval *re
 
         int rc = oxphp_fiber_io_wait(fds, owners, nfds, left_ns);
         if (rc == OXPHP_FIBER_UNWIND) {
-            /* Unwinding with an exception already pending — leave the return
-             * value alone and add nothing of our own. */
+            /* Unwinding — see OXPHP_FIBER_UNWIND — leave the return value alone
+             * and add nothing of our own. */
             goto done;
         }
         if (rc == 0) {
@@ -7654,8 +7656,8 @@ int oxphp_fiber_suspend_for_await(int64_t promise_id, double timeout, void *retv
     /* Switching blocked — see oxphp_fiber_sleep_us. Returns this function's own
      * "not suspendable" code, not 0, which here means "done via fiber". */
     if (zend_fiber_switch_blocked() || oxphp_park_blocked) return 1;
-    /* Out of memory and not reported yet — see oxphp_fiber_sleep_us. */
-    if (oxphp_report_pending_oom()) return OXPHP_FIBER_UNWIND;
+    /* Out of memory — see oxphp_fiber_sleep_us. */
+    if (oxphp_park_refused_for_oom()) return OXPHP_FIBER_UNWIND;
 
     oxphp_request_fiber *self = oxphp_current_fiber;
     self->suspend_reason = OXPHP_SUSPEND_AWAIT;
@@ -7716,8 +7718,8 @@ int oxphp_fiber_suspend_for_yield(void) {
     }
     /* Switching blocked — see oxphp_fiber_sleep_us. */
     if (zend_fiber_switch_blocked() || oxphp_park_blocked) return 0;
-    /* Out of memory and not reported yet — see oxphp_fiber_sleep_us. */
-    if (oxphp_report_pending_oom()) return OXPHP_FIBER_UNWIND;
+    /* Out of memory — see oxphp_fiber_sleep_us. */
+    if (oxphp_park_refused_for_oom()) return OXPHP_FIBER_UNWIND;
 
     oxphp_request_fiber *self = oxphp_current_fiber;
     uint64_t timer_id = oxphp_bridge_timer_register(1); /* ~1ms; resumed by tick */
