@@ -15,6 +15,9 @@
 //! hyper also puts in the request URI. Neither protocol counts the userinfo a
 //! target may carry before an `@` as part of the host.
 //!
+//! A `CONNECT` that gets past those checks asks for a tunnel, which the server
+//! does not open, and it is refused before anything runs.
+//!
 //! Nothing here needs PHP: the executor below hands back the `Host` field
 //! lines it was given, which is what the SAPI builds `HTTP_HOST`,
 //! `SERVER_NAME`, `SERVER_PORT` and the request object's host from.
@@ -24,6 +27,7 @@ mod common;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
 use bytes::Bytes;
 use http::header::HOST;
@@ -225,6 +229,36 @@ async fn h2_connect_host_naming_another_authority_is_refused() {
     assert_eq!(fx.executed.load(Ordering::SeqCst), 0);
 }
 
+/// An HTTP/2 `CONNECT` whose `:authority` passes the checks above asks for a
+/// tunnel, and the server opens none: it is answered with `501`, which RFC
+/// 9110 section 9.1 has an origin server send for a method it does not
+/// implement, and the application is not run.
+#[tokio::test]
+async fn h2_connect_is_refused_before_anything_runs() {
+    let fx = start().await;
+    let tcp = TcpStream::connect(fx.addr).await.unwrap();
+    let (send_req, conn) = h2::client::handshake(tcp).await.unwrap();
+    tokio::spawn(async move {
+        let _ = conn.await;
+    });
+    let req = Request::builder()
+        .method("CONNECT")
+        .uri("a.example:443")
+        .body(())
+        .unwrap();
+    let mut send_req = send_req.ready().await.unwrap();
+    let (resp_fut, _) = send_req.send_request(req, true).unwrap();
+    let status = resp_fut
+        .await
+        .map(|resp| resp.status().as_u16())
+        .map_err(|e| e.to_string());
+    assert_eq!(
+        (status, fx.executed.load(Ordering::SeqCst)),
+        (Ok(501), 0),
+        "(status, requests the application ran)"
+    );
+}
+
 /// One HTTP/1.x request written to a raw socket as `head`, which the server
 /// must close the connection after. Returns the status and the body.
 async fn get_h1(addr: SocketAddr, head: &str) -> (u16, Vec<u8>) {
@@ -292,8 +326,7 @@ async fn h1_absolute_form_userinfo_is_not_part_of_the_host() {
 /// authority-form one RFC 9112 keeps for `CONNECT`, and one that only lacks
 /// its leading `/`. Neither is the absolute form RFC 9112 section 3.2.2
 /// speaks of, and the `Host` header stays as it came. Asked with `GET`,
-/// because a successful answer to a `CONNECT` carries no body to read it
-/// from.
+/// because a `CONNECT` never reaches the application.
 #[tokio::test]
 async fn h1_target_without_scheme_keeps_its_host() {
     let fx = start().await;
@@ -306,6 +339,96 @@ async fn h1_target_without_scheme_keeps_its_host() {
         let (status, body) = get_h1(fx.addr, &head).await;
         assert_eq!(status, 200, "{target}");
         assert_eq!(delivered(&body), ["b.example"], "{target}");
+    }
+}
+
+/// What the server answers a `CONNECT` with.
+const CONNECT_REFUSED: (u16, &str) = (501, "501 Not Implemented: CONNECT is not supported");
+
+/// A `CONNECT` asks for a tunnel, and the server opens none: it is answered
+/// with `501`, which RFC 9110 section 9.1 has an origin server send for a
+/// method it does not implement, and the application is not run. That holds
+/// for the authority-form target RFC 9112 keeps for `CONNECT`, which would
+/// route as `/`, and for an origin-form one naming a script, which the
+/// HTTP/1.1 parser lets through with the method.
+#[tokio::test]
+async fn h1_connect_is_refused_before_anything_runs() {
+    let fx = start().await;
+    let mut answers = Vec::new();
+    for head in [
+        "CONNECT a.example:443 HTTP/1.1\r\n\
+         Host: a.example:443\r\n\
+         Connection: close\r\n\r\n",
+        "CONNECT /index.php HTTP/1.1\r\n\
+         Host: a.example\r\n\
+         Connection: close\r\n\r\n",
+    ] {
+        let (status, body) = get_h1(fx.addr, head).await;
+        answers.push((status, String::from_utf8_lossy(&body).into_owned()));
+    }
+    let refused = (CONNECT_REFUSED.0, CONNECT_REFUSED.1.to_owned());
+    assert_eq!(
+        (answers, fx.executed.load(Ordering::SeqCst)),
+        (vec![refused.clone(), refused], 0),
+        "([(status, body)], requests the application ran)"
+    );
+}
+
+/// The refusal comes before routing, so a `CONNECT` naming a static file gets
+/// it too, and not the file.
+#[tokio::test]
+async fn h1_connect_naming_a_static_file_is_refused() {
+    let fx = start().await;
+    let (status, body) = get_h1(
+        fx.addr,
+        "CONNECT /a.txt HTTP/1.1\r\n\
+         Host: a.example\r\n\
+         Connection: close\r\n\r\n",
+    )
+    .await;
+    assert_eq!((status, &*String::from_utf8_lossy(&body)), CONNECT_REFUSED);
+}
+
+/// A `CONNECT` client may send what it means for the tunnel right behind its
+/// request, without waiting for the answer. The connection closes after the
+/// refusal, as nginx closes it, so those bytes are not served as a request of
+/// their own. An HTTP/1.0 client asking to keep the connection alive gets
+/// the same.
+#[tokio::test]
+async fn h1_connect_refusal_closes_the_connection() {
+    let fx = start().await;
+    for (head, status_line) in [
+        (
+            "CONNECT a.example:80 HTTP/1.1\r\n\
+             Host: a.example:80\r\n\r\n\
+             GET /index.php HTTP/1.1\r\n\
+             Host: a.example\r\n\r\n",
+            "HTTP/1.1 501 ",
+        ),
+        (
+            "CONNECT a.example:80 HTTP/1.0\r\n\
+             Connection: keep-alive\r\n\r\n\
+             GET /index.php HTTP/1.0\r\n\r\n",
+            "HTTP/1.0 501 ",
+        ),
+    ] {
+        let mut sock = TcpStream::connect(fx.addr).await.unwrap();
+        sock.write_all(head.as_bytes()).await.unwrap();
+        let mut buf = Vec::new();
+        let closed = tokio::time::timeout(Duration::from_secs(5), sock.read_to_end(&mut buf))
+            .await
+            .is_ok();
+        let answer = String::from_utf8_lossy(&buf);
+        assert_eq!(
+            (
+                closed,
+                answer.matches("HTTP/1.").count(),
+                answer.starts_with(status_line),
+                fx.executed.load(Ordering::SeqCst)
+            ),
+            (true, 1, true, 0),
+            "{head:?}: (closed, answers, first is the 501, requests the application ran): {answer:?}"
+        );
     }
 }
 

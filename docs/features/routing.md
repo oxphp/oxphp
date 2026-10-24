@@ -20,6 +20,8 @@ Every request runs through a shared pipeline before the mode-specific logic kick
 7. **Mode dispatch** — each mode handles the three URI kinds with its own rules
 8. **Symlink validation** — every resolved filesystem path must canonicalize inside the document root, and a static file or PHP script is checked again, on the file actually opened, when it is read or executed
 
+A `CONNECT` request never reaches this pipeline: it asks for a tunnel, which OxPHP does not open. It is refused before routing with `501 Not Implemented`, and an HTTP/1.1 connection closes after that answer. A malformed one gets `400 Bad Request` instead (see [Error Pages](error-pages.md#status-codes-worth-providing)), and an HTTP/2 one with a non-zero `content-length` never reaches OxPHP: the connection it arrived on is closed, along with every other request in flight on it.
+
 The classification step is the key efficiency: the disk check for static assets (`/style.css`, `/logo.png`) is performed **once** in the shared layer for `OtherExtension` URIs, so all three modes pay the same cost.
 
 ## Configuration

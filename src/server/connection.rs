@@ -669,6 +669,36 @@ async fn dispatch_request(
         ));
     }
 
+    // A CONNECT asks for a tunnel, which this server never opens, and RFC
+    // 9110 section 9.1 has an origin server answer a method it does not
+    // implement with 501. A route's successful answer would not reach the
+    // client anyway: RFC 9110 section 9.3.6 has the tunnel start right after
+    // a 2xx's header, so hyper sends that header without the body, and sends
+    // nothing for one carrying a Content-Length (over HTTP/2, a non-zero one).
+    // An HTTP/1.x connection is closed after the refusal, as nginx closes it:
+    // what the client sent behind the CONNECT was meant for the tunnel, not
+    // for this server. HTTP/2 forbids a Connection header, and there the
+    // stream ends.
+    if parts.method == Method::CONNECT {
+        let mut refusal = Response::builder()
+            .status(StatusCode::NOT_IMPLEMENTED)
+            .header(header::CONTENT_TYPE, "text/plain; charset=utf-8");
+        if parts.version != http::Version::HTTP_2 {
+            // In the request's version: hyper makes an HTTP/1.1 answer to an
+            // HTTP/1.0 request asking for keep-alive a keep-alive one.
+            refusal = refusal
+                .version(parts.version)
+                .header(header::CONNECTION, "close");
+        }
+        return Ok((
+            refusal.body(full_body(Bytes::from_static(
+                b"501 Not Implemented: CONNECT is not supported",
+            )))?,
+            0,
+            PhpExecData::default(),
+        ));
+    }
+
     let uri_path = parts.uri.path();
     let route_result = server
         .route_config
