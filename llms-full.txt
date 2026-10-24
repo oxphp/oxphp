@@ -2923,7 +2923,7 @@ $result = oxphp_async_await($promise);           // Wait indefinitely
 $result = oxphp_async_await($promise, 5.0);      // Wait up to 5 seconds
 ```
 
-A timeout of `0.0` (the default) waits indefinitely. On timeout, `OxPHP\Async\TimeoutException` is thrown.
+A timeout of `0.0` (the default) waits indefinitely, and so do a negative timeout, `NAN`, `INF` and anything above `1e9` seconds (about 31.7 years). On timeout, `OxPHP\Async\TimeoutException` is thrown.
 
 ### All Promises
 
@@ -13694,7 +13694,7 @@ Blocks until the specified async promise completes and returns its result. Insid
 
 **Parameters:**
 - `$promise_id` — A promise ID returned by `oxphp_async()`
-- `$timeout` — Maximum seconds to wait. `0.0` means wait indefinitely. Default: `0.0`
+- `$timeout` — Maximum seconds to wait. `0.0` means wait indefinitely, and so do a negative value, `NAN`, `INF` and anything above `1e9` (about 31.7 years). Default: `0.0`
 
 **Returns:** The return value of the async closure.
 
@@ -13733,7 +13733,7 @@ Awaits all promises in the array and returns an associative array mapping each p
 
 **Parameters:**
 - `$promise_ids` — An array of integer promise IDs returned by `oxphp_async()`
-- `$timeout` — Maximum seconds to wait per promise. `0.0` means wait indefinitely. Default: `0.0`
+- `$timeout` — Maximum seconds to wait per promise. `0.0` means wait indefinitely, and so do a negative value, `NAN`, `INF` and anything above `1e9` (about 31.7 years). Default: `0.0`
 
 **Returns:** An associative array where each key is a promise ID (integer) and each value is the result of that promise.
 
@@ -13770,7 +13770,7 @@ Races multiple promises and returns the first one to settle, whether it fulfille
 
 **Parameters:**
 - `$promise_ids` — An array of at least one integer promise ID returned by `oxphp_async()`. Must not be empty.
-- `$timeout` — Maximum seconds to wait for any promise to settle. `0.0` means wait indefinitely. Default: `0.0`
+- `$timeout` — Maximum seconds to wait for any promise to settle. `0.0` means wait indefinitely, and so do a negative value, `NAN`, `INF` and anything above `1e9` (about 31.7 years). Default: `0.0`
 
 **Returns:** An associative array with two keys:
 - `id` (`int`) — The promise ID of the winner
@@ -13804,7 +13804,7 @@ Returns as soon as one promise FULFILLS. Rejections are accumulated, and only be
 
 **Parameters:**
 - `$promise_ids` — An array of at least one integer promise ID returned by `oxphp_async()`. Must not be empty.
-- `$timeout` — Maximum seconds to wait for the first fulfillment. `0.0` means wait indefinitely. Default: `0.0`
+- `$timeout` — Maximum seconds to wait for the first fulfillment. `0.0` means wait indefinitely, and so do a negative value, `NAN`, `INF` and anything above `1e9` (about 31.7 years). Default: `0.0`
 
 **Returns:** An associative array with two keys:
 - `id` (`int`) — The promise ID of the first fulfilled promise

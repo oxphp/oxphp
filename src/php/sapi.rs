@@ -10,7 +10,7 @@ use http::header;
 use http::{HeaderName, HeaderValue};
 use tokio::sync::oneshot;
 
-use crate::async_types::{AsyncResult, AsyncTask, CancelShared, PromiseCleanup};
+use crate::async_types::{await_timeout, AsyncResult, AsyncTask, CancelShared, PromiseCleanup};
 use crate::executor::idle_clock::LastActive;
 use crate::metrics::{WorkerMetrics, WorkerStats};
 use crate::php::bindings::{self, *};
@@ -3998,7 +3998,7 @@ pub fn await_is_ready(promise_id: u64) -> bool {
                 // report ready, so the awaiter throws instead of seeing the
                 // promise as perpetually-not-ready. The latter livelocks the
                 // fiber await_race / await_any poll loops — and spins a worker
-                // forever when timeout <= 0 — because they only ever observe
+                // forever when the await has no timeout — because they only ever observe
                 // `false` for this id and never settle it. Matches the blocking
                 // await path's "promise channel closed unexpectedly" error.
                 READY_RESULTS.with(|m| {
@@ -4493,7 +4493,6 @@ pub unsafe extern "C" fn await_dispatch_callback(
     retval: *mut c_void,
 ) -> c_int {
     use crate::bridge::ffi;
-    use std::time::Duration;
 
     let id = promise_id as u64;
 
@@ -4540,10 +4539,9 @@ pub unsafe extern "C" fn await_dispatch_callback(
     };
 
     // Block on result — use tokio::runtime::Handle::block_on for timeout support
-    let mut result = if timeout > 0.0 {
+    let mut result = if let Some(dur) = await_timeout(timeout) {
         match ASYNC_TOKIO_HANDLE.get() {
             Some(handle) => {
-                let dur = Duration::from_secs_f64(timeout);
                 // Borrow rx so it survives the timeout and can be stranded.
                 match handle.block_on(async { tokio::time::timeout(dur, &mut rx).await }) {
                     Ok(Ok(r)) => r,
@@ -4663,7 +4661,6 @@ pub unsafe extern "C" fn await_race_dispatch_callback(
     use std::future::{poll_fn, Future};
     use std::pin::Pin;
     use std::task::Poll;
-    use std::time::Duration;
 
     if count == 0 || promise_ids.is_null() {
         return -1;
@@ -4738,8 +4735,7 @@ pub unsafe extern "C" fn await_race_dispatch_callback(
             }
             Poll::Pending
         });
-        if timeout > 0.0 {
-            let dur = Duration::from_secs_f64(timeout);
+        if let Some(dur) = await_timeout(timeout) {
             // Construct `Sleep` inside `block_on` so the runtime context is
             // established before the timer driver registers.
             handle.block_on(async move { tokio::time::timeout(dur, race_fut).await })
@@ -4928,8 +4924,7 @@ unsafe fn await_race_in_fiber(
     retval: *mut c_void,
 ) -> c_int {
     use crate::bridge::ffi;
-    let deadline =
-        (timeout > 0.0).then(|| Instant::now() + std::time::Duration::from_secs_f64(timeout));
+    let deadline = await_timeout(timeout).map(|dur| Instant::now() + dur);
 
     loop {
         for &id in ids {
@@ -5002,8 +4997,7 @@ unsafe fn await_any_in_fiber(
     retval: *mut c_void,
 ) -> c_int {
     use crate::bridge::ffi;
-    let deadline =
-        (timeout > 0.0).then(|| Instant::now() + std::time::Duration::from_secs_f64(timeout));
+    let deadline = await_timeout(timeout).map(|dur| Instant::now() + dur);
     let mut collected: Vec<AggregateRejection> = Vec::new();
     let mut remaining: Vec<u64> = ids.to_vec();
 
@@ -5108,7 +5102,6 @@ pub unsafe extern "C" fn await_any_dispatch_callback(
     use std::future::{poll_fn, Future};
     use std::pin::Pin;
     use std::task::Poll;
-    use std::time::Duration;
 
     if count == 0 || promise_ids.is_null() {
         return -1;
@@ -5237,8 +5230,7 @@ pub unsafe extern "C" fn await_any_dispatch_callback(
         Timeout,
     }
 
-    let outcome = if timeout > 0.0 {
-        let dur = Duration::from_secs_f64(timeout);
+    let outcome = if let Some(dur) = await_timeout(timeout) {
         // Construct `Sleep` inside `block_on` so the runtime context is
         // established before the timer driver registers.
         match handle.block_on(async move { tokio::time::timeout(dur, race_fut).await }) {

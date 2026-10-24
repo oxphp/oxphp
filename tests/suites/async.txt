@@ -29,6 +29,10 @@ async/test_await_any_empty_array
 async/test_await_any_all_rejected
 async/test_await_any_partial_reject_then_success
 async/test_await_any_timeout
+# A timeout too large to be a deadline (INF, 1e300, PHP_INT_MAX) waits without
+# a limit in every await, blocking or in a task's fiber, instead of aborting the
+# server; a finite one still bounds the wait on the same paths.
+async/test_await_unbounded_timeout
 
 async/test_await_any_unknown_id
 async/test_await_any_preserves_others

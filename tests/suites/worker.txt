@@ -22,6 +22,9 @@ worker/test_worker_class_legacy_aliases
 worker/test_worker_class_traditional_mode
 worker/test_worker_class_worker_mode_basic
 worker/test_await_timeout_in_request_fiber
+# The same in the request's fiber: a timeout too large to be a deadline waits
+# without a limit instead of timing out at once or aborting the server.
+async/test_await_unbounded_timeout
 
 # Runs deep into the suite on purpose: by now every worker has served a request,
 # so this one probably lands on a RECYCLED request fiber. Kept ahead of the tests

@@ -66,7 +66,7 @@ $result = oxphp_async_await($promise);           // Wait indefinitely
 $result = oxphp_async_await($promise, 5.0);      // Wait up to 5 seconds
 ```
 
-A timeout of `0.0` (the default) waits indefinitely. On timeout, `OxPHP\Async\TimeoutException` is thrown.
+A timeout of `0.0` (the default) waits indefinitely, and so do a negative timeout, `NAN`, `INF` and anything above `1e9` seconds (about 31.7 years). On timeout, `OxPHP\Async\TimeoutException` is thrown.
 
 ### All Promises
 
