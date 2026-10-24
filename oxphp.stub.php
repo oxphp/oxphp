@@ -1815,7 +1815,7 @@ namespace OxPHP\Shared {
         /** Point-in-time snapshot of pool counters. */
         public function stats(): Pool\Stats {}
 
-        /** Force-evict all idle slots reachable from this worker now. Returns the count. */
+        /** Force-evict all idle slots of the calling thread now. Returns the count. */
         public function evict(): int {}
 
         /** Registry ID for this instance. */
