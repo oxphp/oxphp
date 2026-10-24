@@ -20,7 +20,8 @@ http_object/test_http_protocol
 http_object/test_http_protocol_version
 http_object/test_header_single
 http_object/test_header_default
-http_object/test_headers_all
+http_object/test_headers_all >> ?case=h1 | GET | -H "X-Case-Probe: One" | |
+http_object/test_headers_all >> ?case=h2 | GET | --http2-prior-knowledge -H "X-Case-Probe: One" | |
 http_object/test_has_header
 http_object/test_header_repeated_field_lines >> ?case=h1 | GET | -H "X-Foo: one" -H "X-Foo: two" -H "X-Forwarded-For: 198.51.100.1" -H "X-Forwarded-For: 203.0.113.9" | |
 http_object/test_header_repeated_field_lines >> ?case=h2 | GET | --http2-prior-knowledge -H "X-Foo: one" -H "X-Foo: two" -H "X-Forwarded-For: 198.51.100.1" -H "X-Forwarded-For: 203.0.113.9" | |
