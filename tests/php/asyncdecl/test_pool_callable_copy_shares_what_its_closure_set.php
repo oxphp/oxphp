@@ -43,7 +43,8 @@ foreach (['a static with a non-constant initializer' => $initialized, 'a static'
     $t->assertSame("$what: the closure counts on from the copy's call", $factory()->made, 3);
 }
 
-// The copy run by a task, and the pool then dropped by this request.
+// The copy run by a task, and the pool then dropped by this request. On the
+// task's thread the call starts from a copy of the `static`, made there.
 $factory = static function (): object {
     static $made = 0;
     $o = new \stdClass();
@@ -59,8 +60,8 @@ $pool = new \OxPHP\Shared\Pool(factory: $factory, destroy: null, maxSize: 1);
     return $made;
 }));
 $t->assertTrue('in a task: the task returns', $ok);
-$t->assertSame("in a task: the pool's copy counts on from the closure's call", $made, 2);
+$t->assertSame("in a task: the call counts on from the closure's call", $made, 2);
 unset($pool);
-$t->assertSame('in a task: the closure counts on from the copy run by the task', $factory()->made, 3);
+$t->assertSame('in a task: the closure counts on from its own call', $factory()->made, 2);
 
 $t->done();

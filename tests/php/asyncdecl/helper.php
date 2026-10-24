@@ -57,3 +57,34 @@ function asyncdecl_refused(string $function, string $file, int $line): array
 {
     return [\Error::class, "Call to undefined function $function() at $file:$line" . ASYNCDECL_TAIL];
 }
+
+/** The tail of the message for a variable of the closure that is not copied. */
+const ASYNCDECL_COPY_TAIL = ': on a thread other than the one that created the pool, a Shared\Pool '
+    . "callback runs with copies of its closure's variables, and only null, booleans, numbers, "
+    . 'strings, arrays of these and OxPHP\Shared objects are copied, so the code was not run';
+
+/** The tail of the message for a callback that uses $this. */
+const ASYNCDECL_THIS_TAIL = ' uses $this: on a thread other than the one that created the pool, a '
+    . 'Shared\Pool callback cannot use an object of the request that created it, so the code was not run';
+
+/**
+ * What acquire() returns, by asyncdecl_acquire_in_task(), when variable
+ * $variable of the closure at $file:$line holds $what.
+ *
+ * @return array{string, string}
+ */
+function asyncdecl_not_copied(string $variable, string $what, string $file, int $line): array
+{
+    return [\Error::class, "Variable \$$variable of the closure at $file:$line holds $what" . ASYNCDECL_COPY_TAIL];
+}
+
+/**
+ * What acquire() returns, by asyncdecl_acquire_in_task(), when $what — "The
+ * closure at file:line" or "Method Class::method()" — uses $this.
+ *
+ * @return array{string, string}
+ */
+function asyncdecl_uses_this(string $what): array
+{
+    return [\Error::class, $what . ASYNCDECL_THIS_TAIL];
+}

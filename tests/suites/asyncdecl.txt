@@ -24,6 +24,14 @@ asyncdecl/test_pool_callable_calls_the_object_it_was_given
 asyncdecl/test_pool_callable_copy_shares_what_its_closure_set
 asyncdecl/test_pool_internal_factory_in_task
 asyncdecl/test_pool_factory_first_run_by_request
+# On a task's thread a factory or $destroy runs with copies of its closure's
+# variables made there, starting each call from their values when the pool was
+# created, and with a run-time cache of its own; what is not copied, and $this,
+# are refused.
+asyncdecl/test_pool_callback_captures_leave_no_gc_root_in_task
+asyncdecl/test_pool_callback_static_on_another_thread
+asyncdecl/test_pool_callback_refused_on_another_thread
+asyncdecl/test_pool_callback_run_time_cache_is_per_thread
 # A task's idle slot, when the pool goes away on the worker thread.
 asyncdecl/test_pool_idle_slot_of_a_task_outlives_the_pool
 # A factory or $destroy reaching __call(), __callStatic() or a closure's
@@ -60,8 +68,11 @@ asyncdecl/test_task_nested_closure_of_late_file
 asyncdecl/test_task_default_value_closure_of_late_file
 
 # A pool bound to a name whose factory and $destroy a task ran, then its
-# worker exits; a collection on the pool's threads after that.
+# worker exits; a collection on the pool's threads after that. The second one's
+# callbacks capture an array.
 asyncdecl/test_pool_registry_callable_in_task_outlives_its_creator >> ?action=trigger
 asyncdecl/test_pool_registry_callable_in_task_outlives_its_creator >> ?action=check
+asyncdecl/test_pool_registry_captured_array_in_task_outlives_its_creator >> ?action=trigger
+asyncdecl/test_pool_registry_captured_array_in_task_outlives_its_creator >> ?action=check
 
 asyncdecl/test_server_alive

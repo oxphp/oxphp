@@ -5045,9 +5045,15 @@ static zend_string *oxphp_call_missing_here(const zend_function *fn, zend_object
  * properties, a class's static properties or constants, the static variables
  * of a function or method, a built-in object that holds others (ArrayObject,
  * a Generator), an object a parameter's default value creates, a string
- * callable that names a method through self, static or parent, and a class a
- * closure names once it has run, since every thread shares a closure's
- * run-time cache and the class it found there. */
+ * callable that names a method through self, static or parent, and a class
+ * that a closure made from a function or method, as f(...) makes one, names
+ * once it has run, since every thread shares that closure's run-time cache and
+ * the class it found there. So does a closure the callback declares, when its
+ * script is not in OPcache's shared memory: closures made from one declaration
+ * share its run-time cache then, on every thread. Only the callback's own
+ * closure runs on another thread with a cache of its own
+ * (oxphp_pool_call_elsewhere), and finds there only the classes that thread
+ * has. */
 static zend_string *oxphp_pool_callable_missing_here(const zend_fcall_info_cache *fcc) {
     const zend_function *fn = fcc->function_handler;
     HashTable seen;
@@ -7264,8 +7270,10 @@ int oxphp_shared_invoke_2_ret_stop(zval *callable,
  *  unless by reference — and not at all when the engine took it from
  *  the $this of the code creating the pool. The callable is resolved
  *  once, on the thread creating the pool, and called through
- *  oxphp_pool_call_fcc on whichever thread runs the factory or
- *  $destroy.
+ *  oxphp_pool_invoke on whichever thread runs the factory or
+ *  $destroy: on that thread, through the fcc; on any other, a
+ *  closure through a closure of that thread's own
+ *  (oxphp_pool_call_elsewhere).
  *
  *  Per-resource zvals are emalloc'd once at factory invocation
  *  and owned by the pool; acquire ZVAL_COPYs them into user
@@ -7279,7 +7287,27 @@ int oxphp_shared_invoke_2_ret_stop(zval *callable,
 typedef struct {
     zend_fcall_info_cache fcc;
     zval callable_zv; /* keeps the Closure/callable op_array alive */
+    /* The heap of the thread that created the pool. Everything below is
+     * written there, before the pool is published, and only read after. */
+    zend_mm_heap *home;
+    /* Why another thread does not run the callable, or NULL. */
+    zend_string *refused_elsewhere;
+    /* A closure not made from a function or method runs elsewhere through
+     * a closure built there: its called scope, its table of variables as
+     * oxphp_portable_serialize_ht() wrote it, what each slot held that the
+     * table as written does not keep (OXPHP_POOL_SLOT_*), and the
+     * OxPHP\Shared objects in it, which the table names by id only. */
+    bool rebuilt_elsewhere;
+    zend_class_entry *called_scope;
+    unsigned char *vars;
+    size_t vars_len;
+    uint8_t *slots;
+    uint32_t slot_count;
+    HashTable *held;
 } oxphp_pool_fcc_t;
+
+#define OXPHP_POOL_SLOT_REF   1
+#define OXPHP_POOL_SLOT_UNDEF 2
 
 /* The pool's own copy of a closure it stores: the same body, $this and
  * captured values. `clone` copies the closure's table of variables, and the
@@ -7289,16 +7317,18 @@ typedef struct {
  * and the first call of a copy whose `static` has a non-constant initializer
  * would crash, expecting a reference there. Such a slot gets the closure's
  * reference back. A `static` not set yet is set in the copy's own table when
- * the copy runs it, with a reference made in the memory of the thread running
- * it, unless the closure was made from a function or method, as f(...) makes
- * one, which uses the function's table.
+ * the copy runs it, unless the closure was made from a function or method, as
+ * f(...) makes one, which uses the function's table. The copy of a closure
+ * not made from one runs only on the thread that created the pool; any other
+ * runs a closure of its own built from it (oxphp_pool_call_elsewhere).
  *
  * A call to a closure takes a reference to it and drops it when the call
  * returns (zend_call_function(), the VM's leave helper), and a drop that
  * leaves references puts the object in the garbage collector's buffer of
  * possible roots of the thread making the call, writing that buffer's index
- * into the object. A factory or $destroy runs on any PHP thread, and each
- * thread has a buffer of its own: an entry in another thread's buffer points
+ * into the object. The copy of a closure made from a function or method runs
+ * on whichever PHP thread runs the factory or $destroy, and each thread has a
+ * buffer of its own: an entry in another thread's buffer points
  * at an object the creating request frees, and that request, freeing it,
  * takes it out of its own buffer by the other buffer's index. The copy is
  * marked not collectable, which the engine checks before it adds an object it
@@ -7329,6 +7359,186 @@ static void oxphp_pool_own_closure(zval *out, zend_object *closure) {
     }
     ZVAL_OBJ(out, copy);
     GC_ADD_FLAGS(copy, GC_NOT_COLLECTABLE);
+}
+
+#define OXPHP_POOL_COPY_TAIL ": on a thread other than the one that created the pool, " \
+    "a Shared\\Pool callback runs with copies of its closure's variables, and only null, " \
+    "booleans, numbers, strings, arrays of these and OxPHP\\Shared objects are copied, " \
+    "so the code was not run"
+#define OXPHP_POOL_THIS_TAIL " uses $this: on a thread other than the one that created the " \
+    "pool, a Shared\\Pool callback cannot use an object of the request that created it, " \
+    "so the code was not run"
+
+/* What a value of a closure's variables is that oxphp_portable_serialize_ht()
+ * does not copy, through references and arrays, or NULL. An array holding
+ * itself would have it recurse without end. Each OxPHP\Shared object on the
+ * way is kept in held: the copy names it by its id, which no longer leads to
+ * it once nothing holds it, as when the creating request replaces it in a
+ * variable captured by reference. */
+static zend_string *oxphp_pool_not_copied(zval *zv, HashTable *held) {
+    ZVAL_DEREF(zv);
+    switch (Z_TYPE_P(zv)) {
+        case IS_OBJECT:
+            if (oxphp_is_shareable(zv)) {
+                Z_ADDREF_P(zv);
+                zend_hash_next_index_insert_new(held, zv);
+                return NULL;
+            }
+            return zend_strpprintf(0, "an object of class %s", ZSTR_VAL(Z_OBJCE_P(zv)->name));
+        case IS_RESOURCE:
+            return zend_string_init("a resource", sizeof("a resource") - 1, 0);
+        case IS_ARRAY: {
+            HashTable *ht = Z_ARRVAL_P(zv);
+            if (GC_IS_RECURSIVE(ht)) {
+                return zend_string_init(
+                    "an array that holds itself", sizeof("an array that holds itself") - 1, 0);
+            }
+            zend_string *what = NULL;
+            GC_TRY_PROTECT_RECURSION(ht);
+            zval *item;
+            ZEND_HASH_FOREACH_VAL(ht, item) {
+                what = oxphp_pool_not_copied(item, held);
+                if (what) {
+                    break;
+                }
+            } ZEND_HASH_FOREACH_END();
+            GC_TRY_UNPROTECT_RECURSION(ht);
+            return what;
+        }
+        default:
+            return NULL;
+    }
+}
+
+/* Whether the code of op_array, or of a closure it declares, uses $this. A
+ * closure declared in a closure bound to an object is bound to it too. */
+static bool oxphp_pool_uses_this(const zend_op_array *op_array) {
+    if (op_array->fn_flags & ZEND_ACC_USES_THIS) {
+        return true;
+    }
+    for (uint32_t i = 0; i < op_array->num_dynamic_func_defs; i++) {
+        if (oxphp_pool_uses_this(op_array->dynamic_func_defs[i])) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/* What another thread is to run, decided on the thread creating the pool.
+ *
+ * A closure that is not made from a function or method runs there as a
+ * closure built on that thread, from a copy of the pool's copy's table of
+ * variables made there on each call: what it captured and the values of its
+ * `static`s when the pool was created. Run with the table itself, a call put
+ * what it took from the table in its own thread's buffer of possible garbage
+ * roots, as it did the closure (see oxphp_pool_own_closure), and set a
+ * `static` with memory of its own thread in a table the creating request
+ * frees. The closure built there has no $this, which code compiled in a method
+ * reads without checking that it exists (this_guaranteed_exists()), so a
+ * closure whose code uses $this, as PHP refuses to unbind one, and one whose
+ * variables hold what the copy does not take, are refused there instead. So
+ * is a method or __call() that uses $this, called on an object: the call
+ * would run it with the object itself.
+ *
+ * Any other callable is called there as it is called here. */
+static void oxphp_pool_prepare_elsewhere(oxphp_pool_fcc_t *heap) {
+    const zend_function *fn = heap->fcc.function_handler;
+    zend_object *this_obj = heap->fcc.object;
+
+    if (Z_TYPE(heap->callable_zv) == IS_OBJECT && Z_OBJCE(heap->callable_zv) == zend_ce_closure) {
+        zend_object *closure = Z_OBJ(heap->callable_zv);
+        zend_function *closure_fn;
+        closure->handlers->get_closure(
+            closure, &heap->called_scope, &closure_fn, &this_obj, true);
+        fn = closure_fn;
+        if (fn->type == ZEND_USER_FUNCTION && !(fn->common.fn_flags & ZEND_ACC_FAKE_CLOSURE)) {
+            const zend_op_array *op = &fn->op_array;
+            HashTable *vars = ZEND_MAP_PTR_GET(op->static_variables_ptr);
+            if (vars) {
+                heap->held = zend_new_array(0);
+                zend_string *name;
+                zval *val;
+                ZEND_HASH_FOREACH_STR_KEY_VAL(vars, name, val) {
+                    zend_string *what = oxphp_pool_not_copied(val, heap->held);
+                    if (what) {
+                        heap->refused_elsewhere = zend_strpprintf(0,
+                            "Variable $%s of the closure at %s:%u holds %s" OXPHP_POOL_COPY_TAIL,
+                            ZSTR_VAL(name), ZSTR_VAL(op->filename), op->line_start, ZSTR_VAL(what));
+                        zend_string_release_ex(what, 0);
+                        return;
+                    }
+                } ZEND_HASH_FOREACH_END();
+            }
+            if (this_obj && oxphp_pool_uses_this(op)) {
+                heap->refused_elsewhere = zend_strpprintf(0,
+                    "The closure at %s:%u" OXPHP_POOL_THIS_TAIL,
+                    ZSTR_VAL(op->filename), op->line_start);
+                return;
+            }
+            if (vars) {
+                /* An arrow function binds each variable its body names, the
+                 * parameters of an arrow function in it too, and one that is
+                 * not defined where it is declared stays undefined in the
+                 * table (ZEND_BIND_LEXICAL), which the serializer counts but
+                 * does not write. Such a slot is written as null, in the
+                 * pool's own copy, which no call has run yet. */
+                heap->slot_count = vars->nNumUsed;
+                heap->slots = ecalloc(vars->nNumUsed, 1);
+                for (uint32_t i = 0; i < vars->nNumUsed; i++) {
+                    zval *slot = &vars->arData[i].val;
+                    if (Z_ISREF_P(slot)) {
+                        heap->slots[i] = OXPHP_POOL_SLOT_REF;
+                    } else if (Z_ISUNDEF_P(slot)) {
+                        heap->slots[i] = OXPHP_POOL_SLOT_UNDEF;
+                        ZVAL_NULL(slot);
+                    }
+                }
+                unsigned char *buf;
+                size_t len;
+                int rc = oxphp_portable_serialize_ht(vars, &buf, &len);
+                for (uint32_t i = 0; i < vars->nNumUsed; i++) {
+                    if (heap->slots[i] == OXPHP_POOL_SLOT_UNDEF) {
+                        ZVAL_UNDEF(&vars->arData[i].val);
+                    }
+                }
+                if (rc != 0) {
+                    /* An OxPHP\Shared object it cannot name. */
+                    heap->refused_elsewhere = zend_strpprintf(0,
+                        "A variable of the closure at %s:%u holds a value that is not copied"
+                        OXPHP_POOL_COPY_TAIL, ZSTR_VAL(op->filename), op->line_start);
+                    return;
+                }
+                heap->vars = emalloc(len);
+                memcpy(heap->vars, buf, len);
+                heap->vars_len = len;
+                oxphp_portable_free(buf);
+            }
+            heap->rebuilt_elsewhere = true;
+            return;
+        }
+    }
+
+    if (!this_obj || this_obj->ce == zend_ce_closure) {
+        return;
+    }
+    /* A trampoline, and the built-in function of a closure made from a
+     * method __call() answers, run __call(). That function bears the method's
+     * name, which the class can still have as a private or protected method:
+     * one written in PHP, or a built-in one of another class. */
+    if (fn->common.fn_flags & ZEND_ACC_CALL_VIA_TRAMPOLINE) {
+        fn = this_obj->ce->__call;
+    } else if (fn->type != ZEND_USER_FUNCTION) {
+        const zend_function *named =
+            zend_hash_find_ptr_lc(&this_obj->ce->function_table, fn->common.function_name);
+        if (!named || named->type != ZEND_INTERNAL_FUNCTION
+                || named->common.scope != fn->common.scope) {
+            fn = this_obj->ce->__call;
+        }
+    }
+    if (fn && fn->type == ZEND_USER_FUNCTION && oxphp_pool_uses_this(&fn->op_array)) {
+        heap->refused_elsewhere = zend_strpprintf(0, "Method %s::%s()" OXPHP_POOL_THIS_TAIL,
+            ZSTR_VAL(fn->common.scope->name), ZSTR_VAL(fn->common.function_name));
+    }
 }
 
 /* Allocate a fcc_heap from a user callable. Returns 0 on success
@@ -7381,9 +7591,11 @@ int oxphp_pool_fcc_new(void *callable_zval, void **out_fcc_heap) {
         fcc.function_handler = copy;
     }
 
-    oxphp_pool_fcc_t *heap = emalloc(sizeof(oxphp_pool_fcc_t));
+    oxphp_pool_fcc_t *heap = ecalloc(1, sizeof(oxphp_pool_fcc_t));
     heap->fcc = fcc;
     ZVAL_COPY_VALUE(&heap->callable_zv, &stored);
+    heap->home = zend_mm_get_heap();
+    oxphp_pool_prepare_elsewhere(heap);
     *out_fcc_heap = (void *)heap;
     oxphp_publish_map_ptr_last();
     return 0;
@@ -7398,6 +7610,18 @@ void oxphp_pool_fcc_free(void *fcc_heap) {
     oxphp_pool_fcc_t *heap = (oxphp_pool_fcc_t *)fcc_heap;
     zend_release_fcall_info_cache(&heap->fcc);
     zval_ptr_dtor(&heap->callable_zv);
+    if (heap->refused_elsewhere) {
+        zend_string_release_ex(heap->refused_elsewhere, 0);
+    }
+    if (heap->vars) {
+        efree(heap->vars);
+    }
+    if (heap->slots) {
+        efree(heap->slots);
+    }
+    if (heap->held) {
+        zend_array_destroy(heap->held);
+    }
     efree(heap);
 }
 
@@ -7421,6 +7645,101 @@ static void oxphp_pool_call_fcc(const zend_fcall_info_cache *fcc,
     zend_call_known_function(func, fcc->object, fcc->called_scope, retval, argc, argv, NULL);
 }
 
+/* Call a closure the pool stores on a thread other than the one that created
+ * the pool, through a closure built on this thread from the pool's copy, as
+ * oxphp_reconstruct_async_closure() builds a task's: the copy's body, scope
+ * and called scope, no $this, and the copy's variables as they were when the
+ * pool was created, in memory of this thread. Released when the call returns,
+ * before the caller looks at what it threw: the release runs the destructor
+ * of an object the call put in a `static`. */
+static void oxphp_pool_call_elsewhere(const oxphp_pool_fcc_t *heap,
+                                      zval *retval, uint32_t argc, zval *argv) {
+    HashTable *vars = NULL;
+    if (heap->vars && oxphp_portable_deserialize_ht(heap->vars, heap->vars_len, &vars) != 0) {
+        zend_throw_error(NULL, "Shared\\Pool could not copy the variables of its callback");
+        return;
+    }
+
+    zend_function func;
+    memcpy(&func, zend_get_closure_method_def(Z_OBJ(heap->callable_zv)), sizeof(zend_op_array));
+    /* The body's refcount and the name may live in the memory of the request
+     * that created the pool, which a count from this thread must not touch. */
+    func.op_array.refcount = NULL;
+    zend_string *own_name = NULL;
+    if (!ZSTR_IS_INTERNED(func.op_array.function_name)) {
+        own_name = zend_string_init(
+            ZSTR_VAL(func.op_array.function_name), ZSTR_LEN(func.op_array.function_name), 0);
+        func.op_array.function_name = own_name;
+    }
+    /* zend_create_closure() copies the table of variables from its MAP_PTR on
+     * PHP 8.5 and from op_array.static_variables on 8.4. */
+    func.op_array.static_variables = vars;
+    ZEND_MAP_PTR_INIT(func.op_array.static_variables_ptr, vars);
+    /* The copy's run-time cache, which it usually shares with the closure it
+     * was made from, holds what calls on the thread that created the pool
+     * looked up, a class of a script this thread never loaded among them.
+     * With this flag set zend_create_closure() gives the closure a cache of
+     * its own, in this thread's memory, which the closure frees; the copy's
+     * pointer to its cache is never NULL, which would have it make one in
+     * the arena. */
+    func.op_array.fn_flags |= ZEND_ACC_HEAP_RT_CACHE;
+
+    zval closure;
+    zend_create_closure(&closure, &func, func.common.scope, heap->called_scope, NULL);
+    if (own_name) {
+        zend_string_release_ex(own_name, 0);
+    }
+    zend_function *fn = (zend_function *)zend_get_closure_method_def(Z_OBJ(closure));
+    if (vars) {
+        HashTable *own = ZEND_MAP_PTR_GET(fn->op_array.static_variables_ptr);
+        /* The copy above turned each reference into the value it held, and a
+         * `static` once set is read as a reference (ZEND_BIND_INIT_STATIC_OR_JMP
+         * takes one without checking); a variable left undefined was written
+         * as null. zend_array_dup() keeps every slot at its index, as the
+         * serialized table does. */
+        for (uint32_t i = 0; i < heap->slot_count; i++) {
+            zval *slot = &own->arData[i].val;
+            if (heap->slots[i] == OXPHP_POOL_SLOT_REF) {
+                ZVAL_MAKE_REF(slot);
+            } else if (heap->slots[i] == OXPHP_POOL_SLOT_UNDEF) {
+                ZVAL_UNDEF(slot);
+            }
+        }
+        /* 8.5 left the closure's op_array.static_variables pointing at the
+         * table it copied; point it at the closure's own, as 8.4 does. */
+        fn->op_array.static_variables = own;
+        zend_array_destroy(vars);
+    }
+
+    zend_call_known_function(fn, NULL, heap->called_scope, retval, argc, argv, NULL);
+    zval_ptr_dtor(&closure);
+}
+
+/* Run the factory or $destroy the pool stores. Returns NULL once it has run,
+ * or the message saying why this thread does not run it, which the caller
+ * throws or reports. An acquire can run it on a thread that never ran its
+ * script, a task's, or another worker thread's when the pool is shared. */
+static zend_string *oxphp_pool_invoke(const oxphp_pool_fcc_t *heap,
+                                      zval *retval, uint32_t argc, zval *argv) {
+    zend_string *missing = oxphp_pool_callable_missing_here(&heap->fcc);
+    if (missing) {
+        return missing;
+    }
+    bool elsewhere = zend_mm_get_heap() != heap->home;
+    if (elsewhere && heap->refused_elsewhere) {
+        /* A string of this thread's: the stored one's count is not atomic. */
+        return zend_string_init(
+            ZSTR_VAL(heap->refused_elsewhere), ZSTR_LEN(heap->refused_elsewhere), 0);
+    }
+    oxphp_cover_map_ptr_last();
+    if (elsewhere && heap->rebuilt_elsewhere) {
+        oxphp_pool_call_elsewhere(heap, retval, argc, argv);
+    } else {
+        oxphp_pool_call_fcc(&heap->fcc, retval, argc, argv);
+    }
+    return NULL;
+}
+
 /* Invoke the factory with 0 args. On success, emalloc a fresh
  * zval and ZVAL_COPY the factory's return into it; the heap
  * pointer is written to `*out_slot_zv_heap`. The pool owns this
@@ -7441,20 +7760,15 @@ static int oxphp_pool_factory_invoke_unguarded(void *fcc_heap, void **out_slot_z
 
     oxphp_pool_fcc_t *heap = (oxphp_pool_fcc_t *)fcc_heap;
 
-    /* An acquire can run the factory on a thread that never ran its script:
-     * a task's, or another worker thread's when the pool is shared. */
-    zend_string *missing = oxphp_pool_callable_missing_here(&heap->fcc);
-    if (missing) {
-        zend_throw_error(NULL, "%s", ZSTR_VAL(missing));
-        zend_string_release_ex(missing, 0);
-        return -1;
-    }
-    oxphp_cover_map_ptr_last();
-
     zval ret_zv;
     ZVAL_UNDEF(&ret_zv);
 
-    oxphp_pool_call_fcc(&heap->fcc, &ret_zv, 0, NULL);
+    zend_string *refused = oxphp_pool_invoke(heap, &ret_zv, 0, NULL);
+    if (refused) {
+        zend_throw_error(NULL, "%s", ZSTR_VAL(refused));
+        zend_string_release_ex(refused, 0);
+        return -1;
+    }
 
     if (EG(exception)) {
         zval_ptr_dtor(&ret_zv);
@@ -7632,15 +7946,11 @@ static int oxphp_pool_destroy_invoke_unguarded(void *destroy_fcc_heap, void *slo
         zval ret_zv;
         ZVAL_UNDEF(&ret_zv);
 
-        /* $destroy can run on a thread that never ran its script, a task's or
-         * another worker thread's. Handled the way a throw from it is. */
-        zend_string *missing = oxphp_pool_callable_missing_here(&heap->fcc);
-        if (missing) {
-            oxphp_bridge_capture_fatal(ZSTR_VAL(missing), ZSTR_LEN(missing));
-            zend_string_release_ex(missing, 0);
-        } else {
-            oxphp_cover_map_ptr_last();
-            oxphp_pool_call_fcc(&heap->fcc, &ret_zv, 1, args);
+        /* Refused on this thread: handled the way a throw from it is. */
+        zend_string *refused = oxphp_pool_invoke(heap, &ret_zv, 1, args);
+        if (refused) {
+            oxphp_bridge_capture_fatal(ZSTR_VAL(refused), ZSTR_LEN(refused));
+            zend_string_release_ex(refused, 0);
         }
 
         zval_ptr_dtor(&args[0]);

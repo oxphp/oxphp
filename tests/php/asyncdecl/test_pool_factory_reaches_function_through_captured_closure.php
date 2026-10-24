@@ -66,4 +66,22 @@ $h = $pool->acquire();
 $t->assertSame('on the worker thread, the same factory runs', $h->get()->v, 1);
 $h->release();
 
+// A captured closure that calls nothing of this file passes the check, and is
+// then refused as a variable another thread gets no copy of.
+$plain = static fn (): object => new \stdClass();
+$plainLine = __LINE__ + 2;
+$pool = new \OxPHP\Shared\Pool(
+    factory: static fn (): object => $plain(),
+    destroy: null,
+    maxSize: 1,
+);
+$t->assertSame(
+    'a captured closure that calls nothing of this file',
+    asyncdecl_acquire_in_task($pool),
+    asyncdecl_not_copied('plain', 'an object of class Closure', __FILE__, $plainLine),
+);
+$h = $pool->acquire();
+$t->assertTrue('on the worker thread, it runs', $h->get() instanceof \stdClass);
+$h->release();
+
 $t->done();

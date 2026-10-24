@@ -134,6 +134,9 @@ async/test_orphan_cpu_bound_cancelled_at_request_end
 # A pool bound to a name runs its factory on the worker thread that acquires;
 # one written in a file only the other worker included is refused there.
 worker/test_pool_factory_from_file_peer_never_loaded
+# On the other worker the factory runs with copies of what it captured and of
+# its `static`, made there.
+worker/test_pool_callback_on_peer_worker_copies_captures
 
 # A pool bound to a name outlives the worker that created it. The other worker
 # keeps the slots idle on it, but makes no new one and evicts without $destroy
