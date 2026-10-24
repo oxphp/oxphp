@@ -2181,6 +2181,20 @@ static __thread const php_stream *oxphp_stream_gone = NULL;
  * wording: a wait reached from a libc-level poll() is not always a read. */
 static void oxphp_raise_stream_closed_while_parked(bool reading, const php_stream *stream)
 {
+    /* Not with an exception pending, which zend_error() would report first as
+     * uncaught — through the exception's __toString(), PHP code where the class
+     * defines one. The one found here can be what a wait set aside and put back:
+     * a destructor waiting on a socket while the VM unwound towards a catch that
+     * will not run now, so the log would blame the end of the request on an
+     * exception its code catches. Dropped, as the wait drops it on a drain kill —
+     * released rather than cleared: zend_clear_exception() also points the
+     * current frame at the opline that threw, and a destructor run as its frame
+     * was left has the caller's frame current, whose line the fatal names. */
+    if (EG(exception) != NULL) {
+        zend_object *pending = EG(exception);
+        EG(exception) = NULL;
+        OBJ_RELEASE(pending);
+    }
     oxphp_stream_gone = stream;
     if (reading) {
         zend_error(E_ERROR,
