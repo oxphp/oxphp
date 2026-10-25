@@ -46,7 +46,7 @@ This Dockerfile compiles the extensions against a matching `php:8.5-zts-alpine` 
 
 ```dockerfile
 # ── Stage 1: compile WordPress PHP extensions against PHP 8.5 ─────
-FROM php:8.5-zts-alpine3.23 AS ext-builder
+FROM php:8.5-zts-alpine3.24 AS ext-builder
 RUN apk add --no-cache \
         icu-dev libzip-dev libpng-dev libjpeg-turbo-dev freetype-dev oniguruma-dev \
     && docker-php-ext-configure gd --with-jpeg --with-freetype \

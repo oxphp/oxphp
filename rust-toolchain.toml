@@ -1,15 +1,18 @@
-# The compiler CI checks against. It is the compiler that builds the
-# published images: the Alpine release Dockerfile installs Rust from
-# Alpine's package repository (Alpine 3.23 ships 1.91.1), where rustup is
-# absent and this file is ignored; the Debian one installs `channel` from
-# this file through rustup. It is also the MSRV (`rust-version` in
-# Cargo.toml). Without a pin, CI follows the runner's floating stable and
-# a new clippy lint turns every PR red regardless of what the PR changes.
+# The compiler CI checks against. It is the oldest compiler that builds
+# the published images: the Alpine release Dockerfile installs Rust from
+# Alpine's package repository, where rustup is absent and this file is
+# ignored, and the images are built on every Alpine in `alpine_versions`
+# of .github/supported-versions.yml (Alpine 3.23 ships 1.91.1, 3.24 ships
+# 1.96.1); the Debian one installs `channel` from this file through rustup.
+# It is also the MSRV (`rust-version` in Cargo.toml). Without a pin, CI
+# follows the runner's floating stable and a new clippy lint turns every PR
+# red regardless of what the PR changes.
 #
-# Move all three together: bump ALPINE_VERSION in the Dockerfiles, set
-# `channel` here and `rust-version` in Cargo.toml to the Rust that Alpine
-# release ships, and fix whatever new lints fire in the same PR. The
-# Format job fails if `channel` and `rust-version` disagree.
+# Move these together when the oldest Alpine leaves `alpine_versions`: set
+# `channel` here and `rust-version` in Cargo.toml to the Rust that the
+# Alpine now oldest ships, move the `test-php` job's container in pr.yml to
+# that Alpine, and fix whatever new lints fire in the same PR. The Format
+# job fails if `channel` and `rust-version` disagree.
 [toolchain]
 channel = "1.91.1"
 components = ["clippy", "rustfmt"]

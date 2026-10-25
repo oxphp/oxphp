@@ -57,7 +57,7 @@ jobs:
         include:
           - { arch: amd64, runner: ubuntu-24.04 }
           - { arch: arm64, runner: ubuntu-24.04-arm }
-          - { variant: alpine, base: alpine3.23, dockerfile: docker/release/alpine/Dockerfile, suffix: "" }
+          - { variant: alpine, base: alpine3.24, dockerfile: docker/release/alpine/Dockerfile, suffix: "" }
           - { variant: trixie, base: trixie, dockerfile: docker/release/debian/Dockerfile, suffix: "-trixie" }
 
     runs-on: ${{ matrix.runner }}
