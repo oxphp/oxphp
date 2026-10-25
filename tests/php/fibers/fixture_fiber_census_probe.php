@@ -61,8 +61,11 @@ foreach ($matches as $m) {
 
 // The label is the stats slot, which a worker takes by its id modulo the number
 // of slots — the same arithmetic the server does when it hands a worker thread
-// its slot, so a recycled worker with an id past the pool size still resolves.
-$label = $series === [] ? null : (string) ($id % count($series));
+// its slot. The number of slots is the pool's maximum size, read from the same
+// scrape, not the number of series: a slot renders none from the moment its
+// worker exits until its replacement starts.
+$slots = preg_match('/^oxphp_workers_max (\d+)$/m', $raw, $m) === 1 ? (int) $m[1] : 0;
+$label = $series === [] || $slots === 0 ? null : (string) ($id % $slots);
 
 echo json_encode([
     'worker' => $id,
