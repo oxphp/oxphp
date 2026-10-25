@@ -6749,13 +6749,13 @@ int oxphp_shared_wrapper_new(zval *out, uint8_t type_tag, const void *entry_ptr)
  * of a pool whose last reference one of those, a free_obj handler or a
  * promise cleanup let go of, or from a promise cleanup releasing the
  * promise's closure, so a flag that is set has one of those below it to take
- * it. Nothing between the two parks the fiber that set it: where a handler
- * would park after such a release, an await over several promises waiting on
- * the next, the park is refused while the flag is up. A guarded helper
- * called from anywhere else would leave the flag for the next stub on the
- * thread to raise in a request that never failed. One teardown is called
- * from elsewhere and does just that: the loop of an oxphp_async() worker
- * thread, between tasks, drops a task result nobody receives any more,
+ * it. Nothing between the two parks the fiber that set it: an await returns
+ * from the promise cleanup that set it without waiting on anything more, and
+ * a park reached after any other release is refused while the flag is up. A
+ * guarded helper called from anywhere else would leave the flag for the next
+ * stub on the thread to raise in a request that never failed. One teardown is
+ * called from elsewhere and does just that: the loop of an oxphp_async()
+ * worker thread, between tasks, drops a task result nobody receives any more,
  * which can hold the last reference to a pool. $destroy is skipped there,
  * with no frame, but freeing a slot the thread parked runs its object's
  * destructor under the guard, and so does freeing the callables of a pool a

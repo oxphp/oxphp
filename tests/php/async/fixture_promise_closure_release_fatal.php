@@ -48,6 +48,81 @@ switch ($case) {
         oxphp_async_await($p);
         break;
 
+    case 'await_all_slow':
+        // The first promise's closure raises the fatal error as await_all()
+        // takes it, while the second promise still has a while to run. The
+        // shutdown functions record how long after the await began the
+        // request ended.
+        $box = null;
+        $first = oxphp_async(static function () use (&$box): int {
+            return 1;
+        });
+        $second = oxphp_async(static function (): int {
+            usleep(1_500_000);
+
+            return 2;
+        });
+        $box = new class ($fatal) {
+            public function __construct(private \Closure $fatal)
+            {
+            }
+
+            public function __destruct()
+            {
+                ($this->fatal)();
+            }
+        };
+        unset($box);
+        $start = microtime(true);
+        register_shutdown_function(static function () use ($run, $start): void {
+            file_put_contents(
+                sys_get_temp_dir() . "/oxphp-promise-closure-elapsed-{$run}",
+                (string) (microtime(true) - $start)
+            );
+        });
+        oxphp_async_await_all([$first, $second]);
+        break;
+
+    case 'await_any_rejected':
+        // Every promise is rejected with an exception of a class this request
+        // has not declared, so reporting them would look the class up and run
+        // the autoloader. The fatal error must be what the request reports.
+        spl_autoload_register(static function (string $class) use ($run): void {
+            file_put_contents(sys_get_temp_dir() . "/oxphp-promise-closure-autoload-{$run}", $class);
+        });
+        register_shutdown_function(static function () use ($run): void {
+            file_put_contents(
+                sys_get_temp_dir() . "/oxphp-promise-closure-last-error-{$run}",
+                (string) (error_get_last()['message'] ?? '')
+            );
+        });
+        $box = null;
+        $first = oxphp_async(static function () use (&$box): int {
+            if (!class_exists('OxphpPromiseClosureTaskFailure', false)) {
+                eval('class OxphpPromiseClosureTaskFailure extends \RuntimeException {}');
+            }
+            throw new \OxphpPromiseClosureTaskFailure('rejected');
+        });
+        $second = oxphp_async(static function (): int {
+            if (!class_exists('OxphpPromiseClosureTaskFailure', false)) {
+                eval('class OxphpPromiseClosureTaskFailure extends \RuntimeException {}');
+            }
+            throw new \OxphpPromiseClosureTaskFailure('rejected');
+        });
+        $box = new class ($fatal) {
+            public function __construct(private \Closure $fatal)
+            {
+            }
+
+            public function __destruct()
+            {
+                ($this->fatal)();
+            }
+        };
+        unset($box);
+        oxphp_async_await_any([$first, $second]);
+        break;
+
     case 'shutdown':
         // In a function, so that once it returns the promise's closure and
         // the output handler are all that hold $box.

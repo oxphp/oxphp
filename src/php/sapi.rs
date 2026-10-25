@@ -4483,7 +4483,9 @@ pub unsafe fn strand_and_cancel_promise(id: u64) {
 /// Blocks on the oneshot receiver until the async result arrives,
 /// cleans up frozen/borrowed state, and copies the result into retval.
 ///
-/// Returns: 0 = success (retval populated), -1 = error, -2 = timeout.
+/// Returns: 0 = success (retval populated), -1 = error, -2 = timeout,
+/// `OXPHP_FIBER_UNWIND` = the cleanup left a bailout held back (see
+/// `bailout_held_back`).
 ///
 /// # Safety
 /// Called from C FFI. `retval` must be a valid zval pointer.
@@ -4500,6 +4502,9 @@ pub unsafe extern "C" fn await_dispatch_callback(
     // (fiber-aware await resumes after the scheduler detects readiness via await_poll)
     if let Some(mut result) = take_ready_result(id) {
         cleanup_promise(id);
+        if bailout_held_back() {
+            return ffi::OXPHP_FIBER_UNWIND;
+        }
 
         if result.success {
             if !result.serialized_value.is_null() && result.serialized_value_len > 0 {
@@ -4598,6 +4603,9 @@ pub unsafe extern "C" fn await_dispatch_callback(
 
     // Cleanup frozen/borrowed state
     cleanup_promise(id);
+    if bailout_held_back() {
+        return ffi::OXPHP_FIBER_UNWIND;
+    }
 
     // Handle result
     if result.success {
@@ -4637,7 +4645,8 @@ pub unsafe extern "C" fn await_dispatch_callback(
 /// PROMISE_MAP so they can be awaited individually later via
 /// `oxphp_async_await()`.
 ///
-/// Returns: 0 = success, -1 = error, -2 = timeout.
+/// Returns: 0 = success, -1 = error, -2 = timeout, `OXPHP_FIBER_UNWIND` = the
+/// winner's cleanup left a bailout held back (see `bailout_held_back`).
 /// On success: `*out_winner_id` is the winning promise ID, `retval` is populated.
 ///
 /// **Timeout behavior**: On timeout, the cancel flag is set on every still-
@@ -4771,6 +4780,9 @@ pub unsafe extern "C" fn await_race_dispatch_callback(
 
             // Cleanup the winner's frozen/borrowed state
             cleanup_promise(winner_id);
+            if bailout_held_back() {
+                return ffi::OXPHP_FIBER_UNWIND;
+            }
 
             if result.success {
                 *out_winner_id = winner_id as i64;
@@ -4941,6 +4953,9 @@ unsafe fn await_race_in_fiber(
                 }
             };
             cleanup_promise(id);
+            if bailout_held_back() {
+                return ffi::OXPHP_FIBER_UNWIND;
+            }
             if result.success {
                 if !result.serialized_value.is_null() && result.serialized_value_len > 0 {
                     let rc = ffi::oxphp_portable_deserialize(
@@ -4987,6 +5002,8 @@ unsafe fn await_race_in_fiber(
 /// errors plus the still-pending ids (returns -2). Still-pending promises are
 /// left in PROMISE_MAP — awaitable individually, and cleaned up safely at
 /// RSHUTDOWN, which waits for their workers before unfreezing captures.
+/// Returns `OXPHP_FIBER_UNWIND` when the fiber unwinds, and when a promise's
+/// cleanup leaves a bailout held back (see `bailout_held_back`).
 ///
 /// # Safety
 /// As `await_race_in_fiber`.
@@ -5017,6 +5034,9 @@ unsafe fn await_any_in_fiber(
                 }
             };
             cleanup_promise(id);
+            if bailout_held_back() {
+                return ffi::OXPHP_FIBER_UNWIND;
+            }
             if result.success {
                 *out_winner_id = id as i64;
                 if !result.serialized_value.is_null() && result.serialized_value_len > 0 {
@@ -5086,6 +5106,8 @@ unsafe fn await_any_in_fiber(
 ///   * If the timeout expires before a fulfilled winner, accumulates errors
 ///     that arrived before the deadline plus computes still-pending ids, then
 ///     throws `OxPHP\Async\TimeoutException` with both fields. Returns -2.
+///   * A promise's cleanup that leaves a bailout held back ends the call there
+///     with `OXPHP_FIBER_UNWIND`, nothing thrown (see `bailout_held_back`).
 ///   * Other internal failures return -1.
 ///
 /// # Safety
@@ -5247,7 +5269,9 @@ pub unsafe extern "C" fn await_any_dispatch_callback(
 
     // Push collected rejections in input-array position order into the
     // C-bridge aggregate buffer. Used by both the all-rejected (-3) and
-    // timeout (-2) paths.
+    // timeout (-2) paths. Returns true, with nothing pushed and the rest of
+    // the rejected promises left to the request's promise cleanup, when one's
+    // cleanup leaves a bailout held back.
     let push_collected_in_position_order =
         |collected: &mut Vec<AggregateRejection>, input_ids: &[u64]| {
             let position: std::collections::HashMap<u64, usize> = input_ids
@@ -5278,6 +5302,9 @@ pub unsafe extern "C" fn await_any_dispatch_callback(
             // the worker actually finishes.
             for r in &sorted {
                 cleanup_promise(r.promise_id);
+                if bailout_held_back() {
+                    return true;
+                }
             }
 
             ffi::oxphp_bridge_aggregate_clear();
@@ -5286,6 +5313,7 @@ pub unsafe extern "C" fn await_any_dispatch_callback(
                 let msg = CString::new(r.message.as_str()).unwrap_or_default();
                 ffi::oxphp_bridge_aggregate_push(cls.as_ptr(), msg.as_ptr(), r.promise_id as i64);
             }
+            false
         };
 
     match outcome {
@@ -5299,6 +5327,9 @@ pub unsafe extern "C" fn await_any_dispatch_callback(
                 store_promise(id, rx, cancelled);
             }
             cleanup_promise(winner_id);
+            if bailout_held_back() {
+                return ffi::OXPHP_FIBER_UNWIND;
+            }
             *out_winner_id = winner_id as i64;
             if !result.serialized_value.is_null() && result.serialized_value_len > 0 {
                 let rc = ffi::oxphp_portable_deserialize(
@@ -5316,7 +5347,9 @@ pub unsafe extern "C" fn await_any_dispatch_callback(
             0
         }
         AnyOutcome::AllRejected => {
-            push_collected_in_position_order(&mut collected, &input_ids);
+            if push_collected_in_position_order(&mut collected, &input_ids) {
+                return ffi::OXPHP_FIBER_UNWIND;
+            }
             ffi::oxphp_bridge_aggregate_throw();
             -3
         }
@@ -5353,7 +5386,9 @@ pub unsafe extern "C" fn await_any_dispatch_callback(
                 m.async_tasks_stranded(stranded_count);
             }
 
-            push_collected_in_position_order(&mut collected, &input_ids);
+            if push_collected_in_position_order(&mut collected, &input_ids) {
+                return ffi::OXPHP_FIBER_UNWIND;
+            }
             ffi::oxphp_bridge_aggregate_throw_timeout(
                 pending_ids.as_ptr(),
                 pending_ids.len() as u32,
@@ -5395,6 +5430,21 @@ unsafe fn run_promise_cleanup(cleanup: &PromiseCleanup) {
     if !cleanup.closure_zval.is_null() {
         ffi::oxphp_closure_release_guarded(cleanup.closure_zval);
     }
+}
+
+/// Whether the promise cleanup just run left a bailout held back for the
+/// plugin stub below to raise: a destructor the closure release ran ended in
+/// one (`oxphp_closure_release_guarded`). An await returns
+/// `OXPHP_FIBER_UNWIND` at once then, because anything more it did would run
+/// between the fatal and its raise: a result written into the call's return
+/// value is left there by the bailout, and a worker's heap keeps it until the
+/// worker exits; reporting rejections builds exceptions, and looking up their
+/// class can run the script's autoloader; another promise's closure release
+/// is refused. The promises it has not cleaned up are left to the request's
+/// own promise cleanup.
+fn bailout_held_back() -> bool {
+    // SAFETY: reads a thread-local of the bridge; takes no arguments.
+    unsafe { crate::bridge::ffi::oxphp_bridge_deferred_bailout_pending() != 0 }
 }
 
 /// Restore frozen and borrowed zvals for a completed/timed-out promise.

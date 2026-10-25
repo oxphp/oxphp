@@ -7706,14 +7706,15 @@ int oxphp_fiber_suspend_for_await(int64_t promise_id, double timeout, void *retv
     /* Out of memory — see oxphp_fiber_sleep_us. */
     if (oxphp_park_refused_for_oom()) return OXPHP_FIBER_UNWIND;
     /* A bailout held back for the plugin stub below (OXPHP_SHARED_RUN_GUARDED),
-     * from something an await over several promises released before it waits
-     * on the next: a promise's closure, a task result holding a pool's last
-     * reference. Parked, the fiber would hand the thread to another request,
-     * whose next plugin call would raise it. Unwound, the handler returns to
-     * the stub, which raises it. Asked here and in the yield below, the two
-     * parks Rust reaches after a release; the other suspend points are reached
-     * from running PHP, where none is held back, or, for Shared\Pool::acquire,
-     * through a guarded helper that refuses while one is. */
+     * from something Rust released before this park. An await's own promise
+     * cleanup returns before it gets here (bailout_held_back in
+     * src/php/sapi.rs); this stops one from any other release. Parked, the
+     * fiber would hand the thread to another request, whose next plugin call
+     * would raise it. Unwound, the handler returns to the stub, which raises
+     * it. Asked here and in the yield below, the two parks Rust reaches; the
+     * other suspend points are reached from running PHP, where none is held
+     * back, or, for Shared\Pool::acquire, through a guarded helper that
+     * refuses while one is. */
     if (oxphp_bridge_deferred_bailout_pending()) return OXPHP_FIBER_UNWIND;
 
     oxphp_request_fiber *self = oxphp_current_fiber;
@@ -7760,7 +7761,7 @@ int oxphp_fiber_suspend_for_await(int64_t promise_id, double timeout, void *retv
     }
 
     int rc = oxphp_bridge_await_dispatch(promise_id, 0.0, (zval *)retval);
-    return rc; /* 0 = success, -1 = error, -2 = timeout */
+    return rc; /* 0, -1, -2 or OXPHP_FIBER_UNWIND, as above */
 }
 
 /* Cooperative yield: suspend the current task fiber for one scheduler cycle

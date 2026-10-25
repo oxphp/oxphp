@@ -256,6 +256,8 @@ fn handler_await(call: &mut NativeCall, enabled: bool) -> Result<(), PhpError> {
             let rc = unsafe { ffi::oxphp_bridge_await_dispatch(promise_id, timeout, retval) };
             match rc {
                 0 => Ok(()),
+                // A bailout is held back — see OXPHP_FIBER_UNWIND.
+                ffi::OXPHP_FIBER_UNWIND => Ok(()),
                 -2 => Err(timeout_err(format!(
                     "oxphp_async_await(): promise {promise_id} timed out"
                 ))),
