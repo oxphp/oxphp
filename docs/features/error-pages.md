@@ -131,7 +131,7 @@ OxPHP logs a warning and continues without custom error pages if the `ERROR_PAGE
 ```bash
 docker run --rm -v ./errors:/var/www/errors:ro \
   -e ERROR_PAGES_DIR=/var/www/errors \
-  ghcr.io/oxphp/oxphp:0.13.0
+  ghcr.io/oxphp/oxphp:0.14.0
 ```
 
 ### A 429 response still shows the default body
@@ -143,7 +143,7 @@ Some responses generated before the response pipeline runs — such as rate-limi
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.13.0
+    image: ghcr.io/oxphp/oxphp:0.14.0
     ports:
       - "8080:8080"
     volumes:
