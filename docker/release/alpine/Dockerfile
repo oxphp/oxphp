@@ -89,8 +89,6 @@ COPY --from=bridge-builder /usr/local/include/oxphp_bridge.h /usr/local/include/
 
 WORKDIR /build
 
-ARG OXPHP_VERSION
-
 COPY Cargo.toml Cargo.lock ./
 # build.rs runs prost_build::compile_protos unconditionally, so proto/
 # must be present even for the dep-cache build below.
@@ -105,6 +103,10 @@ RUN mkdir src && \
     rm -rf src target/release/oxphp target/release/deps/oxphp-* target/release/.fingerprint/oxphp-*
 
 COPY src ./src
+
+# Declared after the dependency build: an ARG in scope is part of the cache
+# key of every RUN below it, so each new version would recompile the deps.
+ARG OXPHP_VERSION
 
 # Patch Cargo.toml version from the build arg (always applied in prod builds)
 RUN sed -i "s/^version = \".*\"/version = \"${OXPHP_VERSION}\"/" Cargo.toml
