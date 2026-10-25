@@ -5881,6 +5881,64 @@ static void oxphp_putenv_hook_restore(void)
 }
 #endif
 
+/* define() on an async worker, whose constants outlive the requests whose code
+ * its tasks run. define() copies an array only when it is counted and keeps an
+ * uncounted one, given or nested, by pointer (copy_constant_array,
+ * Zend/zend_builtin_functions.c, 8.4.26 and 8.5.11). The array literals of a
+ * task's code and the copies taken of them are uncounted: outside OPcache's
+ * shared memory they live in the memory of the request that dispatched it. */
+static zif_handler oxphp_orig_define = NULL;
+
+/* The counted arrays of a constant's value are define()'s own copies. */
+static void oxphp_define_copy_uncounted_arrays(zval *zv)
+{
+    if (Z_TYPE_P(zv) != IS_ARRAY) {
+        return;
+    }
+    if (!Z_REFCOUNTED_P(zv)) {
+        /* An uncounted array holds no object for the copy to lose. Null
+         * while the copy is made: a bailout on memory leaves the constant
+         * so, not pointing into the request's memory. */
+        zval orig, copy;
+        ZVAL_COPY_VALUE(&orig, zv);
+        ZVAL_NULL(zv);
+        oxphp_deep_copy_zval(&copy, &orig);
+        ZVAL_COPY_VALUE(zv, &copy);
+        return;
+    }
+    zval *val;
+    ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(zv), val) {
+        oxphp_define_copy_uncounted_arrays(val);
+    } ZEND_HASH_FOREACH_END();
+}
+
+static ZEND_NAMED_FUNCTION(oxphp_define_hook)
+{
+    oxphp_orig_define(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+    if (Z_TYPE_P(return_value) == IS_TRUE && oxphp_bridge_is_async_worker()) {
+        /* true means define() added the constant to EG(zend_constants), whose
+         * order is that of insertion, so it is the last one there. */
+        zend_constant *c;
+        ZEND_HASH_REVERSE_FOREACH_PTR(EG(zend_constants), c) {
+            oxphp_define_copy_uncounted_arrays(&c->value);
+            break;
+        } ZEND_HASH_FOREACH_END();
+    }
+}
+
+/* Swapped on the startup thread, as the session gate is. */
+static void oxphp_define_hook_install(void)
+{
+    oxphp_hook_swap("define", sizeof("define") - 1,
+                    oxphp_define_hook, &oxphp_orig_define);
+}
+
+static void oxphp_define_hook_restore(void)
+{
+    oxphp_hook_restore("define", sizeof("define") - 1, oxphp_orig_define);
+    oxphp_orig_define = NULL;
+}
+
 /* Publishing the set is what makes an enabled RUNTIME_HOOKS confirmable at all:
  * a misspelled variable name, RUNTIME_HOOKS=0 and a correctly enabled build
  * otherwise serve byte-identical responses and log nothing. The flags are
@@ -9755,6 +9813,7 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
 #ifdef HAVE_PUTENV
     oxphp_putenv_hook_install();
 #endif
+    oxphp_define_hook_install();
     oxphp_runtime_hooks_install();
     oxphp_request_body_hook_install();
 
@@ -9782,6 +9841,7 @@ PHP_MSHUTDOWN_FUNCTION(oxphp_sapi)
     oxphp_request_body_hook_restore();
     oxphp_runtime_hooks_restore();
     oxphp_session_gate_restore();
+    oxphp_define_hook_restore();
 #ifdef HAVE_PUTENV
     oxphp_putenv_hook_restore();
 #endif

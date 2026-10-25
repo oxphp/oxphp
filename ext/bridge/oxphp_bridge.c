@@ -3204,12 +3204,157 @@ uint64_t oxphp_bridge_async_drain_output(void) {
 
 static void oxphp_publish_map_ptr_last(void);
 
+/*
+ * Without OPcache the literals of a request's code are counted values in that
+ * request's memory, shared by every thread that runs the code: a task's thread
+ * would count its copies on them and list them as its own garbage roots. The
+ * thread that compiled the code gives them, before a task's thread sees it, the
+ * form OPcache gives the literals it stores (zend_persist_zval,
+ * ext/opcache/zend_persist.c): zvals that copy without counting, arrays a
+ * writer copies first, strings flagged interned. This and the engine code cited
+ * below were read from PHP 8.4.26 and 8.5.11.
+ *
+ * Nothing releases them after that, since an uncounted copy may outlive the
+ * code: the end of the request frees them with its memory. Code compiled again
+ * and again inside a request that does not end — Worker mode's, or the one an
+ * async worker thread keeps open for its lifetime — leaves its literals behind
+ * each time.
+ */
+static void oxphp_op_array_make_literals_immutable(zend_op_array *op);
+
+static void oxphp_make_literal_immutable(zval *zv);
+
+static void oxphp_make_ast_literals_immutable(zend_ast *ast) {
+    if (!ast) {
+        return;
+    }
+    if (ast->kind == ZEND_AST_ZVAL || ast->kind == ZEND_AST_CONSTANT) {
+        oxphp_make_literal_immutable(&((zend_ast_zval *)ast)->val);
+        return;
+    }
+#if PHP_VERSION_ID >= 80500
+    if (ast->kind == ZEND_AST_OP_ARRAY) {
+        oxphp_op_array_make_literals_immutable(zend_ast_get_op_array(ast)->op_array);
+        return;
+    }
+#endif
+    if (zend_ast_is_list(ast)) {
+        zend_ast_list *list = zend_ast_get_list(ast);
+        for (uint32_t i = 0; i < list->children; i++) {
+            oxphp_make_ast_literals_immutable(list->child[i]);
+        }
+        return;
+    }
+    if (zend_ast_is_special(ast)) {
+        return;
+    }
+    for (uint32_t i = 0; i < zend_ast_get_num_children(ast); i++) {
+        oxphp_make_ast_literals_immutable(ast->child[i]);
+    }
+}
+
+static void oxphp_make_literal_immutable(zval *zv) {
+    if (!Z_REFCOUNTED_P(zv)) {
+        return;
+    }
+    switch (Z_TYPE_P(zv)) {
+        case IS_STRING:
+            /* Computed now, the hash is not stored later by whichever thread
+             * reads it first. */
+            zend_string_hash_val(Z_STR_P(zv));
+            GC_ADD_FLAGS(Z_STR_P(zv), IS_STR_INTERNED);
+            break;
+        case IS_ARRAY: {
+            HashTable *ht = Z_ARRVAL_P(zv);
+            if (GC_FLAGS(ht) & IS_ARRAY_IMMUTABLE) {
+                break;
+            }
+            /* zend_array_dup copies an immutable array's elements without
+             * counting them (Zend/zend_hash.c), so none may be counted. */
+            if (HT_IS_PACKED(ht)) {
+                zval *val;
+                ZEND_HASH_PACKED_FOREACH_VAL(ht, val) {
+                    oxphp_make_literal_immutable(val);
+                } ZEND_HASH_FOREACH_END();
+            } else {
+                Bucket *p;
+                ZEND_HASH_MAP_FOREACH_BUCKET(ht, p) {
+                    /* A key OPcache interned lies in its shared memory, which
+                     * opcache.protect_memory=1 keeps read-only. */
+                    if (p->key && !ZSTR_IS_INTERNED(p->key)) {
+                        GC_ADD_FLAGS(p->key, IS_STR_INTERNED);
+                    }
+                    oxphp_make_literal_immutable(&p->val);
+                } ZEND_HASH_FOREACH_END();
+            }
+            /* SEPARATE_ARRAY writes in place to an array counted once, so
+             * OPcache sets the count to 2. Copies this thread took before still
+             * count theirs and release them later, so one is added to them
+             * instead: with the literal's own, which nothing releases now, the
+             * count stays at 2 or more, also while this thread's collector
+             * subtracts those copies' references. */
+            GC_ADDREF(ht);
+            GC_ADD_FLAGS(ht, IS_ARRAY_IMMUTABLE);
+            /* zend_hash_compare (Zend/zend_hash.c) checks this flag on any
+             * array but clears it only on a mutable one, and a comparison of
+             * this array can be what runs the dispatch. A literal cannot hold
+             * itself, so the check has nothing to find. */
+            GC_DEL_FLAGS(ht, GC_PROTECTED);
+            break;
+        }
+        case IS_CONSTANT_AST:
+            oxphp_make_ast_literals_immutable(GC_AST(Z_AST_P(zv)));
+            /* zval_update_constant_with_ctx counts the expression while it
+             * evaluates it unless it is immutable (Zend/zend_execute_API.c). */
+            GC_ADD_FLAGS(Z_AST_P(zv), GC_IMMUTABLE);
+            break;
+        default:
+            return;
+    }
+    Z_TYPE_FLAGS_P(zv) = 0;
+}
+
+/* Closures declared inside, and on PHP 8.5 those in a constant expression, run
+ * from literals of their own. Arguments of the function's and its parameters'
+ * attributes are copied out as literals are: Reflection and #[\Deprecated] read
+ * them through zend_get_attribute_value (Zend/zend_attributes.c, 8.4.26 and
+ * 8.5.11). */
+static void oxphp_op_array_make_literals_immutable(zend_op_array *op) {
+    for (int i = 0; i < op->last_literal; i++) {
+        oxphp_make_literal_immutable(&op->literals[i]);
+    }
+    if (op->attributes) {
+        zend_attribute *attr;
+        ZEND_HASH_FOREACH_PTR(op->attributes, attr) {
+            for (uint32_t i = 0; i < attr->argc; i++) {
+                oxphp_make_literal_immutable(&attr->args[i].value);
+            }
+        } ZEND_HASH_FOREACH_END();
+    }
+    for (uint32_t i = 0; i < op->num_dynamic_func_defs; i++) {
+        oxphp_op_array_make_literals_immutable(op->dynamic_func_defs[i]);
+    }
+}
+
+/* Code without a refcount is OPcache's, whose literals have that form already.
+ * The literals are allocated with the opcodes (pass_two, Zend/zend_opcode.c),
+ * so opcodes in this thread's heap mean this thread may write them; code of
+ * another thread's request is left alone. With PHP's allocator switched off
+ * (USE_ZEND_ALLOC=0 without USE_TRACKED_ALLOC=1) or replaced by an extension's
+ * handlers, the heap check finds nothing, and the literals stay counted. */
+static void oxphp_make_dispatched_literals_immutable(zend_op_array *op) {
+    if (op->refcount != NULL && is_zend_ptr(op->opcodes)) {
+        oxphp_op_array_make_literals_immutable(op);
+    }
+}
+
 int64_t oxphp_bridge_async_dispatch(
     void *op_array, void *static_vars, void *this_ptr,
     uint32_t argc, void *args, void *closure_zval
 ) {
     if (__builtin_expect(rust_async_dispatch != NULL, 1)) {
         oxphp_publish_map_ptr_last();
+        oxphp_make_dispatched_literals_immutable((zend_op_array *)op_array);
         return rust_async_dispatch(op_array, static_vars, this_ptr, argc, args, closure_zval);
     }
     return -1;
