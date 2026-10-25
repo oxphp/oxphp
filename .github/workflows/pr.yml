@@ -147,10 +147,11 @@ jobs:
 
   # The default feature set, which is the only one that builds the php-gated
   # code, links libphp.so and liboxphp_bridge.so. The job runs in the PHP ZTS
-  # base image the release image is built on, so libphp.so is already there;
-  # the script installs Rust from Alpine (the compiler rust-toolchain.toml
-  # pins) and builds the bridge. PHP 8.4 only: the clippy matrix type-checks
-  # the 8.5 bindings, and no test is version-gated.
+  # base image of the oldest Alpine the release image is built on, so
+  # libphp.so is already there; the script installs Rust from that Alpine
+  # (the compiler rust-toolchain.toml pins) and builds the bridge. PHP 8.4
+  # only: the clippy matrix type-checks the 8.5 bindings, and no test is
+  # version-gated.
   test-php:
     name: Test (php feature)
     runs-on: ubuntu-24.04

@@ -18,7 +18,9 @@ jobs:
   # ──────────────────────────────────────────────────────────────
   # Job 1: per-(PHP, distribution, arch) build + push arch-specific tags.
   # The distribution is both the PHP base image's tag suffix
-  # (php:8.4-zts-alpine3.23, php:8.4-zts-trixie) and the image tag's.
+  # (php:8.4-zts-alpine3.24, php:8.4-zts-trixie) and the image tag's.
+  # Keep the Alpine entries in step with alpine_versions in
+  # .github/supported-versions.yml, which decides the one the aliases follow.
   # ──────────────────────────────────────────────────────────────
   build:
     strategy:
@@ -26,10 +28,11 @@ jobs:
       matrix:
         php: ["8.4", "8.5"]
         arch: [amd64, arm64]
-        distro: [alpine3.23, trixie]
+        distro: [alpine3.24, alpine3.23, trixie]
         include:
           - { arch: amd64, runner: ubuntu-24.04 }
           - { arch: arm64, runner: ubuntu-24.04-arm }
+          - { distro: alpine3.24, dockerfile: docker/release/alpine/Dockerfile }
           - { distro: alpine3.23, dockerfile: docker/release/alpine/Dockerfile }
           - { distro: trixie, dockerfile: docker/release/debian/Dockerfile }
     runs-on: ${{ matrix.runner }}
@@ -170,7 +173,7 @@ jobs:
       fail-fast: false
       matrix:
         php: ["8.4", "8.5"]
-        distro: [alpine3.23, trixie]
+        distro: [alpine3.24, alpine3.23, trixie]
     runs-on: ubuntu-24.04
     steps:
       - name: Checkout

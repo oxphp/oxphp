@@ -14,7 +14,7 @@
 #     oxphp-perf
 # ══════════════════════════════════════════════════════════════
 ARG PHP_VERSION=8.4
-ARG ALPINE_VERSION=3.23
+ARG ALPINE_VERSION=3.24
 ARG BASE_IMAGE=php:${PHP_VERSION}-zts-alpine${ALPINE_VERSION}
 ARG OXPHP_WITH_PROFILER=1
 

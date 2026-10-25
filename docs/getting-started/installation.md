@@ -5,7 +5,7 @@ description: Install OxPHP via Docker image or build from source. Covers prerequ
 
 # Installation
 
-OxPHP is distributed as a Docker image — the fastest and recommended way to start serving PHP applications. The image bundles the server binary, PHP 8.4 or 8.5 ZTS, the OxPHP extension, and all runtime dependencies on Alpine Linux. The default `:0.13.0` and `:latest` tags ship PHP 8.5; pull PHP 8.4 with the `:0.13.0-php8.4`, `:php8.4`, or any `*-php8.4*` tag variant.
+OxPHP is distributed as a Docker image — the fastest and recommended way to start serving PHP applications. The image bundles the server binary, PHP 8.4 or 8.5 ZTS, the OxPHP extension, and all runtime dependencies on Alpine Linux. The default `:0.13.0` and `:latest` tags ship PHP 8.5; pull PHP 8.4 with the `:0.13.0-php8.4`, `:php8.4`, or any `*-php8.4*` tag variant. The latest release's tags that name no Alpine version (`:latest`, `:0.13.0`, `:php8.4`, `:0.13-php8.5`) are built on Alpine 3.24; each release is also published on Alpine 3.23 as `:0.13.0-php8.5-alpine3.23`, `:0.13.0-php8.4-alpine3.23` and the matching patch-pinned tags.
 
 ## Docker (Recommended)
 
@@ -29,7 +29,7 @@ The image includes:
 
 ### Debian (glibc) Image
 
-From 0.13.0 on, every release is also published as the same server built on Debian trixie instead of Alpine, for `linux/amd64` and `linux/arm64`. The tags are the release's Alpine tags with `-trixie` added at the end (in place of `-alpine3.23` where a tag has it), and `:trixie` stands in for `:latest`: `ghcr.io/oxphp/oxphp:trixie` and `:0.13.0-trixie` (PHP 8.5), `:php8.4-trixie`, `:php8.5-trixie`, `:0.13-php8.5-trixie`, `:0.13.0-php8.5-trixie`, and `:0.13.0-php8.5.<patch>-trixie` pinned to a PHP patch release. They are signed with cosign like the Alpine tags, and the weekly job that rebuilds recent releases on the current PHP patch release rebuilds them too. Releases before 0.13.0 are Alpine only.
+From 0.13.0 on, every release is also published as the same server built on Debian trixie instead of Alpine, for `linux/amd64` and `linux/arm64`. The tags are the release's Alpine tags with `-trixie` added at the end (in place of `-alpine<X.Y>` where a tag has it), and `:trixie` stands in for `:latest`: `ghcr.io/oxphp/oxphp:trixie` and `:0.13.0-trixie` (PHP 8.5), `:php8.4-trixie`, `:php8.5-trixie`, `:0.13-php8.5-trixie`, `:0.13.0-php8.5-trixie`, and `:0.13.0-php8.5.<patch>-trixie` pinned to a PHP patch release. They are signed with cosign like the Alpine tags, and the weekly job that rebuilds recent releases on the current PHP patch release rebuilds them too. Releases before 0.13.0 are Alpine only.
 
 The nightly pipeline publishes the Debian build as well: `:nightly-trixie` (PHP 8.4), `:php8.4-nightly-trixie` and `:php8.5-nightly-trixie`. Nightly tags are built from `main` on nights when it has moved since the last fully successful run, and carry no stability promise. A night on which the Debian build fails leaves `:nightly-trixie` and `:php<minor>-nightly-trixie` at the last build that succeeded, so they can trail `:nightly`.
 
@@ -74,7 +74,7 @@ File layout of the runtime image:
         └── extension.ini                            # extension=oxphp_sapi.so
 ```
 
-> **The `<ABI>` value depends on the PHP minor.** PHP 8.4 uses `20240924`, PHP 8.5 uses a different date stamp. The examples below pin `20240924` because their `FROM` line targets `php:8.4-zts-alpine3.23` — switch the FROM and you must switch the date too. To derive it portably inside the build:
+> **The `<ABI>` value depends on the PHP minor.** PHP 8.4 uses `20240924`, PHP 8.5 uses a different date stamp. The examples below pin `20240924` because their `FROM` line targets `php:8.4-zts-alpine3.24` — switch the FROM and you must switch the date too. To derive it portably inside the build:
 >
 > ```bash
 > php -r 'echo ini_get("extension_dir");'
@@ -105,14 +105,17 @@ The `oxphp` binary links to `libphp.so` and `liboxphp_bridge.so`. The PHP extens
 
 ### Minimal Dockerfile
 
-The base image `php:8.4-zts-alpine3.23` (or `php:8.5-zts-alpine3.23`) already contains `libphp.so` and all its dependencies. Match the PHP minor in your `FROM` to the OxPHP tag you copy from, and the C library too: artifacts from a `-trixie` tag go onto `php:<minor>-zts-trixie`, not onto an Alpine base. You only need to copy the three OxPHP artifacts:
+The base image `php:8.4-zts-alpine3.24` (or `php:8.5-zts-alpine3.24`) already contains `libphp.so` and all its dependencies. Match the PHP minor in your `FROM` to the OxPHP tag you copy from, and the C library too: artifacts from a `-trixie` tag go onto `php:<minor>-zts-trixie`, not onto an Alpine base, and artifacts from a tag of the latest release that names no Alpine version, such as `:0.13.0-php8.4`, go onto Alpine 3.24, the ones from an `-alpine3.23` tag onto `php:<minor>-zts-alpine3.23`. You only need to copy the three OxPHP artifacts:
 
 ```dockerfile
-FROM php:8.4-zts-alpine3.23
+FROM php:8.4-zts-alpine3.24
 
-COPY --from=ghcr.io/oxphp/oxphp:0.13.0 /usr/local/bin/oxphp /usr/local/bin/oxphp
-COPY --from=ghcr.io/oxphp/oxphp:0.13.0 /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
-COPY --from=ghcr.io/oxphp/oxphp:0.13.0 /usr/local/lib/php/extensions/no-debug-zts-20240924/oxphp_sapi.so /usr/local/lib/php/extensions/no-debug-zts-20240924/
+# The oxphp binary links libgcc_s.so.1, which the PHP base image does not ship
+RUN apk add --no-cache libgcc
+
+COPY --from=ghcr.io/oxphp/oxphp:0.13.0-php8.4 /usr/local/bin/oxphp /usr/local/bin/oxphp
+COPY --from=ghcr.io/oxphp/oxphp:0.13.0-php8.4 /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
+COPY --from=ghcr.io/oxphp/oxphp:0.13.0-php8.4 /usr/local/lib/php/extensions/no-debug-zts-20240924/oxphp_sapi.so /usr/local/lib/php/extensions/no-debug-zts-20240924/
 
 RUN echo "extension=oxphp_sapi.so" > /usr/local/etc/php/conf.d/oxphp.ini
 
@@ -131,13 +134,13 @@ The official OxPHP image is minimal — it does not include PHP CLI or extension
 
 ```dockerfile
 # Extension build stage
-FROM php:8.4-zts-alpine3.23 AS extensions
+FROM php:8.4-zts-alpine3.24 AS extensions
 
 RUN apk add --no-cache icu-dev postgresql-dev \
     && docker-php-ext-install pdo pdo_mysql pdo_pgsql intl
 
 # Production
-FROM ghcr.io/oxphp/oxphp:0.13.0
+FROM ghcr.io/oxphp/oxphp:0.13.0-php8.4
 
 # Runtime dependencies for extensions
 USER root

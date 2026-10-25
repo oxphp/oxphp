@@ -27,7 +27,7 @@ For real-world applications, use a multi-stage Dockerfile with separate `dev` an
 
 ```dockerfile
 # ── Stage: php-base — shared PHP extensions ──────────────────
-FROM php:8.4-zts-alpine3.23 AS php-base
+FROM php:8.4-zts-alpine3.24 AS php-base
 
 RUN apk add --no-cache \
         icu-dev \
@@ -53,7 +53,7 @@ RUN apk add --no-cache $PHPIZE_DEPS linux-headers \
 FROM composer:2 AS composer
 
 # ── Stage: oxphp — pull OxPHP artifacts ──────────────────────
-FROM ghcr.io/oxphp/oxphp:0.13.0 AS oxphp
+FROM ghcr.io/oxphp/oxphp:0.13.0-php8.4 AS oxphp
 
 # ── Target: dev ──────────────────────────────────────────────
 # Includes: PHP CLI, Composer, Xdebug, OxPHP binary + extension
@@ -183,7 +183,7 @@ The container starts as root, and `oxphp serve` then drops to `www-data` by defa
 
 ### Best practice pattern (two stages, smaller image)
 
-For the smallest possible final image, compile extensions in a dedicated builder stage and copy only the compiled `.so` files into the runtime stage. The [Multi-Stage Dockerfile](#multi-stage-dockerfile) walkthrough above uses `FROM ghcr.io/oxphp/oxphp:0.13.0 AS prod` — simple, portable, and recommended as a starting point.
+For the smallest possible final image, compile extensions in a dedicated builder stage and copy only the compiled `.so` files into the runtime stage. The [Multi-Stage Dockerfile](#multi-stage-dockerfile) walkthrough above bases `prod` on `ghcr.io/oxphp/oxphp:0.13.0-php8.4` — simple, portable, and recommended as a starting point.
 
 `examples/dockerfile/Dockerfile` in the repository goes further: its `prod` target is based on bare `alpine` with an explicit `apk` dependency list, copying only the `oxphp` binary, `libphp.so`, compiled PHP extensions, and the required shared libraries. This cuts the base image from ~188 MB down to ~76 MB (~60% reduction, excluding your app code) at the cost of tracking PHP/Alpine version bumps in the `apk` list. The same file also ships a `prod-cli` target — a short-lived image for `php artisan migrate`, Composer, and other maintenance commands that should stay out of the serving path.
 

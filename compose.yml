@@ -9,7 +9,7 @@ services:
         # `php-config --vernum`. Override with: PHP_VERSION=8.4 docker compose build.
         PHP_VERSION: "8.5"
         # Alpine base version. Override with: ALPINE_VERSION=3.23 docker compose build
-        ALPINE_VERSION: "3.23"
+        ALPINE_VERSION: "3.24"
         # Extra Cargo features (space-separated), e.g. "plugin-debug"
         # Default features (see Cargo.toml `default`) include the "php"
         # aggregate (plugin-apm, plugin-async) plus plugin-profiler.

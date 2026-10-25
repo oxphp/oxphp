@@ -2,7 +2,7 @@
 # Build arguments (overridable from compose.yml or CI)
 # ══════════════════════════════════════════════════════════════
 ARG PHP_VERSION=8.4
-ARG ALPINE_VERSION=3.23
+ARG ALPINE_VERSION=3.24
 ARG BASE_IMAGE=php:${PHP_VERSION}-zts-alpine${ALPINE_VERSION}
 
 # Toggles -DOXPHP_WITH_PROFILER=1 in both C build stages. Must match the

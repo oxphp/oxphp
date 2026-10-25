@@ -33,7 +33,7 @@ cp yii3-oxphp/src/.env.example yii3-oxphp/src/.env
 ```dockerfile
 ARG OXPHP_VERSION=0.13.0
 ARG PHP_VERSION=8.5
-ARG ALPINE_VERSION=3.23
+ARG ALPINE_VERSION=3.24
 
 # ── PHP base: native mbstring ─────────────────────────────────
 FROM php:${PHP_VERSION}-zts-alpine${ALPINE_VERSION} AS php-base
