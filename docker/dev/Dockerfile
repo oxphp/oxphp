@@ -101,8 +101,6 @@ WORKDIR /build
 # via compose build-args or --build-arg on the command line.
 ARG CARGO_FEATURES="plugin-apm,plugin-async,plugin-shared"
 
-ARG OXPHP_VERSION
-
 # Copy dependency files first (layer caching)
 COPY Cargo.toml Cargo.lock ./
 
@@ -123,6 +121,10 @@ COPY src ./src
 COPY benches ./benches
 COPY build.rs ./
 COPY proto ./proto
+
+# Declared after the dependency build: an ARG in scope is part of the cache
+# key of every RUN below it, so each new version would recompile the deps.
+ARG OXPHP_VERSION
 
 # Patch version from build arg (only when OXPHP_VERSION is explicitly set)
 RUN if [ -n "${OXPHP_VERSION}" ]; then \
