@@ -161,7 +161,7 @@ docker build --target prod -t myapp:prod .
 
 ## Installing PHP Extensions in Production
 
-Starting with OxPHP 0.3.0, the production image ships the full PHP toolchain (`php`, `docker-php-ext-install`, `phpize`) inherited from `php:8.4-zts-alpine` (or `php:8.5-zts-alpine` for the `:*-php8.5*` variants) and does **not** set a `USER` directive. Downstream Dockerfiles can install PHP extensions directly — no `USER` toggle required.
+Starting with OxPHP 0.3.0, the production image ships the full PHP toolchain (`php`, `docker-php-ext-install`, `phpize`) inherited from `php:8.4-zts-alpine` (or `php:8.5-zts-alpine` for the `:*-php8.5*` variants, and `php:<minor>-zts-trixie` for the `-trixie` ones) and does **not** set a `USER` directive. Downstream Dockerfiles can install PHP extensions directly — no `USER` toggle required.
 
 ### Quick-start pattern (single stage)
 

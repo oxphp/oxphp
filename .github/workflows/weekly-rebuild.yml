@@ -1,8 +1,9 @@
 name: Weekly Rebuild
 
 # Picks up upstream PHP patch releases by re-running the release pipeline
-# against a pinned oxphp version, for every (oxphp, PHP, Alpine) triple
-# listed in .github/supported-versions.yml.
+# against a pinned oxphp version, for every (oxphp, PHP, distribution)
+# triple listed in .github/supported-versions.yml: each Alpine version, and
+# each Debian codename for the releases whose tag has the Debian Dockerfile.
 
 on:
   schedule:
@@ -27,6 +28,7 @@ jobs:
     outputs:
       build_matrix: ${{ steps.compute.outputs.build_matrix }}
       merge_matrix: ${{ steps.compute.outputs.merge_matrix }}
+      suite_matrix: ${{ steps.compute.outputs.suite_matrix }}
     steps:
       - uses: actions/checkout@v5
 
@@ -38,9 +40,10 @@ jobs:
       - name: Verify all upstream base images exist
         run: |
           FAIL=0
+          DISTROS="$(yq '.alpine_versions[] | "alpine" + .' .github/supported-versions.yml) $(yq '.debian_versions[]' .github/supported-versions.yml)"
           for PHP in $(yq '.php_versions[]' .github/supported-versions.yml); do
-            for ALPINE in $(yq '.alpine_versions[]' .github/supported-versions.yml); do
-              BASE="php:${PHP}-zts-alpine${ALPINE}"
+            for DISTRO in $DISTROS; do
+              BASE="php:${PHP}-zts-${DISTRO}"
               if ! docker manifest inspect "$BASE" >/dev/null 2>&1; then
                 echo "error: upstream base image not found: $BASE" >&2
                 FAIL=1
@@ -54,38 +57,68 @@ jobs:
             exit 1
           fi
 
-      - name: Compute build and merge matrices
+      - name: Compute build, merge and suite matrices
         id: compute
         run: |
           BUILD_JSON="["
           MERGE_JSON="["
+          SUITE_JSON="["
           FIRST_B=1
           FIRST_M=1
+          FIRST_S=1
           for OXPHP in $(yq '.oxphp_versions[]' .github/supported-versions.yml); do
+            # Each entry is <distro>:<Dockerfile>. A release tagged before the
+            # Debian Dockerfile existed is rebuilt on Alpine only.
+            DISTROS=""
+            for ALPINE in $(yq '.alpine_versions[]' .github/supported-versions.yml); do
+              DISTROS+=" alpine${ALPINE}:docker/release/alpine/Dockerfile"
+            done
+            git fetch --quiet --depth=1 origin "refs/tags/v${OXPHP}:refs/tags/v${OXPHP}"
+            if git cat-file -e "v${OXPHP}:docker/release/debian/Dockerfile" 2>/dev/null; then
+              for DEBIAN in $(yq '.debian_versions[]' .github/supported-versions.yml); do
+                DISTROS+=" ${DEBIAN}:docker/release/debian/Dockerfile"
+              done
+            else
+              echo "v${OXPHP} has no docker/release/debian/Dockerfile; Alpine only"
+            fi
             for PHP in $(yq '.php_versions[]' .github/supported-versions.yml); do
-              for ALPINE in $(yq '.alpine_versions[]' .github/supported-versions.yml); do
+              for ENTRY in $DISTROS; do
+                DISTRO="${ENTRY%%:*}"
+                DOCKERFILE="${ENTRY#*:}"
                 if [[ $FIRST_M -eq 0 ]]; then MERGE_JSON+=","; fi
                 FIRST_M=0
-                MERGE_JSON+="{\"oxphp\":\"$OXPHP\",\"php\":\"$PHP\",\"alpine\":\"$ALPINE\"}"
+                MERGE_JSON+="{\"oxphp\":\"$OXPHP\",\"php\":\"$PHP\",\"distro\":\"$DISTRO\"}"
+                # The PHP suites run on the Alpine image only: their health
+                # checks call wget, which the Debian image does not have.
+                if [[ "$DISTRO" == alpine* ]]; then
+                  if [[ $FIRST_S -eq 0 ]]; then SUITE_JSON+=","; fi
+                  FIRST_S=0
+                  SUITE_JSON+="{\"oxphp\":\"$OXPHP\",\"php\":\"$PHP\",\"distro\":\"$DISTRO\"}"
+                fi
                 for ARCH in amd64 arm64; do
                   RUNNER="ubuntu-24.04"
                   if [[ "$ARCH" == "arm64" ]]; then RUNNER="ubuntu-24.04-arm"; fi
                   if [[ $FIRST_B -eq 0 ]]; then BUILD_JSON+=","; fi
                   FIRST_B=0
-                  BUILD_JSON+="{\"oxphp\":\"$OXPHP\",\"php\":\"$PHP\",\"alpine\":\"$ALPINE\",\"arch\":\"$ARCH\",\"runner\":\"$RUNNER\"}"
+                  BUILD_JSON+="{\"oxphp\":\"$OXPHP\",\"php\":\"$PHP\",\"distro\":\"$DISTRO\",\"dockerfile\":\"$DOCKERFILE\",\"arch\":\"$ARCH\",\"runner\":\"$RUNNER\"}"
                 done
               done
             done
           done
           BUILD_JSON+="]"
           MERGE_JSON+="]"
-          echo "build_matrix=$BUILD_JSON" >> "$GITHUB_OUTPUT"
-          echo "merge_matrix=$MERGE_JSON" >> "$GITHUB_OUTPUT"
+          SUITE_JSON+="]"
+          {
+            echo "build_matrix=$BUILD_JSON"
+            echo "merge_matrix=$MERGE_JSON"
+            echo "suite_matrix=$SUITE_JSON"
+          } >> "$GITHUB_OUTPUT"
           echo "build_matrix: $BUILD_JSON"
           echo "merge_matrix: $MERGE_JSON"
+          echo "suite_matrix: $SUITE_JSON"
 
   # ──────────────────────────────────────────────────────────────
-  # Job 2: per-(oxphp, PHP, alpine, arch) build
+  # Job 2: per-(oxphp, PHP, distro, arch) build
   # ──────────────────────────────────────────────────────────────
   build:
     needs: plan
@@ -114,9 +147,9 @@ jobs:
         id: base_digest
         env:
           PHP_MINOR: ${{ matrix.php }}
-          ALPINE_VER: ${{ matrix.alpine }}
+          DISTRO: ${{ matrix.distro }}
         run: |
-          BASE="php:${PHP_MINOR}-zts-alpine${ALPINE_VER}"
+          BASE="php:${PHP_MINOR}-zts-${DISTRO}"
           # Parse default human-readable output — the `{{.Manifest.Digest}}`
           # template is silently ignored in newer docker buildx builds and
           # would cause multi-line $GITHUB_OUTPUT content that GitHub rejects.
@@ -130,14 +163,16 @@ jobs:
       - name: Resolve last-published upstream digest
         id: published
         env:
+          OXPHP_VER: ${{ matrix.oxphp }}
           PHP_MINOR: ${{ matrix.php }}
+          DISTRO: ${{ matrix.distro }}
         run: |
           # Last weekly publish records the upstream digest in the manifest
           # annotation `org.oxphp.upstream-digest` (set by the publish step
-          # below). Empty annotation => first run for this PHP minor; treat
+          # below). Empty annotation => first run for this triple; treat
           # as new (proceed with full build).
           LAST=$(docker buildx imagetools inspect \
-            "${REGISTRY}/${IMAGE_NAME}:php${PHP_MINOR}" --raw 2>/dev/null \
+            "${REGISTRY}/${IMAGE_NAME}:${OXPHP_VER}-php${PHP_MINOR}-${DISTRO}" --raw 2>/dev/null \
             | jq -r '.annotations["org.oxphp.upstream-digest"] // ""' || echo "")
           echo "digest=$LAST" >> "$GITHUB_OUTPUT"
 
@@ -160,10 +195,10 @@ jobs:
         id: php_patch
         env:
           PHP_MINOR: ${{ matrix.php }}
-          ALPINE_VER: ${{ matrix.alpine }}
+          DISTRO: ${{ matrix.distro }}
           ARCH: ${{ matrix.arch }}
         run: |
-          BASE="php:${PHP_MINOR}-zts-alpine${ALPINE_VER}"
+          BASE="php:${PHP_MINOR}-zts-${DISTRO}"
           docker pull --platform "linux/${ARCH}" "$BASE"
           PATCH=$(docker run --rm --platform "linux/${ARCH}" "$BASE" php -r 'echo PHP_VERSION;')
           if [[ ! "$PATCH" =~ ^${PHP_MINOR}\.[0-9]+$ ]]; then
@@ -172,20 +207,21 @@ jobs:
           fi
           echo "patch=$PATCH" >> "$GITHUB_OUTPUT"
 
-      - name: Build image from docker/release/alpine/Dockerfile (cache key includes base digest)
+      - name: Build image from ${{ matrix.dockerfile }} (cache key includes base digest)
         if: steps.decide.outputs.skip != 'true'
         env:
           PHP_MINOR: ${{ matrix.php }}
-          ALPINE_VER: ${{ matrix.alpine }}
+          DISTRO: ${{ matrix.distro }}
+          DOCKERFILE: ${{ matrix.dockerfile }}
           ARCH: ${{ matrix.arch }}
           OXPHP_VER: ${{ matrix.oxphp }}
           BASE_DIGEST: ${{ steps.base_digest.outputs.digest }}
         run: |
           docker buildx build \
             --platform "linux/${ARCH}" \
-            --file docker/release/alpine/Dockerfile \
+            --file "$DOCKERFILE" \
             --build-arg "PHP_VERSION=${PHP_MINOR}" \
-            --build-arg "ALPINE_VERSION=${ALPINE_VER}" \
+            --build-arg "BASE_IMAGE=php:${PHP_MINOR}-zts-${DISTRO}" \
             --build-arg "OXPHP_VERSION=${OXPHP_VER}" \
             --cache-from "type=gha,scope=weekly-${ARCH}-${PHP_MINOR}-${BASE_DIGEST}" \
             --cache-to "type=gha,scope=weekly-${ARCH}-${PHP_MINOR}-${BASE_DIGEST},mode=max" \
@@ -206,10 +242,10 @@ jobs:
         env:
           OXPHP_VER: ${{ matrix.oxphp }}
           PHP_MINOR: ${{ matrix.php }}
-          ALPINE_VER: ${{ matrix.alpine }}
+          DISTRO: ${{ matrix.distro }}
           ARCH: ${{ matrix.arch }}
         run: |
-          TAG="${REGISTRY}/${IMAGE_NAME}:${OXPHP_VER}-php${PHP_MINOR}-alpine${ALPINE_VER}-${ARCH}"
+          TAG="${REGISTRY}/${IMAGE_NAME}:${OXPHP_VER}-php${PHP_MINOR}-${DISTRO}-${ARCH}"
           docker tag oxphp:ci "$TAG"
           docker push "$TAG"
 
@@ -218,10 +254,10 @@ jobs:
         env:
           OXPHP_VER: ${{ matrix.oxphp }}
           PHP_PATCH: ${{ steps.php_patch.outputs.patch }}
-          ALPINE_VER: ${{ matrix.alpine }}
+          DISTRO: ${{ matrix.distro }}
           ARCH: ${{ matrix.arch }}
         run: |
-          TAG="${REGISTRY}/${IMAGE_NAME}:${OXPHP_VER}-php${PHP_PATCH}-alpine${ALPINE_VER}-${ARCH}"
+          TAG="${REGISTRY}/${IMAGE_NAME}:${OXPHP_VER}-php${PHP_PATCH}-${DISTRO}-${ARCH}"
           docker tag oxphp:ci "$TAG"
           docker push "$TAG"
 
@@ -231,18 +267,18 @@ jobs:
           PHP_PATCH: ${{ steps.php_patch.outputs.patch }}
           OXPHP_VER: ${{ matrix.oxphp }}
           PHP_MINOR: ${{ matrix.php }}
-          ALPINE_VER: ${{ matrix.alpine }}
+          DISTRO: ${{ matrix.distro }}
           ARCH: ${{ matrix.arch }}
         run: |
           mkdir -p /tmp/outputs
-          echo "$PHP_PATCH" > "/tmp/outputs/php_patch_${OXPHP_VER}_${PHP_MINOR}_${ALPINE_VER}_${ARCH}.txt"
+          echo "$PHP_PATCH" > "/tmp/outputs/php_patch_${OXPHP_VER}_${PHP_MINOR}_${DISTRO}_${ARCH}.txt"
 
       - name: Upload PHP patch artifact
         if: steps.decide.outputs.skip != 'true'
         uses: actions/upload-artifact@v6
         with:
-          name: php-patch-${{ matrix.oxphp }}-${{ matrix.php }}-${{ matrix.alpine }}-${{ matrix.arch }}
-          path: /tmp/outputs/php_patch_${{ matrix.oxphp }}_${{ matrix.php }}_${{ matrix.alpine }}_${{ matrix.arch }}.txt
+          name: php-patch-${{ matrix.oxphp }}-${{ matrix.php }}-${{ matrix.distro }}-${{ matrix.arch }}
+          path: /tmp/outputs/php_patch_${{ matrix.oxphp }}_${{ matrix.php }}_${{ matrix.distro }}_${{ matrix.arch }}.txt
           retention-days: 1
 
   # ──────────────────────────────────────────────────────────────
@@ -263,7 +299,7 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        include: ${{ fromJson(needs.plan.outputs.merge_matrix) }}
+        include: ${{ fromJson(needs.plan.outputs.suite_matrix) }}
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v5
@@ -281,9 +317,9 @@ jobs:
         env:
           OXPHP_VER: ${{ matrix.oxphp }}
           PHP_MINOR: ${{ matrix.php }}
-          ALPINE_VER: ${{ matrix.alpine }}
+          DISTRO: ${{ matrix.distro }}
         run: |
-          SRC="${REGISTRY}/${IMAGE_NAME}:${OXPHP_VER}-php${PHP_MINOR}-alpine${ALPINE_VER}-amd64"
+          SRC="${REGISTRY}/${IMAGE_NAME}:${OXPHP_VER}-php${PHP_MINOR}-${DISTRO}-amd64"
           docker pull "$SRC"
           docker tag "$SRC" oxphp:dev
 
@@ -326,7 +362,7 @@ jobs:
           fi
 
   # ──────────────────────────────────────────────────────────────
-  # Job 3: per-(oxphp, PHP, alpine) manifest merge + sign + aliases
+  # Job 3: per-(oxphp, PHP, distro) manifest merge + sign + aliases
   # ──────────────────────────────────────────────────────────────
   manifest:
     needs: [plan, build, php-suite-subset]
@@ -349,7 +385,7 @@ jobs:
       - name: Download PHP patch artifacts
         uses: actions/download-artifact@v7
         with:
-          pattern: php-patch-${{ matrix.oxphp }}-${{ matrix.php }}-${{ matrix.alpine }}-*
+          pattern: php-patch-${{ matrix.oxphp }}-${{ matrix.php }}-${{ matrix.distro }}-*
           path: /tmp/patches
 
       - name: Verify PHP patch consistency across arches
@@ -357,10 +393,10 @@ jobs:
         env:
           OXPHP_VER: ${{ matrix.oxphp }}
           PHP_MINOR: ${{ matrix.php }}
-          ALPINE_VER: ${{ matrix.alpine }}
+          DISTRO: ${{ matrix.distro }}
         run: |
-          AMD_FILE="/tmp/patches/php-patch-${OXPHP_VER}-${PHP_MINOR}-${ALPINE_VER}-amd64/php_patch_${OXPHP_VER}_${PHP_MINOR}_${ALPINE_VER}_amd64.txt"
-          ARM_FILE="/tmp/patches/php-patch-${OXPHP_VER}-${PHP_MINOR}-${ALPINE_VER}-arm64/php_patch_${OXPHP_VER}_${PHP_MINOR}_${ALPINE_VER}_arm64.txt"
+          AMD_FILE="/tmp/patches/php-patch-${OXPHP_VER}-${PHP_MINOR}-${DISTRO}-amd64/php_patch_${OXPHP_VER}_${PHP_MINOR}_${DISTRO}_amd64.txt"
+          ARM_FILE="/tmp/patches/php-patch-${OXPHP_VER}-${PHP_MINOR}-${DISTRO}-arm64/php_patch_${OXPHP_VER}_${PHP_MINOR}_${DISTRO}_arm64.txt"
           AMD=$(cat "$AMD_FILE")
           ARM=$(cat "$ARM_FILE")
           if [[ "$AMD" != "$ARM" ]]; then
@@ -376,24 +412,24 @@ jobs:
         env:
           OXPHP_VER: ${{ matrix.oxphp }}
           PHP_MINOR: ${{ matrix.php }}
-          ALPINE_VER: ${{ matrix.alpine }}
+          DISTRO: ${{ matrix.distro }}
         run: |
           docker buildx imagetools create \
-            -t "${REGISTRY}/${IMAGE_NAME}:${OXPHP_VER}-php${PHP_MINOR}-alpine${ALPINE_VER}" \
-            "${REGISTRY}/${IMAGE_NAME}:${OXPHP_VER}-php${PHP_MINOR}-alpine${ALPINE_VER}-amd64" \
-            "${REGISTRY}/${IMAGE_NAME}:${OXPHP_VER}-php${PHP_MINOR}-alpine${ALPINE_VER}-arm64"
+            -t "${REGISTRY}/${IMAGE_NAME}:${OXPHP_VER}-php${PHP_MINOR}-${DISTRO}" \
+            "${REGISTRY}/${IMAGE_NAME}:${OXPHP_VER}-php${PHP_MINOR}-${DISTRO}-amd64" \
+            "${REGISTRY}/${IMAGE_NAME}:${OXPHP_VER}-php${PHP_MINOR}-${DISTRO}-arm64"
 
       - name: Create patch-pinned multi-arch manifest
         env:
           OXPHP_VER: ${{ matrix.oxphp }}
           PHP_MINOR: ${{ matrix.php }}
           PHP_PATCH: ${{ steps.patch.outputs.patch }}
-          ALPINE_VER: ${{ matrix.alpine }}
+          DISTRO: ${{ matrix.distro }}
         run: |
           docker buildx imagetools create \
-            -t "${REGISTRY}/${IMAGE_NAME}:${OXPHP_VER}-php${PHP_PATCH}-alpine${ALPINE_VER}" \
-            "${REGISTRY}/${IMAGE_NAME}:${OXPHP_VER}-php${PHP_MINOR}-alpine${ALPINE_VER}-amd64" \
-            "${REGISTRY}/${IMAGE_NAME}:${OXPHP_VER}-php${PHP_MINOR}-alpine${ALPINE_VER}-arm64"
+            -t "${REGISTRY}/${IMAGE_NAME}:${OXPHP_VER}-php${PHP_PATCH}-${DISTRO}" \
+            "${REGISTRY}/${IMAGE_NAME}:${OXPHP_VER}-php${PHP_MINOR}-${DISTRO}-amd64" \
+            "${REGISTRY}/${IMAGE_NAME}:${OXPHP_VER}-php${PHP_MINOR}-${DISTRO}-arm64"
 
       - name: Install cosign
         uses: sigstore/cosign-installer@v3
@@ -403,10 +439,10 @@ jobs:
           OXPHP_VER: ${{ matrix.oxphp }}
           PHP_MINOR: ${{ matrix.php }}
           PHP_PATCH: ${{ steps.patch.outputs.patch }}
-          ALPINE_VER: ${{ matrix.alpine }}
+          DISTRO: ${{ matrix.distro }}
         run: |
-          cosign sign --yes "${REGISTRY}/${IMAGE_NAME}:${OXPHP_VER}-php${PHP_MINOR}-alpine${ALPINE_VER}"
-          cosign sign --yes "${REGISTRY}/${IMAGE_NAME}:${OXPHP_VER}-php${PHP_PATCH}-alpine${ALPINE_VER}"
+          cosign sign --yes "${REGISTRY}/${IMAGE_NAME}:${OXPHP_VER}-php${PHP_MINOR}-${DISTRO}"
+          cosign sign --yes "${REGISTRY}/${IMAGE_NAME}:${OXPHP_VER}-php${PHP_PATCH}-${DISTRO}"
 
       - name: Install yq
         run: |
@@ -417,30 +453,23 @@ jobs:
         env:
           OXPHP_VER: ${{ matrix.oxphp }}
           PHP_MINOR: ${{ matrix.php }}
-          ALPINE_VER: ${{ matrix.alpine }}
+          DISTRO: ${{ matrix.distro }}
           REGISTRY_OVERRIDE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
         run: |
           REGISTRY="$REGISTRY_OVERRIDE" ./scripts/move-aliases.sh \
             "$OXPHP_VER" \
             "$PHP_MINOR" \
-            "$ALPINE_VER"
+            "$DISTRO"
 
       - name: Sign moved aliases
         env:
           OXPHP_VER: ${{ matrix.oxphp }}
           PHP_MINOR: ${{ matrix.php }}
+          DISTRO: ${{ matrix.distro }}
+          REGISTRY_OVERRIDE: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
         run: |
-          SEMVER_MINOR=$(echo "$OXPHP_VER" | cut -d. -f1,2)
-          LATEST_OXPHP=$(yq '.oxphp_versions[0]' .github/supported-versions.yml)
-          DEFAULT_PHP=$(yq '.default_php' .github/supported-versions.yml)
-
-          cosign sign --yes "${REGISTRY}/${IMAGE_NAME}:${OXPHP_VER}-php${PHP_MINOR}"
-          cosign sign --yes "${REGISTRY}/${IMAGE_NAME}:${SEMVER_MINOR}-php${PHP_MINOR}"
-
-          if [[ "$OXPHP_VER" == "$LATEST_OXPHP" ]]; then
-            cosign sign --yes "${REGISTRY}/${IMAGE_NAME}:php${PHP_MINOR}"
-            if [[ "$PHP_MINOR" == "$DEFAULT_PHP" ]]; then
-              cosign sign --yes "${REGISTRY}/${IMAGE_NAME}:${OXPHP_VER}"
-              cosign sign --yes "${REGISTRY}/${IMAGE_NAME}:latest"
-            fi
-          fi
+          ALIASES=$(REGISTRY="$REGISTRY_OVERRIDE" ./scripts/move-aliases.sh \
+            "$OXPHP_VER" "$PHP_MINOR" "$DISTRO" --list)
+          for ALIAS in $ALIASES; do
+            cosign sign --yes "$ALIAS"
+          done

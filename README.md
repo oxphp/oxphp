@@ -196,7 +196,7 @@ Full guide: [Profiling](docs/features/profiling.md).
 - **Path traversal protection** — symlink escape detection — see [Symlink allow paths](docs/security/symlink-allow-paths.md)
 - **Trusted proxy support** — real client IP extraction from `Forwarded` (RFC 7239), `X-Forwarded-*` and, behind Cloudflare, `CF-Connecting-IP` headers with CIDR-based trust — see [Trusted proxies](docs/security/trusted-proxies.md)
 - **Dot-path blocking** — returns 404 for hidden files (`.env`, `.git/`) with `.well-known` exception (RFC 8615) — see [Dot-path blocking](docs/security/dot-path-blocking.md)
-- **Privilege drop** — the container starts as root so it can bind port 80, and `oxphp` drops to `www-data` (UID 82; 33 in the nightly [Debian image](docs/getting-started/installation.md#debian-glibc-image)) before handling any request; `--user` overrides the target
+- **Privilege drop** — the container starts as root so it can bind port 80, and `oxphp` drops to `www-data` (UID 82; 33 in the [Debian image](docs/getting-started/installation.md#debian-glibc-image)) before handling any request; `--user` overrides the target
 
 ---
 
@@ -367,7 +367,7 @@ LISTEN_ADDR=127.0.0.1:8080 DOCUMENT_ROOT=./www/public ./target/release/oxphp
 | ~~**APM & Auto-Instrumentation**~~ | ✅ Implemented — `plugin-apm` feature: automatic tracing of internal PHP functions across PDO, mysqli, cURL, Redis, Memcached, and file I/O, `#[OxPHP\Apm\Trace]` decorator, 10 `oxphp_apm_*()` SDK functions, PHP error capture |
 | **Custom Metrics** | PHP API for registering application-defined Prometheus metrics from userland code |
 | ~~**Built-in PHP Profiler**~~ | ✅ Implemented — `plugin-profiler` feature: per-request profiling with xhprof/speedscope/pprof/collapsed formats, PHP SDK, attribute triggers, in-memory LRU + disk retention, HTTP push to xhgui, `/__profiler/` internal routes, Prometheus metrics — see [Profiling](docs/features/profiling.md) |
-| **Debian image in releases** | A Debian (glibc) image as an alternative to Alpine — built nightly as `:nightly-trixie`, not yet published with tagged releases |
+| ~~**Debian image in releases**~~ | ✅ Implemented — every release from 0.13.0 on is also published on Debian trixie (glibc) as `:trixie`, `:php8.5-trixie` and the release's other tags with a `-trixie` suffix, an alternative to the default Alpine image — see [Debian (glibc) Image](docs/getting-started/installation.md#debian-glibc-image) |
 | **Non-Docker Install** | *(speculative)* Native installation via system package managers (apt, brew, etc.) |
 | **HTTP/3** | QUIC-based HTTP/3 support |
 | **HTTP 103 Early Hints** | Send `103 Early Hints` responses to allow clients to preload resources before the final response |

@@ -335,7 +335,7 @@ docker build --target prod -t myapp:prod .
 
 ## Installing PHP Extensions in Production
 
-Starting with OxPHP 0.3.0, the production image ships the full PHP toolchain (`php`, `docker-php-ext-install`, `phpize`) inherited from `php:8.4-zts-alpine` (or `php:8.5-zts-alpine` for the `:*-php8.5*` variants) and does **not** set a `USER` directive. Downstream Dockerfiles can install PHP extensions directly — no `USER` toggle required.
+Starting with OxPHP 0.3.0, the production image ships the full PHP toolchain (`php`, `docker-php-ext-install`, `phpize`) inherited from `php:8.4-zts-alpine` (or `php:8.5-zts-alpine` for the `:*-php8.5*` variants, and `php:<minor>-zts-trixie` for the `-trixie` ones) and does **not** set a `USER` directive. Downstream Dockerfiles can install PHP extensions directly — no `USER` toggle required.
 
 ### Quick-start pattern (single stage)
 
@@ -633,7 +633,7 @@ The image includes:
 - **PHP ZTS runtime** — 8.4 or 8.5, depending on the tag pulled; thread-safe PHP for multi-worker execution
 - **OxPHP PHP extension** (`oxphp_sapi.so`) — provides `oxphp_request_id()`, `oxphp_server_info()`, `oxphp_worker()`, and other built-in functions
 - **Bridge library** (`liboxphp_bridge.so`) — connects the Rust server to the PHP runtime
-- **Alpine Linux** base — minimal runtime footprint (a Debian build is published nightly, see [Debian (glibc) Image](#debian-glibc-image))
+- **Alpine Linux** base — minimal runtime footprint (releases are also published on Debian, see [Debian (glibc) Image](#debian-glibc-image))
 - **No `USER` directive** — the image **starts** as **root** (matching `nginx:alpine` / `php-fpm:alpine` / `frankenphp:alpine`) so it can bind privileged ports, but `oxphp serve`/`run` then drop to **`www-data`** by default before serving, so traffic is not handled as root out of the box. The `www-data` user (UID 82, GID 82; 33 in the Debian image) is pre-created and `/var/www/html` is chowned to it at build time. Pin the runtime identity explicitly at the orchestrator level for a specific uid or extra defense-in-depth:
   - `docker run --user www-data ghcr.io/oxphp/oxphp:0.13.0`
   - Compose: `services.app.user: www-data`
@@ -641,9 +641,11 @@ The image includes:
 
 ### Debian (glibc) Image
 
-The nightly pipeline also publishes the same server built on Debian trixie instead of Alpine: `ghcr.io/oxphp/oxphp:nightly-trixie` (PHP 8.4), `:php8.4-nightly-trixie` and `:php8.5-nightly-trixie`, for `linux/amd64` and `linux/arm64`. Tagged releases are Alpine only. Nightly tags are built from `main` on nights when it has moved since the last fully successful run, and carry no stability promise. A night on which the Debian build fails leaves `:nightly-trixie` and `:php<minor>-nightly-trixie` at the last build that succeeded, so they can trail `:nightly`.
+From 0.13.0 on, every release is also published as the same server built on Debian trixie instead of Alpine, for `linux/amd64` and `linux/arm64`. The tags are the release's Alpine tags with `-trixie` added at the end (in place of `-alpine3.23` where a tag has it), and `:trixie` stands in for `:latest`: `ghcr.io/oxphp/oxphp:trixie` and `:0.13.0-trixie` (PHP 8.5), `:php8.4-trixie`, `:php8.5-trixie`, `:0.13-php8.5-trixie`, `:0.13.0-php8.5-trixie`, and `:0.13.0-php8.5.<patch>-trixie` pinned to a PHP patch release. They are signed with cosign like the Alpine tags, and the weekly job that rebuilds recent releases on the current PHP patch release rebuilds them too. Releases before 0.13.0 are Alpine only.
 
-It spends less CPU per request, for two reasons:
+The nightly pipeline publishes the Debian build as well: `:nightly-trixie` (PHP 8.4), `:php8.4-nightly-trixie` and `:php8.5-nightly-trixie`. Nightly tags are built from `main` on nights when it has moved since the last fully successful run, and carry no stability promise. A night on which the Debian build fails leaves `:nightly-trixie` and `:php<minor>-nightly-trixie` at the last build that succeeded, so they can trail `:nightly`.
+
+The Debian image spends less CPU per request, for two reasons:
 
 - **Thread-local storage.** Thread-safe PHP reaches the engine's per-thread state through a thread-local pointer. Built against musl, PHP leaves that pointer on the global-dynamic TLS model, so code in `libphp.so` reaches it through a call into the TLS runtime; against glibc it uses initial-exec, a load relative to the thread pointer.
 - **Allocator.** musl's allocator, which extensions and libraries such as libpq use beside PHP's own memory manager, maps fresh memory for libpq's query results and unmaps it when they are freed. On x86-64 that costs TLB shootdowns across the server's threads.
