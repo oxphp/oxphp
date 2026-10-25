@@ -65,11 +65,14 @@ typedef enum {
     OXPHP_SUSPEND_IO_WAIT,      /* waiting for readiness of a file descriptor */
 } oxphp_suspend_reason;
 
-/* A suspend point returns this when its resume delivered a pending exception,
- * or when the request has run out of memory and may not wait there (see
- * oxphp_park_refused_for_oom()) — usually with the exception the engine raised
- * for it pending, but not always: code on the way out may have dropped it. The
- * caller must return to PHP at once and add no exception of its own. */
+/* A suspend point returns this when the fiber has to go back to PHP instead of
+ * waiting there: its resume delivered a pending exception, or it may not park —
+ * the request has run out of memory (see oxphp_park_refused_for_oom()), or a
+ * bailout is held back for the plugin stub to raise
+ * (oxphp_bridge_deferred_bailout_pending()). An exception is usually pending,
+ * but not always: code on the way out may have dropped it, and a held-back
+ * bailout has none. The caller must return to PHP at once and add no exception
+ * of its own. */
 #define OXPHP_FIBER_UNWIND (-9)
 
 /* ─── Per-Fiber PHP State ──────────────────────────────── */

@@ -7907,10 +7907,56 @@ int64_t oxphp_async_sched_poll_completed(void **out_retval,
     return -1;
 }
 
+/* Releases the closure a finished task ran and what it returned. The driver
+ * calls in for that from the async worker's loop, between tasks: Rust, with no
+ * PHP frame and no zend_try above it. The release can run userland — a
+ * destructor, the finally blocks of a generator — and a fatal in it, or an
+ * exception the engine turns into one because no frame is there to catch it,
+ * bails out, which with no catch to land in exits the process. So each value is
+ * released under a catch of its own and recovered from as the fiber loop
+ * recovers from a task's fatal, and an exception left standing is dropped. The
+ * driver has serialized the result by then; the engine's own report of the
+ * failure is all that is left of it. The copy of that report kept for a task's
+ * awaiter is dropped: no task is left to hand it to, and the next task to bail
+ * out with no report of its own would be handed it as its cause. Taken off the
+ * fiber first, so that nothing a bailout interrupts is left there to be released
+ * again. */
+static void oxphp_task_release_payload_guarded(oxphp_request_fiber *fiber) {
+    zval closure, retval;
+    ZVAL_COPY_VALUE(&closure, &fiber->task_closure);
+    ZVAL_COPY_VALUE(&retval, &fiber->task_retval);
+    ZVAL_UNDEF(&fiber->task_closure);
+    ZVAL_UNDEF(&fiber->task_retval);
+
+    oxphp_vm_stack_mark mark;
+    oxphp_vm_stack_save(&mark);
+
+    /* What the window finds standing is not its own — see
+     * oxphp_serve_loop_thread_idle(). */
+    oxphp_recover_from_reported_oom();
+
+    zend_try {
+        zval_ptr_dtor(&closure);
+    } zend_catch {
+        oxphp_recover_from_bailout(&mark);
+        free(oxphp_bridge_pop_fatal());
+    } zend_end_try();
+    zend_try {
+        zval_ptr_dtor(&retval);
+    } zend_catch {
+        oxphp_recover_from_bailout(&mark);
+        free(oxphp_bridge_pop_fatal());
+    } zend_end_try();
+
+    oxphp_serve_loop_drop_exception(&mark);
+    oxphp_recover_from_reported_oom();
+}
+
 /* Tear down a finished task fiber and hand it to the reuse pool. The caller has
  * established fiber->completed; the driver has already drained its retval. */
 static void oxphp_task_recycle_fiber(oxphp_fiber_scheduler *sched,
                                      oxphp_request_fiber *fiber) {
+    oxphp_task_release_payload_guarded(fiber);
     oxphp_fiber_free_task_payload(fiber);
     fiber->task_args = NULL;
     fiber->task_argc = 0;

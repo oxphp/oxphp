@@ -46,13 +46,14 @@
 //!   task result nobody receives any more, dropped there between tasks,
 //!   can hold the last reference to a pool. `$destroy` is skipped there,
 //!   with no frame, but freeing a slot still runs its object's destructor,
-//!   and a bailout in it waits for the next plugin call on that thread,
+//!   and so does freeing the callables of a pool a task made there; a
+//!   bailout in either waits for the next plugin call on that thread,
 //!   which raises it in a task that never failed.
 //!   Other threads' slots are left to them: the registry drain at shutdown
 //!   leaves them where they are, and `on_drop` forgets them — their memory
 //!   and the objects in it go with their thread's request. The
-//!   factory/destroy fccs are freed with `oxphp_pool_fcc_free` only by the
-//!   request that created them, and forgotten otherwise. A slot of a pool
+//!   factory/destroy fccs are freed with `oxphp_pool_fcc_free_guarded` only
+//!   by the request that created them, and forgotten otherwise. A slot of a pool
 //!   with a `$destroy` that leaves without it is counted in
 //!   `oxphp_shared_pool_destroy_skipped_total`.
 
@@ -297,19 +298,21 @@ impl Callables {
 
 impl Drop for Callables {
     fn drop(&mut self) {
-        // SAFETY: both were allocated by `oxphp_pool_fcc_new` in the heap
-        // of request `made_in`. That request is the one open on this thread,
-        // so the heap is this thread's and has not been reset since, and the
-        // last reference is going, so no thread calls them any more. Freeing
-        // one releases its callable, which can run destructors — PHP, which
-        // may not run while a bailout is held back: then they are forgotten
-        // too, and go with the heap of the request the bailout ends.
-        if !self.made_here() || bailout_held_back() {
+        if !self.made_here() {
             return;
         }
         for fcc in [self.factory, self.destroy] {
             if !fcc.is_null() {
-                unsafe { ffi::oxphp_pool_fcc_free(fcc) };
+                // SAFETY: allocated by `oxphp_pool_fcc_new` in the heap of
+                // request `made_in`. That request is the one open on this
+                // thread, so the heap is this thread's and has not been reset
+                // since, and the last reference is going, so no thread calls
+                // it any more. Freeing it releases its callable, which can
+                // run a destructor: the helper holds a bailout in it back for
+                // the C code this call into Rust returns to, and refuses while
+                // one is held back — from the other callable or from earlier
+                // in the same call. A refused one is left in that heap.
+                unsafe { ffi::oxphp_pool_fcc_free_guarded(fcc) };
             }
         }
     }
@@ -1696,7 +1699,10 @@ pub unsafe extern "C" fn oxphp_shared_pool_create(
         if !destroy_callable_zval.is_null() {
             let rc = unsafe { ffi::oxphp_pool_fcc_new(destroy_callable_zval, &mut destroy_fcc) };
             if rc != 0 {
-                unsafe { ffi::oxphp_pool_fcc_free(factory_fcc) };
+                // SAFETY: made just above by this request, and nothing else
+                // holds it. A bailout releasing the callable could run is held
+                // back for the dispatch stub this handler returns to.
+                unsafe { ffi::oxphp_pool_fcc_free_guarded(factory_fcc) };
                 set_last_error("destroy argument is not a valid PHP callable");
                 return Err(crate::plugins::ox_shared::error::SharedError::Type);
             }
@@ -3234,7 +3240,7 @@ mod tests {
         //   (1) closes the pool,
         //   (2) empties the idle deques,
         //   (3) decrements size to zero.
-        // NULL fccs are not handed to `oxphp_pool_fcc_free` at all.
+        // NULL fccs are not handed to `oxphp_pool_fcc_free_guarded` at all.
         open_request_token();
         let p = inner(2);
         let me = current_thread_key();

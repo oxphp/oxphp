@@ -13,6 +13,8 @@ fibers/test_closure_fatal_releases_it
 fibers/test_shared_closure_fatal_releases
 fibers/test_shared_pool_destroy_fatal
 fibers/test_shared_pool_drop_fatal
+fibers/test_shared_pool_factory_capture_fatal
+fibers/test_await_all_no_park_after_held_back_bailout
 fibers/test_shared_pool_acquire_parks
 fibers/test_shared_pool_acquire_ended_by_a_recycle >> ?action=trigger
 fibers/test_shared_pool_acquire_ended_by_a_recycle >> ?action=check

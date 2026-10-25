@@ -3,7 +3,8 @@
 declare(strict_types=1);
 
 // Inner self-request for fibers/test_shared_closure_fatal_releases,
-// fibers/test_shared_pool_destroy_fatal and fibers/test_shared_pool_drop_fatal.
+// fibers/test_shared_pool_destroy_fatal, fibers/test_shared_pool_drop_fatal and
+// fibers/test_shared_pool_factory_capture_fatal.
 //
 // A fatal raised inside a callable that a Shared\* method runs on the caller's
 // behalf: the closure of Mutex::withLock and tryWithLock, the factory of
@@ -16,8 +17,9 @@ declare(strict_types=1);
 // inside the callable, and what the method held has to be given back on the
 // fatal's way out, or it stays held for the life of the process. The same goes
 // for a fatal just around the callable while the method holds it: from the
-// autoloader that resolving a named callable runs, or from the destructor of a
-// value the callable returned and the method could not store.
+// autoloader that resolving a named callable runs, from the destructor of a
+// value the callable returned and the method could not store, or from releasing
+// the copy of its state a Mutex keeps until it has stored it.
 //
 // Every primitive is bound in the Registry under the run id the test passes, so
 // the test can reach the same ones once this request is over, and a second run
@@ -131,6 +133,19 @@ try {
             $m->withLock(static function (mixed &$v) use ($fatalOnDestruct): object {
                 $v = 'dirty';
                 return $fatalOnDestruct();
+            });
+            break;
+
+        case 'with_lock_retained':
+            // The closure finishes. The copy of its state the Mutex keeps
+            // until it has stored it holds the last reference to the map the
+            // closure created, and releasing the copy, with the lock still
+            // held, runs the destructor of the value a WeakMap kept for it.
+            $m = Registry::mutex("closure-fatal-with-lock-retained-$run", static fn (): Mutex => new Mutex('clean'));
+            $values = new \WeakMap();
+            $m->withLock(static function (mixed &$v) use ($values, $fatalOnDestruct): void {
+                $v = new Map();
+                $values[$v] = $fatalOnDestruct();
             });
             break;
 
@@ -276,6 +291,24 @@ try {
             $map = Registry::map("closure-fatal-pool-drop-map-clear-$run", static fn (): Map => new Map());
             $map->set('pool', $poolOfTwo("closure-fatal-pool-drop-map-clear-calls-$run"));
             $map->clear();
+            break;
+
+        case 'pool_drop_factory_capture':
+            // No slot to destroy: the fatal comes from the destructor of an
+            // object the factory captured, which the pool's teardown releases
+            // with the factory.
+            $p = (static function () use ($fatalOnDestruct): Pool {
+                $captured = $fatalOnDestruct();
+
+                return new Pool(
+                    factory: static function () use ($captured): \stdClass {
+                        return new \stdClass();
+                    },
+                    destroy: null,
+                    maxSize: 1,
+                );
+            })();
+            unset($p);
             break;
 
         case 'pool_drop_map_use':

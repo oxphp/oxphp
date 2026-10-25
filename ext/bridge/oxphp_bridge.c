@@ -1944,12 +1944,6 @@ void *oxphp_closure_addref(void *closure_zv) {
     return NULL;
 }
 
-void oxphp_closure_release(void *obj_ptr) {
-    if (obj_ptr) {
-        OBJ_RELEASE((zend_object*)obj_ptr);
-    }
-}
-
 size_t oxphp_zval_size(void) {
     return sizeof(zval);
 }
@@ -3269,28 +3263,32 @@ void oxphp_bridge_set_cleanup_promises(oxphp_cleanup_promises_fn_t fn) {
     rust_cleanup_promises = fn;
 }
 
-void oxphp_bridge_cleanup_outstanding_promises(void) {
-    if (__builtin_expect(rust_cleanup_promises != NULL, 1)) {
-        rust_cleanup_promises();
-    }
-}
-
 static oxphp_cleanup_promises_for_fiber_fn_t rust_cleanup_promises_for_fiber = NULL;
 
 void oxphp_bridge_set_cleanup_promises_for_fiber(oxphp_cleanup_promises_for_fiber_fn_t fn) {
     rust_cleanup_promises_for_fiber = fn;
 }
 
-/* The promise cleanup and the deferred drain below release promise results,
- * and a result can hold the last reference to a Shared\Pool: the pool's
- * teardown then runs $destroy on this thread's idle slots, guarded, with a
- * bailout in it held back until the Rust callback has returned (see
- * OXPHP_SHARED_RUN_GUARDED). Raised again as soon as it has, before anything
- * else runs. It lands in the zend_try of the serve loop these run in, where a
- * fatal raised at this point would land anyway. */
+/* The promise cleanups and the deferred drain below release promise results
+ * and the closures promises were dispatched with. A result can hold the last
+ * reference to a Shared\Pool, whose teardown runs $destroy on this thread's
+ * idle slots, and a closure what it captured, whose destructor runs: both
+ * guarded, with a bailout in them held back until the Rust callback has
+ * returned (see OXPHP_SHARED_RUN_GUARDED). Raised again as soon as it has,
+ * before anything else runs. It lands where a fatal raised at this point would
+ * land anyway: in the zend_try of the serve loop the per-fiber cleanup and the
+ * drain run in, and for the thread-wide cleanup, which runs in RSHUTDOWN, in
+ * the one zend_deactivate_modules() puts around each module's RSHUTDOWN. */
 static void oxphp_bridge_raise_held_back_bailout(void) {
     if (oxphp_bridge_take_deferred_bailout()) {
         zend_bailout();
+    }
+}
+
+void oxphp_bridge_cleanup_outstanding_promises(void) {
+    if (__builtin_expect(rust_cleanup_promises != NULL, 1)) {
+        rust_cleanup_promises();
+        oxphp_bridge_raise_held_back_bailout();
     }
 }
 
@@ -6739,26 +6737,30 @@ int oxphp_shared_wrapper_new(zval *out, uint8_t type_tag, const void *entry_ptr)
  * dispatch stubs (oxphp_method_dispatch, oxphp_native_dispatch), which
  * re-raise it, by the serve loop's idle point (oxphp_serve_loop_thread_idle),
  * which re-raises it into its own zend_try and recovers, and by the C that
- * the Rust code letting go of a Shared\Pool returns to, which re-raises it:
- * the plugin objects' free_obj handler (oxphp_plugin_free_object) and the
- * worker scheduler's promise cleanup and deferred drain
- * (oxphp_bridge_cleanup_promises_for_fiber,
- * oxphp_bridge_poll_deferred_drains).
+ * the Rust code letting go of a Shared\Pool or of a promise returns to,
+ * which re-raises it: the plugin objects' free_obj handler
+ * (oxphp_plugin_free_object), the worker scheduler's promise cleanup and
+ * deferred drain (oxphp_bridge_cleanup_promises_for_fiber,
+ * oxphp_bridge_poll_deferred_drains) and the thread-wide promise cleanup in
+ * RSHUTDOWN (oxphp_bridge_cleanup_outstanding_promises).
  *
  * Every guarded helper is called either from inside a plugin method or
- * function handler, from the plugins' thread_idle event, or from the teardown
- * of a pool whose last reference one of those, a free_obj handler or the
- * scheduler's promise release let go of, so a flag that is set has one of
- * those below it to take it, and nothing between the two parks the fiber
- * that set it. A guarded helper called from anywhere else would leave the
- * flag for the next stub on the thread to raise in a request that never
- * failed. One teardown is called from elsewhere and does just that: the
- * loop of an oxphp_async() worker thread, between tasks, drops a task
- * result nobody receives any more, which can hold the last reference to a
- * pool whose slots the thread parked. $destroy is skipped there, with no
- * frame, but freeing a slot runs its object's destructor under the guard,
- * and a bailout in it is raised by the next stub on that thread, in another
- * task. */
+ * function handler, from the plugins' thread_idle event, from the teardown
+ * of a pool whose last reference one of those, a free_obj handler or a
+ * promise cleanup let go of, or from a promise cleanup releasing the
+ * promise's closure, so a flag that is set has one of those below it to take
+ * it. Nothing between the two parks the fiber that set it: where a handler
+ * would park after such a release, an await over several promises waiting on
+ * the next, the park is refused while the flag is up. A guarded helper
+ * called from anywhere else would leave the flag for the next stub on the
+ * thread to raise in a request that never failed. One teardown is called
+ * from elsewhere and does just that: the loop of an oxphp_async() worker
+ * thread, between tasks, drops a task result nobody receives any more,
+ * which can hold the last reference to a pool. $destroy is skipped there,
+ * with no frame, but freeing a slot the thread parked runs its object's
+ * destructor under the guard, and so does freeing the callables of a pool a
+ * task made there; a bailout in either is raised by the next stub on that
+ * thread, in another task. */
 static __thread int oxphp_shared_deferred_bailout = 0;
 
 int oxphp_bridge_deferred_bailout_pending(void) {
@@ -6824,6 +6826,25 @@ int oxphp_bridge_take_deferred_bailout(void) {
             (rc) = OXPHP_SHARED_INVOKE_BAILOUT;                             \
         } zend_end_try();                                                   \
     } while (0)
+
+static int oxphp_closure_release_unguarded(void *obj_ptr) {
+    if (obj_ptr) {
+        OBJ_RELEASE((zend_object *)obj_ptr);
+    }
+    return 0;
+}
+
+/* Releases a reference taken with oxphp_closure_addref(), which the promise
+ * code holds for each promise until it cleans the promise up. The last one
+ * releases what the closure captured, and a destructor that runs then can bail
+ * out. Returns OXPHP_SHARED_INVOKE_BAILOUT when one did, or one was already
+ * waiting to be raised again and the reference was left alone, to go with the
+ * request's heap. */
+int oxphp_closure_release_guarded(void *obj_ptr) {
+    int rc;
+    OXPHP_SHARED_RUN_GUARDED(rc, oxphp_closure_release_unguarded(obj_ptr));
+    return rc;
+}
 
 /* Invoke a zero-argument closure/callable. Returns its portbuf-encoded
  * return value in *out_ret_buf (emalloc'd via the same free path as
@@ -6984,7 +7005,7 @@ int oxphp_shared_invoke_0_portbuf(zval *callable,
  *   value into a heap-allocated zval and hand its pointer back via the
  *   out-param. The copy pins every embedded Shareable across the dtor
  *   (ZVAL_COPY on an array bumps refcounts on every nested element);
- *   the caller MUST balance with `oxphp_shared_free_zval()` after
+ *   the caller MUST balance with `oxphp_shared_free_zval_guarded()` after
  *   decoding (or on any early exit). NULL when there is nothing to
  *   retain (serialise step failed, ret was IS_UNDEF/IS_NULL, etc.).
  */
@@ -7074,7 +7095,7 @@ static int oxphp_shared_invoke_byref_1_portbuf_unguarded(zval *callable,
     /* State serialised cleanly. Pin embedded Shareables across the
      * upcoming `zval_ptr_dtor(&state_zv)` so the Rust-side decode can
      * resolve their wire ids. The caller MUST balance via
-     * `oxphp_shared_free_zval()` after decoding. */
+     * `oxphp_shared_free_zval_guarded()` after decoding. */
     {
         zval *retained = (zval *)emalloc(sizeof(zval));
         ZVAL_COPY(retained, state_inner);
@@ -7115,7 +7136,7 @@ static int oxphp_shared_invoke_byref_1_portbuf_unguarded(zval *callable,
      * the receiver decodes the wire bytes — manifesting as a silent
      * PHP-side `null` return. `ZVAL_COPY` on an array bumps refcounts
      * on every nested element too, so nested Shareables are covered.
-     * The caller MUST balance via `oxphp_shared_free_zval()` after
+     * The caller MUST balance via `oxphp_shared_free_zval_guarded()` after
      * decoding (or on any early exit). */
     if (Z_TYPE(ret_zv) != IS_UNDEF && Z_TYPE(ret_zv) != IS_NULL) {
         zval *retained = (zval *)emalloc(sizeof(zval));
@@ -7165,15 +7186,25 @@ int oxphp_shared_invoke_byref_1_portbuf(zval *callable,
     return rc;
 }
 
-/* Release a retained-state zval produced by
- * `oxphp_shared_invoke_byref_1_portbuf` (`*out_retained_state`). NULL
- * is a no-op (callers don't have to gate themselves). */
-void oxphp_shared_free_zval(void *p)
+static int oxphp_shared_free_zval_unguarded(zval *z)
 {
-    if (!p) return;
-    zval *z = (zval *)p;
     zval_ptr_dtor(z);
     efree(z);
+    return 0;
+}
+
+/* Releases a value oxphp_shared_invoke_byref_1_portbuf() retained. NULL is a
+ * no-op. The value can hold the last reference to a Shared wrapper, and
+ * releasing the wrapper can run the destructor of a value a WeakMap keeps for
+ * it, which can bail out. Returns OXPHP_SHARED_INVOKE_BAILOUT when one did, or
+ * one was already waiting to be raised again and the value was left alone, to
+ * go with the request's heap. */
+int oxphp_shared_free_zval_guarded(void *p)
+{
+    int rc;
+    if (!p) return 0;
+    OXPHP_SHARED_RUN_GUARDED(rc, oxphp_shared_free_zval_unguarded((zval *)p));
+    return rc;
 }
 
 /* Invoke $fn(key, value) for Shared\Map::forEach. The key is the tagged
@@ -7545,7 +7576,7 @@ static void oxphp_pool_prepare_elsewhere(oxphp_pool_fcc_t *heap) {
 
 /* Allocate a fcc_heap from a user callable. Returns 0 on success
  * with `*out_fcc_heap` populated, -1 if `callable` is not a valid
- * PHP callable. The caller must pair with oxphp_pool_fcc_free. */
+ * PHP callable. The caller must pair with oxphp_pool_fcc_free_guarded. */
 int oxphp_pool_fcc_new(void *callable_zval, void **out_fcc_heap) {
     if (!callable_zval || !out_fcc_heap) return -1;
     *out_fcc_heap = NULL;
@@ -7607,8 +7638,8 @@ int oxphp_pool_fcc_new(void *callable_zval, void **out_fcc_heap) {
  * heap, so only the request that allocated it may call this: another
  * thread's heap aborts the process ("zend_mm_heap corrupted"), and a
  * request that has ended had its heap reset, the fcc with it. */
-void oxphp_pool_fcc_free(void *fcc_heap) {
-    if (!fcc_heap) return;
+static int oxphp_pool_fcc_free_unguarded(void *fcc_heap) {
+    if (!fcc_heap) return 0;
     oxphp_pool_fcc_t *heap = (oxphp_pool_fcc_t *)fcc_heap;
     zend_release_fcall_info_cache(&heap->fcc);
     zval_ptr_dtor(&heap->callable_zv);
@@ -7625,6 +7656,18 @@ void oxphp_pool_fcc_free(void *fcc_heap) {
         zend_array_destroy(heap->held);
     }
     efree(heap);
+    return 0;
+}
+
+/* For a pool's callables, in the request that made them. Releasing a callable
+ * releases what it captured, and a destructor that runs then can bail out.
+ * Returns OXPHP_SHARED_INVOKE_BAILOUT when one did, or one was already waiting
+ * to be raised again: what is left of the fcc_heap is not freed then, and goes
+ * with the request's heap. */
+int oxphp_pool_fcc_free_guarded(void *fcc_heap) {
+    int rc;
+    OXPHP_SHARED_RUN_GUARDED(rc, oxphp_pool_fcc_free_unguarded(fcc_heap));
+    return rc;
 }
 
 /* Call a stored fcc. A trampoline — the function a callable reaching
@@ -7871,7 +7914,7 @@ void oxphp_pool_slot_to_user(void *slot_zv_heap, void *user_out_zv) {
 }
 
 /* zval_ptr_dtor + efree on a slot-zval heap allocation. Same
- * caveat as oxphp_pool_fcc_free: only the request that allocated it
+ * caveat as oxphp_pool_fcc_free_guarded: only the request that allocated it
  * may free it. */
 void oxphp_pool_slot_free(void *slot_zv_heap) {
     if (!slot_zv_heap) return;
