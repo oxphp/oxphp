@@ -12,6 +12,10 @@ ARG BASE_IMAGE=php:${PHP_VERSION}-zts-alpine${ALPINE_VERSION}
 # compiles out and the PHP-side plugin runtime has nothing to hook into.
 ARG OXPHP_WITH_PROFILER=1
 
+# Overrides the version in Cargo.toml for the binary and the extension when
+# set; empty keeps the one in Cargo.toml.
+ARG OXPHP_VERSION=""
+
 # ══════════════════════════════════════════════════════════════
 # Stage 1: Build bridge library (needs PHP headers for zval accessors)
 # ══════════════════════════════════════════════════════════════
@@ -48,13 +52,18 @@ WORKDIR /build/ext
 COPY ext/config.m4 ext/php_oxphp_sapi.h ext/oxphp_sapi.c ext/oxphp_fiber.h ext/oxphp_fiber.c ./
 COPY ext/bridge/oxphp_bridge.h ./bridge/
 
+# The extension reports OXPHP_VERSION, or the version in ../Cargo.toml when it
+# is empty — the same version the binary is built with.
+COPY Cargo.toml /build/
+ARG OXPHP_VERSION
+
 # Propagate -DOXPHP_WITH_PROFILER=1 into phpize's generated Makefile via
 # CPPFLAGS (appended by autoconf to every compile line). Using CPPFLAGS
 # instead of CFLAGS avoids clobbering the phpize-emitted optimisation and
 # PHP ABI flags that land in CFLAGS itself.
 RUN phpize && \
     CPPFLAGS="$([ "${OXPHP_WITH_PROFILER}" = "1" ] && echo '-DOXPHP_WITH_PROFILER=1')" \
-        ./configure --enable-oxphp-sapi && \
+        ./configure --enable-oxphp-sapi OXPHP_VERSION="${OXPHP_VERSION}" && \
     make && \
     make install
 
@@ -92,9 +101,7 @@ WORKDIR /build
 # via compose build-args or --build-arg on the command line.
 ARG CARGO_FEATURES="plugin-apm,plugin-async,plugin-shared"
 
-# Version injected from CI when building a tagged release. Empty default
-# leaves Cargo.toml version untouched.
-ARG OXPHP_VERSION=""
+ARG OXPHP_VERSION
 
 # Copy dependency files first (layer caching)
 COPY Cargo.toml Cargo.lock ./

@@ -4,6 +4,10 @@ All notable changes to OxPHP are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **`oxphp_server_info()['version']`, `phpversion('oxphp_sapi')`, `ReflectionExtension::getVersion()` and the Version row of the `oxphp_sapi` section in `phpinfo()` now report the server's version, the one `oxphp --version` prints, instead of `0.1.0`.** The extension carried a version of its own that no release ever changed. An extension built from source (`phpize && ./configure` in `ext/`) takes the version from the checkout's `Cargo.toml`, or from `OXPHP_VERSION` passed to `./configure`, and `./configure` stops with an error when it finds neither.
+
 ## [0.14.0] - 2026-10-25
 
 ### Migration from 0.13.0
