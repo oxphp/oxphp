@@ -20,6 +20,13 @@ php_versions:
 alpine_versions:
   - "3.23"
 
+# Debian codenames the Debian image (docker/release/debian/Dockerfile) is
+# published on. Its tags and aliases carry the codename (`php8.5-trixie`,
+# and `trixie` in place of `latest`). An oxphp release whose tag has no
+# docker/release/debian/Dockerfile is rebuilt on Alpine only.
+debian_versions:
+  - "trixie"
+
 # The PHP version that receives the default-PHP aliases (`latest`,
 # `0.13.0`, etc.). Must be present in php_versions. Bumped to a newer
 # minor only after that version has soaked on the opt-in tags.
