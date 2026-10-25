@@ -5,3 +5,6 @@ asyncnocache/test_task_class_lookup_slot_of_another_request
 # A task that keeps running past the drain budget after the end of its request
 # cancelled it runs code from that request's memory: the end waits for it.
 asyncnocache/test_task_outliving_the_drain_budget_keeps_its_code
+# The literals of a task's code are shared with the request that compiled it:
+# a task's thread copies them without counting them or listing them as roots.
+asyncnocache/test_task_literals_leave_no_trace_on_the_pool_thread
