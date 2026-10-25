@@ -10,8 +10,8 @@
 # aliases (e.g. 0.3.0-php8.4, 0.3-php8.4).
 
 oxphp_versions:
-  - "0.13.0"  # latest
-  - "0.12.0"  # previous
+  - "0.14.0"  # latest
+  - "0.13.0"  # previous
 
 php_versions:
   - "8.4"
@@ -19,7 +19,7 @@ php_versions:
 
 # Alpine versions the Alpine image is published on, newest first. The
 # first entry receives the aliases that name no Alpine version (`latest`,
-# `php8.5`, `0.13.0`, `0.13-php8.5`); the others get only their canonical
+# `php8.5`, `0.14.0`, `0.14-php8.5`); the others get only their canonical
 # `-alpine<X.Y>` tags. The oldest entry's Rust is the MSRV (see
 # rust-toolchain.toml).
 alpine_versions:
@@ -34,6 +34,6 @@ debian_versions:
   - "trixie"
 
 # The PHP version that receives the default-PHP aliases (`latest`,
-# `0.13.0`, etc.). Must be present in php_versions. Bumped to a newer
+# `0.14.0`, etc.). Must be present in php_versions. Bumped to a newer
 # minor only after that version has soaked on the opt-in tags.
 default_php: "8.5"
