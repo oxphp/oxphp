@@ -297,7 +297,12 @@ pub unsafe extern "C" fn oxphp_shared_mutex_with(
         impl Drop for RetainedStateGuard {
             fn drop(&mut self) {
                 if !self.0.is_null() {
-                    unsafe { ffi::oxphp_shared_free_zval(self.0) };
+                    // SAFETY: a value the C side retained for this call and handed to
+                    // this guard alone, freed once. Freeing it can run a destructor: the
+                    // helper holds a bailout in it back for the dispatch stub this call
+                    // returns to, and refuses while one is held back. A refused value is
+                    // left in the request's heap.
+                    unsafe { ffi::oxphp_shared_free_zval_guarded(self.0) };
                 }
             }
         }
@@ -322,7 +327,12 @@ pub unsafe extern "C" fn oxphp_shared_mutex_with(
         impl Drop for RetainedRetGuard {
             fn drop(&mut self) {
                 if !self.released && !self.ptr.is_null() {
-                    unsafe { ffi::oxphp_shared_free_zval(self.ptr) };
+                    // SAFETY: a value the C side retained for this call and handed to
+                    // this guard alone, freed once. Freeing it can run a destructor: the
+                    // helper holds a bailout in it back for the dispatch stub this call
+                    // returns to, and refuses while one is held back. A refused value is
+                    // left in the request's heap.
+                    unsafe { ffi::oxphp_shared_free_zval_guarded(self.ptr) };
                 }
             }
         }
@@ -567,7 +577,12 @@ pub unsafe extern "C" fn oxphp_shared_mutex_try_with(
         impl Drop for RetainedStateGuard {
             fn drop(&mut self) {
                 if !self.0.is_null() {
-                    unsafe { ffi::oxphp_shared_free_zval(self.0) };
+                    // SAFETY: a value the C side retained for this call and handed to
+                    // this guard alone, freed once. Freeing it can run a destructor: the
+                    // helper holds a bailout in it back for the dispatch stub this call
+                    // returns to, and refuses while one is held back. A refused value is
+                    // left in the request's heap.
+                    unsafe { ffi::oxphp_shared_free_zval_guarded(self.0) };
                 }
             }
         }
@@ -588,7 +603,12 @@ pub unsafe extern "C" fn oxphp_shared_mutex_try_with(
         impl Drop for RetainedRetGuard {
             fn drop(&mut self) {
                 if !self.released && !self.ptr.is_null() {
-                    unsafe { ffi::oxphp_shared_free_zval(self.ptr) };
+                    // SAFETY: a value the C side retained for this call and handed to
+                    // this guard alone, freed once. Freeing it can run a destructor: the
+                    // helper holds a bailout in it back for the dispatch stub this call
+                    // returns to, and refuses while one is held back. A refused value is
+                    // left in the request's heap.
+                    unsafe { ffi::oxphp_shared_free_zval_guarded(self.ptr) };
                 }
             }
         }
@@ -898,7 +918,12 @@ fn invoke_mutex_with(
     impl Drop for RetainedRetGuard {
         fn drop(&mut self) {
             if !self.0.is_null() {
-                unsafe { ffi::oxphp_shared_free_zval(self.0) };
+                // SAFETY: a value the C side retained for this call and handed to
+                // this guard alone, freed once. Freeing it can run a destructor: the
+                // helper holds a bailout in it back for the dispatch stub this call
+                // returns to, and refuses while one is held back. A refused value is
+                // left in the request's heap.
+                unsafe { ffi::oxphp_shared_free_zval_guarded(self.0) };
             }
         }
     }
@@ -953,7 +978,12 @@ fn invoke_mutex_try_with(call: &mut crate::bridge::call::NativeCall) -> Result<(
     impl Drop for RetainedRetGuard {
         fn drop(&mut self) {
             if !self.0.is_null() {
-                unsafe { ffi::oxphp_shared_free_zval(self.0) };
+                // SAFETY: a value the C side retained for this call and handed to
+                // this guard alone, freed once. Freeing it can run a destructor: the
+                // helper holds a bailout in it back for the dispatch stub this call
+                // returns to, and refuses while one is held back. A refused value is
+                // left in the request's heap.
+                unsafe { ffi::oxphp_shared_free_zval_guarded(self.0) };
             }
         }
     }

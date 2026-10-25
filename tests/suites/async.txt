@@ -67,3 +67,8 @@ async/test_task_bound_to_this_outlives_its_request
 # A single await that times out outside worker mode still has its abandoned
 # task drained at request end: the end waits for it, bounded by the budget.
 async/test_await_timeout_waits_for_the_task_at_request_end
+# A fatal from a destructor run by an await releasing the promise's closure:
+# the await still lets go of the task's result on the fatal's way out. The same
+# fatal from the request's end releasing a promise never awaited ends that
+# request, not the next one on its thread.
+async/test_promise_closure_release_fatal

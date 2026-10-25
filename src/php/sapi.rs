@@ -4386,7 +4386,7 @@ pub unsafe extern "C" fn async_dispatch_callback(
             }
             // Release the closure object reference on rollback
             if !cleanup.closure_zval.is_null() {
-                ffi::oxphp_closure_release(cleanup.closure_zval);
+                ffi::oxphp_closure_release_guarded(cleanup.closure_zval);
             }
             if let Some(m) = get_async_metrics() {
                 m.async_task_rejected();
@@ -4875,9 +4875,9 @@ enum Yielded {
     /// Cancelled while yielded. The cancellation exception is in bridge TLS;
     /// the caller aborts with -1.
     Cancelled,
-    /// The fiber is unwinding — see `OXPHP_FIBER_UNWIND`. The caller must
-    /// return without adding an error of its own and without yielding again —
-    /// a fiber being torn down is no longer the current one, so a second
+    /// The fiber has to go back to PHP — see `OXPHP_FIBER_UNWIND`. The caller
+    /// must return without adding an error of its own and without yielding
+    /// again — a fiber being torn down is no longer the current one, so a second
     /// yield would report "outside a fiber" and turn the unwind into a
     /// synthetic error.
     Unwinding,
@@ -5388,9 +5388,12 @@ unsafe fn run_promise_cleanup(cleanup: &PromiseCleanup) {
         );
     }
     // Release the closure object reference (prevents op_array from being
-    // freed while the async worker holds a pointer to it).
+    // freed while the async worker holds a pointer to it). The last one
+    // releases what the closure captured, and a destructor can run: a bailout
+    // in it is held back for the C code this call into Rust returns to, so
+    // that the frames between here and there finish.
     if !cleanup.closure_zval.is_null() {
-        ffi::oxphp_closure_release(cleanup.closure_zval);
+        ffi::oxphp_closure_release_guarded(cleanup.closure_zval);
     }
 }
 

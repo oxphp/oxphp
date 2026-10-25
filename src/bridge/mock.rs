@@ -309,7 +309,12 @@ pub unsafe fn oxphp_zval_addref(_zv: *mut c_void) {}
 pub unsafe fn oxphp_closure_addref(_closure_zv: *mut c_void) -> *mut c_void {
     std::ptr::null_mut()
 }
-pub unsafe fn oxphp_closure_release(_obj_ptr: *mut c_void) {}
+pub unsafe fn oxphp_closure_release_guarded(_obj_ptr: *mut c_void) -> c_int {
+    if MOCK_DEFERRED_BAILOUT.get() {
+        return OXPHP_SHARED_INVOKE_BAILOUT;
+    }
+    0
+}
 pub unsafe fn oxphp_zval_size() -> usize {
     16
 }
@@ -1000,8 +1005,12 @@ pub unsafe fn oxphp_shared_invoke_byref_1_portbuf(
 }
 
 #[allow(clippy::missing_safety_doc)]
-pub unsafe fn oxphp_shared_free_zval(_p: *mut c_void) {
+pub unsafe fn oxphp_shared_free_zval_guarded(_p: *mut c_void) -> c_int {
     // host mock: no zval ever materialised, so nothing to free.
+    if MOCK_DEFERRED_BAILOUT.get() {
+        return OXPHP_SHARED_INVOKE_BAILOUT;
+    }
+    0
 }
 
 #[allow(clippy::missing_safety_doc)]
@@ -1098,7 +1107,7 @@ pub fn mock_pool_factory_mints(slot: *mut c_void) {
 }
 
 /// Host tests: how many pool bridge calls that would touch the PHP heap
-/// (`fcc_free`, `slot_free`, `destroy_invoke`) the calling thread made.
+/// (`fcc_free_guarded`, `slot_free`, `destroy_invoke`) the calling thread made.
 #[cfg(test)]
 pub fn mock_pool_heap_calls() -> u64 {
     MOCK_POOL_HEAP_CALLS.with(|c| c.get())
@@ -1114,8 +1123,13 @@ pub unsafe fn oxphp_pool_fcc_new(
 ) -> c_int {
     -1
 }
-pub unsafe fn oxphp_pool_fcc_free(_fcc_heap: *mut c_void) {
+/// As under OXPHP_SHARED_RUN_GUARDED: refused while a bailout is held back.
+pub unsafe fn oxphp_pool_fcc_free_guarded(_fcc_heap: *mut c_void) -> c_int {
+    if MOCK_DEFERRED_BAILOUT.get() {
+        return OXPHP_SHARED_INVOKE_BAILOUT;
+    }
     count_pool_heap_call();
+    0
 }
 pub unsafe fn oxphp_pool_factory_invoke(
     _fcc_heap: *mut c_void,

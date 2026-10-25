@@ -7693,7 +7693,8 @@ int oxphp_in_oxphp_fiber(void) {
 
 /* Fiber-aware await helper. Called from Rust handler via FFI.
  * Returns: 0 = fiber handled it (retval populated), 1 = not in fiber (caller does blocking),
- *         -1 = error (exception details in bridge TLS), -2 = timeout */
+ *         -1 = error (exception details in bridge TLS), -2 = timeout,
+ *         OXPHP_FIBER_UNWIND = go back to PHP (see it) */
 int oxphp_fiber_suspend_for_await(int64_t promise_id, double timeout, void *retval) {
     if (oxphp_current_fiber == NULL
         || !oxphp_fiber_owns_current_context(oxphp_current_fiber)) {
@@ -7704,6 +7705,16 @@ int oxphp_fiber_suspend_for_await(int64_t promise_id, double timeout, void *retv
     if (zend_fiber_switch_blocked() || oxphp_park_blocked) return 1;
     /* Out of memory — see oxphp_fiber_sleep_us. */
     if (oxphp_park_refused_for_oom()) return OXPHP_FIBER_UNWIND;
+    /* A bailout held back for the plugin stub below (OXPHP_SHARED_RUN_GUARDED),
+     * from something an await over several promises released before it waits
+     * on the next: a promise's closure, a task result holding a pool's last
+     * reference. Parked, the fiber would hand the thread to another request,
+     * whose next plugin call would raise it. Unwound, the handler returns to
+     * the stub, which raises it. Asked here and in the yield below, the two
+     * parks Rust reaches after a release; the other suspend points are reached
+     * from running PHP, where none is held back, or, for Shared\Pool::acquire,
+     * through a guarded helper that refuses while one is. */
+    if (oxphp_bridge_deferred_bailout_pending()) return OXPHP_FIBER_UNWIND;
 
     oxphp_request_fiber *self = oxphp_current_fiber;
     self->suspend_reason = OXPHP_SUSPEND_AWAIT;
@@ -7757,7 +7768,8 @@ int oxphp_fiber_suspend_for_await(int64_t promise_id, double timeout, void *retv
  * resume. Used by the fiber-aware await_race / await_any poll loops to avoid
  * pinning the worker while waiting for one of several promises to settle.
  * Returns 1 if it suspended (in a fiber), 0 if not in a fiber (caller falls
- * back to blocking), -3 if the task was cancelled while yielded. */
+ * back to blocking), -3 if the task was cancelled while yielded,
+ * OXPHP_FIBER_UNWIND to go back to PHP (see it). */
 int oxphp_fiber_suspend_for_yield(void) {
     if (oxphp_current_fiber == NULL
         || !oxphp_fiber_owns_current_context(oxphp_current_fiber)) {
@@ -7767,6 +7779,8 @@ int oxphp_fiber_suspend_for_yield(void) {
     if (zend_fiber_switch_blocked() || oxphp_park_blocked) return 0;
     /* Out of memory — see oxphp_fiber_sleep_us. */
     if (oxphp_park_refused_for_oom()) return OXPHP_FIBER_UNWIND;
+    /* A bailout held back — see oxphp_fiber_suspend_for_await. */
+    if (oxphp_bridge_deferred_bailout_pending()) return OXPHP_FIBER_UNWIND;
 
     oxphp_request_fiber *self = oxphp_current_fiber;
     uint64_t timer_id = oxphp_bridge_timer_register(1); /* ~1ms; resumed by tick */

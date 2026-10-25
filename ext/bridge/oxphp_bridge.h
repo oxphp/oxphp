@@ -983,8 +983,11 @@ void oxphp_zval_addref(void *zv);
 /** Addref the closure object and return the zend_object pointer (stable across stack frames). */
 void *oxphp_closure_addref(void *closure_zv);
 
-/** Release a closure object reference obtained via oxphp_closure_addref. */
-void oxphp_closure_release(void *obj_ptr);
+/** Release a closure object reference obtained via oxphp_closure_addref,
+ *  guarded: a bailout from a destructor the release runs is held back for the
+ *  C code the calling Rust returns to (OXPHP_SHARED_INVOKE_BAILOUT), and the
+ *  release is refused while one is. */
+int oxphp_closure_release_guarded(void *obj_ptr);
 
 /** Return sizeof(zval) for the running PHP build. */
 size_t oxphp_zval_size(void);
@@ -2433,7 +2436,7 @@ int oxphp_shared_invoke_0_portbuf(zval *callable,
  * there is nothing to pin (the function returned BAD_CALLABLE early,
  * the corresponding serialise step rejected the value, or ret was
  * IS_UNDEF/IS_NULL). The caller MUST balance each non-NULL pointer
- * with `oxphp_shared_free_zval()` after consuming the wire buffer
+ * with `oxphp_shared_free_zval_guarded()` after consuming the wire buffer
  * (or on any early exit). */
 int oxphp_shared_invoke_byref_1_portbuf(zval *callable,
                                          const uint8_t *state_buf,
@@ -2448,8 +2451,11 @@ int oxphp_shared_invoke_byref_1_portbuf(zval *callable,
 
 /* Release a retained zval pointer produced by
  * `oxphp_shared_invoke_byref_1_portbuf` (either `*out_retained_state`
- * or `*out_retained_ret`). NULL is a no-op. */
-void oxphp_shared_free_zval(void *p);
+ * or `*out_retained_ret`). NULL is a no-op. Guarded: a bailout from a
+ * destructor the release runs is held back for the C code the calling
+ * Rust returns to (OXPHP_SHARED_INVOKE_BAILOUT), and the release is
+ * refused while one is. */
+int oxphp_shared_free_zval_guarded(void *p);
 
 /* Shared\Map::forEach — invoke $fn(key, value); 1=stop, 0=continue,
  * <0=bad callable / deserialise failure / PHP throw / bailout
@@ -2467,7 +2473,7 @@ int oxphp_shared_invoke_2_ret_stop(zval *callable,
  * Real pool factory / body / slot lifecycle helpers.
  *
  * Lifetime contract:
- *   - `oxphp_pool_fcc_new`  → paired with `oxphp_pool_fcc_free`.
+ *   - `oxphp_pool_fcc_new`  → paired with `oxphp_pool_fcc_free_guarded`.
  *   - `oxphp_pool_factory_invoke` out-param is owned by pool;
  *      pair with `oxphp_pool_slot_free` at pool-drop.
  *   - `oxphp_pool_slot_to_user` does not transfer ownership;
@@ -2478,7 +2484,7 @@ int oxphp_shared_invoke_2_ret_stop(zval *callable,
  * is per thread, and a request's is reset when it ends. */
 
 int oxphp_pool_fcc_new(void *callable_zval, void **out_fcc_heap);
-void oxphp_pool_fcc_free(void *fcc_heap);
+int oxphp_pool_fcc_free_guarded(void *fcc_heap);
 int oxphp_pool_factory_invoke(void *fcc_heap, void **out_slot_zv_heap);
 int oxphp_pool_body_invoke(void *body_callable_zv,
                             void *slot_zv_heap,

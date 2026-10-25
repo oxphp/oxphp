@@ -7,6 +7,7 @@ declare(strict_types=1);
 require_once __DIR__ . '/../test_helper.php';
 
 use OxPHP\Shared\Counter;
+use OxPHP\Shared\Map;
 use OxPHP\Shared\Mutex;
 use OxPHP\Shared\Once;
 use OxPHP\Shared\Once\FailureMode;
@@ -58,7 +59,7 @@ $inner = static function (string $case, int $status = 500) use ($t, $run, $get):
     $t->assertNotContains("$case: nothing past the fatal ran", $resp, 'NOT-REACHED');
 
     // A worker retires after three requests in a row end in a bailout, and this
-    // test raises eleven on the one worker it then reads back from. A request
+    // test raises twelve on the one worker it then reads back from. A request
     // that completes in between keeps that worker in service.
     $t->assertMatch("$case: a request after it completes", $get('case=none'), '#^HTTP/\S+ 200 #');
 };
@@ -104,6 +105,29 @@ foreach (['with_lock' => 500, 'with_lock_parked' => 504, 'with_lock_destructor' 
         'clean'
     );
 }
+
+// with_lock_retained is a fatal after the closure has returned, from releasing
+// the copy of its state the Mutex kept until it had stored it. The closure
+// finished, so the state it wrote, a Shared\Map, is kept.
+
+$inner('with_lock_retained');
+$m = Registry::mutex("closure-fatal-with-lock-retained-$run", static fn (): Mutex => new Mutex('not-created-by-the-fixture'));
+$t->assertSame(
+    'with_lock_retained: the worker thread the fatal was on takes the lock again',
+    $probe(static fn (): mixed => $m->tryWithLock(static fn (mixed &$v): string => get_debug_type($v))),
+    Map::class
+);
+$t->assertSame(
+    'with_lock_retained: another thread takes the lock',
+    oxphp_async_await(oxphp_async(static function () use ($m): mixed {
+        try {
+            return $m->tryWithLock(static fn (mixed &$v): string => get_debug_type($v));
+        } catch (\Throwable $e) {
+            return get_class($e) . ': ' . $e->getMessage();
+        }
+    })),
+    Map::class
+);
 
 // ── Once ─────────────────────────────────────────────────────────────────────
 // A fatal is not the factory failing — it is the request being ended — so even

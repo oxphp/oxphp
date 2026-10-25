@@ -25,3 +25,8 @@ async/test_task_ini_survives_a_sibling_task
 # it: the end of the request cancels both before it waits for either, so the
 # queued one never starts and the response is not held.
 async/test_orphans_all_cancelled_before_any_is_waited_on
+
+# A task's result and closure are released on the single async worker between
+# tasks: a generator's finally failing there, with an exception or a fatal
+# error, is recovered from, and the worker runs the next task.
+async/test_task_payload_release_bailout

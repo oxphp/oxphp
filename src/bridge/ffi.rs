@@ -3,13 +3,15 @@
 
 use std::os::raw::{c_char, c_int, c_void};
 
-/// Returned by a fiber suspend point when the resume that ended it delivered a
-/// pending PHP exception, or when the request or task has run out of memory and
-/// may not wait there (`oxphp_park_refused_for_oom()` in the extension) —
-/// usually with the exception PHP raised for it pending, but not always: code
-/// on the way out may have dropped it. Callers must return to PHP at once
-/// without raising an error of their own: where one is in flight, a second
-/// would replace the real cause with a synthetic one.
+/// Returned by a fiber suspend point when the fiber has to go back to PHP
+/// instead of waiting there: the resume that ended it delivered a pending PHP
+/// exception, or it may not park — the request or task has run out of memory
+/// (`oxphp_park_refused_for_oom()` in the extension), or a bailout is held back
+/// for the plugin stub to raise. An exception is usually pending, but not
+/// always: code on the way out may have dropped it, and a held-back bailout has
+/// none. Callers must return to PHP at once without raising an error of their
+/// own: where one is in flight, a second would replace the real cause with a
+/// synthetic one.
 pub const OXPHP_FIBER_UNWIND: c_int = -9;
 
 #[allow(dead_code)]
@@ -225,7 +227,11 @@ extern "C" {
     pub fn oxphp_zval_dtor(zv: *mut c_void);
     pub fn oxphp_zval_addref(zv: *mut c_void);
     pub fn oxphp_closure_addref(closure_zv: *mut c_void) -> *mut c_void;
-    pub fn oxphp_closure_release(obj_ptr: *mut c_void);
+    /// Releases a reference `oxphp_closure_addref` took, with a bailout from
+    /// a destructor the release runs held back: returns
+    /// `OXPHP_SHARED_INVOKE_BAILOUT` then, and also, releasing nothing, while
+    /// one is held back already.
+    pub fn oxphp_closure_release_guarded(obj_ptr: *mut c_void) -> c_int;
     pub fn oxphp_zval_size() -> usize;
     pub fn oxphp_op_array_size() -> usize;
     pub fn oxphp_op_array_in_request_memory(op_array: *const c_void) -> c_int;
@@ -502,8 +508,11 @@ extern "C" {
     /// `out_retained_ret` (pins Shareables in the closure's return).
     /// Once Rust has finished decoding the corresponding wire buffer
     /// into owned `SharedValue`s (which take their own `Arc` strong
-    /// refs), the pin can be released. Null-safe.
-    pub fn oxphp_shared_free_zval(p: *mut c_void);
+    /// refs), the pin can be released. Null-safe. A bailout from a
+    /// destructor the release runs is held back: returns
+    /// `OXPHP_SHARED_INVOKE_BAILOUT` then, and also, releasing nothing, while
+    /// one is held back already.
+    pub fn oxphp_shared_free_zval_guarded(p: *mut c_void) -> c_int;
 
     /// Invoke `$fn(key, value)` for `Shared\Map::forEach`. The key is the
     /// tagged tuple `(key_kind: 0=int/1=str, key_int, key_ptr, key_len)`;
@@ -534,7 +543,11 @@ extern "C" {
     // emalloc'd in C and owned by the pool (Rust) until the pool
     // drops. All *_free calls must run on a Zend-initialised worker.
     pub fn oxphp_pool_fcc_new(callable_zval: *mut c_void, out_fcc_heap: *mut *mut c_void) -> c_int;
-    pub fn oxphp_pool_fcc_free(fcc_heap: *mut c_void);
+    /// Frees what `oxphp_pool_fcc_new` made, with a bailout from a
+    /// destructor releasing the callable runs held back: returns
+    /// `OXPHP_SHARED_INVOKE_BAILOUT` then, and also, freeing nothing, while
+    /// one is held back already.
+    pub fn oxphp_pool_fcc_free_guarded(fcc_heap: *mut c_void) -> c_int;
     pub fn oxphp_pool_factory_invoke(
         fcc_heap: *mut c_void,
         out_slot_zv_heap: *mut *mut c_void,
