@@ -51,9 +51,20 @@ if ($census === []) {
 
 // The label is the stats slot, which a worker takes by its id modulo the number
 // of slots — the same arithmetic the server does when handing a worker thread
-// its slot, so a recycled worker with an id past the pool size still resolves.
+// its slot. The number of slots is the pool's maximum size, read from the same
+// scrape, not the number of series: a slot renders none from the moment its
+// worker exits until its replacement starts, and the tests ahead of this one
+// in the suite retire a worker.
+$slots = preg_match('/^oxphp_workers_max (\d+)$/m', $metrics, $m) === 1 ? (int)$m[1] : 0;
+
+$test->assertGreaterThan('oxphp_workers_max is exposed', $slots, 0);
+
+if ($slots === 0) {
+    $test->done();
+}
+
 $id = OxPHP\Server\Worker::current()->id();
-$label = (string)($id % count($census));
+$label = (string)($id % $slots);
 
 $test->assertKeyExists('the worker serving this request has a census entry', $census, $label);
 
