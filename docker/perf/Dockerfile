@@ -36,6 +36,8 @@ COPY --from=bridge-builder /usr/local/include/oxphp_bridge.h /usr/local/include/
 WORKDIR /build/ext
 COPY ext/config.m4 ext/php_oxphp_sapi.h ext/oxphp_sapi.c ext/oxphp_fiber.h ext/oxphp_fiber.c ./
 COPY ext/bridge/oxphp_bridge.h ./bridge/
+# The extension reports the version in ../Cargo.toml, as the binary does.
+COPY Cargo.toml /build/
 RUN phpize && \
     CPPFLAGS="-g $([ "${OXPHP_WITH_PROFILER}" = "1" ] && echo '-DOXPHP_WITH_PROFILER=1')" \
         ./configure --enable-oxphp-sapi && \

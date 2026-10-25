@@ -11,6 +11,11 @@ ARG BASE_IMAGE=php:${PHP_VERSION}-zts-alpine${ALPINE_VERSION}
 # matching edit to the --features list below).
 ARG OXPHP_WITH_PROFILER=1
 
+# Version injected from CI. Tag v1.2.3 → OXPHP_VERSION=1.2.3.
+# Default "0.0.0-dev" is only used for local test builds of this file
+# outside of CI (useful when manually smoke-testing the prod Dockerfile).
+ARG OXPHP_VERSION="0.0.0-dev"
+
 # ══════════════════════════════════════════════════════════════
 # Stage 1: Build bridge library
 # ══════════════════════════════════════════════════════════════
@@ -42,9 +47,12 @@ WORKDIR /build/ext
 COPY ext/config.m4 ext/php_oxphp_sapi.h ext/oxphp_sapi.c ext/oxphp_fiber.h ext/oxphp_fiber.c ./
 COPY ext/bridge/oxphp_bridge.h ./bridge/
 
+# The extension reports this version, the same one the binary is built with.
+ARG OXPHP_VERSION
+
 RUN phpize && \
     CPPFLAGS="$([ "${OXPHP_WITH_PROFILER}" = "1" ] && echo '-DOXPHP_WITH_PROFILER=1')" \
-        ./configure --enable-oxphp-sapi && \
+        ./configure --enable-oxphp-sapi OXPHP_VERSION="${OXPHP_VERSION}" && \
     make && \
     make install
 
@@ -81,10 +89,7 @@ COPY --from=bridge-builder /usr/local/include/oxphp_bridge.h /usr/local/include/
 
 WORKDIR /build
 
-# Version injected from CI. Tag v1.2.3 → OXPHP_VERSION=1.2.3.
-# Default "0.0.0-dev" is only used for local test builds of this file
-# outside of CI (useful when manually smoke-testing the prod Dockerfile).
-ARG OXPHP_VERSION="0.0.0-dev"
+ARG OXPHP_VERSION
 
 COPY Cargo.toml Cargo.lock ./
 # build.rs runs prost_build::compile_protos unconditionally, so proto/

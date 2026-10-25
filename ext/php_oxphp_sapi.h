@@ -9,7 +9,7 @@
 #include "php_ini.h"
 #include "ext/standard/info.h"
 
-#define PHP_OXPHP_SAPI_VERSION "0.1.0"
+/* PHP_OXPHP_SAPI_VERSION comes from config.h: config.m4 sets it to the server's version. */
 #define PHP_OXPHP_SAPI_EXTNAME "oxphp_sapi"
 
 extern zend_module_entry oxphp_sapi_module_entry;
