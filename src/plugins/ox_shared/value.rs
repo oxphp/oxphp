@@ -184,6 +184,8 @@ impl SharedValue {
 //          key_type 0 = index key → u64 LE index
 //          key_type 1 = string key → u32 LE klen + bytes
 //   7  = shared ref → u8 type_tag + u64 LE shared_id
+//   8  = reference: C side only, in a task's closure variables, which never
+//        reach this codec; decoding it is a `SharedError::Type`
 //
 // The codec is split into:
 //   sv_to_portbuf(&SharedValue) -> Vec<u8>       (serialize from owned)

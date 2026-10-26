@@ -461,6 +461,13 @@ pub unsafe fn oxphp_portable_serialize_ht(
 ) -> c_int {
     0
 }
+pub unsafe fn oxphp_portable_serialize_closure_vars(
+    _ht: *mut c_void,
+    _out_buf: *mut *mut u8,
+    _out_len: *mut usize,
+) -> c_int {
+    0
+}
 pub unsafe fn oxphp_portable_deserialize_ht(
     _buf: *const u8,
     _len: usize,
