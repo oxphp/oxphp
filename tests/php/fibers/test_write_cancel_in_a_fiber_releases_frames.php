@@ -25,6 +25,14 @@ if (write_cancel_stage($t, 'stream-fiber', '?in=stream-fiber')) {
 
     $t->assertSame('the write it resumed into ended it', OxphpWriteCancelProbe::$stage, 'before-write');
     $t->assertTrue('what the frame below the fiber was holding did not outlive its request', $freed);
+    // Destroyed while the worker gave it back, which runs PHP as part of the
+    // request — so in the request's fiber, as anything else of that request does.
+    $t->assertNotNull('the request ran in a fiber', OxphpWriteCancelProbe::$requestFiber);
+    $t->assertSame(
+        'and what it held was destroyed in that fiber',
+        OxphpWriteCancelProbe::$fiberAtDestruct,
+        OxphpWriteCancelProbe::$requestFiber
+    );
     // Ended by the write and not by an interrupt, which ends a stream whose
     // client has gone too and gives its frames back as well — told apart, as in
     // the stream stage of that file, by the fatal an interrupt reports and the

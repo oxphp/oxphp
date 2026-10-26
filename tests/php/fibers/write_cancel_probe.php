@@ -24,11 +24,27 @@ if (!class_exists('OxphpWriteCancelProbe', false)) {
         /** What the fixture's frame was holding, weakly. */
         public static ?\WeakReference $weak = null;
 
-        /** @var array{stage: ?string, freed: bool, last_error: ?string}|null */
+        /** @var array{stage: ?string, freed: bool, last_error: ?string, fiber: ?int}|null */
         public static ?array $report = null;
 
         /** How far the fixture had got when the object it held was destroyed. */
         public static ?string $stageAtDestruct = null;
+
+        /**
+         * The fiber the request ran in before the write, and with
+         * ?in=stream-fiber or ?in=stream-decorated the one the object it held
+         * was destroyed in, by id.
+         */
+        public static ?int $requestFiber = null;
+        public static ?int $fiberAtDestruct = null;
+
+        /**
+         * With ?in=stream-decorated and ?in=stream-decorated-destructor, how far
+         * the decorator's after() got — 'writing', then 'wrote' — and the fiber
+         * it ran in, by id.
+         */
+        public static ?string $afterStage = null;
+        public static ?int $fiberAtAfter = null;
 
         /**
          * What connection_aborted() answered the fixture after the write whose
@@ -43,6 +59,10 @@ if (!class_exists('OxphpWriteCancelProbe', false)) {
             self::$weak = null;
             self::$report = null;
             self::$stageAtDestruct = null;
+            self::$requestFiber = null;
+            self::$fiberAtDestruct = null;
+            self::$afterStage = null;
+            self::$fiberAtAfter = null;
             self::$abortedAfterWrite = null;
         }
 

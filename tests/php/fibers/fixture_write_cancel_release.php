@@ -2,8 +2,14 @@
 
 declare(strict_types=1);
 
-// Inner request for fibers/test_write_cancel_releases_frames, and with
-// ?in=stream-fiber for fibers/test_write_cancel_in_a_fiber_releases_frames.
+// Inner request for fibers/test_write_cancel_releases_frames, with
+// ?in=stream-fiber for fibers/test_write_cancel_in_a_fiber_releases_frames, with
+// ?in=stream-held-fiber for
+// fibers/test_fatal_while_releasing_a_held_fiber_keeps_the_request_fiber, with
+// ?in=stream-decorated for
+// fibers/test_write_cancel_in_a_decorator_keeps_the_request_fiber_for_the_release,
+// and with ?in=stream-decorated-destructor for
+// fibers/test_fatal_in_a_released_destructor_keeps_the_request_fiber_for_its_decorator.
 //
 // Parks while holding an object in a local variable. The test closes this
 // request's connection during the park; when the request resumes, the first
@@ -36,7 +42,31 @@ declare(strict_types=1);
 // after it resumes. The engine catches the ending inside that fiber and destroys
 // the fiber's frames before it ends the request with it, so what the worker can
 // give back is what the request's own frames below the fiber were holding — and
-// the object is held there.
+// the object is held there. Its destructor runs while the worker gives it back,
+// and records the fiber it runs in: the request's, though the engine cleared its
+// record of the current fiber when it ended the request from inside another.
+//
+// ?in=stream-held-fiber holds a Fiber suspended in a try whose finally fatals,
+// and writes from the request itself. Destroying that fiber while the worker
+// gives back what the frame held resumes it to run the finally, and the fatal
+// there ends the give-back from inside that fiber, which clears the engine's
+// record of the current fiber again. The request's shutdown function, after it,
+// records the fiber it runs in.
+//
+// ?in=stream-decorated makes the ?in=stream-fiber write from inside a decorated
+// function. The ending leaves that call open, and the worker closes it before it
+// gives anything back, which calls the decorator's after(). after() records the
+// fiber it runs in, then writes to the same gone client from a Fiber of its own,
+// and the ending that write raises clears the engine's record of the current
+// fiber again on its way out of that fiber. The object the request held, given
+// back after it, records the fiber its destructor runs in.
+//
+// ?in=stream-decorated-destructor holds an object whose decorated destructor
+// lets go of a Fiber suspended in a try whose finally fatals. The give-back runs
+// that destructor, the fatal ends it from inside that fiber, and the worker
+// closes the destructor's call after the give-back, which calls the same after():
+// it records the fiber it runs in and ends itself with a write. The request's
+// shutdown function, after it, records the fiber it runs in.
 //
 // ?in=destructor holds an object with a destructor instead. The destructor now
 // runs at the function's own return, as part of the request, because the
@@ -76,6 +106,77 @@ if (!class_exists('OxphpWriteCancelThrows', false)) {
     }
 }
 
+if (!class_exists('OxphpWriteCancelRecordsFiber', false)) {
+    final class OxphpWriteCancelRecordsFiber
+    {
+        public function __destruct()
+        {
+            $current = \Fiber::getCurrent();
+            OxphpWriteCancelProbe::$fiberAtDestruct = $current === null ? null : spl_object_id($current);
+        }
+    }
+}
+
+if (!function_exists('oxphp_write_cancel_fiber_fataling_when_destroyed')) {
+    function oxphp_write_cancel_fiber_fataling_when_destroyed(): \Fiber
+    {
+        $fiber = new \Fiber(static function (): void {
+            try {
+                \Fiber::suspend();
+            } finally {
+                engine_fatal('OxphpWriteCancelHeldFiberFinally');
+            }
+        });
+        $fiber->start();
+
+        return $fiber;
+    }
+}
+
+if (!class_exists('OxphpWriteCancelDecorator', false)) {
+    #[\Attribute(\Attribute::TARGET_FUNCTION | \Attribute::TARGET_METHOD)]
+    final class OxphpWriteCancelDecorator implements \OxPHP\Decorator\AttributeInterface
+    {
+        public function before(\OxPHP\Decorator\Context $ctx): void
+        {
+        }
+
+        public function after(\OxPHP\Decorator\Context $ctx): void
+        {
+            $current = \Fiber::getCurrent();
+            OxphpWriteCancelProbe::$fiberAtAfter = $current === null ? null : spl_object_id($current);
+            OxphpWriteCancelProbe::$afterStage = 'writing';
+            (new \Fiber(static function (): void {
+                echo "nobody is left to read this either\n";
+                oxphp_stream_flush();
+            }))->start();
+            OxphpWriteCancelProbe::$afterStage = 'wrote';
+        }
+    }
+
+    oxphp_register_decorator(OxphpWriteCancelDecorator::class);
+}
+
+if (!class_exists('OxphpWriteCancelReleasesFatalingFiber', false)) {
+    final class OxphpWriteCancelReleasesFatalingFiber
+    {
+        private ?\Fiber $fiber;
+
+        public function __construct()
+        {
+            $this->fiber = oxphp_write_cancel_fiber_fataling_when_destroyed();
+        }
+
+        #[OxphpWriteCancelDecorator]
+        public function __destruct()
+        {
+            // The fiber's only reference: destroyed here, inside this call.
+            $this->fiber = null;
+            OxphpWriteCancelProbe::$stage = 'destructor-returned';
+        }
+    }
+}
+
 if (!function_exists('oxphp_write_after_client_left')) {
     function oxphp_write_after_client_left(string $holding = 'plain', bool $stream = false, bool $inFiber = false): void
     {
@@ -83,6 +184,9 @@ if (!function_exists('oxphp_write_after_client_left')) {
         $held = match ($holding) {
             'destructs' => new OxphpWriteCancelDestructs(),
             'throws' => new OxphpWriteCancelThrows(),
+            'records-fiber' => new OxphpWriteCancelRecordsFiber(),
+            'fiber-fataling-when-destroyed' => oxphp_write_cancel_fiber_fataling_when_destroyed(),
+            'releases-fataling-fiber' => new OxphpWriteCancelReleasesFatalingFiber(),
             default => new \ArrayObject([str_repeat('x', 1 << 16)]),
         };
         OxphpWriteCancelProbe::$weak = \WeakReference::create($held);
@@ -92,6 +196,8 @@ if (!function_exists('oxphp_write_after_client_left')) {
         sleep(2);
 
         OxphpWriteCancelProbe::$stage = 'before-write';
+        $current = \Fiber::getCurrent();
+        OxphpWriteCancelProbe::$requestFiber = $current === null ? null : spl_object_id($current);
         if ($inFiber) {
             (new \Fiber(static function (): void {
                 echo "nobody is left to read this\n";
@@ -104,6 +210,14 @@ if (!function_exists('oxphp_write_after_client_left')) {
             }
         }
         OxphpWriteCancelProbe::$stage = 'after-write';
+    }
+}
+
+if (!function_exists('oxphp_write_after_client_left_decorated')) {
+    #[OxphpWriteCancelDecorator]
+    function oxphp_write_after_client_left_decorated(): void
+    {
+        oxphp_write_after_client_left('records-fiber', true, true);
     }
 }
 
@@ -122,15 +236,17 @@ if (($_GET['in'] ?? '') === 'shutdown') {
 // Runs after the worker has dealt with the abandoned frames. Writes nothing:
 // the client is gone and nobody would read it.
 register_shutdown_function(static function (): void {
+    $current = \Fiber::getCurrent();
     OxphpWriteCancelProbe::$report = [
         'stage' => OxphpWriteCancelProbe::$stage,
         'freed' => OxphpWriteCancelProbe::freed(),
         'last_error' => error_get_last()['message'] ?? null,
+        'fiber' => $current === null ? null : spl_object_id($current),
     ];
 });
 
 $in = $_GET['in'] ?? '';
-$stream = $in === 'stream' || $in === 'stream-throw' || $in === 'stream-fiber';
+$stream = str_starts_with($in, 'stream');
 if ($stream) {
     // The header alone is what makes the request a stream. Nothing is sent
     // before the park: a stream that has already sent its headers is no longer
@@ -139,12 +255,19 @@ if ($stream) {
     header('Content-Type: text/event-stream');
 }
 
-oxphp_write_after_client_left(
-    match ($in) {
-        'destructor' => 'destructs',
-        'stream-throw' => 'throws',
-        default => 'plain',
-    },
-    $stream,
-    $in === 'stream-fiber'
-);
+if ($in === 'stream-decorated') {
+    oxphp_write_after_client_left_decorated();
+} else {
+    oxphp_write_after_client_left(
+        match ($in) {
+            'destructor' => 'destructs',
+            'stream-throw' => 'throws',
+            'stream-fiber' => 'records-fiber',
+            'stream-held-fiber' => 'fiber-fataling-when-destroyed',
+            'stream-decorated-destructor' => 'releases-fataling-fiber',
+            default => 'plain',
+        },
+        $stream,
+        $in === 'stream-fiber'
+    );
+}
