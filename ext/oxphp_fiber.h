@@ -667,6 +667,12 @@ typedef struct _oxphp_request_fiber {
     bool exec_timeout_due;          /* ran out and the engine has not answered it yet:
                                      * delivered the moment the request runs again */
 
+    /* What stood when this request's request_parse_body() calls were made,
+     * for the end of the request to release; it can name the body and hash
+     * still current. Request fibers only; empty between requests. See
+     * oxphp_supersede_request_body_parse(). */
+    struct oxphp_superseded_parse *superseded_parses;
+
     /* Linked list pointers for the scheduler's fiber list */
     struct _oxphp_request_fiber *next;
     struct _oxphp_request_fiber *prev;
@@ -1000,6 +1006,14 @@ void oxphp_release_request_post_state(void);
  * put back at MSHUTDOWN, like the runtime hooks. */
 void oxphp_request_body_hook_install(void);
 void oxphp_request_body_hook_restore(void);
+
+/* Called by the request_parse_body() wrapper before the original runs, in the
+ * calling request's fiber with switching blocked. php-src puts the new parse's
+ * body, uploaded-file hash and content-type copy where the previous parse's
+ * stand without freeing them; this keeps the previous body and hash for the end
+ * of the request to release, and frees the copy when no post handler is
+ * registered to read it. */
+void oxphp_supersede_request_body_parse(void);
 
 /* Targeted per-fiber request init (safe to call while other fibers are suspended).
  * Unlike oxphp_soft_reset(), this does NOT touch global OB or other thread-wide state.

@@ -1852,9 +1852,8 @@ static void oxphp_drop_body_res(zend_resource **slot) {
  * replaced is only dropped, not closed. php-src reassigns
  * SG(request_info).request_body without freeing what stands there
  * (main/SAPI.c, sapi_read_standard_form_data), which a second parse in one
- * request — userland request_parse_body() — makes reachable; the stream it
- * orphans outlives the request either way, and closing it here would be a
- * different change with a contract of its own to sort out.
+ * request — userland request_parse_body() — makes reachable; the replaced body
+ * is kept by oxphp_supersede_request_body_parse() for the end of the request.
  *
  * Worker mode only. In the classic mode the engine's own request shutdown
  * closes the body and destroys the resource list, so there is no hand close to
@@ -2170,6 +2169,164 @@ static void oxphp_close_input_wrappers_for(php_stream *body) {
     }
 }
 
+/* Release a body worker mode owns: the php://input handles reading it, the
+ * stream, and the claim on it. `named` is the pointer the body is known by and
+ * `slot` the claim; both are cleared. */
+static void oxphp_release_body(php_stream **named, zend_resource **slot) {
+    if (*named) {
+        /* Before the close rather than after it: the match is on this pointer,
+         * and after the close it names freed memory. php_stream_input_close()
+         * does not touch the body, so the wrappers going first costs nothing.
+         *
+         * Run whatever became of the body, including when userland has already
+         * closed it. The walk only compares this address, never reads through
+         * it, and the handles it is looking for are exactly the ones that would
+         * otherwise go on naming freed memory into the next request. (A body
+         * closed from userland can have had its block taken by a stream opened
+         * since, and a php://input handle on THAT one would then match. Losing a
+         * handle to a body the request no longer has is the lesser of the two,
+         * and it takes a request that closed its own body to reach at all.) */
+        oxphp_close_input_wrappers_for(*named);
+        *named = NULL;
+    }
+    /* The body itself is closed through the claim rather than through the
+     * pointer above — the whole point of holding one. Three outcomes: the claim
+     * names a live stream, which is closed; it names one userland has already
+     * closed, and there is nothing left to close; or there is no claim, and
+     * nothing to close here. */
+    php_stream *body = oxphp_live_body_of(*slot);
+    if (body != NULL) {
+        php_stream_close(body);
+    }
+    oxphp_drop_body_res(slot);
+}
+
+/* Unlink the temp files of the uploads `*slot` registers and free it.
+ * destroy_uploaded_files_hash() is the engine's own routine for that and reads
+ * only SG(rfc1867_uploaded_files), so the hash is put there for the call and
+ * whatever stood there is put back. */
+static void oxphp_destroy_uploaded_files(HashTable **slot) {
+    if (*slot == NULL) {
+        return;
+    }
+    HashTable *standing = SG(rfc1867_uploaded_files);
+    SG(rfc1867_uploaded_files) = *slot;
+    destroy_uploaded_files_hash();
+    *slot = NULL;
+    SG(rfc1867_uploaded_files) = standing;
+}
+
+/* The content-type copy sapi_read_post_data() leaves standing in SG(). */
+static void oxphp_free_content_type_dup(void) {
+    if (SG(request_info).content_type_dup) {
+        efree(SG(request_info).content_type_dup);
+        SG(request_info).content_type_dup = NULL;
+    }
+}
+
+/* What stood when a request_parse_body() call was made — the body and the
+ * uploaded-file hash it parses in place of — kept for the end of the request.
+ * `body` is only an address, of a stream userland may have closed; `body_res`
+ * holds a reference of its own. A call can exit before replacing either, so
+ * either can still be current when the request ends, and what is current is
+ * its owner's to release. Either can be NULL. */
+struct oxphp_superseded_parse {
+    struct oxphp_superseded_parse *next;
+    php_stream *body;
+    zend_resource *body_res;
+    HashTable *files;
+};
+
+void oxphp_supersede_request_body_parse(void) {
+    oxphp_request_fiber *self = oxphp_current_fiber;
+    ZEND_ASSERT(self != NULL && !self->task_mode);
+
+    /* sapi_read_post_data() is about to overwrite it without freeing it. Freed
+     * only when no post handler is registered for it: sapi_handle_post() wants
+     * both, and nothing else in php-src reads it. With a handler it can be the
+     * copy a parse this call was made from inside has still to hand over. */
+    if (SG(request_info).post_entry == NULL) {
+        oxphp_free_content_type_dup();
+    }
+
+    /* A claim on a body userland has closed: SG() still names the freed stream,
+     * and oxphp_adopt_request_body() refuses to claim the body the new parse
+     * puts there while the dead claim stands. */
+    bool dead_claim = oxphp_owned_body_res != NULL
+        && oxphp_live_body_of(oxphp_owned_body_res) == NULL;
+
+    /* Kept to the end of the request rather than released now — php-fpm does
+     * not release them before then either: a php://input handle opened before
+     * this call goes on reading the current body, and $_FILES, which the call
+     * leaves as it was, goes on naming the files the current hash registers. A
+     * call that exits before replacing either leaves the same body and hash
+     * standing for the next one, which must not keep them twice. */
+    zend_resource *res = oxphp_owned_body_res;
+    HashTable *files = SG(rfc1867_uploaded_files);
+    for (struct oxphp_superseded_parse *kept = self->superseded_parses; kept; kept = kept->next) {
+        if (kept->body_res == res) {
+            res = NULL;
+        }
+        if (kept->files == files) {
+            files = NULL;
+        }
+    }
+    if (res != NULL || files != NULL) {
+        /* malloc rather than emalloc: an allocation over memory_limit here would
+         * bail out of a call the script made, before the parse it asked for. */
+        struct oxphp_superseded_parse *kept = calloc(1, sizeof(*kept));
+        if (kept == NULL) {
+            return;
+        }
+        if (res != NULL) {
+            /* A dead claim's resource names no stream any more; the pointer
+             * SG() still holds is what its php://input handles read through. */
+            php_stream *live = oxphp_live_body_of(res);
+            kept->body = live != NULL ? live : SG(request_info).request_body;
+            kept->body_res = res;
+            GC_ADDREF(res);
+        }
+        kept->files = files;
+        kept->next = self->superseded_parses;
+        self->superseded_parses = kept;
+    }
+
+    /* Now recorded, the dead claim is cleared so that the new body is claimed
+     * like any other. The php://input handles naming the freed body are closed
+     * at the end of the request with the record's, not here: closing one runs
+     * its filters, and this is inside a call the script made. */
+    if (dead_claim) {
+        SG(request_info).request_body = NULL;
+        oxphp_drop_body_res(&oxphp_owned_body_res);
+    }
+}
+
+/* Release what oxphp_supersede_request_body_parse() kept for `fiber`, except
+ * what is still current — the body `current_res` claims and the hash
+ * `current_files` — which its owner releases. The owner clears the pointer a
+ * body is known by before closing it; closed from here, the current body would
+ * still be SG()'s while its filters ran, and a php://input one of them opened
+ * would be handed the stream being freed. */
+static void oxphp_release_superseded_parses(oxphp_request_fiber *fiber,
+                                            zend_resource *current_res,
+                                            HashTable *current_files) {
+    struct oxphp_superseded_parse *kept = fiber->superseded_parses;
+    fiber->superseded_parses = NULL;
+    while (kept != NULL) {
+        struct oxphp_superseded_parse *next = kept->next;
+        if (kept->files != current_files) {
+            oxphp_destroy_uploaded_files(&kept->files);
+        }
+        if (kept->body_res == current_res) {
+            oxphp_drop_body_res(&kept->body_res);
+        } else {
+            oxphp_release_body(&kept->body, &kept->body_res);
+        }
+        free(kept);
+        kept = next;
+    }
+}
+
 /* Free per-fiber owned state at teardown: the task-mode payload (reconstructed
  * closure, captured return value, captured-exception strings) and any parked
  * unhandled-exception capture. The borrowed task_args belong to the Rust driver
@@ -2251,31 +2408,12 @@ static void oxphp_fiber_free_task_payload(oxphp_request_fiber *fiber) {
      * down while parked never reaches the end of a request that would have
      * released them, and the worker's resource list — the only other thing that
      * would close the stream — is about to go away with the worker itself, which
-     * is too late to keep upload_tmp_dir clean. The hash is put back where
-     * destroy_uploaded_files_hash() reads it, since unlinking every path in it is
-     * the engine's own routine and not worth duplicating here. */
-    if (fiber->php_state.rfc1867_uploaded_files) {
-        HashTable *standing = SG(rfc1867_uploaded_files);
-        SG(rfc1867_uploaded_files) = fiber->php_state.rfc1867_uploaded_files;
-        destroy_uploaded_files_hash();
-        fiber->php_state.rfc1867_uploaded_files = NULL;
-        SG(rfc1867_uploaded_files) = standing;
-    }
-    if (fiber->php_state.request_body) {
-        oxphp_close_input_wrappers_for(fiber->php_state.request_body);
-        fiber->php_state.request_body = NULL;
-    }
-    {
-        /* Closed through the resource, not through the pointer above: userland
-         * can reach the body and close it, and then the pointer names whatever
-         * has taken the block since. Same test and same order as the end of a
-         * request — see oxphp_release_request_post_state(). */
-        php_stream *body = oxphp_live_body_of(fiber->php_state.request_body_res);
-        if (body != NULL) {
-            php_stream_close(body);
-        }
-        oxphp_drop_body_res(&fiber->php_state.request_body_res);
-    }
+     * is too late to keep upload_tmp_dir clean. The same goes for what its
+     * earlier body parses left. */
+    oxphp_release_superseded_parses(fiber, fiber->php_state.request_body_res,
+                                    fiber->php_state.rfc1867_uploaded_files);
+    oxphp_destroy_uploaded_files(&fiber->php_state.rfc1867_uploaded_files);
+    oxphp_release_body(&fiber->php_state.request_body, &fiber->php_state.request_body_res);
     /* Request-fiber state, like unhandled_exc above: only a fiber destroyed
      * while parked still holds these, since resuming hands them back to the
      * symbol table. Released here so worker teardown does not leak the arrays. */
@@ -5041,10 +5179,7 @@ void oxphp_reset_request_post_state(void) {
      * reason: the callback that would consume it never runs.) Every other SAPI
      * frees it at the end of the request (php-src main/SAPI.c,
      * sapi_deactivate_module); a worker's request has no such end of its own. */
-    if (SG(request_info).content_type_dup) {
-        efree(SG(request_info).content_type_dup);
-        SG(request_info).content_type_dup = NULL;
-    }
+    oxphp_free_content_type_dup();
     SG(request_info).post_entry = NULL;
     SG(read_post_bytes) = 0;
     SG(post_read) = 0;
@@ -5091,33 +5226,7 @@ void oxphp_release_request_post_state(void) {
     if (SG(rfc1867_uploaded_files)) {
         destroy_uploaded_files_hash();
     }
-    if (SG(request_info).request_body) {
-        /* Before the close rather than after it: the match is on this pointer,
-         * and after the close it names freed memory. php_stream_input_close()
-         * does not touch the body, so the wrappers going first costs nothing.
-         *
-         * Run whatever became of the body, including when userland has already
-         * closed it. The walk only compares this address, never reads through
-         * it, and the handles it is looking for are exactly the ones that would
-         * otherwise go on naming freed memory into the next request. (A body
-         * closed from userland can have had its block taken by a stream opened
-         * since, and a php://input handle on THAT one would then match. Losing a
-         * handle to a body the request no longer has is the lesser of the two,
-         * and it takes a request that closed its own body to reach at all.) */
-        oxphp_close_input_wrappers_for(SG(request_info).request_body);
-        SG(request_info).request_body = NULL;
-    }
-    /* The body itself is closed through the claim rather than through the
-     * pointer above — the whole point of holding one. Three outcomes: the claim
-     * names a live stream, which is the ordinary case and is closed; it names
-     * one userland has closed, and there is nothing left to close; or there is
-     * no claim, which is a request that never had a body at all, since both
-     * places php-src can make one are claimed as they make it. */
-    php_stream *body = oxphp_live_body_of(oxphp_owned_body_res);
-    if (body != NULL) {
-        php_stream_close(body);
-    }
-    oxphp_drop_body_res(&oxphp_owned_body_res);
+    oxphp_release_body(&SG(request_info).request_body, &oxphp_owned_body_res);
 }
 
 /* ─── Session state between requests ───────────────────── */
@@ -6355,10 +6464,11 @@ void oxphp_scheduler_finalize_fiber(oxphp_fiber_scheduler *sched, oxphp_request_
      * time out despite the tasks succeeding). */
     oxphp_bridge_cleanup_promises_for_fiber(fiber->fiber_id);
 
-    /* Release what this request's body parse left behind — its uploaded-file
-     * temp files and its buffered body. Before the response rather than after
+    /* Release what this request's body parses left behind — their uploaded-file
+     * temp files and their buffered bodies. Before the response rather than after
      * only because everything else this function does to end the request is
      * grouped this way; nothing in the response reads either one. */
+    oxphp_release_superseded_parses(fiber, oxphp_owned_body_res, SG(rfc1867_uploaded_files));
     oxphp_release_request_post_state();
 
     /* Send the HTTP response via Rust (same as worker_send_callback) */
