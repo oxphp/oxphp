@@ -15,7 +15,8 @@
  *   jit_trace_num, active_fiber) is carried by the engine's context switch
  *   itself: it captures EG into a local on the frame that switches and restores
  *   it when that frame resumes, so each side of a switch keeps its own state and
- *   this file does not save or restore any of it
+ *   this file does not save or restore any of it across a switch. Recovering
+ *   from a bailout puts some of it back (oxphp_recover_from_bailout)
  * - PHP superglobals, SAPI headers, Rust TLS managed explicitly per fiber */
 
 #include "oxphp_fiber.h"
@@ -575,6 +576,7 @@ typedef struct {
     zval *end;
     zend_execute_data *execute_data;
     zend_fiber_context *context;
+    zend_fiber *active_fiber; /* what Fiber::getCurrent() answers there */
 } oxphp_vm_stack_mark;
 
 static inline void oxphp_vm_stack_save(oxphp_vm_stack_mark *mark) {
@@ -583,6 +585,7 @@ static inline void oxphp_vm_stack_save(oxphp_vm_stack_mark *mark) {
     mark->end = EG(vm_stack_end);
     mark->execute_data = EG(current_execute_data);
     mark->context = EG(current_fiber_context);
+    mark->active_fiber = EG(active_fiber);
 }
 
 /* Give back the one reference a frame holds on whatever it is running: the
@@ -936,6 +939,19 @@ static void oxphp_recover_from_bailout(const oxphp_vm_stack_mark *mark) {
      * the shutdown functions that follow. */
     oxphp_forget_reported_oom();
 
+    /* A bailout forwarded out of a fiber started or resumed from here clears the
+     * engine's current fiber (zend_fiber_switch_to, PHP 8.4.27 / 8.5.12), and
+     * the switch carries that into every request or task this fiber serves next.
+     * The user code below asks Fiber::getCurrent(), and its collections run
+     * destructors in a fiber only while there is a current one. So it is put
+     * back here and again after each step below that runs user code: each can
+     * raise that bailout itself, and the next step would run without it. The
+     * observer walks are not switch-blocked, and the block around the release
+     * does not keep the engine from resuming a suspended fiber the release
+     * destroys (zend_fiber_object_destroy, PHP 8.4.27 / 8.5.12) or the
+     * collector's. */
+    EG(active_fiber) = mark->active_fiber;
+
     /* The operation the fatal interrupted is over, whatever it was in the middle of:
      * the names it left on the fiber go first, ahead of anything below that can run
      * userland, because that userland can wait on a stream of its own and a wait
@@ -1011,6 +1027,8 @@ static void oxphp_recover_from_bailout(const oxphp_vm_stack_mark *mark) {
             zend_clear_exception();
         }
         oxphp_bailout_frame = bailout_frame;
+        /* Ahead of the release: see the top of this function. */
+        EG(active_fiber) = mark->active_fiber;
     }
 
     /* Guarded for the same reason the walk above is, and it is the same code it
@@ -1107,6 +1125,8 @@ static void oxphp_recover_from_bailout(const oxphp_vm_stack_mark *mark) {
                 zend_clear_exception();
             } zend_end_try();
         }
+        /* Ahead of the walk below: see the top of this function. */
+        EG(active_fiber) = mark->active_fiber;
     }
 
     if (ZEND_OBSERVER_ENABLED) {
@@ -1160,6 +1180,10 @@ static void oxphp_recover_from_bailout(const oxphp_vm_stack_mark *mark) {
      * would refuse the caller's next call — a request's shutdown functions — or
      * the next request's handler. */
     oxphp_forget_reported_oom();
+
+    /* And the current fiber after the last step, for the caller: see the top
+     * of this function. */
+    EG(active_fiber) = mark->active_fiber;
 
     /* Every fatal above recorded its own frame on the way out, and those frames
      * are on the stack the rewind below is about to give back. Left standing,

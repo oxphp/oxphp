@@ -25,9 +25,7 @@ declare(strict_types=1);
 // Nothing refers to the generator once the request is over — the frames that did
 // are the fiber's own, which the engine freed without releasing them — so the
 // close comes from the object store being torn down when the worker goes. The
-// worker is asked to go for that reason, and because a request that fatals
-// inside a fiber leaves that fiber unable to answer Fiber::getCurrent(), which
-// later lines on this worker would otherwise inherit.
+// worker is asked to go for that reason.
 //
 // The shutdown function below fills the pages the fiber's stack went back to
 // before asking the worker to go, and that is load-bearing rather than tidying
