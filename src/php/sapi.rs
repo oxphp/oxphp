@@ -4264,12 +4264,14 @@ pub unsafe extern "C" fn async_dispatch_callback(
     }
     cleanup.code_in_request_memory = ffi::oxphp_op_array_in_request_memory(op_array) != 0;
 
-    // Portable-serialize static_vars (closure use-vars) for safe cross-thread transfer.
+    // Portable-serialize static_vars (the closure's captures and `static`s) for safe
+    // cross-thread transfer, a slot holding a reference as one: the task reads a
+    // `static` a call has set as a reference.
     // All data crossing thread boundaries must be serialized — no pointer sharing.
     let (sv_buf, sv_len) = if !static_vars.is_null() {
         let mut out_buf: *mut u8 = std::ptr::null_mut();
         let mut out_len: usize = 0;
-        let rc = ffi::oxphp_portable_serialize_ht(
+        let rc = ffi::oxphp_portable_serialize_closure_vars(
             static_vars as *mut c_void,
             &mut out_buf,
             &mut out_len,

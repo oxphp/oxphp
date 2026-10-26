@@ -3695,6 +3695,9 @@ void oxphp_deep_free_zval(zval *zv) {
  *   4 = double (8 bytes), 5 = string (4 bytes length + N bytes data),
  *   6 = array (4 bytes count + N×(1 byte key_type + key + value) entries),
  *       key_type: 0 = index (8 bytes ulong), 1 = string key (4 bytes len + data)
+ *   7 = Shared\* wrapper (1 byte type tag + 8 bytes shared id),
+ *   8 = reference to the value that follows; only in a closure's table of
+ *       variables, at its top level (oxphp_portable_serialize_closure_vars())
  */
 
 /* Growable buffer using system malloc */
@@ -3769,6 +3772,41 @@ int oxphp_shared_wrapper_new(zval *out,
                              uint8_t type_tag,
                              const void *entry_ptr);
 
+/* An array, tag 6. A reference in it is written as the value it holds, unless
+ * keep_refs: then a slot of this table holding one is written as tag 8 and
+ * that value, which the reader wraps in a reference of its own. */
+static int portbuf_ser_table(portbuf_t *b, HashTable *ht, bool keep_refs) {
+    uint32_t count = zend_hash_num_elements(ht);
+    if (portbuf_ensure(b, 1 + 4) != 0) return -1;
+    portbuf_u8(b, 6);
+    portbuf_u32(b, count);
+
+    zend_ulong idx;
+    zend_string *key;
+    zval *val;
+    ZEND_HASH_FOREACH_KEY_VAL(ht, idx, key, val) {
+        if (key) {
+            size_t klen = ZSTR_LEN(key);
+            if (portbuf_ensure(b, 1 + 4 + klen) != 0) return -1;
+            portbuf_u8(b, 1); /* string key */
+            portbuf_u32(b, (uint32_t)klen);
+            portbuf_put(b, ZSTR_VAL(key), klen);
+        } else {
+            if (portbuf_ensure(b, 1 + 8) != 0) return -1;
+            portbuf_u8(b, 0); /* index key */
+            portbuf_u64(b, (uint64_t)idx);
+        }
+        const zval *item = val;
+        if (keep_refs && Z_ISREF_P(item)) {
+            if (portbuf_ensure(b, 1) != 0) return -1;
+            portbuf_u8(b, 8);
+            item = Z_REFVAL_P(item);
+        }
+        if (portbuf_ser_zval(b, item) != 0) return -1;
+    } ZEND_HASH_FOREACH_END();
+    return 0;
+}
+
 static int portbuf_ser_zval(portbuf_t *b, const zval *zv) {
     if (portbuf_ensure(b, 16) != 0) return -1;
 
@@ -3808,32 +3846,8 @@ static int portbuf_ser_zval(portbuf_t *b, const zval *zv) {
             portbuf_put(b, Z_STRVAL_P(zv), slen);
             break;
         }
-        case IS_ARRAY: {
-            HashTable *ht = Z_ARRVAL_P(zv);
-            uint32_t count = zend_hash_num_elements(ht);
-            if (portbuf_ensure(b, 1 + 4) != 0) return -1;
-            portbuf_u8(b, 6);
-            portbuf_u32(b, count);
-
-            zend_ulong idx;
-            zend_string *key;
-            zval *val;
-            ZEND_HASH_FOREACH_KEY_VAL(ht, idx, key, val) {
-                if (key) {
-                    size_t klen = ZSTR_LEN(key);
-                    if (portbuf_ensure(b, 1 + 4 + klen) != 0) return -1;
-                    portbuf_u8(b, 1); /* string key */
-                    portbuf_u32(b, (uint32_t)klen);
-                    portbuf_put(b, ZSTR_VAL(key), klen);
-                } else {
-                    if (portbuf_ensure(b, 1 + 8) != 0) return -1;
-                    portbuf_u8(b, 0); /* index key */
-                    portbuf_u64(b, (uint64_t)idx);
-                }
-                if (portbuf_ser_zval(b, val) != 0) return -1;
-            } ZEND_HASH_FOREACH_END();
-            break;
-        }
+        case IS_ARRAY:
+            return portbuf_ser_table(b, Z_ARRVAL_P(zv), false);
         case IS_REFERENCE:
             return portbuf_ser_zval(b, Z_REFVAL_P(zv));
         case IS_OBJECT: {
@@ -4043,6 +4057,16 @@ static int portrd_deser_zval(portrd_t *r, zval *out) {
              * here. */
             break;
         }
+        case 8: { /* reference to the value that follows */
+            zval val;
+            ZVAL_UNDEF(&val);
+            if (portrd_deser_zval(r, &val) != 0) {
+                zval_ptr_dtor(&val);
+                return -1;
+            }
+            ZVAL_NEW_REF(out, &val);
+            break;
+        }
         default:
             ZVAL_NULL(out);
             break;
@@ -4071,6 +4095,20 @@ int oxphp_portable_serialize_ht(HashTable *ht,
     zval tmp;
     ZVAL_ARR(&tmp, ht);
     return oxphp_portable_serialize(&tmp, 1, out_buf, out_len);
+}
+
+int oxphp_portable_serialize_closure_vars(HashTable *ht,
+                                          unsigned char **out_buf, size_t *out_len) {
+    portbuf_t b;
+    portbuf_init(&b);
+    if (!b.data) return -1;
+    if (portbuf_ser_table(&b, ht, true) != 0) {
+        free(b.data);
+        return -1;
+    }
+    *out_buf = b.data;
+    *out_len = b.len;
+    return 0;
 }
 
 int oxphp_portable_deserialize_ht(const unsigned char *buf, size_t len,
@@ -5303,6 +5341,30 @@ static void oxphp_fixup_run_time_cache(zend_op_array *op) {
     op->fn_flags |= ZEND_ACC_HEAP_RT_CACHE;
 }
 
+/* Gives `to`, a copy of the closure variables table `from`, the references
+ * `from` holds, shared with it. zend_array_dup(), which zend_create_closure()
+ * and `clone` copy a closure's table with, turns a reference that only the
+ * table holds into its value (zend_array_dup_value(), PHP 8.4 / 8.5). A
+ * `static` a call has set is one, and a release build of the engine reads a
+ * `static` whose initializer the compiler did not fold to a literal as a
+ * reference without checking (ZEND_BIND_INIT_STATIC_OR_JMP): the copy would
+ * crash on reaching it.
+ * zend_array_dup() keeps every slot at its index: nothing is ever deleted from
+ * the table, and ZEND_BIND_STATIC finds a slot by its offset. */
+static void oxphp_closure_vars_keep_refs(HashTable *from, HashTable *to) {
+    if (!from || !to || from == to) {
+        return;
+    }
+    for (uint32_t i = 0; i < from->nNumUsed; i++) {
+        zval *ref = &from->arData[i].val;
+        zval *slot = &to->arData[i].val;
+        if (Z_ISREF_P(ref) && !Z_ISREF_P(slot)) {
+            zval_ptr_dtor(slot);
+            ZVAL_COPY(slot, ref);
+        }
+    }
+}
+
 /* === Async Promise: Reconstruct closure (shared sync + fiber path) === */
 
 int oxphp_reconstruct_async_closure(
@@ -5377,6 +5439,10 @@ int oxphp_reconstruct_async_closure(
         NULL, /* called_scope */
         this_ptr /* this_ptr, may be NULL */
     );
+    /* static_vars holds a reference where the dispatching request's table did
+     * (oxphp_portable_serialize_closure_vars()). */
+    oxphp_closure_vars_keep_refs(static_vars, ZEND_MAP_PTR_GET(
+        zend_get_closure_method_def(Z_OBJ_P(out_closure))->op_array.static_variables_ptr));
     /* The closure took its own reference to the name. */
     if (own_name) {
         zend_string_release_ex(own_name, 0);
@@ -7518,22 +7584,8 @@ static void oxphp_pool_own_closure(zval *out, zend_object *closure) {
     zend_object *copy = closure->handlers->clone_obj(closure);
     const zend_function *func = zend_get_closure_method_def(closure);
     if (func->type == ZEND_USER_FUNCTION) {
-        HashTable *from = ZEND_MAP_PTR_GET(func->op_array.static_variables_ptr);
-        HashTable *to = ZEND_MAP_PTR_GET(
-            zend_get_closure_method_def(copy)->op_array.static_variables_ptr);
-        /* zend_array_dup() keeps every slot at its index: nothing is ever
-         * deleted from the table, and ZEND_BIND_STATIC finds a slot by its
-         * offset. */
-        if (from && to && from != to) {
-            for (uint32_t i = 0; i < from->nNumUsed; i++) {
-                zval *ref = &from->arData[i].val;
-                zval *slot = &to->arData[i].val;
-                if (Z_ISREF_P(ref) && !Z_ISREF_P(slot)) {
-                    zval_ptr_dtor(slot);
-                    ZVAL_COPY(slot, ref);
-                }
-            }
-        }
+        oxphp_closure_vars_keep_refs(ZEND_MAP_PTR_GET(func->op_array.static_variables_ptr),
+            ZEND_MAP_PTR_GET(zend_get_closure_method_def(copy)->op_array.static_variables_ptr));
     }
     ZVAL_OBJ(out, copy);
     GC_ADD_FLAGS(copy, GC_NOT_COLLECTABLE);

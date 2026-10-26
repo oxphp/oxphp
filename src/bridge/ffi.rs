@@ -337,6 +337,11 @@ extern "C" {
         out_buf: *mut *mut u8,
         out_len: *mut usize,
     ) -> c_int;
+    pub fn oxphp_portable_serialize_closure_vars(
+        ht: *mut c_void,
+        out_buf: *mut *mut u8,
+        out_len: *mut usize,
+    ) -> c_int;
     pub fn oxphp_portable_deserialize_ht(
         buf: *const u8,
         len: usize,

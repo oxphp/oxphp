@@ -1755,18 +1755,29 @@ int oxphp_portable_serialize(const zval *args, uint32_t argc,
 int oxphp_portable_serialize_ht(HashTable *ht,
                                 unsigned char **out_buf, size_t *out_len);
 
+/* Serialize a closure's table of variables for a task's thread, as
+ * oxphp_portable_serialize_ht() does, except that a slot holding a reference
+ * is read back as one: a `static` a call has set is a reference, and a release
+ * build of the engine reads one whose initializer the compiler did not fold to
+ * a literal as a reference without checking. Returns 0 on success, -1 on
+ * failure. */
+int oxphp_portable_serialize_closure_vars(HashTable *ht,
+                                          unsigned char **out_buf, size_t *out_len);
+
 /* Deserialize a portable buffer into `argc` zvals on the current thread's heap.
  * `out` must point to pre-allocated (zeroed) zval storage for argc zvals. */
 int oxphp_portable_deserialize(const unsigned char *buf, size_t len,
                                uint32_t argc, zval *out);
 
-/* Deserialize a portable buffer produced by oxphp_portable_serialize_ht
- * into a new HashTable on the current thread's heap.
+/* Deserialize a portable buffer produced by oxphp_portable_serialize_ht or
+ * oxphp_portable_serialize_closure_vars into a new HashTable on the current
+ * thread's heap.
  * Returns 0 on success, -1 on failure. Caller owns the returned HashTable. */
 int oxphp_portable_deserialize_ht(const unsigned char *buf, size_t len,
                                   HashTable **out_ht);
 
-/* Free a buffer returned by oxphp_portable_serialize / oxphp_portable_serialize_ht. */
+/* Free a buffer returned by oxphp_portable_serialize, oxphp_portable_serialize_ht or
+ * oxphp_portable_serialize_closure_vars. */
 void oxphp_portable_free(unsigned char *buf);
 
 /* Iterate a PHP array (passed as zval*) and portbuf-serialize each value

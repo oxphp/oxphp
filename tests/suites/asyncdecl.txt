@@ -11,6 +11,10 @@ asyncdecl/test_task_default_value_closure_calls_function
 asyncdecl/test_task_unreached_call_is_refused
 # A named class lookup fails with the engine's own Error, as it always did.
 asyncdecl/test_task_named_class_not_found
+# A task starts from the values its closure's variables had at oxphp_async(),
+# a `static` a call has set included: one initialized by a call or a constant
+# took the whole process down before.
+asyncdecl/test_task_closure_static_set_before_dispatch
 
 # The factory and $destroy a task's acquire() and evict() run on its thread.
 asyncdecl/test_pool_factory_anonymous_class_in_task
