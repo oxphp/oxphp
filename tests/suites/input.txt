@@ -6,3 +6,4 @@ input/test_php_input_rewindable | POST | -H "Content-Type: application/json" -d 
 input/test_php_input_empty_get
 input/test_php_input_multipart_empty | POST | -F "field=value" | |
 input/test_php_input_binary | POST | -H "Content-Type: application/octet-stream" -d "binary_data_here" | |
+input/test_request_parse_body_put | PUT | -H "Content-Type: application/x-www-form-urlencoded" -d "probe=put&n=2" | |

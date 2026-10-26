@@ -5740,6 +5740,59 @@ static void oxphp_filter_guard_restore(void)
     oxphp_orig_filter_input_array = NULL;
 }
 
+/* ─── request_parse_body() ───────────────────────────────
+ *
+ * A worker POST body is normally parsed before the script runs, so the script's
+ * request_parse_body() is a second parse in the same request, as is any second
+ * call, and php-src puts its body, upload hash and content-type copy in place of
+ * the earlier parse's without freeing them; see
+ * oxphp_supersede_request_body_parse().
+ *
+ * Switching is blocked for the whole call, as for the request's own parse
+ * (oxphp_fiber_loop_handler): the parse runs the application's error handler
+ * for a body over a limit, and post_entry, content_type_dup and the rfc1867
+ * protected-variable table it works through are one per thread and do not
+ * travel with a parked request.
+ *
+ * Outside a request fiber it passes straight through: the classic mode and the
+ * CLI have a request shutdown of their own, and an async task has no body. */
+static zif_handler oxphp_orig_request_parse_body = NULL;
+
+static ZEND_NAMED_FUNCTION(oxphp_guarded_request_parse_body)
+{
+    oxphp_request_fiber *self = oxphp_current_fiber;
+    if (self == NULL || self->task_mode) {
+        oxphp_orig_request_parse_body(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+        return;
+    }
+
+    zend_fiber_switch_block();
+    zend_try {
+        oxphp_supersede_request_body_parse();
+        oxphp_orig_request_parse_body(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+    } zend_catch {
+        /* A fatal or the memory limit in the error handler jumps over the
+         * unblock below, and a block left up keeps this worker from ever
+         * parking again. */
+        zend_fiber_switch_unblock();
+        zend_bailout();
+    } zend_end_try();
+    zend_fiber_switch_unblock();
+}
+
+static void oxphp_request_parse_body_guard_install(void)
+{
+    oxphp_hook_swap("request_parse_body", sizeof("request_parse_body") - 1,
+                    oxphp_guarded_request_parse_body, &oxphp_orig_request_parse_body);
+}
+
+static void oxphp_request_parse_body_guard_restore(void)
+{
+    oxphp_hook_restore("request_parse_body", sizeof("request_parse_body") - 1,
+                       oxphp_orig_request_parse_body);
+    oxphp_orig_request_parse_body = NULL;
+}
+
 /* ─── session_start() and the session slot ───────────────
  *
  * One session at a time is open on a worker: the files handler locks the session
@@ -9809,6 +9862,7 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
     /* Last: all extensions (standard included) have registered their
      * functions by now; worker threads have not started yet. */
     oxphp_filter_guard_install();
+    oxphp_request_parse_body_guard_install();
     oxphp_session_gate_install();
 #ifdef HAVE_PUTENV
     oxphp_putenv_hook_install();
@@ -9845,6 +9899,7 @@ PHP_MSHUTDOWN_FUNCTION(oxphp_sapi)
 #ifdef HAVE_PUTENV
     oxphp_putenv_hook_restore();
 #endif
+    oxphp_request_parse_body_guard_restore();
     oxphp_filter_guard_restore();
     oxphp_shareable_unregister_ce();
     return SUCCESS;

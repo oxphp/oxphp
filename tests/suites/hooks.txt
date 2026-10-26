@@ -292,6 +292,39 @@ hooks/test_parse_throw_ends_only_its_request >> ?probe=outer
 hooks/test_shared_state_survives_fatals >> ?phase=drain
 hooks/test_shared_state_survives_fatals >> ?phase=check
 
+# A PUT body nothing parsed before: request_parse_body() is its first parse.
+input/test_request_parse_body_put | PUT | -H "Content-Type: application/x-www-form-urlencoded" -d "probe=put&n=2" | |
+
+# request_parse_body() on a POST parses the body a second time and puts what it
+# makes in place of the first parse's body and uploads. Both have to be released
+# by the end of the request. Sightings of each test stay adjacent: the counts and
+# the recorded upload are compared within one worker (PHP_WORKERS=1).
+hooks/test_request_parse_body_streams_bounded >> ?sighting=1 | POST | -H "Content-Type: application/x-www-form-urlencoded" -d "probe=reparse" | |
+hooks/test_request_parse_body_streams_bounded >> ?sighting=2 | POST | -H "Content-Type: application/x-www-form-urlencoded" -d "probe=reparse" | |
+hooks/test_request_parse_body_streams_bounded >> ?sighting=3 | POST | -H "Content-Type: application/x-www-form-urlencoded" -d "probe=reparse" | |
+hooks/test_request_parse_body_unparsed_type_bounded >> ?sighting=1 | POST | -H "Content-Type: application/json" -d '{"probe":"json"}' | |
+hooks/test_request_parse_body_unparsed_type_bounded >> ?sighting=2 | POST | -H "Content-Type: application/json" -d '{"probe":"json"}' | |
+hooks/test_request_parse_body_unparsed_type_bounded >> ?sighting=3 | POST | -H "Content-Type: application/json" -d '{"probe":"json"}' | |
+hooks/test_request_parse_body_unlinks_superseded_uploads >> ?sighting=1 | POST | -F "doc=@$FIXTURES_DIR/small.txt" | |
+hooks/test_request_parse_body_unlinks_superseded_uploads >> ?sighting=2
+hooks/test_request_parse_body_after_body_closed >> ?sighting=1 | POST | -H "Content-Type: application/x-www-form-urlencoded" -d "probe=closed-body" | |
+hooks/test_request_parse_body_after_body_closed >> ?sighting=2 | POST | -H "Content-Type: application/x-www-form-urlencoded" -d "probe=closed-body" | |
+hooks/test_request_parse_body_after_body_closed >> ?sighting=3 | POST | -H "Content-Type: application/x-www-form-urlencoded" -d "probe=closed-body" | |
+hooks/test_request_parse_body_early_exit_keeps_uploads >> ?sighting=1 | POST | -F "doc=@$FIXTURES_DIR/small.txt" | |
+hooks/test_request_parse_body_early_exit_keeps_uploads >> ?sighting=2 | POST | -F "doc=@$FIXTURES_DIR/small.txt" | |
+hooks/test_request_parse_body_early_exit_keeps_uploads >> ?sighting=3
+hooks/test_request_parse_body_nested_call_keeps_outer_parse | POST | -H "Content-Type: application/x-www-form-urlencoded" -d "probe=nested" | |
+hooks/test_request_parse_body_filter_close_reopens_input >> ?sighting=1 | POST | -H "Content-Type: application/x-www-form-urlencoded" -d "probe=reopen" | |
+hooks/test_request_parse_body_filter_close_reopens_input >> ?sighting=2
+
+# The same call must hold fiber switching down while it runs, as the request's
+# own body parse does, and a fatal from inside it must not leave switching
+# blocked on the worker. After the shared-state pair above: the second line
+# fatals, and the third reads what it left in the worker's shared state.
+hooks/test_request_parse_body_blocks_switching >> ?sighting=1 | POST | -H "Content-Type: application/x-www-form-urlencoded" -d "probe=blocked" | |
+hooks/test_request_parse_body_blocks_switching >> ?sighting=2 | POST | -H "Content-Type: application/x-www-form-urlencoded" -d "probe=blocked" | 500 |
+hooks/test_request_parse_body_blocks_switching >> ?sighting=3
+
 # RUNTIME_HOOKS=1 in this profile's compose file. The test reads back what the
 # process says it installed, on `/config` and from PHP, and pins that `1` comes
 # out as the category set it stands for rather than as the string it was written
