@@ -5745,8 +5745,8 @@ static void oxphp_filter_guard_restore(void)
  * A worker POST body is normally parsed before the script runs, so the script's
  * request_parse_body() is a second parse in the same request, as is any second
  * call, and php-src puts its body, upload hash and content-type copy in place of
- * the earlier parse's without freeing them; the body and hash are kept by
- * oxphp_supersede_request_body_parse(), the copy is freed below.
+ * the earlier parse's without freeing them; the body and hash are kept for the
+ * end of the request (struct oxphp_superseded_parse), the copy is freed below.
  *
  * Switching is blocked for the whole call, as for the request's own parse
  * (oxphp_fiber_loop_handler): the parse runs the application's error handler
@@ -5798,6 +5798,7 @@ static ZEND_NAMED_FUNCTION(oxphp_guarded_request_parse_body)
     zend_try {
         oxphp_supersede_request_body_parse();
         oxphp_orig_request_parse_body(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+        oxphp_keep_request_body_parse_files();
     } zend_catch {
         /* A fatal or the memory limit in the error handler jumps over the
          * unblock and the free below, and a block left up keeps this worker
