@@ -1011,8 +1011,7 @@ void oxphp_request_body_hook_restore(void);
  * calling request's fiber with switching blocked. php-src puts the new parse's
  * body, uploaded-file hash and content-type copy where the previous parse's
  * stand without freeing them; this keeps the previous body and hash for the end
- * of the request to release, and frees the copy when no post handler is
- * registered to read it. */
+ * of the request to release. The copy is the wrapper's to free. */
 void oxphp_supersede_request_body_parse(void);
 
 /* Targeted per-fiber request init (safe to call while other fibers are suspended).
