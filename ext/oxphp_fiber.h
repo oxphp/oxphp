@@ -667,10 +667,10 @@ typedef struct _oxphp_request_fiber {
     bool exec_timeout_due;          /* ran out and the engine has not answered it yet:
                                      * delivered the moment the request runs again */
 
-    /* What stood when this request's request_parse_body() calls were made,
-     * for the end of the request to release; it can name the body and hash
-     * still current. Request fibers only; empty between requests. See
-     * oxphp_supersede_request_body_parse(). */
+    /* The bodies and upload hashes this request's request_parse_body() calls
+     * parse in place of, for the end of the request to release; it can name
+     * the body and hash still current. Request fibers only; empty between
+     * requests. See struct oxphp_superseded_parse. */
     struct oxphp_superseded_parse *superseded_parses;
 
     /* Linked list pointers for the scheduler's fiber list */
@@ -1013,6 +1013,13 @@ void oxphp_request_body_hook_restore(void);
  * stand without freeing them; this keeps the previous body and hash for the end
  * of the request to release. The copy is the wrapper's to free. */
 void oxphp_supersede_request_body_parse(void);
+
+/* Called by the same wrapper once the original has returned, likewise. Keeps
+ * the uploaded-file hash the call leaves standing: when the call was made from
+ * an enclosing one's error handler, that one's parse replaces it next, and
+ * rfc1867 puts its own in place before it reads a byte (main/rfc1867.c), so no
+ * hook of ours sees the one it replaces. */
+void oxphp_keep_request_body_parse_files(void);
 
 /* Targeted per-fiber request init (safe to call while other fibers are suspended).
  * Unlike oxphp_soft_reset(), this does NOT touch global OB or other thread-wide state.

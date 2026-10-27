@@ -324,6 +324,19 @@ hooks/test_request_parse_body_filter_close_reopens_input >> ?sighting=2
 hooks/test_request_parse_body_frees_replaced_type_copy >> ?case=nested | POST | -H "Content-Type: application/x-www-form-urlencoded; pad=$(printf %0100001d 0)" -d "probe=copy" | |
 hooks/test_request_parse_body_frees_replaced_type_copy >> ?case=unparsed | POST | -H "Content-Type: application/json; pad=$(printf %0100001d 0)" -d '{"probe":"copy"}' | |
 hooks/test_request_parse_body_options_warning_nested_call >> ?n=80 | POST | -H "Content-Type: application/json; pad=$(printf %080d 0)" -d '{"probe":"once"}' | |
+
+# A body or upload the error handler makes while the call is still reading its
+# options is replaced by the call's own parse, and must be released by the end
+# of the request all the same. Sightings of each case stay adjacent (PHP_WORKERS=1).
+hooks/test_request_parse_body_options_warning_streams_bounded >> ?case=nested&sighting=1 | POST | -H "Content-Type: application/x-www-form-urlencoded" -d "probe=window" | |
+hooks/test_request_parse_body_options_warning_streams_bounded >> ?case=nested&sighting=2 | POST | -H "Content-Type: application/x-www-form-urlencoded" -d "probe=window" | |
+hooks/test_request_parse_body_options_warning_streams_bounded >> ?case=nested&sighting=3 | POST | -H "Content-Type: application/x-www-form-urlencoded" -d "probe=window" | |
+hooks/test_request_parse_body_options_warning_streams_bounded >> ?case=input&sighting=1 | PUT | -H "Content-Type: application/x-www-form-urlencoded" -d "probe=window" | |
+hooks/test_request_parse_body_options_warning_streams_bounded >> ?case=input&sighting=2 | PUT | -H "Content-Type: application/x-www-form-urlencoded" -d "probe=window" | |
+hooks/test_request_parse_body_options_warning_streams_bounded >> ?case=input&sighting=3 | PUT | -H "Content-Type: application/x-www-form-urlencoded" -d "probe=window" | |
+hooks/test_request_parse_body_options_warning_unlinks_uploads >> ?sighting=1 | PUT | -F "doc=@$FIXTURES_DIR/small.txt" | |
+hooks/test_request_parse_body_options_warning_unlinks_uploads >> ?sighting=2
+
 # The second sighting fatals from inside the call; the third compares the
 # worker's memory with what the first recorded.
 hooks/test_request_parse_body_bailout_frees_replaced_type_copy >> ?sighting=1 | POST | -H "Content-Type: application/json; pad=$(printf %0100001d 0)" -d '{"probe":"fatal"}' | |

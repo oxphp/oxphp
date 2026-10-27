@@ -1849,11 +1849,11 @@ static void oxphp_drop_body_res(zend_resource **slot) {
  * common case is that the body is already the one we hold.
  *
  * A body that replaces one we own is adopted in its place, and the one it
- * replaced is only dropped, not closed. php-src reassigns
- * SG(request_info).request_body without freeing what stands there
+ * replaced is kept for the end of the request rather than closed. php-src
+ * reassigns SG(request_info).request_body without freeing what stands there
  * (main/SAPI.c, sapi_read_standard_form_data), which a second parse in one
- * request — userland request_parse_body() — makes reachable; the replaced body
- * is kept by oxphp_supersede_request_body_parse() for the end of the request.
+ * request — userland request_parse_body() — makes reachable, and a php://input
+ * handle opened before it goes on reading the replaced body.
  *
  * Worker mode only. In the classic mode the engine's own request shutdown
  * closes the body and destroys the resource list, so there is no hand close to
@@ -1868,6 +1868,9 @@ static void oxphp_drop_body_res(zend_resource **slot) {
  * not academic: the walk that opens php://temp after closing the body would
  * otherwise read the resource of whichever stream has taken the block and adopt
  * THAT as the body, and the end of the request would close it. */
+static bool oxphp_keep_superseded_parse(oxphp_request_fiber *self, php_stream *body,
+                                        zend_resource *res, HashTable *files);
+
 static void oxphp_adopt_request_body(void) {
     if (!oxphp_bridge_is_worker_mode()) {
         return;
@@ -1888,7 +1891,13 @@ static void oxphp_adopt_request_body(void) {
         }
         /* Our body is alive and something else is standing in SG(). Only a
          * second parse in one request does that (userland request_parse_body),
-         * and the stream it put there was made by the call this runs inside. */
+         * and the stream it put there was made by the call this runs inside.
+         * Ours is kept here rather than only when that call starts: it can
+         * have been made since, by the call or by code its error handler ran. */
+        oxphp_request_fiber *self = oxphp_current_fiber;
+        if (self != NULL && !self->task_mode) {
+            oxphp_keep_superseded_parse(self, owned, oxphp_owned_body_res, NULL);
+        }
     }
 
     if (body->res == NULL) {
@@ -2216,8 +2225,10 @@ static void oxphp_destroy_uploaded_files(HashTable **slot) {
     SG(rfc1867_uploaded_files) = standing;
 }
 
-/* What stood when a request_parse_body() call was made — the body and the
- * uploaded-file hash it parses in place of — kept for the end of the request.
+/* A body and an uploaded-file hash a request_parse_body() call may parse in
+ * place of, kept for the end of the request: the body and hash standing when a
+ * call is made, the hash standing when it returns, and a body replaced while it
+ * runs.
  * `body` is only an address, of a stream userland may have closed; `body_res`
  * holds a reference of its own. A call can exit before replacing either, so
  * either can still be current when the request ends, and what is current is
@@ -2229,24 +2240,11 @@ struct oxphp_superseded_parse {
     HashTable *files;
 };
 
-void oxphp_supersede_request_body_parse(void) {
-    oxphp_request_fiber *self = oxphp_current_fiber;
-    ZEND_ASSERT(self != NULL && !self->task_mode);
-
-    /* A claim on a body userland has closed: SG() still names the freed stream,
-     * and oxphp_adopt_request_body() refuses to claim the body the new parse
-     * puts there while the dead claim stands. */
-    bool dead_claim = oxphp_owned_body_res != NULL
-        && oxphp_live_body_of(oxphp_owned_body_res) == NULL;
-
-    /* Kept to the end of the request rather than released now — php-fpm does
-     * not release them before then either: a php://input handle opened before
-     * this call goes on reading the current body, and $_FILES, which the call
-     * leaves as it was, goes on naming the files the current hash registers. A
-     * call that exits before replacing either leaves the same body and hash
-     * standing for the next one, which must not keep them twice. */
-    zend_resource *res = oxphp_owned_body_res;
-    HashTable *files = SG(rfc1867_uploaded_files);
+/* Keep `res`, the claim on `body`, and `files` on `self` for the end of the
+ * request, each unless it is kept already. Either can be NULL. False when they
+ * could not be kept. */
+static bool oxphp_keep_superseded_parse(oxphp_request_fiber *self, php_stream *body,
+                                        zend_resource *res, HashTable *files) {
     for (struct oxphp_superseded_parse *kept = self->superseded_parses; kept; kept = kept->next) {
         if (kept->body_res == res) {
             res = NULL;
@@ -2255,24 +2253,48 @@ void oxphp_supersede_request_body_parse(void) {
             files = NULL;
         }
     }
-    if (res != NULL || files != NULL) {
-        /* malloc rather than emalloc: an allocation over memory_limit here would
-         * bail out of a call the script made, before the parse it asked for. */
-        struct oxphp_superseded_parse *kept = calloc(1, sizeof(*kept));
-        if (kept == NULL) {
-            return;
-        }
-        if (res != NULL) {
-            /* A dead claim's resource names no stream any more; the pointer
-             * SG() still holds is what its php://input handles read through. */
-            php_stream *live = oxphp_live_body_of(res);
-            kept->body = live != NULL ? live : SG(request_info).request_body;
-            kept->body_res = res;
-            GC_ADDREF(res);
-        }
-        kept->files = files;
-        kept->next = self->superseded_parses;
-        self->superseded_parses = kept;
+    if (res == NULL && files == NULL) {
+        return true;
+    }
+    /* malloc rather than emalloc: an allocation over memory_limit here would
+     * bail out from inside a call the script made. */
+    struct oxphp_superseded_parse *kept = calloc(1, sizeof(*kept));
+    if (kept == NULL) {
+        return false;
+    }
+    if (res != NULL) {
+        kept->body = body;
+        kept->body_res = res;
+        GC_ADDREF(res);
+    }
+    kept->files = files;
+    kept->next = self->superseded_parses;
+    self->superseded_parses = kept;
+    return true;
+}
+
+void oxphp_supersede_request_body_parse(void) {
+    oxphp_request_fiber *self = oxphp_current_fiber;
+    ZEND_ASSERT(self != NULL && !self->task_mode);
+
+    /* A claim on a body userland has closed: SG() still names the freed stream,
+     * and oxphp_adopt_request_body() refuses to claim the body the new parse
+     * puts there while the dead claim stands. */
+    zend_resource *res = oxphp_owned_body_res;
+    php_stream *live = oxphp_live_body_of(res);
+    bool dead_claim = res != NULL && live == NULL;
+
+    /* Kept to the end of the request rather than released now — php-fpm does
+     * not release them before then either: a php://input handle opened before
+     * this call goes on reading the current body, and $_FILES, which the call
+     * leaves as it was, goes on naming the files the current hash registers. A
+     * call that exits before replacing either leaves the same body and hash
+     * standing for the next one, which must not keep them twice. A dead claim's
+     * resource names no stream any more; the pointer SG() still holds is what
+     * its php://input handles read through. */
+    if (!oxphp_keep_superseded_parse(self, live != NULL ? live : SG(request_info).request_body,
+                                     res, SG(rfc1867_uploaded_files))) {
+        return;
     }
 
     /* Now recorded, the dead claim is cleared so that the new body is claimed
@@ -2285,8 +2307,15 @@ void oxphp_supersede_request_body_parse(void) {
     }
 }
 
-/* Release what oxphp_supersede_request_body_parse() kept for `fiber`, except
- * what is still current — the body `current_res` claims and the hash
+void oxphp_keep_request_body_parse_files(void) {
+    oxphp_request_fiber *self = oxphp_current_fiber;
+    ZEND_ASSERT(self != NULL && !self->task_mode);
+
+    oxphp_keep_superseded_parse(self, NULL, NULL, SG(rfc1867_uploaded_files));
+}
+
+/* Release what oxphp_keep_superseded_parse() kept for `fiber`, except what is
+ * still current — the body `current_res` claims and the hash
  * `current_files` — which its owner releases. The owner clears the pointer a
  * body is known by before closing it; closed from here, the current body would
  * still be SG()'s while its filters ran, and a php://input one of them opened
