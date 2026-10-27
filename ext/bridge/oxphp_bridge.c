@@ -5341,17 +5341,20 @@ static void oxphp_fixup_run_time_cache(zend_op_array *op) {
     op->fn_flags |= ZEND_ACC_HEAP_RT_CACHE;
 }
 
-/* Gives `to`, a copy of the closure variables table `from`, the references
- * `from` holds, shared with it. zend_array_dup(), which zend_create_closure()
+/* Puts a reference in each slot of `to`, a copy of the closure variables table
+ * `from`, where `from` holds one: `from`'s own when `share`, else a new one
+ * holding the value the copy took. zend_array_dup(), which zend_create_closure()
  * and `clone` copy a closure's table with, turns a reference that only the
  * table holds into its value (zend_array_dup_value(), PHP 8.4 / 8.5). A
  * `static` a call has set is one, and a release build of the engine reads a
  * `static` whose initializer the compiler did not fold to a literal as a
  * reference without checking (ZEND_BIND_INIT_STATIC_OR_JMP): the copy would
- * crash on reaching it.
+ * crash on reaching it. A shared reference is held twice, and the engine hands
+ * one held twice out as itself, not as a copy of its value (zval_add_ref(),
+ * which getStaticVariables() copies with, and zend_array_dup_value()).
  * zend_array_dup() keeps every slot at its index: nothing is ever deleted from
  * the table, and ZEND_BIND_STATIC finds a slot by its offset. */
-static void oxphp_closure_vars_keep_refs(HashTable *from, HashTable *to) {
+static void oxphp_closure_vars_keep_refs(HashTable *from, HashTable *to, bool share) {
     if (!from || !to || from == to) {
         return;
     }
@@ -5359,8 +5362,12 @@ static void oxphp_closure_vars_keep_refs(HashTable *from, HashTable *to) {
         zval *ref = &from->arData[i].val;
         zval *slot = &to->arData[i].val;
         if (Z_ISREF_P(ref) && !Z_ISREF_P(slot)) {
-            zval_ptr_dtor(slot);
-            ZVAL_COPY(slot, ref);
+            if (share) {
+                zval_ptr_dtor(slot);
+                ZVAL_COPY(slot, ref);
+            } else {
+                ZVAL_MAKE_REF(slot);
+            }
         }
     }
 }
@@ -5440,9 +5447,11 @@ int oxphp_reconstruct_async_closure(
         this_ptr /* this_ptr, may be NULL */
     );
     /* static_vars holds a reference where the dispatching request's table did
-     * (oxphp_portable_serialize_closure_vars()). */
+     * (oxphp_portable_serialize_closure_vars()), until the pool frees it after
+     * the task's first run to a suspend: the task's references are its own. */
     oxphp_closure_vars_keep_refs(static_vars, ZEND_MAP_PTR_GET(
-        zend_get_closure_method_def(Z_OBJ_P(out_closure))->op_array.static_variables_ptr));
+        zend_get_closure_method_def(Z_OBJ_P(out_closure))->op_array.static_variables_ptr),
+        false);
     /* The closure took its own reference to the name. */
     if (own_name) {
         zend_string_release_ex(own_name, 0);
@@ -7585,7 +7594,8 @@ static void oxphp_pool_own_closure(zval *out, zend_object *closure) {
     const zend_function *func = zend_get_closure_method_def(closure);
     if (func->type == ZEND_USER_FUNCTION) {
         oxphp_closure_vars_keep_refs(ZEND_MAP_PTR_GET(func->op_array.static_variables_ptr),
-            ZEND_MAP_PTR_GET(zend_get_closure_method_def(copy)->op_array.static_variables_ptr));
+            ZEND_MAP_PTR_GET(zend_get_closure_method_def(copy)->op_array.static_variables_ptr),
+            true);
     }
     ZVAL_OBJ(out, copy);
     GC_ADD_FLAGS(copy, GC_NOT_COLLECTABLE);

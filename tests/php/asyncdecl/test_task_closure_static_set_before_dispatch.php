@@ -63,6 +63,20 @@ $fresh = static function (): int {
 };
 $t->assertSame('a static not set yet: the task runs its initializer', asyncdecl_settle(oxphp_async($fresh)), [true, 1]);
 
+// The engine hands out a `static` it holds the only reference to as a copy of
+// its value, and Closure::getCurrent(), PHP 8.5 on, lets a task reach its own
+// closure.
+if (PHP_VERSION_ID >= 80500) {
+    $reflected = static function (): int {
+        $copy = (new \ReflectionFunction(\Closure::getCurrent()))->getStaticVariables();
+        $copy['made'] = 5;
+        static $made = 0;
+        return ++$made;
+    };
+    $reflected();
+    $t->assertSame("getStaticVariables() in the task: a copy, as in the request", asyncdecl_settle(oxphp_async($reflected)), [true, 2]);
+}
+
 // A variable captured by value stays a value, and one captured by reference a
 // reference, of the task's own.
 $x = 1;
