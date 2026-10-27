@@ -2216,14 +2216,6 @@ static void oxphp_destroy_uploaded_files(HashTable **slot) {
     SG(rfc1867_uploaded_files) = standing;
 }
 
-/* The content-type copy sapi_read_post_data() leaves standing in SG(). */
-static void oxphp_free_content_type_dup(void) {
-    if (SG(request_info).content_type_dup) {
-        efree(SG(request_info).content_type_dup);
-        SG(request_info).content_type_dup = NULL;
-    }
-}
-
 /* What stood when a request_parse_body() call was made — the body and the
  * uploaded-file hash it parses in place of — kept for the end of the request.
  * `body` is only an address, of a stream userland may have closed; `body_res`
@@ -2240,14 +2232,6 @@ struct oxphp_superseded_parse {
 void oxphp_supersede_request_body_parse(void) {
     oxphp_request_fiber *self = oxphp_current_fiber;
     ZEND_ASSERT(self != NULL && !self->task_mode);
-
-    /* sapi_read_post_data() is about to overwrite it without freeing it. Freed
-     * only when no post handler is registered for it: sapi_handle_post() wants
-     * both, and nothing else in php-src reads it. With a handler it can be the
-     * copy a parse this call was made from inside has still to hand over. */
-    if (SG(request_info).post_entry == NULL) {
-        oxphp_free_content_type_dup();
-    }
 
     /* A claim on a body userland has closed: SG() still names the freed stream,
      * and oxphp_adopt_request_body() refuses to claim the body the new parse
@@ -5179,7 +5163,10 @@ void oxphp_reset_request_post_state(void) {
      * reason: the callback that would consume it never runs.) Every other SAPI
      * frees it at the end of the request (php-src main/SAPI.c,
      * sapi_deactivate_module); a worker's request has no such end of its own. */
-    oxphp_free_content_type_dup();
+    if (SG(request_info).content_type_dup) {
+        efree(SG(request_info).content_type_dup);
+        SG(request_info).content_type_dup = NULL;
+    }
     SG(request_info).post_entry = NULL;
     SG(read_post_bytes) = 0;
     SG(post_read) = 0;

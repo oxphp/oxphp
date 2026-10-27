@@ -5745,8 +5745,8 @@ static void oxphp_filter_guard_restore(void)
  * A worker POST body is normally parsed before the script runs, so the script's
  * request_parse_body() is a second parse in the same request, as is any second
  * call, and php-src puts its body, upload hash and content-type copy in place of
- * the earlier parse's without freeing them; see
- * oxphp_supersede_request_body_parse().
+ * the earlier parse's without freeing them; the body and hash are kept by
+ * oxphp_supersede_request_body_parse(), the copy is freed below.
  *
  * Switching is blocked for the whole call, as for the request's own parse
  * (oxphp_fiber_loop_handler): the parse runs the application's error handler
@@ -5758,6 +5758,17 @@ static void oxphp_filter_guard_restore(void)
  * CLI have a request shutdown of their own, and an async task has no body. */
 static zif_handler oxphp_orig_request_parse_body = NULL;
 
+/* The content-type copy a running call has taken on to free. */
+static __thread char *oxphp_parse_type_copy_taken = NULL;
+
+static void oxphp_settle_parse_type_copy(char *before, bool taken, char *outer_taken)
+{
+    oxphp_parse_type_copy_taken = outer_taken;
+    if (taken && SG(request_info).content_type_dup != before) {
+        efree(before);
+    }
+}
+
 static ZEND_NAMED_FUNCTION(oxphp_guarded_request_parse_body)
 {
     oxphp_request_fiber *self = oxphp_current_fiber;
@@ -5766,18 +5777,37 @@ static ZEND_NAMED_FUNCTION(oxphp_guarded_request_parse_body)
         return;
     }
 
+    /* sapi_read_post_data() writes its copy of the whole Content-Type header
+     * over the previous one, and a worker's heap outlives the request. The
+     * previous copy is freed only once the call has put another in its place:
+     * until then it can be the one an enclosing parse — the error handler runs
+     * inside one — has still to hand to sapi_handle_post(). Once replaced it is
+     * not read again: in php-src 8.4.27 / 8.5.12 sapi_read_post_data() is done
+     * with it before its readers run, and none of the post handlers php-src
+     * registers reads its argument after running userland. A call made while
+     * the enclosing one is still reading its options finds the copy that one
+     * has taken; only one of them may free it. */
+    char *outer_taken = oxphp_parse_type_copy_taken;
+    char *before = SG(request_info).content_type_dup;
+    bool taken = before != NULL && before != outer_taken;
+    if (taken) {
+        oxphp_parse_type_copy_taken = before;
+    }
+
     zend_fiber_switch_block();
     zend_try {
         oxphp_supersede_request_body_parse();
         oxphp_orig_request_parse_body(INTERNAL_FUNCTION_PARAM_PASSTHRU);
     } zend_catch {
         /* A fatal or the memory limit in the error handler jumps over the
-         * unblock below, and a block left up keeps this worker from ever
-         * parking again. */
+         * unblock and the free below, and a block left up keeps this worker
+         * from ever parking again. */
         zend_fiber_switch_unblock();
+        oxphp_settle_parse_type_copy(before, taken, outer_taken);
         zend_bailout();
     } zend_end_try();
     zend_fiber_switch_unblock();
+    oxphp_settle_parse_type_copy(before, taken, outer_taken);
 }
 
 static void oxphp_request_parse_body_guard_install(void)
