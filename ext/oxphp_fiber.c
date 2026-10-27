@@ -2256,8 +2256,8 @@ static bool oxphp_keep_superseded_parse(oxphp_request_fiber *self, php_stream *b
     if (res == NULL && files == NULL) {
         return true;
     }
-    /* malloc rather than emalloc: an allocation over memory_limit here would
-     * bail out from inside a call the script made. */
+    /* calloc rather than ecalloc: the record is the server's, and must not count
+     * against the script's memory_limit. */
     struct oxphp_superseded_parse *kept = calloc(1, sizeof(*kept));
     if (kept == NULL) {
         return false;

@@ -5800,8 +5800,8 @@ static ZEND_NAMED_FUNCTION(oxphp_guarded_request_parse_body)
         oxphp_orig_request_parse_body(INTERNAL_FUNCTION_PARAM_PASSTHRU);
         oxphp_keep_request_body_parse_files();
     } zend_catch {
-        /* A fatal or the memory limit in the error handler jumps over the
-         * unblock and the free below, and a block left up keeps this worker
+        /* A fatal error in the error handler, a timeout among them, jumps over
+         * the unblock and the free below, and a block left up keeps this worker
          * from ever parking again. */
         zend_fiber_switch_unblock();
         oxphp_settle_parse_type_copy(before, taken, outer_taken);
