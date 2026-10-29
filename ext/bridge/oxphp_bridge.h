@@ -1639,6 +1639,17 @@ typedef uint64_t (*oxphp_current_fiber_id_fn_t)(void);
 void oxphp_bridge_set_current_fiber_id_fn(oxphp_current_fiber_id_fn_t fn);
 uint64_t oxphp_bridge_current_fiber_id(void);
 
+/* Registered by the PHP extension: non-zero while an async task runs on this
+ * thread whose code its dispatcher found in request memory rather than in
+ * OPcache shared memory, 0 elsewhere and when the extension is absent. Rust
+ * passes it on to the tasks that task dispatches: a closure it creates is part
+ * of its code, which oxphp_op_array_in_request_memory cannot always place from
+ * the task's thread. */
+typedef int (*oxphp_current_task_code_in_request_memory_fn_t)(void);
+void oxphp_bridge_set_current_task_code_in_request_memory_fn(
+    oxphp_current_task_code_in_request_memory_fn_t fn);
+int oxphp_bridge_current_task_code_in_request_memory(void);
+
 /* ─── libc wait interposition (RUNTIME_HOOKS category "net") ──
  * This library defines poll() and sits ahead of libc in the symbol search
  * order, so every poll() the process makes arrives here first. Almost all of
@@ -2324,7 +2335,10 @@ int     oxphp_async_synthetic_promise_cancel(int64_t id);
  *
  *   spawn()   create a task fiber for one reconstructed closure + args
  *             and enqueue it. Returns the fiber_id (>= 0) or -1 (at
- *             capacity / reconstruction failed).
+ *             capacity / reconstruction failed). code_in_request_memory
+ *             is what the dispatching side recorded for the task's code;
+ *             the fiber keeps it for the tasks it dispatches (see
+ *             oxphp_bridge_current_task_code_in_request_memory).
  *   tick()    advance the scheduler one iteration (resume ready fibers,
  *             run each to its next suspend or completion; new fibers are
  *             started by spawn(), not here). Returns 1 if some fiber was
@@ -2353,7 +2367,7 @@ int     oxphp_async_synthetic_promise_cancel(int64_t id);
  */
 typedef int64_t (*oxphp_async_sched_spawn_fn_t)(
     void *op_array, void *static_vars, int bind_this,
-    uint32_t argc, void *args, void *cancel_cell);
+    uint32_t argc, void *args, void *cancel_cell, int code_in_request_memory);
 typedef int (*oxphp_async_sched_tick_fn_t)(void);
 typedef int64_t (*oxphp_async_sched_poll_fn_t)(
     void **out_retval, const char **out_exc_class, const char **out_exc_message);
@@ -2371,7 +2385,7 @@ void oxphp_bridge_set_async_sched_callbacks(
 
 int64_t oxphp_bridge_async_spawn(
     void *op_array, void *static_vars, int bind_this,
-    uint32_t argc, void *args, void *cancel_cell);
+    uint32_t argc, void *args, void *cancel_cell, int code_in_request_memory);
 int     oxphp_bridge_async_tick(void);
 int64_t oxphp_bridge_async_poll_completed(
     void **out_retval, const char **out_exc_class, const char **out_exc_message);

@@ -379,6 +379,9 @@ pub unsafe fn oxphp_bridge_set_deferred_drain_callbacks(
 pub unsafe fn oxphp_bridge_current_fiber_id() -> u64 {
     0
 }
+pub unsafe fn oxphp_bridge_current_task_code_in_request_memory() -> c_int {
+    0
+}
 
 // ── Async exception details ──
 
@@ -626,6 +629,7 @@ pub unsafe fn oxphp_bridge_async_spawn(
     _argc: u32,
     _args: *mut c_void,
     _cancel_cell: *mut c_void,
+    _code_in_request_memory: c_int,
 ) -> i64 {
     -1
 }

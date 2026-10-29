@@ -3158,10 +3158,11 @@ void oxphp_bridge_set_async_sched_callbacks(
 
 int64_t oxphp_bridge_async_spawn(
     void *op_array, void *static_vars, int bind_this,
-    uint32_t argc, void *args, void *cancel_cell
+    uint32_t argc, void *args, void *cancel_cell, int code_in_request_memory
 ) {
     if (sched_async_spawn != NULL) {
-        return sched_async_spawn(op_array, static_vars, bind_this, argc, args, cancel_cell);
+        return sched_async_spawn(op_array, static_vars, bind_this, argc, args, cancel_cell,
+                                 code_in_request_memory);
     }
     return -1; /* no scheduler registered */
 }
@@ -3454,6 +3455,20 @@ void oxphp_bridge_set_current_fiber_id_fn(oxphp_current_fiber_id_fn_t fn) {
 uint64_t oxphp_bridge_current_fiber_id(void) {
     if (ext_current_fiber_id != NULL) {
         return ext_current_fiber_id();
+    }
+    return 0;
+}
+
+static oxphp_current_task_code_in_request_memory_fn_t ext_current_task_code_in_request_memory = NULL;
+
+void oxphp_bridge_set_current_task_code_in_request_memory_fn(
+    oxphp_current_task_code_in_request_memory_fn_t fn) {
+    ext_current_task_code_in_request_memory = fn;
+}
+
+int oxphp_bridge_current_task_code_in_request_memory(void) {
+    if (ext_current_task_code_in_request_memory != NULL) {
+        return ext_current_task_code_in_request_memory();
     }
     return 0;
 }

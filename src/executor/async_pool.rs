@@ -241,6 +241,9 @@ fn async_worker_thread(
     use std::collections::HashMap;
 
     let mut in_flight: HashMap<i64, InFlight> = HashMap::new();
+    // Tasks that have ended but whose result is held back, keyed by the task's
+    // fiber id (see `drain_completed`).
+    let mut held: HashMap<i64, (InFlight, AsyncResult)> = HashMap::new();
     let mut tasks_executed: u64 = 0;
     let mut warned_output = false;
     // Set once shutdown is observed with fibers still in flight: the drain has
@@ -288,7 +291,7 @@ fn async_worker_thread(
             // unwound by the cancellation this block issues. Breaking with it
             // still in hand would drop its result channel under an awaiter that
             // is still waiting, and lose the in-flight permit it holds.
-            if in_flight.is_empty() && carried.is_none() {
+            if in_flight.is_empty() && held.is_empty() && carried.is_none() {
                 break;
             }
             let deadline = *shutdown_drain_deadline.get_or_insert_with(|| {
@@ -298,6 +301,7 @@ fn async_worker_thread(
                 tracing::warn!(
                     worker = id,
                     abandoned = in_flight.len(),
+                    held = held.len(),
                     "async shutdown drain timed out; abandoning in-flight fibers"
                 );
                 break;
@@ -319,7 +323,7 @@ fn async_worker_thread(
             Some(task)
         } else if shutting_down {
             None
-        } else if in_flight.is_empty() {
+        } else if in_flight.is_empty() && !sapi::deferred_drains_pending() {
             match rx.recv_timeout(std::time::Duration::from_millis(200)) {
                 Ok(t) => Some(t),
                 Err(crossbeam_channel::RecvTimeoutError::Timeout) => None,
@@ -347,9 +351,11 @@ fn async_worker_thread(
             let mut task_permit = WorkerPermitGuard { committed: false };
 
             'task: {
-                // Cancelled before we even start? (Acquire pairs with the
-                // awaiter's Release store of the flag.)
-                if task.cancelled.cancelled.load(Ordering::Acquire) {
+                // Cancelled before we even start? SeqCst, and `started` first:
+                // a canceller that finds `started` unset counts on this load
+                // seeing its flag (see `CancelShared::started`).
+                task.cancelled.started.store(true, Ordering::SeqCst);
+                if task.cancelled.cancelled.load(Ordering::SeqCst) {
                     free_task_args(&task);
                     free_op_array_buf(&task);
                     let _ = task.result_tx.send(AsyncResult {
@@ -473,6 +479,11 @@ fn async_worker_thread(
                 // reconstructed and run to its first suspend or completion
                 // inside the call; args / static_vars / op_array are consumed
                 // there, so free them immediately afterwards.
+                // SAFETY: on this pool thread, inside its open PHP request;
+                // `local_args` and `local_static_vars` were deserialized onto
+                // this thread's heap above and `op_array_buf` is freed only
+                // after the call, and `cancel_cell` points into `task.cancelled`,
+                // which `InFlight` keeps alive for as long as the fiber can read it.
                 let fiber_id = unsafe {
                     ffi::oxphp_bridge_async_spawn(
                         task.op_array_buf as *const c_void,
@@ -481,6 +492,7 @@ fn async_worker_thread(
                         task.argc,
                         local_args,
                         cancel_cell,
+                        task.code_in_request_memory as c_int,
                     )
                 };
 
@@ -518,9 +530,11 @@ fn async_worker_thread(
             }
         }
 
-        // Drive suspended fibers, then drain any that completed.
+        // Drive suspended fibers, then drain any that completed. The tick also
+        // polls the drains of the tasks ended tasks did not await, so it runs
+        // while any is pending, fibers or not.
         let had_fibers = !in_flight.is_empty();
-        if had_fibers {
+        if had_fibers || sapi::deferred_drains_pending() {
             // Propagate cancellation: a promise whose awaiter has given up
             // (await timeout) flips its cancel flag. Ask the scheduler to
             // unwind the still-suspended fiber rather than run it to
@@ -539,9 +553,12 @@ fn async_worker_thread(
             if unsafe { ffi::oxphp_bridge_async_tick() } > 0 {
                 progressed = true;
             }
-            if drain_completed(&mut in_flight, &metrics, &mut tasks_executed) {
+            if drain_completed(&mut in_flight, &mut held, &metrics, &mut tasks_executed) {
                 progressed = true;
             }
+        }
+        if deliver_held(&mut held) {
+            progressed = true;
         }
 
         // The worker just went idle: a background task may have left output in
@@ -575,7 +592,7 @@ fn async_worker_thread(
         // reports parked descriptors it spends the same interval waiting on
         // them and returns non-zero, and this wait is skipped — the wait
         // already happened, and it ended the moment the peer replied.
-        if !progressed && !in_flight.is_empty() {
+        if !progressed && (!in_flight.is_empty() || sapi::deferred_drains_pending()) {
             let wait = if shutting_down {
                 BACKOFF_SHUTDOWN
             } else {
@@ -627,6 +644,9 @@ fn async_worker_thread(
     }
 
     // 4. Shutdown
+    // A result the drain gave up holding can pin `Shared\*` values, whose
+    // release may run PHP code: it goes while the request is still open.
+    drop(held);
     unsafe { crate::php::thread::close_request() };
     drop(request_open);
 
@@ -640,9 +660,15 @@ fn async_worker_thread(
 /// Drain every task fiber that has completed: serialize its result, send it to
 /// the awaiting thread, and release the fiber. Returns true if at least one
 /// fiber was drained.
+///
+/// The release cancels the tasks the task dispatched and did not await. While
+/// one of them still runs code from request memory, the result goes to `held`
+/// instead (see `sapi::orphans_hold_result`): the request that keeps that code
+/// alive would end once it had the result.
 #[cfg(feature = "php")]
 fn drain_completed(
     in_flight: &mut std::collections::HashMap<i64, InFlight>,
+    held: &mut std::collections::HashMap<i64, (InFlight, crate::async_types::AsyncResult)>,
     metrics: &Option<Arc<Metrics>>,
     tasks_executed: &mut u64,
 ) -> bool {
@@ -738,14 +764,39 @@ fn drain_completed(
             }
         }
         if let Some(entry) = in_flight.remove(&fiber_id) {
-            let _ = entry.result_tx.send(result);
-            // Task is done — return the in-flight permit it held since dispatch.
-            crate::php::sapi::async_inflight_release();
+            if crate::php::sapi::orphans_hold_result(fiber_id as u64) {
+                held.insert(fiber_id, (entry, result));
+            } else {
+                let _ = entry.result_tx.send(result);
+                // Task is done — return the in-flight permit it held since dispatch.
+                crate::php::sapi::async_inflight_release();
+            }
         }
         *tasks_executed += 1;
         drained = true;
     }
     drained
+}
+
+/// Send each held result whose task no longer has a task left running that
+/// holds it, and return the in-flight permit the task held since dispatch.
+/// Returns true if at least one was sent.
+#[cfg(feature = "php")]
+fn deliver_held(
+    held: &mut std::collections::HashMap<i64, (InFlight, crate::async_types::AsyncResult)>,
+) -> bool {
+    let ready: Vec<i64> = held
+        .keys()
+        .copied()
+        .filter(|&fiber_id| !crate::php::sapi::orphans_hold_result(fiber_id as u64))
+        .collect();
+    for fiber_id in &ready {
+        if let Some((entry, result)) = held.remove(fiber_id) {
+            let _ = entry.result_tx.send(result);
+            crate::php::sapi::async_inflight_release();
+        }
+    }
+    !ready.is_empty()
 }
 
 /// Copy a NUL-terminated C string (owned by the extension) into an owned

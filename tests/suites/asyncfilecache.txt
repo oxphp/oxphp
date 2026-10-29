@@ -1,0 +1,9 @@
+# profile: asyncfilecache
+# description: oxphp_async() tasks with OPcache keeping scripts in its file cache only
+
+# A task that ends without awaiting a task it dispatched, which runs on another
+# thread and keeps running past the drain budget: the parent's result waits.
+asyncfilecache/test_task_orphan_on_another_thread_outlives_the_budget
+# The same, while another task ends on the thread that holds the parent's
+# result: only the parent's result waits.
+asyncfilecache/test_task_result_not_held_by_another_tasks_orphan

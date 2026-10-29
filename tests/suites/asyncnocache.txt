@@ -8,3 +8,9 @@ asyncnocache/test_task_outliving_the_drain_budget_keeps_its_code
 # The literals of a task's code are shared with the request that compiled it:
 # a task's thread copies them without counting them or listing them as roots.
 asyncnocache/test_task_literals_leave_no_trace_on_the_pool_thread
+# A task that ends without awaiting a task it dispatched cancels that task, and
+# its result reaches the request only once the child has stopped.
+asyncnocache/test_task_orphan_holds_its_parent_result_until_it_stops
+# A child still waiting in the queue when its parent ends is never run, so the
+# parent's result does not wait for the child's turn.
+asyncnocache/test_task_orphan_still_queued_does_not_hold_its_parent_result

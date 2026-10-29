@@ -42,6 +42,12 @@ pub fn await_timeout(secs: f64) -> Option<Duration> {
 pub struct CancelShared {
     pub cancelled: AtomicBool,
     pub worker_interrupt: OnceLock<Arc<InterruptTarget>>,
+    /// Set by the async worker that takes the task off the queue, before it
+    /// reads `cancelled`; a cancelled task it then finds is answered without
+    /// running. A canceller that reads this stores `cancelled` first, and both
+    /// sides use SeqCst, so one that reads `false` here knows the task will
+    /// never run.
+    pub started: AtomicBool,
 }
 
 impl CancelShared {
@@ -49,6 +55,7 @@ impl CancelShared {
         Self {
             cancelled: AtomicBool::new(false),
             worker_interrupt: OnceLock::new(),
+            started: AtomicBool::new(false),
         }
     }
 }
@@ -96,6 +103,10 @@ pub struct AsyncTask {
     pub serialized_args: *mut u8,
     /// Length of the serialized_args buffer.
     pub serialized_args_len: usize,
+    /// The dispatching side's `PromiseCleanup::code_in_request_memory`. The
+    /// task's fiber keeps it, and the tasks it dispatches inherit it: a closure
+    /// the task creates is part of its code.
+    pub code_in_request_memory: bool,
     /// Shared cancellation state — the cancel flag plus the running worker's
     /// `EG(vm_interrupt)` address. Checked by the async worker before/during
     /// execution; the address lets the awaiter interrupt a CPU-bound fiber.
@@ -263,6 +274,7 @@ mod tests {
             argc: 3,
             serialized_args: ptr::null_mut(),
             serialized_args_len: 0,
+            code_in_request_memory: false,
             cancelled: cancelled.clone(),
             result_tx: tx,
         };

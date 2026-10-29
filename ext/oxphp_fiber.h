@@ -648,6 +648,12 @@ typedef struct _oxphp_request_fiber {
     zval task_retval;               /* ZVAL_UNDEF until completed */
     char *task_exc_class;           /* malloc'd, NULL if none */
     char *task_exc_message;         /* malloc'd, NULL if none */
+    bool task_code_in_request_memory; /* whoever dispatched this task found its code in
+                                     * request memory, not in OPcache shared memory
+                                     * (oxphp_op_array_in_request_memory). The tasks this one
+                                     * dispatches inherit it: a closure it creates is part of
+                                     * its code, which from this thread the check cannot
+                                     * always place */
 
     /* The scheduler that created this fiber — the HTTP one for a request fiber,
      * the task one for an async fiber. Distinct from `scheduler` above, which is
@@ -777,6 +783,12 @@ extern __thread uint32_t oxphp_park_blocked;
  * Registered into the bridge at MINIT (oxphp_bridge_set_current_fiber_id_fn)
  * so Rust can tag async promise ownership at creation. */
 uint64_t oxphp_fiber_current_id(void);
+
+/* Non-zero while a task fiber whose task_code_in_request_memory is set runs on
+ * this thread, 0 elsewhere. Registered into the bridge at MINIT
+ * (oxphp_bridge_set_current_task_code_in_request_memory_fn) so Rust can pass
+ * the flag on to the tasks that task dispatches. */
+int oxphp_fiber_current_task_code_in_request_memory(void);
 
 /* ─── Userland fiber object plumbing ───────────────────── */
 
@@ -1077,7 +1089,7 @@ bool oxphp_session_slot_waits_for(const oxphp_request_fiber *waiter,
  * scheduler fills them in. */
 int64_t oxphp_async_sched_spawn(void *op_array, void *static_vars,
                                 int bind_this, uint32_t argc, void *args,
-                                void *cancel_cell);
+                                void *cancel_cell, int code_in_request_memory);
 int     oxphp_async_sched_tick(void);
 int64_t oxphp_async_sched_poll_completed(void **out_retval,
                                          const char **out_exc_class,
