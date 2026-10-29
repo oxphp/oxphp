@@ -43,6 +43,9 @@ async/test_await_all_cancel_cpu_bound
 # A request that ends without awaiting a task spinning in a loop that never
 # suspends cancels it by interrupting it, without holding the response for it.
 async/test_orphan_cpu_bound_cancelled_at_request_end
+# A task that ends without awaiting a task it dispatched cancels that task, and
+# with the code in shared memory its result does not wait for the child.
+async/test_task_orphan_cancelled_when_its_parent_ends
 # A cancelled task keeps its cancel flag after it was unwound; a withLock in
 # its finally must still wait for the lock and run.
 shared/test_mutex_with_lock_cancelled_task_cleanup

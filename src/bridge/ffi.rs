@@ -275,6 +275,9 @@ extern "C" {
 
     // ── Current request fiber identity (0 outside fiber context) ──
     pub fn oxphp_bridge_current_fiber_id() -> u64;
+    /// Non-zero while a task runs on this thread whose dispatcher found its code
+    /// in request memory; 0 elsewhere.
+    pub fn oxphp_bridge_current_task_code_in_request_memory() -> c_int;
 
     // ── Async exception details ──
     pub fn oxphp_bridge_set_async_exception(cls: *const c_char, msg: *const c_char);
@@ -470,6 +473,7 @@ extern "C" {
         argc: u32,
         args: *mut c_void,
         cancel_cell: *mut c_void,
+        code_in_request_memory: c_int,
     ) -> i64;
     /// 1 when the tick resumed a fiber whose wait was answered (settled
     /// promise, elapsed await deadline, fired timer, ready descriptor or one

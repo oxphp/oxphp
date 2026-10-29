@@ -9853,6 +9853,8 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
     oxphp_bridge_set_fiber_sleep(oxphp_fiber_sleep_us);
     oxphp_bridge_set_fiber_fd_wait(oxphp_fiber_fd_wait);
     oxphp_bridge_set_current_fiber_id_fn(oxphp_fiber_current_id);
+    oxphp_bridge_set_current_task_code_in_request_memory_fn(
+        oxphp_fiber_current_task_code_in_request_memory);
     oxphp_bridge_set_async_io_backoff_fn(oxphp_async_io_backoff_bridge);
     oxphp_bridge_set_async_next_deadline_fn(oxphp_async_sched_next_deadline_ns);
     oxphp_bridge_set_cancel_mark_fn(oxphp_mark_cancelled_bailout);

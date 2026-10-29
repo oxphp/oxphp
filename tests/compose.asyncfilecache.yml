@@ -1,0 +1,36 @@
+# oxphp_async() tasks with OPcache keeping scripts in its file cache only, so
+# that no script is in shared memory: two async workers, so that a task can run
+# on another thread than the task that dispatched it, and two PHP workers, so a
+# test can send requests to this server while it blocks its own worker reading
+# the response.
+#
+# asyncfilecache.ini sets opcache.file_cache_only=1.
+#
+# Standalone usage:
+#   docker compose -f compose.yml -f compose.asyncfilecache.yml up
+services:
+  oxphp-asyncfilecache:
+    build:
+      context: ..
+      dockerfile: docker/dev/Dockerfile
+      args:
+        PHP_VERSION:
+    ports:
+      - "80"
+    networks: [test-net]
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    environment:
+      LOG_LEVEL: error
+      INTERNAL_ADDR: 0.0.0.0:9090
+      ASYNC_WORKERS: 2
+      PHP_WORKERS: "2"
+    volumes:
+      - ../www:/var/www/html
+      - ./php:/var/www/html/public/tests
+      - ./asyncfilecache.ini:/usr/local/etc/php/conf.d/zz-asyncfilecache.ini:ro

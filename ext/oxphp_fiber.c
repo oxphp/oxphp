@@ -55,6 +55,11 @@ uint64_t oxphp_fiber_current_id(void) {
     return oxphp_current_fiber ? oxphp_current_fiber->fiber_id : 0;
 }
 
+int oxphp_fiber_current_task_code_in_request_memory(void) {
+    return oxphp_current_fiber != NULL && oxphp_current_fiber->task_mode
+        && oxphp_current_fiber->task_code_in_request_memory;
+}
+
 /* Exported by the engine (ZEND_API in Zend/zend_fibers.c) but left out of
  * zend_fibers.h. Declared here rather than reimplemented: delivering a throw
  * into a suspended fiber is the engine's own force-unwind path, and
@@ -7751,7 +7756,7 @@ static void oxphp_task_resume_fiber(oxphp_fiber_scheduler *sched,
 
 int64_t oxphp_async_sched_spawn(void *op_array, void *static_vars,
                                 int bind_this, uint32_t argc, void *args,
-                                void *cancel_cell) {
+                                void *cancel_cell, int code_in_request_memory) {
     oxphp_fiber_scheduler *sched = oxphp_task_sched_get();
 
     if (sched->fiber_count >= OXPHP_MAX_FIBERS) {
@@ -7802,6 +7807,7 @@ int64_t oxphp_async_sched_spawn(void *op_array, void *static_vars,
     fiber->task_argc = 0;
     fiber->task_exc_class = NULL;
     fiber->task_exc_message = NULL;
+    fiber->task_code_in_request_memory = code_in_request_memory != 0;
     ZVAL_UNDEF(&fiber->task_retval);
     ZVAL_UNDEF(&fiber->task_closure);
 
@@ -7898,6 +7904,51 @@ uint64_t oxphp_async_sched_next_deadline_ns(void) {
      * there is no deadline at all, and the difference decides whether it waits
      * out its backoff or comes straight back for the tick that acts on it. */
     return earliest > now_ns ? earliest - now_ns : 1;
+}
+
+/* What the async worker's driver has the engine do between tasks runs from
+ * Rust, with no PHP frame and no zend_try above it. It can run userland — a
+ * destructor, the finally blocks of a generator — and a fatal in it, or an
+ * exception the engine turns into one because no frame is there to catch it,
+ * bails out, which with no catch to land in exits the process. So each step
+ * runs under a catch of its own and is recovered from as the fiber loop
+ * recovers from a task's fatal, and an exception left standing is dropped when
+ * the window closes. The engine's own report of the failure is
+ * all that is left of it: the copy kept for a task's awaiter is dropped, since
+ * no task is left to hand it to, and the next task to bail out with no report
+ * of its own would be handed it as its cause. */
+#define OXPHP_TASK_WINDOW_STEP(mark, step)        \
+    zend_try {                                    \
+        step;                                     \
+    } zend_catch {                                \
+        oxphp_recover_from_bailout(mark);         \
+        free(oxphp_bridge_pop_fatal());           \
+    } zend_end_try()
+
+static void oxphp_task_window_open(oxphp_vm_stack_mark *mark) {
+    oxphp_vm_stack_save(mark);
+    /* What the window finds standing is not its own — see
+     * oxphp_serve_loop_thread_idle(). */
+    oxphp_recover_from_reported_oom();
+}
+
+static void oxphp_task_window_close(oxphp_vm_stack_mark *mark) {
+    oxphp_serve_loop_drop_exception(mark);
+    oxphp_recover_from_reported_oom();
+}
+
+/* Release the promises of tasks that tasks on this thread dispatched and did
+ * not await (see oxphp_task_end_orphans_guarded): once such a task has stopped,
+ * or, with its code in OPcache shared memory, once the drain budget has run out.
+ * The bridge raises a bailout the release held back, hence the window. */
+static void oxphp_task_poll_drains_guarded(void) {
+    if (!oxphp_bridge_has_deferred_drains()) {
+        return;
+    }
+    oxphp_vm_stack_mark mark;
+    oxphp_task_window_open(&mark);
+    OXPHP_TASK_WINDOW_STEP(&mark, oxphp_bridge_poll_deferred_drains());
+    oxphp_task_window_close(&mark);
 }
 
 int oxphp_async_sched_tick(void) {
@@ -8020,6 +8071,8 @@ int oxphp_async_sched_tick(void) {
         }
     }
 
+    oxphp_task_poll_drains_guarded();
+
     return resumed;
 }
 
@@ -8057,20 +8110,10 @@ int64_t oxphp_async_sched_poll_completed(void **out_retval,
     return -1;
 }
 
-/* Releases the closure a finished task ran and what it returned. The driver
- * calls in for that from the async worker's loop, between tasks: Rust, with no
- * PHP frame and no zend_try above it. The release can run userland — a
- * destructor, the finally blocks of a generator — and a fatal in it, or an
- * exception the engine turns into one because no frame is there to catch it,
- * bails out, which with no catch to land in exits the process. So each value is
- * released under a catch of its own and recovered from as the fiber loop
- * recovers from a task's fatal, and an exception left standing is dropped. The
- * driver has serialized the result by then; the engine's own report of the
- * failure is all that is left of it. The copy of that report kept for a task's
- * awaiter is dropped: no task is left to hand it to, and the next task to bail
- * out with no report of its own would be handed it as its cause. Taken off the
- * fiber first, so that nothing a bailout interrupts is left there to be released
- * again. */
+/* Releases the closure a finished task ran and what it returned, each in a
+ * step of the driver's window (see OXPHP_TASK_WINDOW_STEP). The driver has
+ * serialized the result by then. Taken off the fiber first, so that nothing a
+ * bailout interrupts is left there to be released again. */
 static void oxphp_task_release_payload_guarded(oxphp_request_fiber *fiber) {
     zval closure, retval;
     ZVAL_COPY_VALUE(&closure, &fiber->task_closure);
@@ -8079,27 +8122,24 @@ static void oxphp_task_release_payload_guarded(oxphp_request_fiber *fiber) {
     ZVAL_UNDEF(&fiber->task_retval);
 
     oxphp_vm_stack_mark mark;
-    oxphp_vm_stack_save(&mark);
+    oxphp_task_window_open(&mark);
+    OXPHP_TASK_WINDOW_STEP(&mark, zval_ptr_dtor(&closure));
+    OXPHP_TASK_WINDOW_STEP(&mark, zval_ptr_dtor(&retval));
+    oxphp_task_window_close(&mark);
+}
 
-    /* What the window finds standing is not its own — see
-     * oxphp_serve_loop_thread_idle(). */
-    oxphp_recover_from_reported_oom();
-
-    zend_try {
-        zval_ptr_dtor(&closure);
-    } zend_catch {
-        oxphp_recover_from_bailout(&mark);
-        free(oxphp_bridge_pop_fatal());
-    } zend_end_try();
-    zend_try {
-        zval_ptr_dtor(&retval);
-    } zend_catch {
-        oxphp_recover_from_bailout(&mark);
-        free(oxphp_bridge_pop_fatal());
-    } zend_end_try();
-
-    oxphp_serve_loop_drop_exception(&mark);
-    oxphp_recover_from_reported_oom();
+/* Cancels the tasks a finished task dispatched and did not await, as the end of
+ * a request cancels those of the request: their promises are owned by its
+ * fiber_id. They are drained on this thread by oxphp_task_poll_drains_guarded,
+ * and the driver holds the finished task's result while one whose code is in
+ * request memory still runs (src/executor/async_pool.rs). The bridge raises a
+ * bailout the cleanup held back, hence the window. */
+static void oxphp_task_end_orphans_guarded(oxphp_request_fiber *fiber) {
+    oxphp_vm_stack_mark mark;
+    oxphp_task_window_open(&mark);
+    OXPHP_TASK_WINDOW_STEP(&mark,
+        oxphp_bridge_cleanup_promises_for_fiber(fiber->fiber_id));
+    oxphp_task_window_close(&mark);
 }
 
 /* Tear down a finished task fiber and hand it to the reuse pool. The caller has
@@ -8164,6 +8204,7 @@ void oxphp_async_sched_release(int64_t fiber_id) {
         return;
     }
 
+    oxphp_task_end_orphans_guarded(fiber);
     oxphp_task_recycle_fiber(sched, fiber);
 }
 

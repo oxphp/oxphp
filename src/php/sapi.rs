@@ -216,15 +216,21 @@ type PromiseEntry = (
 );
 
 /// A finished fiber's orphaned promise awaiting non-blocking drain. Moved out of
-/// the promise maps by `cleanup_promises_for_fiber_callback` so the worker's
-/// finalize path never blocks in `block_on`; the scheduler tick polls `rx` and,
-/// once the task settles (or `deadline` passes and `drain_budget_releases`
-/// agrees), runs `cleanup` to release the frozen/borrowed captures. `deadline`
+/// the promise maps by `cleanup_promises_for_fiber_callback` so neither the
+/// worker's finalize path nor the end of an async task blocks in `block_on`;
+/// the scheduler tick polls `rx` and, once the task settles (or `deadline`
+/// passes and `drain_budget_releases` agrees), runs `cleanup` to release the
+/// frozen/borrowed captures. `deadline`
 /// is `None` once the budget has run out on a task the drain must wait for.
-/// Worker mode does not free request memory at the handler boundary, so
-/// deferring the unfreeze past the response send is safe.
+/// Neither worker mode nor an async pool thread frees request memory when a
+/// handler or a task ends, so deferring the unfreeze past the response send is
+/// safe.
 struct DeferredDrain {
     id: u64,
+    /// The fiber whose end deferred it. On an async pool thread that is a task,
+    /// whose result the driver holds while this entry blocks it (see
+    /// `orphans_hold_result`).
+    owner: u64,
     rx: tokio::sync::oneshot::Receiver<AsyncResult>,
     cleanup: Option<PromiseCleanup>,
     deadline: Option<Instant>,
@@ -4262,7 +4268,11 @@ pub unsafe extern "C" fn async_dispatch_callback(
             cleanup.closure_zval = obj_ptr;
         }
     }
-    cleanup.code_in_request_memory = ffi::oxphp_op_array_in_request_memory(op_array) != 0;
+    // A closure a task created is part of that task's code, which the check
+    // cannot always place from the task's thread: it sees only this thread's
+    // heap. So what the task's own dispatcher found carries over.
+    cleanup.code_in_request_memory = ffi::oxphp_op_array_in_request_memory(op_array) != 0
+        || ffi::oxphp_bridge_current_task_code_in_request_memory() != 0;
 
     // Portable-serialize static_vars (the closure's captures and `static`s) for safe
     // cross-thread transfer, a slot holding a reference as one: the task reads a
@@ -4338,6 +4348,7 @@ pub unsafe extern "C" fn async_dispatch_callback(
         argc,
         serialized_args: ser_buf,
         serialized_args_len: ser_len,
+        code_in_request_memory: cleanup.code_in_request_memory,
         cancelled: cancelled.clone(),
         result_tx,
     };
@@ -5502,9 +5513,10 @@ unsafe extern "C" fn cleanup_outstanding_promises_callback() {
     drop(prefetched);
 }
 
-/// Worker-mode per-request callback: clean up promises owned by the request
-/// fiber that just completed, leaving sibling fibers' live promises alone.
-/// Called from the fiber scheduler's finalize path via the bridge.
+/// Per-fiber callback: clean up promises owned by the fiber that just
+/// completed, leaving sibling fibers' live promises alone. Called via the bridge
+/// from the worker-mode scheduler's finalize path for a request fiber, and from
+/// an async pool thread's release of a task that has ended.
 ///
 /// # Safety
 /// Called from C FFI on the owning worker thread.
@@ -5552,10 +5564,12 @@ unsafe extern "C" fn cleanup_promises_for_fiber_callback(fiber_id: u64) {
         // Defer instead of block_on'ing on the worker thread: finalize returns
         // immediately and the scheduler tick reclaims each promise once its task
         // settles. Worker mode keeps the request heap alive across handlers, so the
-        // unfreeze can safely happen after the response is sent.
+        // unfreeze can safely happen after the response is sent. On a pool thread
+        // the task's own children can run on this thread, so blocking here would
+        // wait on a task that cannot run.
         let flagged: Vec<Arc<CancelShared>> = live
             .into_iter()
-            .filter_map(|id| defer_promise_drain(id))
+            .filter_map(|id| defer_promise_drain(id, fiber_id))
             .collect();
         // The flag alone reaches only a suspended fiber; a CPU-bound one needs
         // the cross-thread interrupt kick — sent once all of them are flagged.
@@ -5699,21 +5713,30 @@ fn drain_budget_releases(id: u64, cleanup: Option<&PromiseCleanup>) -> bool {
 ///
 /// If the receiver was already consumed (only a cleanup record remains) there
 /// is nothing to wait on, so the cleanup runs immediately — no ordering hazard.
+/// Nor is there for a task no async worker has started: it will never run, so
+/// its cleanup runs now too, and its answer is not waited for.
 ///
 /// Returns the cancel state of a promise it flagged, for the caller to kick
 /// once every promise in the batch is flagged; `None` for one an await had
 /// flagged and kicked already (see `drain_promises`).
-unsafe fn defer_promise_drain(id: u64) -> Option<Arc<CancelShared>> {
+unsafe fn defer_promise_drain(id: u64, owner: u64) -> Option<Arc<CancelShared>> {
     match take_promise(id).or_else(|| take_stranded(id)) {
         Some((rx, cancelled)) => {
-            // Signal cancellation (Release pairs with the worker's Acquire load).
+            // SeqCst, and the flag before `started`: see `CancelShared::started`.
             let newly_flagged = !cancelled
                 .cancelled
-                .swap(true, std::sync::atomic::Ordering::Release);
+                .swap(true, std::sync::atomic::Ordering::SeqCst);
             let cleanup = take_promise_cleanup(id);
+            if !cancelled.started.load(std::sync::atomic::Ordering::SeqCst) {
+                if let Some(cleanup) = cleanup {
+                    run_promise_cleanup(&cleanup);
+                }
+                return None;
+            }
             DEFERRED_DRAIN.with(|d| {
                 d.borrow_mut().push(DeferredDrain {
                     id,
+                    owner,
                     rx,
                     cleanup,
                     deadline: Some(Instant::now() + std::time::Duration::from_secs(5)),
@@ -5730,8 +5753,9 @@ unsafe fn defer_promise_drain(id: u64) -> Option<Arc<CancelShared>> {
     }
 }
 
-/// Scheduler-tick callback (worker mode): release each deferred promise whose
-/// task has settled or whose 5 s budget has elapsed, unless
+/// Scheduler-tick callback (worker mode, and an async pool thread's task
+/// scheduler): release each deferred promise whose task has settled or whose
+/// 5 s budget has elapsed, unless
 /// `drain_budget_releases` refuses — such an entry then waits for its task
 /// with no deadline. Non-blocking — ready entries and the results received for
 /// them are taken out under the borrow, then their captures are released and
@@ -5739,7 +5763,7 @@ unsafe fn defer_promise_drain(id: u64) -> Option<Arc<CancelShared>> {
 /// reference to a `Shared\Pool`, whose teardown runs `$destroy`.
 ///
 /// # Safety
-/// Called from C FFI on the owning HTTP worker thread.
+/// Called from C FFI on the thread that owns the list.
 unsafe extern "C" fn poll_deferred_drains_callback() {
     use tokio::sync::oneshot::error::TryRecvError;
 
@@ -5786,14 +5810,37 @@ unsafe extern "C" fn poll_deferred_drains_callback() {
     drop(results);
 }
 
-/// Scheduler-loop predicate (worker mode): non-zero while any deferred promise
-/// drain is still pending, so the worker keeps ticking (and reclaiming them)
-/// instead of blocking in `worker_wait`.
+/// Scheduler-loop predicate: non-zero while any deferred promise drain is still
+/// pending, so a worker keeps ticking (and reclaiming them) instead of blocking
+/// in `worker_wait`, and an async pool thread's tick polls them.
 ///
 /// # Safety
-/// Called from C FFI on the owning HTTP worker thread.
+/// Called from C FFI on the thread that owns the list.
 unsafe extern "C" fn has_deferred_drains_callback() -> c_int {
-    DEFERRED_DRAIN.with(|d| c_int::from(!d.borrow().is_empty()))
+    c_int::from(deferred_drains_pending())
+}
+
+/// Whether this thread has deferred promise drains still pending. An async pool
+/// thread keeps ticking while it has: they are polled only by its tick.
+pub(crate) fn deferred_drains_pending() -> bool {
+    DEFERRED_DRAIN.with(|d| !d.borrow().is_empty())
+}
+
+/// Whether an async pool thread's driver must go on holding the result of the
+/// ended task `owner`: a task it dispatched and did not await still runs, with
+/// its code in request memory. The request whose memory holds that code may
+/// free it once it has the answer it awaits — an answer that is `owner`'s or
+/// waits for it.
+pub(crate) fn orphans_hold_result(owner: u64) -> bool {
+    DEFERRED_DRAIN.with(|d| {
+        d.borrow().iter().any(|entry| {
+            entry.owner == owner
+                && entry
+                    .cleanup
+                    .as_ref()
+                    .is_some_and(|c| c.code_in_request_memory)
+        })
+    })
 }
 
 /// Blocking teardown flush of the deferred-drain list (RSHUTDOWN / worker
@@ -6986,6 +7033,7 @@ mod tests {
         DEFERRED_DRAIN.with(|d| {
             d.borrow_mut().push(DeferredDrain {
                 id: 1,
+                owner: 0,
                 rx,
                 cleanup: None,
                 deadline: Some(Instant::now() + std::time::Duration::from_secs(5)),
@@ -7022,6 +7070,7 @@ mod tests {
         DEFERRED_DRAIN.with(|d| {
             d.borrow_mut().push(DeferredDrain {
                 id: 1,
+                owner: 0,
                 rx,
                 cleanup: Some(cleanup),
                 deadline: Some(Instant::now()),
