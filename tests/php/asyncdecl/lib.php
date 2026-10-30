@@ -129,3 +129,9 @@ final class AsyncDeclPreInvokableMaker
         return (object) ['v' => $this->v];
     }
 }
+
+/** An enum every thread has: each creates its cases when it first reads one. */
+enum AsyncDeclPreSuit
+{
+    case Hearts;
+}

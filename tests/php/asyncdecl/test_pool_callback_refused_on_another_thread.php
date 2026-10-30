@@ -8,10 +8,16 @@ require_once __DIR__ . '/helper.php';
 // runs with copies of its closure's variables, made there. A variable holding
 // what is not copied, an object other than an OxPHP\Shared one, a closure
 // among them, or a resource, is refused there, and so is a callback that uses
-// $this, an object of the request that created the pool: before the callback
-// runs, as acquire() refuses one that reaches code the thread has not loaded.
-// On the thread that created the pool the same callbacks run.
+// $this, an object of the request that created the pool, a built-in method
+// called on an object other than an OxPHP\Shared one among them: before the
+// callback runs, as acquire() refuses one that reaches code the thread has not
+// loaded. On the thread that created the pool the same callbacks run.
 $t = new TestCase('test_pool_callback_refused_on_another_thread', 'asyncdecl');
+
+function asyncdecl_refused_call_helper(int $base = 0): int
+{
+    return $base + 1;
+}
 
 $lib = __DIR__ . '/lib.php';
 
@@ -47,6 +53,11 @@ $capturesCyclic = static fn (): object => (object) ['v' => \count($cyclic)];
 $maker = new AsyncDeclPreMaker();
 [$thisPool, $thisLine] = $maker->thisPool();
 [$nestedPool, $nestedLine] = $maker->nestedThisPool();
+
+$queue = new \SplQueue();
+$queue->enqueue(new \stdClass());
+$queue->enqueue(new \stdClass());
+$reflection = new \ReflectionFunction(static fn (): object => new \stdClass());
 
 $cases = [
     'a captured object' => [
@@ -129,6 +140,24 @@ $cases = [
         (new AsyncDeclPreChildMaker())->parentPool(),
         [\Error::class, 'Non-static method AsyncDeclPreMaker::make() cannot be called statically'],
     ],
+    // A built-in method works on the object it is called on.
+    '[$queue, \'dequeue\']' => [
+        new \OxPHP\Shared\Pool(factory: [$queue, 'dequeue'], destroy: null, maxSize: 1),
+        asyncdecl_uses_this('Built-in method SplQueue::dequeue()'),
+    ],
+    '$queue->dequeue(...)' => [
+        new \OxPHP\Shared\Pool(factory: $queue->dequeue(...), destroy: null, maxSize: 1),
+        asyncdecl_uses_this('Built-in method SplQueue::dequeue()'),
+    ],
+    // The method runs a closure of this request.
+    '[$reflection, \'invoke\']' => [
+        new \OxPHP\Shared\Pool(factory: [$reflection, 'invoke'], destroy: null, maxSize: 1),
+        asyncdecl_uses_this('Built-in method ReflectionFunction::invoke()'),
+    ],
+    'a built-in method of an OxPHP\\Shared object' => [
+        new \OxPHP\Shared\Pool(factory: [new \OxPHP\Shared\Channel(1), 'tryRecv'], destroy: null, maxSize: 1),
+        ['returned', \OxPHP\Shared\Channel\RecvResult::class],
+    ],
 ];
 
 foreach ($cases as $what => [$pool, $expected]) {
@@ -159,6 +188,39 @@ $t->assertSame('$destroy: it did not run in the task', $ran->get(), 0);
 $pool->acquire()->release();
 $t->assertSame('$destroy: evict() on the worker thread dropped the slot', $pool->evict(), 1);
 $t->assertSame('$destroy: it ran on the worker thread', $ran->get(), 1);
+
+// A built-in method as $destroy is skipped in a task too: one that runs a
+// closure of this request with the slot as its $this, and one that keeps the
+// slot in an object of this request. Closure::call() binds a closure only to
+// an object of a class written in PHP.
+$ran = new \OxPHP\Shared\Counter(0);
+$kept = new \SplQueue();
+$destroys = [
+    '[$closure, \'call\']' => [
+        [function () use ($ran): void {
+            $ran->add(asyncdecl_refused_call_helper());
+        }, 'call'],
+        static fn (): int => $ran->get(),
+    ],
+    '[$queue, \'push\']' => [[$kept, 'push'], static fn (): int => \count($kept)],
+];
+foreach ($destroys as $what => [$destroy, $runs]) {
+    $pool = new \OxPHP\Shared\Pool(
+        factory: static fn (): object => new AsyncDeclPreNamed(),
+        destroy: $destroy,
+        maxSize: 1,
+    );
+    [$ok, $evicted] = asyncdecl_settle(oxphp_async(static function () use ($pool): int {
+        $pool->acquire()->release();
+        return $pool->evict();
+    }));
+    $t->assertTrue("$what as \$destroy: the task returns", $ok);
+    $t->assertSame("$what as \$destroy: evict() in the task dropped the slot", $evicted, 1);
+    $t->assertSame("$what as \$destroy: it did not run in the task", $runs(), 0);
+    $pool->acquire()->release();
+    $t->assertSame("$what as \$destroy: evict() on the worker thread dropped the slot", $pool->evict(), 1);
+    $t->assertSame("$what as \$destroy: it ran on the worker thread", $runs(), 1);
+}
 
 fclose($fh);
 

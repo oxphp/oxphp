@@ -157,9 +157,9 @@ $t->assertSame(
     ['returned', \DateTime::class],
 );
 
-// A built-in method of a class written in PHP runs its own code, not the
-// class's __callStatic(): from() of a backed enum, called without the value it
-// wants.
+// from() of a backed enum is a built-in method of a class written in PHP that
+// has a __callStatic(). A task's thread, whose tables do not hold the enum,
+// refuses it for the enum, not for the code of __callStatic().
 eval(<<<'PHP'
     enum AsyncDeclEvalSuit: string
     {
@@ -173,9 +173,9 @@ eval(<<<'PHP'
     }
     PHP);
 $t->assertSame(
-    'a built-in method of a class with __callStatic() runs in a task',
+    'a built-in method of an enum with __callStatic() is refused for the enum',
     asyncdecl_acquire_in_task(new Pool(factory: [AsyncDeclEvalSuit::class, 'from'], destroy: null, maxSize: 1)),
-    [\ArgumentCountError::class, 'AsyncDeclEvalSuit::from() expects exactly 1 argument, 0 given'],
+    [\Error::class, 'Enum AsyncDeclEvalSuit' . ASYNCDECL_TAIL],
 );
 
 // A refused $destroy is skipped: evict() drops the slot all the same.

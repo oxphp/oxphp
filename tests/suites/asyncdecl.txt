@@ -35,6 +35,7 @@ asyncdecl/test_pool_factory_first_run_by_request
 asyncdecl/test_pool_callback_captures_leave_no_gc_root_in_task
 asyncdecl/test_pool_callback_static_on_another_thread
 asyncdecl/test_pool_callback_refused_on_another_thread
+asyncdecl/test_pool_callback_on_another_thread_ignores_what_its_captures_became
 asyncdecl/test_pool_callback_run_time_cache_is_per_thread
 # A task's idle slot, when the pool goes away on the worker thread.
 asyncdecl/test_pool_idle_slot_of_a_task_outlives_the_pool
@@ -47,11 +48,17 @@ asyncdecl/test_pool_trampoline_factory_in_task
 asyncdecl/test_pool_trampoline_leaves_no_attributes_in_the_slot
 # A factory or $destroy reaching a function of the test file other than through
 # its own body: through an object or a closure it captured, $this, self::,
-# static::, new static, __call(), __callStatic() or a closure's __invoke, or
+# static::, new static, a parameter's default value, a callable naming self,
+# static or parent, an enum case, a closure in its class's constants or
+# property defaults, __call(), __callStatic() or a closure's __invoke, or
 # through the __destruct() of the slots it makes. Each took the whole process
 # down before.
 asyncdecl/test_pool_factory_reaches_function_through_captured_object
 asyncdecl/test_pool_factory_reaches_function_through_its_scope
+asyncdecl/test_pool_factory_reaches_scope_through_a_default_value
+asyncdecl/test_pool_factory_reaches_scope_through_a_callable_string
+asyncdecl/test_pool_factory_reaches_an_enum_case_through_its_scope
+asyncdecl/test_pool_factory_reaches_a_closure_in_its_class_data
 asyncdecl/test_pool_factory_reaches_function_through_this
 asyncdecl/test_pool_factory_reaches_function_through_captured_closure
 asyncdecl/test_pool_factory_reaches_function_through_a_trampoline
