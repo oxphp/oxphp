@@ -138,6 +138,7 @@ curl -s http://localhost:9090/config | jq .
   "document_root": "/var/www/html/public",
   "drain_timeout_seconds": 30,
   "entry_file": "/var/www/html/public/index.php",
+  "entry_only": false,
   "executor_type": "sapi",
   "gzip_level": 6,
   "header_timeout_seconds": 5,

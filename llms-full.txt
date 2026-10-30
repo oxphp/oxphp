@@ -5180,6 +5180,7 @@ curl -s http://localhost:9090/config | jq .
   "document_root": "/var/www/html/public",
   "drain_timeout_seconds": 30,
   "entry_file": "/var/www/html/public/index.php",
+  "entry_only": false,
   "executor_type": "sapi",
   "gzip_level": 6,
   "header_timeout_seconds": 5,
@@ -5215,6 +5216,8 @@ curl -s http://localhost:9090/config | jq .
 `runtime_hooks` lists the runtime-hook categories the process installed at startup, as a parsed set rather than the raw `RUNTIME_HOOKS` value, so `all`, `1` and `sleep, streams, net` all read as `["sleep","streams","net"]` and a scraper needs no copy of that grammar. An empty list means no hook is installed, which is also the answer for a misspelled variable name. It reports what was installed, not what is in effect: where there are no fibers at all the hooks delegate to the builtins they replaced, so a traditional-mode server reports the categories it set up while behaving natively. See [Runtime Hooks](../operations/configuration.md#runtime-hooks).
 
 `deny_file` summarizes the [`.oxphpdeny`](../security/oxphpdeny.md) file read from `DOCUMENT_ROOT` at startup: the number of rules, split by action — `deny`, `entry` for `>` rules, `allow` for `!` rules — and what a deny rule answers with, the `PHP_DENY_FALLBACK` status code or `"script"` without the script's path. The rules themselves are left out: on an internal server reachable from outside, they would be a map of exactly the paths the file protects. To see how each rule was read, start with `LOG_LEVEL=debug` and look for the `oxphpdeny rule` lines. Without the file the entry is `{"loaded": false}`.
+
+`entry_only` is `true` when `DOCUMENT_ROOT` is [switched off](routing.md#no-document-root): every request goes to `ENTRY_FILE`, and `document_root` reports the entry file's directory.
 
 TLS certificate and key file paths are never emitted (only the `tls_enabled` boolean is exposed), and `internal_addr` and `error_pages_dir` are scrubbed from the served response — deployment topology and filesystem paths that aid an attacker and are not needed by scrapers.
 
@@ -6892,7 +6895,7 @@ OxPHP routes incoming HTTP requests using one of three modes, controlled by a si
 
 ## How It Works
 
-Every request runs through a shared pipeline before the mode-specific logic kicks in:
+With a document root, every request runs through a shared pipeline before the mode-specific logic kicks in ([without one](#no-document-root), none of it runs):
 
 1. **Dot-path filter** — paths containing hidden segments (`.git`, `.env`) are blocked, with an exception for `/.well-known/*` ([RFC 8615](https://www.rfc-editor.org/rfc/rfc8615))
 2. **Route cache lookup** — recently resolved URIs are returned from an LRU cache (10 000 entries)
@@ -6913,8 +6916,8 @@ The classification step is the key efficiency: the disk check for static assets 
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `DOCUMENT_ROOT` | `/var/www/html/public` | Root directory for serving files and PHP scripts |
-| `ENTRY_FILE` | *(unset)* | Single canonical entry script. Unset = Traditional. `*.php` = Framework. Non-`.php` = SPA. With `WORKER_MODE_ENABLED=true` = Worker. Accepts an absolute path or one relative to `DOCUMENT_ROOT` (`..` allowed); the resolved path must exist |
+| `DOCUMENT_ROOT` | `/var/www/html/public` | Root directory for serving files and PHP scripts. `false` (or `off`, `0`, `no`) switches it off, and every request goes to `ENTRY_FILE` — see [No Document Root](#no-document-root) |
+| `ENTRY_FILE` | *(unset)* | Single canonical entry script. Unset, or a file name without an extension = Traditional. `*.php` = Framework. Any other extension = SPA. With `WORKER_MODE_ENABLED=true` = Worker. Accepts an absolute path or one relative to `DOCUMENT_ROOT` (`..` allowed; absolute only with `DOCUMENT_ROOT` switched off); the resolved path must exist |
 | `WORKER_MODE_ENABLED` | `false` | Enable persistent worker mode. Requires `ENTRY_FILE` to point at a `.php` script |
 
 ## Traditional Mode
@@ -7050,7 +7053,7 @@ Worker mode activates when `WORKER_MODE_ENABLED=true` and `ENTRY_FILE` points at
 
 Arbitrary `.php` files in the document root are **never executed directly** in worker mode — a request to `/about.php` reaches the worker callback like any other route, even if `about.php` exists on disk. There is no directory-index lookup and no root `index.php` fallback either; the worker sees those requests itself.
 
-The exceptions are server-level defenses that run before mode dispatch, and none of them reaches the worker: dot-segment paths (`/.git/config`, `/.env`, bare `/.well-known`) are rejected by [dot-path blocking](../security/dot-path-blocking.md), and `.php` URIs under `/.well-known/` are refused as defense-in-depth, both with 404. With a [`.oxphpdeny`](../security/oxphpdeny.md) file holding at least one deny or `>` rule, a path a deny rule matches gets the `PHP_DENY_FALLBACK` status, and a path past the file's depth and length limits gets 404.
+The exceptions are server-level defenses that run before mode dispatch, and none of them reaches the worker — unless `DOCUMENT_ROOT` is [switched off](#no-document-root), which skips them all: dot-segment paths (`/.git/config`, `/.env`, bare `/.well-known`) are rejected by [dot-path blocking](../security/dot-path-blocking.md), and `.php` URIs under `/.well-known/` are refused as defense-in-depth, both with 404. With a [`.oxphpdeny`](../security/oxphpdeny.md) file holding at least one deny or `>` rule, a path a deny rule matches gets the `PHP_DENY_FALLBACK` status, and a path past the file's depth and length limits gets 404.
 
 Startup-time validation rejects three combinations:
 
@@ -7059,6 +7062,40 @@ Startup-time validation rejects three combinations:
 - A `.oxphpdeny` deny rule with a script `PHP_DENY_FALLBACK` → `PHP_DENY_FALLBACK is a script, but in worker mode every request runs the worker entry`. A worker thread runs nothing but the entry, so it cannot run a fallback script in a denied request's place; use a status code.
 
 See [Worker Mode](worker-mode.md) for full configuration details.
+
+## No Document Root
+
+A service with no static files — an API, a microservice — has no use for a document root. Set `DOCUMENT_ROOT` to `false` (or `off`, `0`, `no`, in any case), and every request goes to `ENTRY_FILE`, which must then be an absolute path:
+
+| `ENTRY_FILE` | `WORKER_MODE_ENABLED` | Every request |
+|---|---|---|
+| `*.php` | `false` | Runs the script, once per request |
+| `*.php` | `true` | Goes to the worker |
+| Any other file, with or without an extension | `false` | Gets that file, served as a [static file](static-files.md) with the MIME type of its extension (`application/octet-stream` without one) |
+
+With nothing on disk to serve but the entry, the router does not look at the path. None of the pipeline steps above runs — no dot-path filter, no decoding, no `.oxphpdeny` (the file is not read), no `.well-known` block — so `/.env`, `/.git/config` and `/%FF` all reach the application, which reads the path from `$_SERVER['REQUEST_URI']`. `PATH_INFO` is never set. `PHP_DENY_PATHS`, `PHP_DENY_FALLBACK`, `SYMLINK_ALLOW_PATHS` and a `.oxphpdeny` left in the entry file's directory have no files to guard; each one present is named in a startup warning and ignored.
+
+What runs before routing still runs: a `CONNECT` request and a malformed `Host` or request target are refused as in every mode, and the connection, request-size and rate limits apply.
+
+`$_SERVER['DOCUMENT_ROOT']` is the entry file's directory, and `SCRIPT_NAME` and `PHP_SELF` are its name: `/app.php` for `ENTRY_FILE=/srv/app/app.php`.
+
+`ENTRY_FILE` is resolved once, at startup, with any symlink in it followed, so `$_SERVER['DOCUMENT_ROOT']`, `SCRIPT_NAME` and `PHP_SELF` describe the file the link points to: `ENTRY_FILE=/srv/app/current.php` linked to `/srv/app/releases/v1/index.php` gives `/srv/app/releases/v1` and `/index.php`. A link re-pointed later — a Kubernetes ConfigMap update, a release switch — takes effect only after a restart, and nothing in the log says one is needed. Until then a `.php` entry run per request keeps running the old target and fails once it is removed; workers already running keep the code they loaded, and only a worker started after the removal fails; a non-`.php` entry is served from the in-memory cache, without a check on disk, while `STATIC_REVALIDATE` is off (the default).
+
+The server refuses to start when `ENTRY_FILE` is unset, relative, or not a regular file. An empty `DOCUMENT_ROOT=` does not switch the root off: it means the default `/var/www/html/public`.
+
+```yaml
+services:
+  api:
+    image: ghcr.io/oxphp/oxphp:0.14.0
+    ports:
+      - "8080:80"
+    volumes:
+      - ./src:/srv/app
+    environment:
+      - DOCUMENT_ROOT=false
+      - WORKER_MODE_ENABLED=true
+      - ENTRY_FILE=/srv/app/worker.php
+```
 
 ## PATH_INFO Behavior
 
@@ -7074,7 +7111,7 @@ See [Worker Mode](worker-mode.md) for full configuration details.
 
 ## Path Security
 
-OxPHP applies multiple layers of protection to prevent directory traversal, hidden file disclosure, and symlink escape attacks:
+OxPHP applies multiple layers of protection to prevent directory traversal, hidden file disclosure, and symlink escape attacks. They guard the files under a document root: with `DOCUMENT_ROOT` [switched off](#no-document-root), none of them runs and every path reaches `ENTRY_FILE`.
 
 - **Percent-decoding** runs before sanitization, so encoded traversal attempts like `/%2e%2e/etc/passwd` are caught
 - **Segment filtering** removes `..`, `.`, and empty segments from the resolved path
@@ -7082,7 +7119,7 @@ OxPHP applies multiple layers of protection to prevent directory traversal, hidd
 - **Dot-path blocking** blocks any path segment starting with `.` (e.g. `/.git/config`, `/.env`), with an exception for `/.well-known/*` per RFC 8615
 - **Well-known PHP block** — even with the dot-path exception, `.php` scripts under `/.well-known/` are never executed (defense-in-depth)
 - **PHP execution deny-list** — in the direct-mapping modes (Traditional and SPA), `PHP_DENY_PATHS` blocks `.php` execution at configured glob patterns (e.g. `/uploads/**`, or a single file like `/admin/legacy.php`) before any disk I/O. See [PHP Execution Deny-List](../security/php-deny.md)
-- **Path deny rules** — a [`.oxphpdeny`](../security/oxphpdeny.md) file at the top of `DOCUMENT_ROOT` lists, in gitignore syntax, paths that are never served — static files and scripts alike — or, with a `>` prefix, are handed to the entry script. It applies in every routing mode, right after the path is decoded and normalized and before any disk access
+- **Path deny rules** — a [`.oxphpdeny`](../security/oxphpdeny.md) file at the top of `DOCUMENT_ROOT` lists, in gitignore syntax, paths that are never served — static files and scripts alike — or, with a `>` prefix, are handed to the entry script. It applies in every routing mode that has a document root, right after the path is decoded and normalized and before any disk access
 
 > **Note:** If the document root directory does not exist at startup, the server exits with a fatal error. Symlink escape protection requires a valid, resolvable document root path.
 
@@ -7106,7 +7143,7 @@ In Framework mode, direct access to the front controller is now allowed (the rew
 
 ### `PATH_INFO` is empty in Framework mode
 
-This is expected for application routes. Framework mode follows CGI semantics: `PATH_INFO` is set only when the request explicitly names the entry file with a trailing segment (`/index.php/news` → `/news`). For a normal app route like `/users/42`, the front controller is reached by an internal rewrite it does not name, so `PATH_INFO` is absent — read the path from `$_SERVER['REQUEST_URI']`. (If `ENTRY_FILE` does not end in `.php`, OxPHP picks SPA mode, which never populates `PATH_INFO`.)
+This is expected for application routes. Framework mode follows CGI semantics: `PATH_INFO` is set only when the request explicitly names the entry file with a trailing segment (`/index.php/news` → `/news`). For a normal app route like `/users/42`, the front controller is reached by an internal rewrite it does not name, so `PATH_INFO` is absent — read the path from `$_SERVER['REQUEST_URI']`. (If `ENTRY_FILE` does not end in `.php`, OxPHP is not in Framework mode: another extension picks SPA mode, which never populates `PATH_INFO`, and a file name without one picks Traditional.)
 
 ### Symlink inside document root returns 404
 
@@ -8040,7 +8077,7 @@ Worker mode runs persistent PHP workers that bootstrap once and handle multiple 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `WORKER_MODE_ENABLED` | `false` | Enable persistent worker mode. Accepts `true`, `1`, `yes`. Requires `ENTRY_FILE` to point at a `.php` script |
-| `ENTRY_FILE` | *(unset)* | Path to the worker bootstrap script. Resolved against `DOCUMENT_ROOT` when relative; `..` segments and absolute paths are allowed (worker bootstraps living outside the public document root are a supported layout) |
+| `ENTRY_FILE` | *(unset)* | Path to the worker bootstrap script. Resolved against `DOCUMENT_ROOT` when relative; `..` segments and absolute paths are allowed (worker bootstraps living outside the public document root are a supported layout). A worker that serves no static files can run with `DOCUMENT_ROOT=false` and an absolute `ENTRY_FILE` — see [No Document Root](routing.md#no-document-root) |
 | `WORKER_MAX_MEMORY_MIB` | `0` | Maximum PHP memory per worker in MiB before recycling. `0` = unlimited |
 
 For application-driven recycling, call [`OxPHP\Server\Worker::scheduleExit()`](../php/worker-class.md#scheduleexit) from inside a request handler. The worker exits cleanly after the current request completes.
@@ -11600,7 +11637,7 @@ Per-entry detail — id, type, refcount, byte cost — lives on the [internal in
 
 OxPHP blocks access to any URL path containing a segment that starts with `.` — returning 404 Not Found. This prevents exposure of sensitive files like `.env`, `.git/`, `.htaccess`, `.svn/`, and `.DS_Store` that are commonly targeted by automated scanners.
 
-This protection is always on and cannot be disabled. It applies to all routing modes (traditional, framework, SPA, and worker).
+This protection cannot be disabled on its own. It applies in every routing mode — Traditional, Framework, SPA and Worker — and is skipped only when `DOCUMENT_ROOT` is [switched off](../features/routing.md#no-document-root): with no files to serve, every request, `/.env` included, goes to `ENTRY_FILE`, and the application decides what to answer.
 
 ## What Is Blocked
 
@@ -11631,7 +11668,7 @@ Single-level percent-encoded bypasses are caught — `/%2egit/HEAD` decodes once
 | `/.well-known/` | 404 (directory listing) |
 | `/.well-known/test.php` | 404 (PHP execution blocked) |
 
-PHP files inside `.well-known` are never executed — they always return 404. This directory serves static content only.
+With a document root, PHP files inside `.well-known` are never executed — they return 404, and the directory serves static content only. With `DOCUMENT_ROOT` switched off, a `/.well-known/` path goes to `ENTRY_FILE` like any other.
 
 MIME types are determined by file extension. Files without an extension (like `openid-configuration`) are served as `application/octet-stream`.
 
@@ -11747,6 +11784,7 @@ To stop `.php` execution in writable directories, use [`PHP_DENY_PATHS`](php-den
 | SPA (`ENTRY_FILE=index.html`) | Yes | Startup error — `index.html` cannot take a request |
 | Framework (`ENTRY_FILE=index.php`) | Yes | Front controller |
 | Worker (`WORKER_MODE_ENABLED=true`) | Yes, with a status-code fallback | Worker entry |
+| [No document root](../features/routing.md#no-document-root) (`DOCUMENT_ROOT=false`) | No — the file is not read; one left in the entry file's directory is named in a startup warning | No |
 
 ## Fallback
 
@@ -11966,7 +12004,7 @@ Honest list of what this feature does *not* do:
 
 ## See Also
 
-- [Path Deny Rules](oxphpdeny.md) — keep any path, static or PHP, from being served, in every routing mode
+- [Path Deny Rules](oxphpdeny.md) — keep any path, static or PHP, from being served, in every routing mode with a document root
 - [Routing](../features/routing.md) — routing modes and path security
 - [Error Pages](../features/error-pages.md) — custom HTML bodies for status-fallback responses
 - [Configuration Reference](../operations/configuration.md) — full env-var list
@@ -14474,7 +14512,7 @@ OxPHP builds `$_SERVER` from the incoming HTTP request following the CGI/1.1 spe
 | Variable | Description | Example |
 |----------|-------------|---------|
 | `SCRIPT_FILENAME` | Absolute filesystem path to the PHP script being executed | `/var/www/html/public/index.php` |
-| `DOCUMENT_ROOT` | Web root directory configured via `DOCUMENT_ROOT` env var | `/var/www/html/public` |
+| `DOCUMENT_ROOT` | Web root directory configured via `DOCUMENT_ROOT` env var. With `DOCUMENT_ROOT=false`, the entry file's directory — `getenv('DOCUMENT_ROOT')` still returns the variable, `false` | `/var/www/html/public` |
 | `SERVER_SOFTWARE` | Server identifier (carries the running OxPHP version) | `OxPHP/0.14.0` |
 | `SERVER_PROTOCOL` | Negotiated HTTP protocol version | `HTTP/2` |
 | `REQUEST_METHOD` | HTTP method | `GET` |
@@ -15002,8 +15040,8 @@ An unset variable or empty assignment (`FOO=`) falls back to the documented defa
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LISTEN_ADDR` | `0.0.0.0:80` | Address and port for the main HTTP server |
-| `DOCUMENT_ROOT` | `/var/www/html/public` | Root directory for serving files and PHP scripts |
-| `ENTRY_FILE` | *(unset)* | Single canonical entry script. Unset = direct file mapping. `*.php` = front controller. Non-`.php` = static fallback (SPA). With `WORKER_MODE_ENABLED=true` = worker bootstrap. Resolved against `DOCUMENT_ROOT` (relative paths and `..` allowed; absolute paths used as-is). See [Routing](../features/routing.md) |
+| `DOCUMENT_ROOT` | `/var/www/html/public` | Root directory for serving files and PHP scripts. `false` (or `off`, `0`, `no`) switches it off: every request goes to `ENTRY_FILE`, with no static files served. See [No Document Root](../features/routing.md#no-document-root) |
+| `ENTRY_FILE` | *(unset)* | Single canonical entry script. Unset, or a file name without an extension = direct file mapping. `*.php` = front controller. Any other extension = static fallback (SPA). With `WORKER_MODE_ENABLED=true` = worker bootstrap. Resolved against `DOCUMENT_ROOT` (relative paths and `..` allowed; absolute paths used as-is, and required with `DOCUMENT_ROOT` switched off). See [Routing](../features/routing.md) |
 | `WORKER_MODE_ENABLED` | `false` | Enable persistent worker mode. Requires `ENTRY_FILE` to point at a `.php` script. Boolean — see [Boolean values](#boolean-values) |
 | `MAX_CONNECTIONS` | `10000` | Maximum concurrent TCP connections. Also the ceiling for the default `QUEUE_MAX_WAITING` (half of it), so a malformed value is a startup error rather than a silent fallback. Lowering it does not move the `QUEUE_CAPACITY` default, which is sized from the worker count alone — keep it above `PHP_WORKERS` + `QUEUE_CAPACITY` + `QUEUE_MAX_WAITING`, see below |
 | `TOKIO_WORKERS` | [CPU](#how-the-cpu-count-is-detected) / 2 (min 1) | Async I/O threads. `1` = single-threaded, `N > 1` = fixed thread count, unset = auto (CPU / 2, min 1) |
@@ -15482,6 +15520,7 @@ curl -s http://localhost:9090/config | jq .
   "document_root": "/var/www/html/public",
   "drain_timeout_seconds": 30,
   "entry_file": "/var/www/html/public/index.php",
+  "entry_only": false,
   "executor_type": "sapi",
   "gzip_level": 6,
   "header_timeout_seconds": 5,
@@ -15818,6 +15857,7 @@ curl -s http://localhost:9090/config | jq .
   "document_root": "/var/www/html/public",
   "drain_timeout_seconds": 30,
   "entry_file": "/var/www/html/public/index.php",
+  "entry_only": false,
   "executor_type": "sapi",
   "gzip_level": 6,
   "header_timeout_seconds": 5,

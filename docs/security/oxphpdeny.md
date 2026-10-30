@@ -108,6 +108,7 @@ To stop `.php` execution in writable directories, use [`PHP_DENY_PATHS`](php-den
 | SPA (`ENTRY_FILE=index.html`) | Yes | Startup error — `index.html` cannot take a request |
 | Framework (`ENTRY_FILE=index.php`) | Yes | Front controller |
 | Worker (`WORKER_MODE_ENABLED=true`) | Yes, with a status-code fallback | Worker entry |
+| [No document root](../features/routing.md#no-document-root) (`DOCUMENT_ROOT=false`) | No — the file is not read; one left in the entry file's directory is named in a startup warning | No |
 
 ## Fallback
 

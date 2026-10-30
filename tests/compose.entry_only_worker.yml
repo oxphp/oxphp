@@ -1,0 +1,31 @@
+# DOCUMENT_ROOT switched off in worker mode: every URI reaches the worker,
+# and nothing in the entry's directory is served.
+#
+# Standalone usage:
+#   docker compose -f compose.yml -f compose.entry_only_worker.yml up
+services:
+  oxphp-entry_only_worker:
+    build:
+      context: ..
+      dockerfile: docker/dev/Dockerfile
+      args:
+        PHP_VERSION:
+    ports:
+      - "80"
+    networks: [test-net]
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    environment:
+      LOG_LEVEL: error
+      INTERNAL_ADDR: 0.0.0.0:9090
+      DOCUMENT_ROOT: "off"
+      WORKER_MODE_ENABLED: "true"
+      ENTRY_FILE: /srv/app/worker.php
+    volumes:
+      - ./fixtures/entry_only/app:/srv/app
+      - ./php/test_helper.php:/srv/lib/test_helper.php

@@ -707,6 +707,160 @@ async fn test_worker_php_path_info_goes_to_worker() {
     assert_worker_execute(&*rc.resolve_request("/about.php/v1/users", &cache).await);
 }
 
+// --- DOCUMENT_ROOT switched off ---
+
+/// `RouteConfig` as `Config::from_env` builds it with `DOCUMENT_ROOT` off:
+/// the root is the entry file's directory. `env` applies while building.
+fn make_entry_only_config(
+    dir: &Path,
+    entry: impl AsRef<Path>,
+    worker_mode: bool,
+    env: &[(&str, Option<&str>)],
+) -> (RouteConfig, std::path::PathBuf) {
+    let entry_path = dir.canonicalize().unwrap().join(entry);
+    let mut vars: Vec<(&str, Option<&str>)> = vec![
+        ("PHP_DENY_PATHS", None),
+        ("PHP_DENY_FALLBACK", None),
+        ("SYMLINK_ALLOW_PATHS", None),
+    ];
+    vars.extend_from_slice(env);
+    let rc = crate::config::test_env::with_env(&vars, || {
+        let mut config = ServerConfig::new(
+            "0.0.0.0:8080".to_string(),
+            entry_path.parent().unwrap().to_path_buf(),
+        );
+        config.entry_only = true;
+        let mut rc = RouteConfig::new(&config, Some(&entry_path), worker_mode);
+        if worker_mode {
+            rc.set_worker_route(entry_path.clone());
+        }
+        rc
+    });
+    (rc, entry_path)
+}
+
+/// URIs that a mode with a root maps to a file on disk or answers itself.
+const ENTRY_ONLY_URIS: &[&str] = &[
+    "/",
+    "/style.css",
+    "/index.html",
+    "/about.php",
+    "/about.php/extra",
+    "/sub/page.html",
+    "/nonexistent.txt",
+    "/.env",
+    "/.git/config",
+    "/.well-known/x.php",
+    "/%FF",
+    "/../etc/passwd",
+];
+
+#[tokio::test]
+async fn test_entry_only_sends_every_uri_to_the_php_entry() {
+    let dir = setup_test_dir();
+    fs::write(dir.path().join("app.php"), "<?php").unwrap();
+    for worker_mode in [false, true] {
+        let (rc, entry) = make_entry_only_config(dir.path(), "app.php", worker_mode, &[]);
+        let cache = Arc::new(FileCache::new(200));
+        for uri in ENTRY_ONLY_URIS {
+            let result = rc.resolve_request(uri, &cache).await;
+            assert!(
+                matches!(&*result, RouteResult::Execute(p, None, None) if *p == entry),
+                "{uri} (worker mode {worker_mode}): {result:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn test_entry_only_serves_a_non_php_entry_for_every_uri() {
+    let dir = setup_test_dir();
+    // With a root, an entry without an extension means direct file mapping;
+    // here there is nothing to map, so it is served like any other file.
+    for name in ["index.html", "healthz", "LICENSE"] {
+        let (rc, entry) = make_entry_only_config(dir.path(), name, false, &[]);
+        let cache = Arc::new(FileCache::new(200));
+        for uri in ENTRY_ONLY_URIS {
+            let result = rc.resolve_request(uri, &cache).await;
+            assert!(
+                matches!(&*result, RouteResult::Serve(p) if *p == entry),
+                "{name} {uri}: {result:?}"
+            );
+        }
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn test_entry_only_reads_the_extension_of_a_non_utf8_entry_name() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let dir = setup_test_dir();
+    let cache = Arc::new(FileCache::new(200));
+
+    let (rc, entry) =
+        make_entry_only_config(dir.path(), OsStr::from_bytes(b"caf\xe9.html"), false, &[]);
+    let result = rc.resolve_request("/", &cache).await;
+    assert!(
+        matches!(&*result, RouteResult::Serve(p) if *p == entry),
+        "{result:?}"
+    );
+
+    let (rc, entry) =
+        make_entry_only_config(dir.path(), OsStr::from_bytes(b"caf\xe9.PHP"), false, &[]);
+    let result = rc.resolve_request("/", &cache).await;
+    assert!(
+        matches!(&*result, RouteResult::Execute(p, None, None) if *p == entry),
+        "{result:?}"
+    );
+}
+
+#[tokio::test]
+async fn test_entry_only_ignores_deny_and_symlink_settings() {
+    // With a root, each of these stops the server: an allow path that does
+    // not exist, a fallback script that does not exist.
+    let dir = setup_test_dir();
+    let (rc, entry) = make_entry_only_config(
+        dir.path(),
+        "index.html",
+        false,
+        &[
+            ("PHP_DENY_PATHS", Some("/**")),
+            ("PHP_DENY_FALLBACK", Some("/missing.php")),
+            ("SYMLINK_ALLOW_PATHS", Some("/nonexistent-allow-path")),
+        ],
+    );
+    let cache = Arc::new(FileCache::new(200));
+    let result = rc.resolve_request("/about.php", &cache).await;
+    assert!(
+        matches!(&*result, RouteResult::Serve(p) if *p == entry),
+        "{result:?}"
+    );
+}
+
+#[test]
+fn test_entry_only_names_every_setting_it_ignores() {
+    let dir = setup_test_dir();
+    let vars = [
+        ("PHP_DENY_PATHS", Some("/admin/**")),
+        ("PHP_DENY_FALLBACK", None),
+        ("SYMLINK_ALLOW_PATHS", Some(" ")),
+    ];
+    crate::config::test_env::with_env(&vars, || {
+        assert_eq!(
+            RouteConfig::ignored_without_root(dir.path()),
+            ["PHP_DENY_PATHS"]
+        );
+        // A root's deny file left in the entry's directory, where the old
+        // root was: its rules stop applying, so it must not go unmentioned.
+        fs::write(dir.path().join(".oxphpdeny"), "admin/\n").unwrap();
+        assert_eq!(
+            RouteConfig::ignored_without_root(dir.path()),
+            ["PHP_DENY_PATHS", ".oxphpdeny"]
+        );
+    });
+}
+
 // --- Security tests ---
 
 #[tokio::test]
@@ -1363,6 +1517,7 @@ mod php_deny_integration {
         let cfg = ServerConfig {
             listen_addr: "127.0.0.1:0".to_string(),
             document_root: dir.path().to_path_buf(),
+            entry_only: false,
             header_read_timeout: Duration::from_secs(5),
             deny_file: None,
         };

@@ -8,7 +8,13 @@ use super::DenyFile;
 #[derive(Debug)]
 pub struct ServerConfig {
     pub listen_addr: String,
+    /// With `entry_only`, the directory of `ENTRY_FILE`, set by
+    /// `Config::from_env` once the entry is resolved: it names only
+    /// `$_SERVER['DOCUMENT_ROOT']` and where the entry may run from.
     pub document_root: PathBuf,
+    /// `DOCUMENT_ROOT` is a falsy value: every request takes `ENTRY_FILE`'s
+    /// route, and no URI is mapped to another file or screened.
+    pub entry_only: bool,
     pub header_read_timeout: Duration,
     /// `.oxphpdeny` from the top of `document_root`, when there is one. Set
     /// by `Config::from_env`, which knows the routing mode the file is
@@ -21,6 +27,7 @@ impl ServerConfig {
         Self {
             listen_addr,
             document_root,
+            entry_only: false,
             header_read_timeout: Duration::from_secs(5),
             deny_file: None,
         }
@@ -28,9 +35,23 @@ impl ServerConfig {
 
     pub fn from_env() -> Result<Self, crate::types::BoxError> {
         let listen_addr = std::env::var("LISTEN_ADDR").unwrap_or_else(|_| "0.0.0.0:80".to_string());
-        let document_root: PathBuf = std::env::var("DOCUMENT_ROOT")
-            .unwrap_or_else(|_| "/var/www/html/public".to_string())
-            .into();
+        // Empty means the default: an unsubstituted `DOCUMENT_ROOT=${…}`
+        // must not switch the root off.
+        let raw_root = match std::env::var("DOCUMENT_ROOT") {
+            Ok(root) => Some(root).filter(|s| !s.trim().is_empty()),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(std::env::VarError::NotUnicode(_)) => {
+                return Err("DOCUMENT_ROOT is not valid UTF-8".into())
+            }
+        };
+        let entry_only = raw_root
+            .as_deref()
+            .is_some_and(|s| matches!(super::parse_bool_strict(s), Ok(false)));
+        let document_root: PathBuf = match raw_root {
+            _ if entry_only => PathBuf::new(),
+            Some(root) => root.into(),
+            None => "/var/www/html/public".into(),
+        };
 
         let header_read_timeout = Duration::from_secs(
             std::env::var("HEADER_TIMEOUT_SECONDS")
@@ -42,6 +63,7 @@ impl ServerConfig {
         Ok(Self {
             listen_addr,
             document_root,
+            entry_only,
             header_read_timeout,
             deny_file: None,
         })

@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use crate::server::compression::{Coding, Levels};
 pub use cpu::{CpuCount, CpuSource};
-pub use deny_file::{DenyAction, DenyFile};
+pub use deny_file::{DenyAction, DenyFile, DENY_FILE_NAME};
 #[allow(unused_imports)] // consumed by feature-gated plugins
 pub(crate) use env_bool::parse_bool_opt;
 pub(crate) use env_bool::{parse_bool_strict, parse_env_bool};
@@ -627,14 +627,26 @@ impl Config {
             .and_then(|s| s.parse::<usize>().ok())
             .unwrap_or(512 * 1024);
 
-        let (entry_file, worker_mode_enabled) = resolve_entry_and_mode(&server.document_root)?;
-        // Here rather than with the routing: the internal server, which
-        // reports the file on `/config`, starts before the router is built.
-        server.deny_file = DenyFile::load(
-            &server.document_root,
-            RoutingModeKind::resolve(entry_file.as_deref(), worker_mode_enabled),
-        )?
-        .map(std::sync::Arc::new);
+        let (entry_file, worker_mode_enabled) =
+            resolve_entry_and_mode((!server.entry_only).then_some(server.document_root.as_path()))?;
+        if server.entry_only {
+            let entry = entry_file.as_deref().expect("resolved without a root");
+            if !entry.is_file() {
+                return Err(format!("ENTRY_FILE={} is not a regular file", entry.display()).into());
+            }
+            server.document_root = entry
+                .parent()
+                .expect("a file has a parent directory")
+                .to_path_buf();
+        } else {
+            // Here rather than with the routing: the internal server, which
+            // reports the file on `/config`, starts before the router is built.
+            server.deny_file = DenyFile::load(
+                &server.document_root,
+                RoutingModeKind::resolve(entry_file.as_deref(), worker_mode_enabled),
+            )?
+            .map(std::sync::Arc::new);
+        }
 
         let worker_max_memory_mib = std::env::var("WORKER_MAX_MEMORY_MIB")
             .ok()
@@ -746,6 +758,7 @@ impl Config {
             server: ServerConfig {
                 listen_addr: "127.0.0.1:0".to_string(),
                 document_root: PathBuf::from("/var/www/html/public"),
+                entry_only: false,
                 header_read_timeout: Duration::from_secs(5),
                 deny_file: None,
             },
@@ -844,6 +857,7 @@ impl Config {
         serde_json::json!({
             "listen_addr": self.server.listen_addr,
             "document_root": self.server.document_root.display().to_string(),
+            "entry_only": self.server.entry_only,
             "deny_file": deny_file,
             "entry_file": self.entry_file.as_ref().map(|p| p.display().to_string()),
             "log_level": self.log_level,
@@ -938,15 +952,24 @@ impl Config {
 }
 
 /// Resolve `ENTRY_FILE` and `WORKER_MODE_ENABLED` from the environment.
+/// `document_root` is `None` when `DOCUMENT_ROOT` is switched off; the entry
+/// is then the only thing left to serve, so it is required.
 fn resolve_entry_and_mode(
-    document_root: &Path,
+    document_root: Option<&Path>,
 ) -> Result<(Option<PathBuf>, bool), crate::types::BoxError> {
     let entry_file_env = std::env::var("ENTRY_FILE").ok().filter(|s| !s.is_empty());
     let worker_mode_enabled = parse_env_bool("WORKER_MODE_ENABLED", false)?;
 
-    let entry_file = match entry_file_env {
-        Some(value) => Some(resolve_entry_file(&value, document_root)?),
-        None => None,
+    let entry_file = match (entry_file_env, document_root) {
+        (Some(value), _) => Some(resolve_entry_file(&value, document_root)?),
+        (None, Some(_)) => None,
+        (None, None) => {
+            return Err(
+                "DOCUMENT_ROOT is switched off, so ENTRY_FILE must name the file \
+                        every request goes to"
+                    .into(),
+            )
+        }
     };
 
     Ok((entry_file, worker_mode_enabled))
@@ -954,18 +977,24 @@ fn resolve_entry_and_mode(
 
 /// Resolve a raw `ENTRY_FILE` value into an absolute, existence-checked path.
 ///
-/// Relative paths (including `..`-relative) resolve against `document_root`.
+/// Relative paths (including `..`-relative) resolve against `document_root`;
+/// without one (`DOCUMENT_ROOT` switched off) only an absolute path is taken.
 /// The result is canonicalised so symlinks collapse and the executor sees a
 /// stable path regardless of how `DOCUMENT_ROOT` was spelled.
 fn resolve_entry_file(
     value: &str,
-    document_root: &Path,
+    document_root: Option<&Path>,
 ) -> Result<PathBuf, crate::types::BoxError> {
     let path = Path::new(value);
-    let candidate = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        document_root.join(path)
+    let candidate = match document_root {
+        _ if path.is_absolute() => path.to_path_buf(),
+        Some(root) => root.join(path),
+        None => {
+            return Err(format!(
+                "ENTRY_FILE={value} must be an absolute path when DOCUMENT_ROOT is switched off"
+            )
+            .into())
+        }
     };
     candidate
         .canonicalize()
@@ -1769,7 +1798,7 @@ mod entry_file_tests {
     #[test]
     fn resolve_entry_file_relative() {
         let dir = make_root_with(&["index.php"]);
-        let resolved = resolve_entry_file("index.php", dir.path()).unwrap();
+        let resolved = resolve_entry_file("index.php", Some(dir.path())).unwrap();
         assert_eq!(
             resolved,
             dir.path().canonicalize().unwrap().join("index.php")
@@ -1780,7 +1809,7 @@ mod entry_file_tests {
     fn resolve_entry_file_absolute() {
         let dir = make_root_with(&["index.php"]);
         let abs = dir.path().join("index.php");
-        let resolved = resolve_entry_file(abs.to_str().unwrap(), dir.path()).unwrap();
+        let resolved = resolve_entry_file(abs.to_str().unwrap(), Some(dir.path())).unwrap();
         assert_eq!(resolved, abs.canonicalize().unwrap());
     }
 
@@ -1792,7 +1821,7 @@ mod entry_file_tests {
         std::fs::write(outer.path().join("worker.php"), b"<?php // worker\n").unwrap();
         let public = outer.path().join("public");
         std::fs::create_dir_all(&public).unwrap();
-        let resolved = resolve_entry_file("../worker.php", &public).unwrap();
+        let resolved = resolve_entry_file("../worker.php", Some(&public)).unwrap();
         assert_eq!(
             resolved,
             outer.path().canonicalize().unwrap().join("worker.php")
@@ -1802,7 +1831,7 @@ mod entry_file_tests {
     #[test]
     fn resolve_entry_file_missing_errors() {
         let dir = TempDir::new().unwrap();
-        let err = resolve_entry_file("missing.php", dir.path()).unwrap_err();
+        let err = resolve_entry_file("missing.php", Some(dir.path())).unwrap_err();
         assert!(err.to_string().contains("ENTRY_FILE=missing.php"));
     }
 
@@ -1817,7 +1846,7 @@ mod entry_file_tests {
                 ("WORKER_MODE_ENABLED", None),
             ],
             || {
-                let (entry, worker) = resolve_entry_and_mode(dir.path()).unwrap();
+                let (entry, worker) = resolve_entry_and_mode(Some(dir.path())).unwrap();
                 assert!(entry.is_some(), "entry_file should be set");
                 assert!(!worker, "worker mode should be off");
             },
@@ -1833,7 +1862,7 @@ mod entry_file_tests {
                 ("WORKER_MODE_ENABLED", Some("true")),
             ],
             || {
-                let (entry, worker) = resolve_entry_and_mode(dir.path()).unwrap();
+                let (entry, worker) = resolve_entry_and_mode(Some(dir.path())).unwrap();
                 assert!(entry.is_some());
                 assert!(worker);
             },
@@ -1850,7 +1879,7 @@ mod entry_file_tests {
                     ("WORKER_MODE_ENABLED", Some(val)),
                 ],
                 || {
-                    let (_, worker) = resolve_entry_and_mode(dir.path()).unwrap();
+                    let (_, worker) = resolve_entry_and_mode(Some(dir.path())).unwrap();
                     assert!(
                         worker,
                         "WORKER_MODE_ENABLED={val:?} should enable worker mode"
@@ -1870,7 +1899,7 @@ mod entry_file_tests {
                     ("WORKER_MODE_ENABLED", Some(val)),
                 ],
                 || {
-                    let (_, worker) = resolve_entry_and_mode(dir.path()).unwrap();
+                    let (_, worker) = resolve_entry_and_mode(Some(dir.path())).unwrap();
                     assert!(
                         !worker,
                         "WORKER_MODE_ENABLED={val:?} should disable worker mode"
@@ -1890,7 +1919,7 @@ mod entry_file_tests {
                     ("WORKER_MODE_ENABLED", Some(val)),
                 ],
                 || {
-                    let res = resolve_entry_and_mode(dir.path());
+                    let res = resolve_entry_and_mode(Some(dir.path()));
                     let err = res
                         .err()
                         .unwrap_or_else(|| panic!("WORKER_MODE_ENABLED={val:?} should error"));
@@ -1917,7 +1946,7 @@ mod entry_file_tests {
                     ("WORKER_MODE_ENABLED", Some(val)),
                 ],
                 || {
-                    let (_, worker) = resolve_entry_and_mode(dir.path()).unwrap();
+                    let (_, worker) = resolve_entry_and_mode(Some(dir.path())).unwrap();
                     assert!(
                         !worker,
                         "WORKER_MODE_ENABLED={val:?} should fall back to default (false)"
@@ -1941,7 +1970,7 @@ mod entry_file_tests {
                     (var, Some(value)),
                 ],
                 || {
-                    let (entry, worker) = resolve_entry_and_mode(dir.path()).unwrap();
+                    let (entry, worker) = resolve_entry_and_mode(Some(dir.path())).unwrap();
                     assert_eq!(entry, None, "{var} must not select an entry script");
                     assert!(!worker, "{var} must not enable worker mode");
                 },
@@ -2029,5 +2058,87 @@ mod entry_file_tests {
             errors.iter().all(|e| !e.contains("WORKER_MODE_ENABLED")),
             "got: {errors:?}"
         );
+    }
+
+    // ── DOCUMENT_ROOT switched off ──
+
+    fn root_off_env<'a>(
+        root: &'a str,
+        entry: Option<&'a str>,
+    ) -> [(&'static str, Option<&'a str>); 3] {
+        [
+            ("DOCUMENT_ROOT", Some(root)),
+            ("ENTRY_FILE", entry),
+            ("WORKER_MODE_ENABLED", None),
+        ]
+    }
+
+    #[test]
+    fn document_root_off_makes_the_entry_directory_the_root() {
+        let dir = make_root_with(&["app.php"]);
+        // Loaded with a root in every mode, so its absence is the switch's.
+        std::fs::write(dir.path().join(".oxphpdeny"), "vendor/\n").unwrap();
+        let entry = dir.path().join("app.php");
+        for value in ["false", "off", "0", "no", " FALSE "] {
+            with_env(&root_off_env(value, entry.to_str()), || {
+                let config = Config::from_env().unwrap();
+                assert!(config.server.entry_only, "{value:?}");
+                assert_eq!(
+                    config.server.document_root,
+                    dir.path().canonicalize().unwrap(),
+                    "{value:?}"
+                );
+                assert_eq!(config.entry_file, Some(entry.canonicalize().unwrap()));
+                assert!(config.server.deny_file.is_none(), "{value:?}");
+            });
+        }
+    }
+
+    #[test]
+    fn document_root_off_needs_an_entry_file() {
+        with_env(&root_off_env("off", None), || {
+            let err = Config::from_env().unwrap_err().to_string();
+            assert!(err.contains("ENTRY_FILE"), "{err}");
+        });
+    }
+
+    #[test]
+    fn document_root_off_needs_an_absolute_entry_file() {
+        with_env(&root_off_env("off", Some("app.php")), || {
+            let err = Config::from_env().unwrap_err().to_string();
+            assert!(err.contains("absolute"), "{err}");
+        });
+    }
+
+    #[test]
+    fn document_root_off_needs_the_entry_to_be_a_file() {
+        let dir = make_root_with(&[]);
+        for entry in [dir.path().to_str().unwrap(), "/"] {
+            with_env(&root_off_env("off", Some(entry)), || {
+                let err = Config::from_env().unwrap_err().to_string();
+                assert!(err.contains("not a regular file"), "{entry}: {err}");
+            });
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn non_utf8_document_root_is_a_hard_error() {
+        use std::os::unix::ffi::OsStrExt;
+        // Falling back to the default would serve another directory.
+        let bad = std::ffi::OsStr::from_bytes(b"/srv/\xFF");
+        test_env::with_env_os(&[("DOCUMENT_ROOT", Some(bad))], || {
+            let err = ServerConfig::from_env().unwrap_err().to_string();
+            assert!(err.contains("DOCUMENT_ROOT"), "{err}");
+        });
+    }
+
+    #[test]
+    fn empty_document_root_is_the_default() {
+        with_env(&[("DOCUMENT_ROOT", Some(""))], || {
+            let server = ServerConfig::from_env().unwrap();
+            assert_eq!(server.document_root, PathBuf::from("/var/www/html/public"));
+            assert!(!server.entry_only);
+        });
     }
 }

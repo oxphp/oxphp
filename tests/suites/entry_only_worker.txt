@@ -1,0 +1,8 @@
+# profile: entry_only_worker
+# description: DOCUMENT_ROOT switched off in worker mode — every URI reaches the worker with its path intact
+
+entry_only/test_root_reaches_the_worker >> / | GET | -H "X-Expect-Uri: /" | 200 | content-type:~application/json
+entry_only/test_existing_static_file_reaches_the_worker >> /style.css | GET | -H "X-Expect-Uri: /style.css" | 200 | content-type:~application/json
+entry_only/test_other_php_file_reaches_the_worker >> /other.php | GET | -H "X-Expect-Uri: /other.php" | 200 | content-type:~application/json
+entry_only/test_dot_env_reaches_the_worker >> /.env | GET | -H "X-Expect-Uri: /.env" | 200 | content-type:~application/json
+entry_only/test_invalid_utf8_reaches_the_worker >> /%FF | GET | -H "X-Expect-Uri: /%FF" | 200 | content-type:~application/json

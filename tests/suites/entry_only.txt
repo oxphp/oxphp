@@ -1,0 +1,18 @@
+# profile: entry_only
+# description: DOCUMENT_ROOT switched off, .php ENTRY_FILE per request — every URI runs the entry with its path intact
+
+# Written at startup, before the first request.
+log ~ignoring these settings
+log ~"settings":"PHP_DENY_PATHS, SYMLINK_ALLOW_PATHS, .oxphpdeny"
+
+entry_only/test_root_runs_the_entry >> / | GET | -H "X-Expect-Uri: /" | 200 | content-type:~application/json
+entry_only/test_existing_static_file_runs_the_entry >> /style.css | GET | -H "X-Expect-Uri: /style.css" | 200 | content-type:~application/json
+entry_only/test_other_php_file_runs_the_entry >> /other.php | GET | -H "X-Expect-Uri: /other.php" | 200 | content-type:~application/json
+entry_only/test_path_info_uri_runs_the_entry >> /other.php/extra | GET | -H "X-Expect-Uri: /other.php/extra" | 200 | content-type:~application/json
+entry_only/test_dot_env_runs_the_entry >> /.env | GET | -H "X-Expect-Uri: /.env" | 200 | content-type:~application/json
+entry_only/test_dot_git_runs_the_entry >> /.git/config | GET | -H "X-Expect-Uri: /.git/config" | 200 | content-type:~application/json
+entry_only/test_well_known_php_runs_the_entry >> /.well-known/x.php | GET | -H "X-Expect-Uri: /.well-known/x.php" | 200 | content-type:~application/json
+entry_only/test_invalid_utf8_runs_the_entry >> /%FF | GET | -H "X-Expect-Uri: /%FF" | 200 | content-type:~application/json
+entry_only/test_encoded_traversal_runs_the_entry >> /%2e%2e/etc/passwd | GET | -H "X-Expect-Uri: /%2e%2e/etc/passwd" | 200 | content-type:~application/json
+entry_only/test_deny_file_itself_runs_the_entry >> /.oxphpdeny | GET | -H "X-Expect-Uri: /.oxphpdeny" | 200 | content-type:~application/json
+entry_only/test_post_runs_the_entry >> /api/items | POST | -H "X-Expect-Uri: /api/items" -d "x=1" | 200 | content-type:~application/json

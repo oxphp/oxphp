@@ -1,0 +1,9 @@
+# profile: entry_only_spa
+# description: DOCUMENT_ROOT switched off with ENTRY_FILE=index.html — every URI gets that file as text/html
+
+entry_only/test_spa_root_gets_the_entry >> / | GET | | 200 | content-type:~text/html, etag:exists
+entry_only/test_spa_existing_asset_gets_the_entry >> /app.js | GET | | 200 | content-type:~text/html, etag:exists
+entry_only/test_spa_client_route_gets_the_entry >> /users/42 | GET | | 200 | content-type:~text/html, etag:exists
+entry_only/test_spa_php_uri_gets_the_entry >> /index.php | GET | | 200 | content-type:~text/html, etag:exists
+entry_only/test_spa_dot_env_gets_the_entry >> /.env | GET | | 200 | content-type:~text/html, etag:exists
+entry_only/test_spa_post_gets_the_entry >> /api/items | POST | -d "x=1" | 200 | content-type:~text/html
