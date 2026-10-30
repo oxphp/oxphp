@@ -645,9 +645,19 @@ fn async_worker_thread(
 
     // 4. Shutdown
     // A result the drain gave up holding can pin `Shared\*` values, whose
-    // release may run PHP code: it goes while the request is still open.
-    drop(held);
+    // release may run PHP code: it goes while the request is still open. Its
+    // sender waits for the close, as in-flight ones do: the result was held for
+    // a task running the awaiting request's code, and only the close stops that
+    // task — unwinding it here, or waiting until it answers or the pool stops.
+    let held: Vec<InFlight> = held
+        .into_values()
+        .map(|(entry, result)| {
+            drop(result);
+            entry
+        })
+        .collect();
     unsafe { crate::php::thread::close_request() };
+    drop(held);
     drop(request_open);
 
     tracing::info!(

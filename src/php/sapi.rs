@@ -275,8 +275,10 @@ thread_local! {
     static PROMISE_STRANDED: RefCell<HashMap<u64, PromiseEntry>>
         = RefCell::new(HashMap::new());
 
-    /// Orphaned promises of finished request fibers, awaiting non-blocking drain
-    /// by the scheduler tick (see `DeferredDrain`). HTTP worker threads only.
+    /// Orphaned promises of finished request fibers and async tasks, awaiting
+    /// non-blocking drain by the scheduler tick (see `DeferredDrain`). Per
+    /// thread: what a task leaves is on the thread whose driver holds its
+    /// result, so `orphans_hold_result` needs no other thread's list.
     static DEFERRED_DRAIN: RefCell<Vec<DeferredDrain>> = const { RefCell::new(Vec::new()) };
 
     /// True on async worker threads, false on HTTP workers.
