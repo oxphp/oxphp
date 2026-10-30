@@ -146,7 +146,7 @@ Honest list of what this feature does *not* do:
 
 ## See Also
 
-- [Path Deny Rules](oxphpdeny.md) — keep any path, static or PHP, from being served, in every routing mode
+- [Path Deny Rules](oxphpdeny.md) — keep any path, static or PHP, from being served, in every routing mode with a document root
 - [Routing](../features/routing.md) — routing modes and path security
 - [Error Pages](../features/error-pages.md) — custom HTML bodies for status-fallback responses
 - [Configuration Reference](../operations/configuration.md) — full env-var list

@@ -1,0 +1,34 @@
+# DOCUMENT_ROOT switched off with a .php ENTRY_FILE run per request: every
+# URI runs the entry, and nothing in the entry's directory is served or read.
+#
+# Standalone usage:
+#   docker compose -f compose.yml -f compose.entry_only.yml up
+services:
+  oxphp-entry_only:
+    build:
+      context: ..
+      dockerfile: docker/dev/Dockerfile
+      args:
+        PHP_VERSION:
+    ports:
+      - "80"
+    networks: [test-net]
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    environment:
+      # warn: the suite reads the warning about the ignored settings below.
+      LOG_LEVEL: warn
+      INTERNAL_ADDR: 0.0.0.0:9090
+      DOCUMENT_ROOT: "false"
+      ENTRY_FILE: /srv/app/app.php
+      # With a root, an allow path that does not exist stops the server.
+      SYMLINK_ALLOW_PATHS: /nonexistent-allow-path
+      PHP_DENY_PATHS: /**
+    volumes:
+      - ./fixtures/entry_only/app:/srv/app
+      - ./php/test_helper.php:/srv/lib/test_helper.php

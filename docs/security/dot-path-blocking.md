@@ -7,7 +7,7 @@ description: OxPHP blocks access to hidden files and directories (starting with 
 
 OxPHP blocks access to any URL path containing a segment that starts with `.` — returning 404 Not Found. This prevents exposure of sensitive files like `.env`, `.git/`, `.htaccess`, `.svn/`, and `.DS_Store` that are commonly targeted by automated scanners.
 
-This protection is always on and cannot be disabled. It applies to all routing modes (traditional, framework, SPA, and worker).
+This protection cannot be disabled on its own. It applies in every routing mode — Traditional, Framework, SPA and Worker — and is skipped only when `DOCUMENT_ROOT` is [switched off](../features/routing.md#no-document-root): with no files to serve, every request, `/.env` included, goes to `ENTRY_FILE`, and the application decides what to answer.
 
 ## What Is Blocked
 
@@ -38,7 +38,7 @@ Single-level percent-encoded bypasses are caught — `/%2egit/HEAD` decodes once
 | `/.well-known/` | 404 (directory listing) |
 | `/.well-known/test.php` | 404 (PHP execution blocked) |
 
-PHP files inside `.well-known` are never executed — they always return 404. This directory serves static content only.
+With a document root, PHP files inside `.well-known` are never executed — they return 404, and the directory serves static content only. With `DOCUMENT_ROOT` switched off, a `/.well-known/` path goes to `ENTRY_FILE` like any other.
 
 MIME types are determined by file extension. Files without an extension (like `openid-configuration`) are served as `application/octet-stream`.
 

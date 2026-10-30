@@ -22,7 +22,7 @@ Worker mode runs persistent PHP workers that bootstrap once and handle multiple 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `WORKER_MODE_ENABLED` | `false` | Enable persistent worker mode. Accepts `true`, `1`, `yes`. Requires `ENTRY_FILE` to point at a `.php` script |
-| `ENTRY_FILE` | *(unset)* | Path to the worker bootstrap script. Resolved against `DOCUMENT_ROOT` when relative; `..` segments and absolute paths are allowed (worker bootstraps living outside the public document root are a supported layout) |
+| `ENTRY_FILE` | *(unset)* | Path to the worker bootstrap script. Resolved against `DOCUMENT_ROOT` when relative; `..` segments and absolute paths are allowed (worker bootstraps living outside the public document root are a supported layout). A worker that serves no static files can run with `DOCUMENT_ROOT=false` and an absolute `ENTRY_FILE` — see [No Document Root](routing.md#no-document-root) |
 | `WORKER_MAX_MEMORY_MIB` | `0` | Maximum PHP memory per worker in MiB before recycling. `0` = unlimited |
 
 For application-driven recycling, call [`OxPHP\Server\Worker::scheduleExit()`](../php/worker-class.md#scheduleexit) from inside a request handler. The worker exits cleanly after the current request completes.

@@ -354,6 +354,7 @@ async fn async_main(
         version = env!("CARGO_PKG_VERSION"),
         listen_addr = %config.server.listen_addr,
         document_root = %config.server.document_root.display(),
+        entry_only = config.server.entry_only,
         executor = %config.executor_type,
         mode = mode,
         "OxPHP HTTP server starting"

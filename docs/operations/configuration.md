@@ -23,8 +23,8 @@ An unset variable or empty assignment (`FOO=`) falls back to the documented defa
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `LISTEN_ADDR` | `0.0.0.0:80` | Address and port for the main HTTP server |
-| `DOCUMENT_ROOT` | `/var/www/html/public` | Root directory for serving files and PHP scripts |
-| `ENTRY_FILE` | *(unset)* | Single canonical entry script. Unset = direct file mapping. `*.php` = front controller. Non-`.php` = static fallback (SPA). With `WORKER_MODE_ENABLED=true` = worker bootstrap. Resolved against `DOCUMENT_ROOT` (relative paths and `..` allowed; absolute paths used as-is). See [Routing](../features/routing.md) |
+| `DOCUMENT_ROOT` | `/var/www/html/public` | Root directory for serving files and PHP scripts. `false` (or `off`, `0`, `no`) switches it off: every request goes to `ENTRY_FILE`, with no static files served. See [No Document Root](../features/routing.md#no-document-root) |
+| `ENTRY_FILE` | *(unset)* | Single canonical entry script. Unset, or a file name without an extension = direct file mapping. `*.php` = front controller. Any other extension = static fallback (SPA). With `WORKER_MODE_ENABLED=true` = worker bootstrap. Resolved against `DOCUMENT_ROOT` (relative paths and `..` allowed; absolute paths used as-is, and required with `DOCUMENT_ROOT` switched off). See [Routing](../features/routing.md) |
 | `WORKER_MODE_ENABLED` | `false` | Enable persistent worker mode. Requires `ENTRY_FILE` to point at a `.php` script. Boolean — see [Boolean values](#boolean-values) |
 | `MAX_CONNECTIONS` | `10000` | Maximum concurrent TCP connections. Also the ceiling for the default `QUEUE_MAX_WAITING` (half of it), so a malformed value is a startup error rather than a silent fallback. Lowering it does not move the `QUEUE_CAPACITY` default, which is sized from the worker count alone — keep it above `PHP_WORKERS` + `QUEUE_CAPACITY` + `QUEUE_MAX_WAITING`, see below |
 | `TOKIO_WORKERS` | [CPU](#how-the-cpu-count-is-detected) / 2 (min 1) | Async I/O threads. `1` = single-threaded, `N > 1` = fixed thread count, unset = auto (CPU / 2, min 1) |
@@ -503,6 +503,7 @@ curl -s http://localhost:9090/config | jq .
   "document_root": "/var/www/html/public",
   "drain_timeout_seconds": 30,
   "entry_file": "/var/www/html/public/index.php",
+  "entry_only": false,
   "executor_type": "sapi",
   "gzip_level": 6,
   "header_timeout_seconds": 5,

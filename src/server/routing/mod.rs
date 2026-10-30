@@ -140,6 +140,10 @@ pub struct RouteConfig {
     /// after any eviction. Values are `Arc<RouteResult>` so hits are a
     /// single atomic increment rather than a `PathBuf::clone()`.
     route_cache: Mutex<LruCache<String, Arc<RouteResult>>>,
+    /// The route every request takes when `DOCUMENT_ROOT` is switched off,
+    /// ahead of every pipeline step. `policy` and `document_root` still apply:
+    /// the entry is opened and served against them.
+    entry_route: Option<Arc<RouteResult>>,
 }
 
 impl RouteConfig {
@@ -152,6 +156,9 @@ impl RouteConfig {
     /// - non-worker mode + `*.php` entry → `FrameworkRouter` (front controller),
     /// - non-worker mode + non-`.php` entry → `SpaRouter` (static fallback),
     /// - non-worker mode + no entry → `TraditionalRouter` (direct file mapping).
+    ///
+    /// With `DOCUMENT_ROOT` switched off, every request takes the entry
+    /// file's route instead, whatever the mode.
     ///
     /// Panics if the document root cannot be canonicalized, since symlink
     /// escape protection requires a valid, resolvable document root path.
@@ -192,6 +199,9 @@ impl RouteConfig {
             }
             RoutingModeKind::Spa => Mode::Spa(SpaRouter::new(&document_root, entry_name())),
         };
+        if config.entry_only {
+            return Self::entry_only(document_root, canonical_root, mode, entry_file);
+        }
 
         let php_deny =
             crate::config::PhpDeny::from_env(&canonical_root, kind).unwrap_or_else(|e| {
@@ -248,7 +258,65 @@ impl RouteConfig {
             route_cache: Mutex::new(LruCache::new(
                 NonZeroUsize::new(ROUTE_CACHE_CAPACITY).unwrap(),
             )),
+            entry_route: None,
         }
+    }
+
+    /// `DOCUMENT_ROOT` switched off: the deny and symlink settings guard files
+    /// under a root, and with none to map a URI onto they are dropped.
+    fn entry_only(
+        document_root: Arc<PathBuf>,
+        canonical_root: PathBuf,
+        mode: Mode,
+        entry_file: Option<&Path>,
+    ) -> Self {
+        let ignored = Self::ignored_without_root(&canonical_root);
+        if !ignored.is_empty() {
+            tracing::warn!(
+                settings = ignored.join(", "),
+                "DOCUMENT_ROOT is switched off and every request goes to ENTRY_FILE — ignoring these settings"
+            );
+        }
+        let entry = entry_file
+            .expect("Config::from_env requires ENTRY_FILE without a root")
+            .to_path_buf();
+        // By the extension alone, not by `RoutingModeKind`: that reads a name
+        // without one, or one that is not UTF-8, as direct file mapping.
+        let route = if entry
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("php"))
+        {
+            RouteResult::Execute(entry, None, None)
+        } else {
+            RouteResult::Serve(entry)
+        };
+        Self {
+            document_root,
+            policy: Arc::new(crate::path_guard::PathPolicy::new(
+                canonical_root,
+                crate::config::SymlinkAllowList::default(),
+            )),
+            mode,
+            worker_route: None,
+            php_deny: None,
+            deny_file: None,
+            deny_file_fallback: None,
+            route_cache: Mutex::new(LruCache::new(NonZeroUsize::MIN)),
+            entry_route: Some(Arc::new(route)),
+        }
+    }
+
+    /// The settings `entry_only` drops that the operator gave all the same.
+    fn ignored_without_root(entry_dir: &Path) -> Vec<&'static str> {
+        let mut ignored: Vec<&str> = ["PHP_DENY_PATHS", "PHP_DENY_FALLBACK", "SYMLINK_ALLOW_PATHS"]
+            .into_iter()
+            .filter(|var| std::env::var(var).is_ok_and(|v| !v.trim().is_empty()))
+            .collect();
+        let deny_file = crate::config::DENY_FILE_NAME;
+        if entry_dir.join(deny_file).exists() {
+            ignored.push(deny_file);
+        }
+        ignored
     }
 
     /// Returns the canonical document root.
@@ -305,6 +373,12 @@ impl RouteConfig {
         uri_path: &str,
         file_cache: &Arc<FileCache>,
     ) -> Arc<RouteResult> {
+        // Every URI takes the entry's route as sent: with no other file to
+        // serve, the pipeline has nothing to guard.
+        if let Some(route) = &self.entry_route {
+            return Arc::clone(route);
+        }
+
         // Block dot-paths before cache (keeps junk out of LRU). Fast-path:
         // byte scan lets clean URIs (`/api/users`, `/style.css`, `/`) skip
         // percent-decoding entirely. When markers are present we decode once

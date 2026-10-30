@@ -316,8 +316,8 @@ The essentials — what most deployments need to get a service up:
 | Variable | Default | Description |
 |---|---|---|
 | `LISTEN_ADDR` | `0.0.0.0:80` | Address and port to bind |
-| `DOCUMENT_ROOT` | `/var/www/html/public` | Filesystem path to serve files from |
-| `ENTRY_FILE` | *(unset)* | Single canonical entry script. Unset = Traditional, `*.php` = Framework, non-`.php` = SPA. Resolved against `DOCUMENT_ROOT` |
+| `DOCUMENT_ROOT` | `/var/www/html/public` | Filesystem path to serve files from. `false` switches it off: every request goes to `ENTRY_FILE` — see [No Document Root](docs/features/routing.md#no-document-root) |
+| `ENTRY_FILE` | *(unset)* | Single canonical entry script. Unset or without an extension = Traditional, `*.php` = Framework, any other extension = SPA. Resolved against `DOCUMENT_ROOT`; must be absolute when it is switched off |
 | `WORKER_MODE_ENABLED` | `false` | Enable persistent worker mode. Requires `ENTRY_FILE` to point at a `.php` script |
 | `INTERNAL_ADDR` | *(unset)* | Internal server for health/metrics/config. A port-only value like `:9090` binds `127.0.0.1`; use `0.0.0.0:9090` to expose it off-host |
 | `INTERNAL_ALLOW_IPS` | *(unset)* | Comma-separated CIDRs allowed to reach `/metrics`, `/config` and other internal paths. Health endpoints (`/health`, `/healthz`, `/readyz`, `/startupz`, …) are always allowed. Empty = allow all. Loopback is not implicit — list `127.0.0.1/32` to keep localhost access |

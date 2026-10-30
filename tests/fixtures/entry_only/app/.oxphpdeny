@@ -1,0 +1,2 @@
+# Never read with DOCUMENT_ROOT switched off; read, it would deny this file.
+style.css
