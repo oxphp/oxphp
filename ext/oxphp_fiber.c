@@ -7630,9 +7630,10 @@ int oxphp_scheduler_tick(oxphp_fiber_scheduler *sched) {
  * Reuses the HTTP fiber struct (oxphp_request_fiber + its task_* fields).
  * Unlike HTTP request fibers, task fibers carry no per-request superglobal /
  * SAPI-header / Rust-TLS state, so their switch wrappers move nothing but the
- * C-stack bounds — concurrent suspended tasks are kept apart by the Zend VM
- * state zend_fiber_switch_context carries per switching frame, which is the
- * same thing that keeps userland Fibers apart.
+ * C-stack bounds and the task's last error — concurrent suspended tasks are
+ * otherwise kept apart by the Zend VM state zend_fiber_switch_context carries
+ * per switching frame, which is the same thing that keeps userland Fibers
+ * apart.
  * Superglobals and output buffers stay shared on the worker
  * (background tasks are read-only w.r.t. them — same as the previous
  * synchronous model, which never reset superglobals between tasks).
@@ -7711,10 +7712,59 @@ static void task_capture_fatal(oxphp_request_fiber *fiber) {
     }
 }
 
+static void oxphp_task_last_error_release(void) {
+    if (PG(last_error_message)) {
+        zend_string_release(PG(last_error_message));
+        PG(last_error_message) = NULL;
+    }
+    if (PG(last_error_file)) {
+        zend_string_release(PG(last_error_file));
+        PG(last_error_file) = NULL;
+    }
+    PG(last_error_type) = 0;
+    PG(last_error_lineno) = 0;
+}
+
+/* A task's last error is its own, taken off the thread at the end of each of
+ * its slices by the move step 1b of oxphp_fiber_save_php_state() makes for a
+ * request, so that no task's stands there between its slices. For code that is
+ * not in OPcache's shared memory, the message and file it names can be in the
+ * memory of the request that dispatched the task, which can end once the
+ * task's result is sent; a copy another task took of it in the meantime would
+ * outlive that memory. A finished task's goes with its payload, before that
+ * send. */
+static void oxphp_task_last_error_park(oxphp_request_fiber *fiber) {
+    fiber->php_state.last_error_type = PG(last_error_type);
+    fiber->php_state.last_error_lineno = PG(last_error_lineno);
+    fiber->php_state.last_error_message = PG(last_error_message);
+    fiber->php_state.last_error_file = PG(last_error_file);
+    PG(last_error_type) = 0;
+    PG(last_error_lineno) = 0;
+    PG(last_error_message) = NULL;
+    PG(last_error_file) = NULL;
+}
+
+/* And back for its next slice, giving up whatever a step outside every slice
+ * left there instead of letting the task read it as its own. */
+static void oxphp_task_last_error_unpark(oxphp_request_fiber *fiber) {
+    oxphp_task_last_error_release();
+    PG(last_error_type) = fiber->php_state.last_error_type;
+    PG(last_error_lineno) = fiber->php_state.last_error_lineno;
+    PG(last_error_message) = fiber->php_state.last_error_message;
+    PG(last_error_file) = fiber->php_state.last_error_file;
+    fiber->php_state.last_error_type = 0;
+    fiber->php_state.last_error_lineno = 0;
+    fiber->php_state.last_error_message = NULL;
+    fiber->php_state.last_error_file = NULL;
+}
+
 /* Switch into a task fiber to run a NEW task — a fresh fiber whose loop begins
  * at its entry, or a recycled one parked at the bottom of that loop.
  * Task-side mirror of oxphp_scheduler_start_fiber; a task carries no HTTP
- * request state, so the C-stack bounds are the only thing installed here. */
+ * request state, so the C-stack bounds are all it installs, and its last error
+ * all it takes back out. A new task starts with none: the driver also runs PHP
+ * outside every slice and window, in the destructors of what it frees, and what
+ * that leaves standing is not the task's. */
 static void oxphp_task_start_fiber(oxphp_fiber_scheduler *sched, oxphp_request_fiber *fiber) {
     /* As oxphp_scheduler_start_fiber() does, for the task's sake. */
     oxphp_recover_from_reported_oom();
@@ -7725,7 +7775,9 @@ static void oxphp_task_start_fiber(oxphp_fiber_scheduler *sched, oxphp_request_f
     void *saved_stack_limit = EG(stack_limit);
     oxphp_fiber_install_stack_limits(fiber);
 
+    oxphp_task_last_error_release();
     oxphp_fiber_enter(fiber, NULL);
+    oxphp_task_last_error_park(fiber);
 
     EG(stack_base) = saved_stack_base;
     EG(stack_limit) = saved_stack_limit;
@@ -7733,7 +7785,9 @@ static void oxphp_task_start_fiber(oxphp_fiber_scheduler *sched, oxphp_request_f
 }
 
 /* Resume a suspended task fiber. Task-side mirror of
- * oxphp_scheduler_resume_fiber, with no per-request state to re-install. */
+ * oxphp_scheduler_resume_fiber, with no request state to re-install: it moves
+ * the C-stack bounds, and the task's last error in for the slice and back out
+ * after it. */
 static void oxphp_task_resume_fiber(oxphp_fiber_scheduler *sched,
                                     oxphp_request_fiber *fiber, zval *value) {
     /* As oxphp_scheduler_start_fiber() does, for the task's sake. */
@@ -7746,7 +7800,9 @@ static void oxphp_task_resume_fiber(oxphp_fiber_scheduler *sched,
     void *saved_stack_limit = EG(stack_limit);
     oxphp_fiber_install_stack_limits(fiber);
 
+    oxphp_task_last_error_unpark(fiber);
     oxphp_fiber_enter(fiber, value);
+    oxphp_task_last_error_park(fiber);
 
     EG(stack_base) = saved_stack_base;
     EG(stack_limit) = saved_stack_limit;
@@ -7932,8 +7988,20 @@ static void oxphp_task_window_open(oxphp_vm_stack_mark *mark) {
     oxphp_recover_from_reported_oom();
 }
 
+/* The close drops what the steps left standing: an exception, the last error,
+ * and on 8.5 the backtrace of the last fatal. That backtrace can also be a
+ * sleeping task's, since tasks share it, which loses it here as it would to any
+ * error raised meanwhile. No task is left to own what a step raised, and the
+ * result of the task whose release raised it can be sent next, to the request
+ * whose memory it may name (see oxphp_task_last_error_park). The backtrace goes
+ * first and under a catch, since releasing it runs destructors; the exception
+ * after it, since its destructor can raise an error. */
 static void oxphp_task_window_close(oxphp_vm_stack_mark *mark) {
+#if PHP_VERSION_ID >= 80500
+    OXPHP_TASK_WINDOW_STEP(mark, oxphp_fatal_backtrace_release());
+#endif
     oxphp_serve_loop_drop_exception(mark);
+    oxphp_task_last_error_release();
     oxphp_recover_from_reported_oom();
 }
 

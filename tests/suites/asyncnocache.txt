@@ -14,3 +14,12 @@ asyncnocache/test_task_orphan_holds_its_parent_result_until_it_stops
 # A child still waiting in the queue when its parent ends is never run, so the
 # parent's result does not wait for the child's turn.
 asyncnocache/test_task_orphan_still_queued_does_not_hold_its_parent_result
+# Without OPcache a task's warning names the memory of the request that
+# dispatched it: the async thread holds none of it once the task has ended.
+asyncnocache/test_task_last_error_does_not_outlive_its_request
+# A task that sleeps keeps its last error; a task that runs meanwhile starts
+# without it.
+asyncnocache/test_task_last_error_is_not_shared_with_a_sibling
+# A warning raised while a finished task's closure is released goes before the
+# next task starts.
+asyncnocache/test_task_driver_window_error_does_not_reach_the_next_task
