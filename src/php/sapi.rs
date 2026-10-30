@@ -1571,7 +1571,7 @@ pub fn build_cli_sapi_module(ini_entries: *const c_char) -> sapi_module_struct {
 
         // php://input from stdin is out of scope for the one-shot role.
         read_post: None,
-        read_cookies: None,
+        read_cookies: Some(cli_read_cookies),
 
         register_server_variables: Some(oxphp_register_server_variables),
         log_message: Some(cli_log_message),
@@ -1655,6 +1655,13 @@ unsafe extern "C" fn cli_ub_write(str: *const c_char, str_length: usize) -> usiz
 
 /// No-op: stdout writes via `write(2)` are not buffered at the libc level.
 unsafe extern "C" fn cli_flush(_server_context: *mut c_void) {}
+
+/// No cookies on the command line, as php-cli answers. The async pool's threads
+/// set `SG(server_context)` for their request, and `sapi_activate()` then calls
+/// this hook without a NULL check (PHP 8.4 / 8.5 `main/SAPI.c`).
+unsafe extern "C" fn cli_read_cookies() -> *mut c_char {
+    std::ptr::null_mut()
+}
 
 /// CLI has no HTTP headers; report them as sent so PHP proceeds.
 unsafe extern "C" fn cli_send_headers(_sapi_headers: *mut sapi_headers_struct) -> c_int {
