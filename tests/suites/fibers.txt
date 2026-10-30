@@ -8,6 +8,11 @@ fibers/test_foreign_resume_is_refused
 fibers/test_async_task_is_a_fiber
 fibers/test_switch_blocked_falls_back
 fibers/test_suspend_retry_is_bounded
+# A request ended for retrying Fiber::suspend() whose unwind suspends the fiber
+# again, by parking in a finally block or by throwing to a catch that suspends
+# once more, is answered only when that unwind is over, and the next request on
+# the worker runs its own handler.
+fibers/test_suspend_retry_end_waits_for_unwind
 fibers/test_generator_fatal_releases_once
 fibers/test_closure_fatal_releases_it
 fibers/test_shared_closure_fatal_releases

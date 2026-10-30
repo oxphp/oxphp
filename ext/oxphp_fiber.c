@@ -76,7 +76,7 @@ __thread oxphp_request_fiber *oxphp_fiber_resume_token = NULL;
  * static in zend_fibers.c, so it has to be resolved by name. Both callers are
  * cold (a userland program doing something the scheduler cannot honour), which
  * is why this looks the class up per refusal instead of caching it. A NULL here
- * is harmless: zend_throw_error() falls back to Error. */
+ * is harmless: both refusals fall back to Error. */
 static zend_class_entry *oxphp_fiber_error_ce(void) {
     zend_string *name = zend_string_init("FiberError", sizeof("FiberError") - 1, 0);
     zend_class_entry *ce = zend_lookup_class(name);
@@ -1585,12 +1585,11 @@ static inline void oxphp_fiber_install_stack_limits(const oxphp_request_fiber *f
 
 /* Refuse a suspension the scheduler did not ask for.
  *
- * Running a request as a real \Fiber makes \Fiber::suspend() reachable from
- * inside it. The engine honours it — the request's own fiber suspends and
- * control lands back here — but it records no reason for the suspension, so
- * nothing in this scheduler will ever resume it and the request would park until
- * its timeout. An event loop handed the request's fiber by \Fiber::getCurrent()
- * suspends it the same way.
+ * Running a request or a task as a real \Fiber makes \Fiber::suspend() reachable
+ * from inside it. The engine honours it — the fiber suspends and control lands
+ * back here — but it records no reason for the suspension, so nothing in this
+ * scheduler will ever resume it: a request would park until its timeout. An
+ * event loop handed the fiber by \Fiber::getCurrent() suspends it the same way.
  *
  * `!completed` with no reason recorded is exactly that case: all four of our own
  * suspend points set a reason before parking, and the loop marks itself
@@ -1601,39 +1600,95 @@ static inline void oxphp_fiber_install_stack_limits(const oxphp_request_fiber *f
  * otherwise never give this function back. It runs inside a scheduler tick, so
  * an unbounded refusal is not one stuck request: the tick never returns, no
  * cancel or timeout from the server side is observed, and every other in-flight
- * request on the worker stops with it. Past the limit the request is ended
- * instead of argued with, the same way teardown ends one — a graceful exit,
- * which userland cannot catch and retry. */
+ * request on the worker, or task on the async worker, stops with it. Past the
+ * limit the fiber is ended instead of argued with, the same way teardown ends
+ * one — a graceful exit, which no catch block matches. */
 #define OXPHP_MAX_SUSPEND_REFUSALS 32
 
-/* End a request that will not stop suspending itself. A graceful exit is what
- * the engine uses to unwind a fiber nobody will resume again: userland cannot
- * catch it, so this terminates however many nested try/catch frames the retry
- * loop is buried in, and the request still unwinds properly — finally blocks,
- * destructors and shutdown functions all run. Once the fiber stops suspending
- * itself the loop below is free to finish, so the caller's tick returns. */
+/* End a request or task that will not stop suspending itself. A graceful exit is
+ * what the engine uses to unwind a fiber nobody will resume again: no catch block
+ * matches it, so this terminates however many nested try/catch frames the retry
+ * loop is buried in, and the fiber still unwinds properly — finally blocks and
+ * destructors run, and a request's shutdown functions too. */
 static void oxphp_fiber_end_after_refusals(oxphp_request_fiber *fiber) {
-    zval exit_obj;
-    ZVAL_OBJ(&exit_obj, zend_create_graceful_exit());
-
-    zval retval;
-    ZVAL_UNDEF(&retval);
-    oxphp_fiber_resume_token = fiber;
-    zend_fiber_resume_exception(fiber->zf, &exit_obj, &retval);
-    oxphp_fiber_resume_token = NULL;
-    zval_ptr_dtor(&retval);
-    zval_ptr_dtor(&exit_obj);
-
-    if (UNEXPECTED(EG(exception))) {
-        zend_clear_exception();
+    /* The task arm of the loop leaves a graceful exit to teardown instead of
+     * taking it as the task's outcome, so without this the awaiter would get a
+     * null the task never returned. Recorded ahead of the unwind, so that a
+     * value the closure still returns after being ended — a catch further out
+     * keeps it running — does not reach the awaiter, while an exception or a
+     * fatal the unwind ends the task with is captured over it. Only while the
+     * task has no outcome yet: a value the closure returned, or an exception of
+     * its already captured, stays when what it left behind — a destructor, a
+     * generator's finally block run as its locals or its registrations are
+     * freed — is the code that keeps retrying. An exception still leaving the
+     * closure while its locals are freed is not captured yet, and the graceful
+     * exit discards it: an exit takes no previous. */
+    if (fiber->task_mode && !fiber->task_exc_class && Z_ISUNDEF(fiber->task_retval)) {
+        fiber->task_exc_class = strdup("FiberError");
+        fiber->task_exc_message = strdup(
+            "Cannot suspend an OxPHP task fiber: the task kept retrying and was ended");
     }
 
-    /* The request is over however it ended: the loop marks itself completed on
-     * its way out, and if it did not get that far the scheduler must still not
-     * wait for a resume that will never come. */
-    fiber->completed = true;
+    /* Again for as long as it comes back suspended with nothing to wait for. A
+     * finally block that throws replaces the graceful exit — the engine keeps
+     * only exit()'s unwind from being replaced — and a catch further out is then
+     * free to suspend again. Staying here takes the program doing that on every
+     * round: a loop of its own, like any other that never ends. */
+    do {
+        zval exit_obj;
+        ZVAL_OBJ(&exit_obj, zend_create_graceful_exit());
+        /* Handed over whole, as the refusal is in
+         * oxphp_fiber_refuse_foreign_suspend(): a finally block that parks
+         * still holds it, and letting go of a shared object here can set off a
+         * cycle collection, with whatever destructors that runs, on the
+         * driver. */
+        GC_DELREF(Z_OBJ(exit_obj));
+
+        zval retval;
+        ZVAL_UNDEF(&retval);
+        oxphp_fiber_resume_token = fiber;
+        zend_fiber_resume_exception(fiber->zf, &exit_obj, &retval);
+        oxphp_fiber_resume_token = NULL;
+        zval_ptr_dtor(&retval);
+
+        if (UNEXPECTED(EG(exception))) {
+            zend_clear_exception();
+        }
+    } while (!fiber->completed
+             && fiber->suspend_reason == OXPHP_SUSPEND_NONE
+             && fiber->zf->context.status == ZEND_FIBER_STATUS_SUSPENDED);
+
+    /* One still suspended has either reached the loop's own park or is parked on
+     * one of our suspend points inside the unwind — a finally block waiting on a
+     * timer or a socket — where the scheduler resumes it like any other. Marked
+     * completed there, it would be handed the next request or task with this one
+     * still on its stack. One no longer suspended at all never reached the loop's
+     * end, and is marked so the scheduler does not wait for a resume that will
+     * never come. */
+    if (fiber->zf->context.status != ZEND_FIBER_STATUS_SUSPENDED) {
+        fiber->completed = true;
+    }
     fiber->handler_failed = true;
     fiber->failure_source = "fiber refused to park";
+}
+
+/* The refusal is built here and thrown only inside the fiber it is delivered to.
+ * The task scheduler refuses from the async worker's driver, which has no PHP
+ * frame: zend_throw_error() there is a fatal instead of a throw, and with no
+ * zend_try above the driver either, its bailout exits the process. */
+static void oxphp_fiber_suspend_refusal(zval *err, const oxphp_request_fiber *fiber) {
+    zend_class_entry *ce = oxphp_fiber_error_ce();
+    if (!ce) {
+        ce = zend_ce_error;
+    }
+    object_init_ex(err, ce);
+
+    zval message;
+    ZVAL_STRING(&message, fiber->task_mode
+        ? "Cannot suspend an OxPHP task fiber: the server drives it, not the caller"
+        : "Cannot suspend an OxPHP request fiber: the server drives it, not the caller");
+    zend_update_property_ex(ce, Z_OBJ_P(err), ZSTR_KNOWN(ZEND_STR_MESSAGE), &message);
+    zval_ptr_dtor(&message);
 }
 
 static void oxphp_fiber_refuse_foreign_suspend(oxphp_request_fiber *fiber) {
@@ -1645,16 +1700,15 @@ static void oxphp_fiber_refuse_foreign_suspend(oxphp_request_fiber *fiber) {
             oxphp_fiber_end_after_refusals(fiber);
             return;
         }
-        zend_throw_error(oxphp_fiber_error_ce(),
-                         "Cannot suspend an OxPHP request fiber: the server drives it, "
-                         "not the caller");
-
-        /* Take the throw off the scheduler and hand it to the fiber instead:
-         * delivering it while it is still pending would chain the exception onto
-         * itself as its own previous. */
         zval err;
-        ZVAL_OBJ_COPY(&err, EG(exception));
-        zend_clear_exception();
+        oxphp_fiber_suspend_refusal(&err, fiber);
+        /* The fiber gets the only reference: the switch copies the object into
+         * the transfer, and the engine throws that copy. One kept here could be
+         * the last once the fiber is done with it — after the FiberError took an
+         * exception it unwound through as its previous — and dropping it would
+         * run what that frees, a destructor or a generator's finally block, on
+         * this side: on the async worker's driver, with no frame to throw into. */
+        GC_DELREF(Z_OBJ(err));
 
         zval retval;
         ZVAL_UNDEF(&retval);
@@ -1662,7 +1716,6 @@ static void oxphp_fiber_refuse_foreign_suspend(oxphp_request_fiber *fiber) {
         zend_fiber_resume_exception(fiber->zf, &err, &retval);
         oxphp_fiber_resume_token = NULL;
         zval_ptr_dtor(&retval);
-        zval_ptr_dtor(&err);
 
         if (UNEXPECTED(EG(exception))) {
             zend_clear_exception();
@@ -3553,14 +3606,19 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
                     fiber->task_exc_class = strdup("RuntimeException");
                     fiber->task_exc_message = strdup("Failed to call async closure");
                 } else if (EG(exception)) {
-                    /* A destroyed fiber is resumed with a graceful exit so it
-                     * unwinds; that is the scheduler tearing this fiber down,
-                     * not an outcome of the task, so it is not taken as a
-                     * result. It is left pending until the late report below,
-                     * which consumes it without logging anything, and the park
-                     * after that sees the fiber destroyed and returns at once.
-                     * exit()/die() raises UnwindExit instead, which IS the
-                     * task's outcome and is captured like any other. */
+                    /* A graceful exit is the scheduler ending this fiber, not
+                     * an outcome of the task, so it is not taken as a result:
+                     * a destroyed fiber is resumed with one so it unwinds, and
+                     * so is a task that kept retrying Fiber::suspend(), whose
+                     * outcome is already set: recorded by
+                     * oxphp_fiber_end_after_refusals(), or the value the
+                     * closure returned before what it left behind retried.
+                     * It is left pending until the late report below, which
+                     * consumes it without logging anything; the park after
+                     * that returns at once for a destroyed fiber and parks the
+                     * other as usual. exit()/die() raises UnwindExit instead,
+                     * which IS the task's outcome and is captured like any
+                     * other. */
                     if (!zend_is_graceful_exit(EG(exception))) {
                         task_capture_exception(fiber);
                     }
@@ -7667,6 +7725,10 @@ static inline oxphp_fiber_scheduler *oxphp_task_sched_get(void) {
  * the fiber, then clear it, so the result can be propagated to the awaiter
  * after the task fiber unwinds. */
 static void task_capture_exception(oxphp_request_fiber *fiber) {
+    /* A task ended for suspending itself already has an outcome recorded. */
+    free(fiber->task_exc_class);
+    free(fiber->task_exc_message);
+
     zend_object *ex = EG(exception);
     zend_class_entry *ce = ex->ce;
     fiber->task_exc_class = strdup(ZSTR_VAL(ce->name));
@@ -7685,6 +7747,10 @@ static void task_capture_exception(oxphp_request_fiber *fiber) {
  * parsing the message the Rust error callback stashed via
  * oxphp_bridge_capture_fatal before the bailout. */
 static void task_capture_fatal(oxphp_request_fiber *fiber) {
+    /* As in task_capture_exception(). */
+    free(fiber->task_exc_class);
+    free(fiber->task_exc_message);
+
     char *fatal_msg = oxphp_bridge_pop_fatal();
     if (fatal_msg && strncmp(fatal_msg, "Uncaught ", 9) == 0) {
         const char *class_start = fatal_msg + 9;

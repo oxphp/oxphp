@@ -75,3 +75,7 @@ async/test_await_timeout_waits_for_the_task_at_request_end
 # fatal from the request's end releasing a promise never awaited ends that
 # request, not the next one on its thread.
 async/test_promise_closure_release_fatal
+# A task calling Fiber::suspend() on its own fiber gets a FiberError it can
+# catch, and the server keeps running; a task that retries without end is ended
+# and its awaiter gets an AsyncException rather than a value.
+async/test_task_fiber_suspend_is_refused
