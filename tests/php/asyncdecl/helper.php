@@ -80,7 +80,8 @@ function asyncdecl_not_copied(string $variable, string $what, string $file, int 
 
 /**
  * What acquire() returns, by asyncdecl_acquire_in_task(), when $what — "The
- * closure at file:line" or "Method Class::method()" — uses $this.
+ * closure at file:line", "Method Class::method()" or "Built-in method
+ * Class::method()" — uses $this.
  *
  * @return array{string, string}
  */

@@ -56,12 +56,6 @@ final class AsyncDeclCapturedHookedMaker
     }
 }
 
-// cases() of an enum is a built-in function the enum declares itself.
-enum AsyncDeclCapturedSuit
-{
-    case Hearts;
-}
-
 $maker = new AsyncDeclCapturedMaker();
 $refused = asyncdecl_refused('asyncdecl_captured_object_helper', __FILE__, $makerLine);
 
@@ -101,7 +95,9 @@ $pool = new \OxPHP\Shared\Pool(
 );
 $t->assertSame('an array that holds itself, then the object', asyncdecl_acquire_in_task($pool), $refused);
 
-$suit = AsyncDeclCapturedSuit::Hearts;
+// cases() of an enum is a built-in function the enum declares itself. The
+// enum is preloaded: one a thread has not declared is refused for itself.
+$suit = AsyncDeclPreSuit::Hearts;
 $pool = new \OxPHP\Shared\Pool(
     factory: static function () use ($suit, $maker): object {
         $o = $maker->make();
