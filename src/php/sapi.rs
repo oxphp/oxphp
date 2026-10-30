@@ -1544,9 +1544,15 @@ pub fn build_sapi_module() -> sapi_module_struct {
 ///
 /// `ini_entries` is a newline-separated `key=value` block (CLI defaults plus
 /// any `-d` overrides); the pointer must remain valid for the process
-/// lifetime. Unlike the web module this does NOT install the bridge
-/// ub_write/flush trampolines — CLI output bypasses the per-request buffer.
-pub fn build_cli_sapi_module(ini_entries: *const c_char) -> sapi_module_struct {
+/// lifetime. `executable_location` is the path PHP resolves `PHP_BINARY` from
+/// during module startup (null leaves it `''`); it must stay valid for the
+/// process lifetime too, since `sapi_module` keeps it. Unlike the web module
+/// this does NOT install the bridge ub_write/flush trampolines — CLI output
+/// bypasses the per-request buffer.
+pub fn build_cli_sapi_module(
+    ini_entries: *const c_char,
+    executable_location: *mut c_char,
+) -> sapi_module_struct {
     sapi_module_struct {
         name: c"cli".as_ptr() as *mut c_char,
         pretty_name: c"OxPHP CLI".as_ptr() as *mut c_char,
@@ -1581,7 +1587,7 @@ pub fn build_cli_sapi_module(ini_entries: *const c_char) -> sapi_module_struct {
         php_ini_path_override: std::ptr::null_mut(),
         default_post_reader: None,
         treat_data: None,
-        executable_location: std::ptr::null_mut(),
+        executable_location,
 
         php_ini_ignore: 0,
         php_ini_ignore_cwd: 0,

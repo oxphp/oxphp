@@ -60,6 +60,10 @@ The full OxPHP engine is available underneath the script: [fibers](../features/f
 
 `$argv` and `$argc` are populated (`$argv[0]` is the script path), and `STDIN` / `STDOUT` / `STDERR` are defined, so Composer- and Symfony-Console-style entry points run unmodified.
 
+`PHP_BINARY` is the path of the `oxphp` binary (`/usr/local/bin/oxphp` in the published images), as it is the path of `php` under the `php` CLI. A library that starts PHP worker processes through `PHP_BINARY`, such as amphp/parallel, therefore starts `oxphp` for them. Each child is a run of its own: it reads `php.ini` and applies the `run` defaults below by itself, and does not inherit the parent's `-d` overrides. As under `php`, the binary's directory is searched for `php-cli.ini` / `php.ini` before `/usr/local/etc/php`.
+
+Such a child gets only the command line `oxphp` accepts: `-d` options, then a script path and its arguments. Other `php` options (`-n`, `-c`, `-r`, `-f`) are an error, `-v` prints the OxPHP version rather than PHP's, and the bare binary, with the script fed on standard input, starts the HTTP server instead. Symfony's `PhpSubprocess` passes `-n -c`, and its `PhpProcess` and PHPUnit 11's process isolation feed the script on standard input, so none of them works under `run` as is. Symfony's `PhpExecutableFinder` reads a `PHP_BINARY` environment variable ahead of the constant: set it to `/usr/local/bin/php` to send Symfony's classes to the `php` CLI. Run PHPUnit itself with `php`. A child is also started without `--user`, so under `oxphp --user=root run` it drops to `www-data` while its parent stays root; an amphp/parallel parent then hangs, waiting for a child that cannot connect back to it.
+
 **The script path is the separator.** Every token after the script path is handed to PHP verbatim — including `--`-prefixed ones — so for ordinary arguments you do not need an explicit `--`. Flags meant for `oxphp` itself (`-d`, `--user`) must come *before* the script path; anything after it belongs to the script.
 
 ```bash

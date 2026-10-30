@@ -160,6 +160,17 @@ gerr="$(docker run --rm -v "$FIX:/cli:ro" "$IMAGE" oxphp --user=82 /cli/whoami.p
 { [ $gcode -ne 0 ] && printf '%s' "$gerr" | grep -qi "root"; } \
 	&& ok "--user as non-root is a hard error" || bad "--user non-root guard (code=$gcode err='$gerr')"
 
+# 8h. PHP_BINARY is this oxphp binary, and a child started through it with the
+#     command line amphp/parallel builds (-d flags, script, args) runs as a CLI
+#     script with the same PHP_BINARY and the child's own -d applied.
+exe="$(docker run --rm "$IMAGE" sh -c 'readlink -f "$(command -v oxphp)"')"
+out="$(run php_binary.php 2>&1)"
+parent="$(printf '%s\n' "$out" | sed -n 1p)"
+child="$(printf '%s\n' "$out" | sed -n 2p)"
+{ [ -n "$exe" ] && [ "${parent%|*}" = "parent|$exe" ] && [ "${child%|*}" = "child|cli|$exe|77M" ] \
+	&& [ "${child##*|}" != "${parent##*|}" ]; } \
+	&& ok "PHP_BINARY = oxphp, child started through it" || bad "PHP_BINARY (exe='$exe' out='$out')"
+
 # 9. regression: HTTP serve role still boots and answers
 name="oxphp-serve-smoke-$$"
 docker run -d --rm --name "$name" -e LISTEN_ADDR=0.0.0.0:18080 -p 127.0.0.1:18080:18080 "$IMAGE" >/dev/null 2>&1
