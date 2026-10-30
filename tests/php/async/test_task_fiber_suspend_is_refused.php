@@ -34,6 +34,30 @@ $t->assertContains('caught: the first is a FiberError naming a task fiber', $r['
 $t->assertContains('caught: the second is refused too', $r['refusals'][1], 'FiberError: Cannot suspend an OxPHP task fiber');
 $t->assertGreaterThan('caught: the task can still park and be resumed', $r['slept'], 0.015);
 
+// The refusal points at the suspend() call, as the engine's own FiberError
+// does, not at the async worker that made it.
+$p = oxphp_async(static function (): array {
+    try {
+        $line = __LINE__ + 1;
+        \Fiber::suspend();
+    } catch (\FiberError $e) {
+        $frame = $e->getTrace()[0] ?? [];
+
+        return [
+            'file' => $e->getFile(),
+            'line' => $e->getLine(),
+            'expected' => $line,
+            'frame' => ($frame['class'] ?? '') . '::' . ($frame['function'] ?? ''),
+        ];
+    }
+
+    return [];
+});
+$r = oxphp_async_await($p, 5.0);
+$t->assertSame('where: the file is the suspend() call\'s', $r['file'] ?? null, __FILE__);
+$t->assertSame('where: so is the line', $r['line'] ?? null, $r['expected'] ?? -1);
+$t->assertSame('where: the trace starts at Fiber::suspend()', $r['frame'] ?? null, 'Fiber::suspend');
+
 // Not caught: the refusal is the task's outcome.
 $p = oxphp_async(static function (): string {
     \Fiber::suspend();

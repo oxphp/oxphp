@@ -1614,8 +1614,8 @@ static void oxphp_fiber_end_after_refusals(oxphp_request_fiber *fiber) {
     /* The task arm of the loop leaves a graceful exit to teardown instead of
      * taking it as the task's outcome, so without this the awaiter would get a
      * null the task never returned. Recorded ahead of the unwind, so that a
-     * value the closure still returns after being ended — a catch further out
-     * keeps it running — does not reach the awaiter, while an exception or a
+     * value the closure still returns after being ended — its unwind stopped,
+     * as below — does not reach the awaiter, while an exception or a
      * fatal the unwind ends the task with is captured over it. Only while the
      * task has no outcome yet: a value the closure returned, or an exception of
      * its already captured, stays when what it left behind — a destructor, a
@@ -1629,11 +1629,13 @@ static void oxphp_fiber_end_after_refusals(oxphp_request_fiber *fiber) {
             "Cannot suspend an OxPHP task fiber: the task kept retrying and was ended");
     }
 
-    /* Again for as long as it comes back suspended with nothing to wait for. A
-     * finally block that throws replaces the graceful exit — the engine keeps
-     * only exit()'s unwind from being replaced — and a catch further out is then
-     * free to suspend again. Staying here takes the program doing that on every
-     * round: a loop of its own, like any other that never ends. */
+    /* Again for as long as it comes back suspended with nothing to wait for.
+     * The unwind can be stopped — a finally block that throws or returns, a
+     * destructor that throws — and the code that carries on is free to suspend
+     * again (8.4.27 / 8.5.12: zend_exception_set_previous() drops an exit it is
+     * handed as a previous, ZEND_DISCARD_EXCEPTION drops any). Staying here
+     * takes the program doing that on every round: a loop of its own, like any
+     * other that never ends. */
     do {
         zval exit_obj;
         ZVAL_OBJ(&exit_obj, zend_create_graceful_exit());
@@ -1659,12 +1661,12 @@ static void oxphp_fiber_end_after_refusals(oxphp_request_fiber *fiber) {
              && fiber->zf->context.status == ZEND_FIBER_STATUS_SUSPENDED);
 
     /* One still suspended has either reached the loop's own park or is parked on
-     * one of our suspend points inside the unwind — a finally block waiting on a
-     * timer or a socket — where the scheduler resumes it like any other. Marked
-     * completed there, it would be handed the next request or task with this one
-     * still on its stack. One no longer suspended at all never reached the loop's
-     * end, and is marked so the scheduler does not wait for a resume that will
-     * never come. */
+     * one of our suspend points short of it — a finally block waiting on a timer
+     * or a socket, or the code a stopped unwind carried on into — where the
+     * scheduler resumes it like any other. Marked completed there, it would be
+     * handed the next request or task with this one still on its stack. One no
+     * longer suspended at all never reached the loop's end, and is marked so the
+     * scheduler does not wait for a resume that will never come. */
     if (fiber->zf->context.status != ZEND_FIBER_STATUS_SUSPENDED) {
         fiber->completed = true;
     }
@@ -1681,7 +1683,17 @@ static void oxphp_fiber_suspend_refusal(zval *err, const oxphp_request_fiber *fi
     if (!ce) {
         ce = zend_ce_error;
     }
+    /* Created over the frame the fiber suspended from, because the engine takes
+     * an exception's file, line and trace from the current frame when it
+     * creates it, not when it throws it: over the scheduler's own they would
+     * name the worker loop, or nothing on the driver. Suspending cut the
+     * fiber's bottom frame loose from whoever resumed it, so the trace ends with
+     * the function the fiber was started with (8.4.27 / 8.5.12
+     * Zend/zend_fibers.c:753, :952). */
+    zend_execute_data *scheduler_frame = EG(current_execute_data);
+    EG(current_execute_data) = fiber->zf->execute_data;
     object_init_ex(err, ce);
+    EG(current_execute_data) = scheduler_frame;
 
     zval message;
     ZVAL_STRING(&message, fiber->task_mode

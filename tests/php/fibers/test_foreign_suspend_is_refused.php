@@ -25,6 +25,21 @@ $t->assertThrows(
     \FiberError::class
 );
 
+// The refusal points at the suspend() call, as the engine's own FiberError
+// does, not at the worker loop that made it.
+$refusal = null;
+try {
+    $line = __LINE__ + 1;
+    \Fiber::suspend();
+} catch (\FiberError $e) {
+    $refusal = $e;
+}
+$t->assertSame('the refusal\'s file is the suspend() call\'s', $refusal?->getFile(), __FILE__);
+$t->assertSame('so is its line', $refusal?->getLine(), $line);
+$frame = $refusal?->getTrace()[0] ?? [];
+$t->assertSame('its trace starts at Fiber::suspend()', ($frame['class'] ?? '') . '::' . ($frame['function'] ?? ''), 'Fiber::suspend');
+$t->assertNotContains('its trace stays inside the request fiber', implode(' ', array_column($refusal?->getTrace() ?? [], 'function')), 'oxphp_worker');
+
 // And the request survives: the refusal unwinds the suspend attempt, not the
 // request.
 $t->assertNotNull('the request is still running after the refusal', \Fiber::getCurrent());
