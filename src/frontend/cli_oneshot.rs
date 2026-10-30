@@ -54,6 +54,16 @@ pub fn run(opts: RunOptions) -> i32 {
     };
     let ini_ptr: *const c_char = ini_cstring.into_raw();
 
+    // ── `PHP_BINARY` is resolved at module startup from this path, so a library
+    //    that starts PHP workers through it (amphp/parallel) starts `oxphp`.
+    //    Not argv[0] as php-cli passes: a bare name is looked up on PATH, which
+    //    may find a different binary. Leaked like `ini_ptr`; null if the path
+    //    cannot be read leaves `PHP_BINARY` empty. ──
+    let exe_ptr: *mut c_char = std::env::current_exe()
+        .ok()
+        .and_then(|p| CString::new(p.as_os_str().as_bytes()).ok())
+        .map_or(std::ptr::null_mut(), CString::into_raw);
+
     // ── Engine-only plugin profile. The HTTP-frontend features (rate limit,
     //    access log, static files, metrics endpoint, …) are not PluginManager
     //    plugins — they are event handlers registered in the serve path, which
@@ -105,12 +115,15 @@ pub fn run(opts: RunOptions) -> i32 {
         crate::php::bootstrap::register_plugin_artifacts(&mut plugin_manager, superglobals_enabled);
 
     // ── PHP engine startup with the CLI SAPI personality. ──
+    // SAFETY: the only engine startup in this process, on the main thread, before
+    // any PHP thread exists; `ini_ptr` and `exe_ptr` are leaked, so the pointers
+    // `sapi_module` keeps stay valid for the process lifetime.
     unsafe {
         if !bindings::php_tsrm_startup() {
             eprintln!("oxphp: php_tsrm_startup() failed");
             return 1;
         }
-        let mut module = sapi::build_cli_sapi_module(ini_ptr);
+        let mut module = sapi::build_cli_sapi_module(ini_ptr, exe_ptr);
         bindings::sapi_startup(&mut module);
         // sapi_startup() sets sapi_module.ini_entries = NULL (main/SAPI.c). php-cli
         // re-attaches the pointer right here; php_module_startup() then copies the
