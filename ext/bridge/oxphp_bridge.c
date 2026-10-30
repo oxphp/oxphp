@@ -3342,10 +3342,21 @@ static void oxphp_op_array_make_literals_immutable(zend_op_array *op) {
  * so opcodes in this thread's heap mean this thread may write them; code of
  * another thread's request is left alone. With PHP's allocator switched off
  * (USE_ZEND_ALLOC=0 without USE_TRACKED_ALLOC=1) or replaced by an extension's
- * handlers, the heap check finds nothing, and the literals stay counted. */
+ * handlers, the heap check finds nothing, and the literals stay counted.
+ *
+ * The file name is given the same form. Every op_array of a file holds the one
+ * counted string (init_op_array, Zend/zend_opcode.c), and a task's thread copies
+ * it, unsynchronised with this one, into whatever names where code ran: the
+ * last error, a backtrace, on 8.5 a constant. Checked on its own, as a name this
+ * thread did not allocate is not its to write. */
 static void oxphp_make_dispatched_literals_immutable(zend_op_array *op) {
     if (op->refcount != NULL && is_zend_ptr(op->opcodes)) {
         oxphp_op_array_make_literals_immutable(op);
+        zend_string *filename = op->filename;
+        if (filename && !ZSTR_IS_INTERNED(filename) && is_zend_ptr(filename)) {
+            zend_string_hash_val(filename);
+            GC_ADD_FLAGS(filename, IS_STR_INTERNED);
+        }
     }
 }
 
