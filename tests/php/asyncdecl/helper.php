@@ -88,3 +88,23 @@ function asyncdecl_uses_this(string $what): array
 {
     return [\Error::class, $what . ASYNCDECL_THIS_TAIL];
 }
+
+/** The tail of the message for a callback whose code is not in OPcache's shared memory. */
+const ASYNCDECL_SHM_TAIL = " is not in OPcache's shared memory: on a thread other than the one that "
+    . 'created the pool, a Shared\Pool callback runs only when its code is there, so the code was not run';
+
+/**
+ * What acquire() returns, by asyncdecl_acquire_in_task(), when the code of
+ * $what — "Function name()", "Method Class::method()", or a closure — is not
+ * in OPcache's shared memory.
+ *
+ * @return array{string, string}
+ */
+function asyncdecl_outside_shm(string|\Closure $what): array
+{
+    if ($what instanceof \Closure) {
+        $r = new \ReflectionFunction($what);
+        $what = 'The closure at ' . $r->getFileName() . ':' . $r->getStartLine();
+    }
+    return [\Error::class, $what . ASYNCDECL_SHM_TAIL];
+}

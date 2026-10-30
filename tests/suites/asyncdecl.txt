@@ -79,4 +79,10 @@ asyncdecl/test_pool_registry_callable_in_task_outlives_its_creator >> ?action=ch
 asyncdecl/test_pool_registry_captured_array_in_task_outlives_its_creator >> ?action=trigger
 asyncdecl/test_pool_registry_captured_array_in_task_outlives_its_creator >> ?action=check
 
+# A pool callback whose code is not in OPcache's shared memory runs only on the
+# thread that created the pool; the second one's worker exits.
+asyncdecl/test_pool_callback_outside_shared_memory_runs_only_where_created
+asyncdecl/test_pool_registry_callback_outside_shared_memory_in_task_outlives_its_creator >> ?action=trigger
+asyncdecl/test_pool_registry_callback_outside_shared_memory_in_task_outlives_its_creator >> ?action=check
+
 asyncdecl/test_server_alive

@@ -5257,12 +5257,10 @@ static zend_string *oxphp_call_missing_here(const zend_function *fn, zend_object
  * callable that names a method through self, static or parent, and a class
  * that a closure made from a function or method, as f(...) makes one, names
  * once it has run, since every thread shares that closure's run-time cache and
- * the class it found there. So does a closure the callback declares, when its
- * script is not in OPcache's shared memory: closures made from one declaration
- * share its run-time cache then, on every thread. Only the callback's own
- * closure runs on another thread with a cache of its own
- * (oxphp_pool_call_elsewhere), and finds there only the classes that thread
- * has. */
+ * the class it found there. A callback whose code
+ * oxphp_op_array_in_request_memory() finds in request memory, where closures
+ * made from one declaration share its run-time cache too, does not run on
+ * another thread (oxphp_pool_prepare_elsewhere). */
 static zend_string *oxphp_pool_callable_missing_here(const zend_fcall_info_cache *fcc) {
     const zend_function *fn = fcc->function_handler;
     HashTable seen;
@@ -7634,6 +7632,9 @@ static void oxphp_pool_own_closure(zval *out, zend_object *closure) {
 #define OXPHP_POOL_THIS_TAIL " uses $this: on a thread other than the one that created the " \
     "pool, a Shared\\Pool callback cannot use an object of the request that created it, " \
     "so the code was not run"
+#define OXPHP_POOL_SHM_TAIL " is not in OPcache's shared memory: on a thread other than the " \
+    "one that created the pool, a Shared\\Pool callback runs only when its code is there, " \
+    "so the code was not run"
 
 /* What a value of a closure's variables is that oxphp_portable_serialize_ht()
  * does not copy, through references and arrays, or NULL. An array holding
@@ -7690,7 +7691,60 @@ static bool oxphp_pool_uses_this(const zend_op_array *op_array) {
     return false;
 }
 
+/* The function written in PHP that a call to fn runs first, or NULL when the
+ * call runs a built-in one. A trampoline, and the built-in function of a
+ * closure made from a method only __call() or __callStatic() answers, run the
+ * magic method of their scope, which ZEND_CALL_TRAMPOLINE and
+ * zend_closure_call_magic() pick by the function's ZEND_ACC_STATIC (PHP 8.4,
+ * 8.5). Such a function bears the method's name, which its scope can still
+ * have as a method the call could not reach, written in PHP or built into a
+ * parent class; a built-in method a closure is made from is found under its
+ * name in its own scope. */
+static const zend_function *oxphp_pool_code_of(const zend_function *fn) {
+    /* A trampoline is a ZEND_USER_FUNCTION too. */
+    bool trampoline = fn->common.fn_flags & ZEND_ACC_CALL_VIA_TRAMPOLINE;
+    if (!trampoline && fn->type == ZEND_USER_FUNCTION) {
+        return fn;
+    }
+    const zend_class_entry *scope = fn->common.scope;
+    if (!scope) {
+        return NULL;
+    }
+    if (!trampoline) {
+        const zend_function *named =
+            zend_hash_find_ptr_lc(&scope->function_table, fn->common.function_name);
+        if (named && named->type == ZEND_INTERNAL_FUNCTION && named->common.scope == scope) {
+            return NULL;
+        }
+    }
+    const zend_function *magic =
+        (fn->common.fn_flags & ZEND_ACC_STATIC) ? scope->__callstatic : scope->__call;
+    return magic && magic->type == ZEND_USER_FUNCTION ? magic : NULL;
+}
+
+/* The refusal of code, named by what it is, followed by tail. */
+static zend_string *oxphp_pool_refusal(const zend_function *code, const char *tail) {
+    if ((code->common.fn_flags & (ZEND_ACC_CLOSURE | ZEND_ACC_FAKE_CLOSURE)) == ZEND_ACC_CLOSURE) {
+        return zend_strpprintf(0, "The closure at %s:%u%s",
+            ZSTR_VAL(code->op_array.filename), code->op_array.line_start, tail);
+    }
+    if (code->common.scope) {
+        return zend_strpprintf(0, "Method %s::%s()%s",
+            ZSTR_VAL(code->common.scope->name), ZSTR_VAL(code->common.function_name), tail);
+    }
+    return zend_strpprintf(0, "Function %s()%s", ZSTR_VAL(code->common.function_name), tail);
+}
+
 /* What another thread is to run, decided on the thread creating the pool.
+ *
+ * Code that is not in OPcache's shared memory belongs to the request that
+ * compiled it, and so do its literals: another thread that ran it would count
+ * the arrays among them from that thread and list them among its own possible
+ * garbage roots, unless OPcache's file cache loaded them in the form nothing
+ * counts, and a slot it made could keep any of them past the end of that
+ * request. So the function written in PHP that a call runs first is
+ * refused there when oxphp_op_array_in_request_memory() finds its code in
+ * request memory, whichever callable leads to it.
  *
  * A closure that is not made from a function or method runs there as a
  * closure built on that thread, from a copy of the pool's copy's table of
@@ -7706,104 +7760,99 @@ static bool oxphp_pool_uses_this(const zend_op_array *op_array) {
  * is a method or __call() that uses $this, called on an object: the call
  * would run it with the object itself.
  *
- * Any other callable is called there as it is called here. */
+ * Any other callable is called there as it is called here: a built-in one, or
+ * one whose code oxphp_op_array_in_request_memory() does not find in request
+ * memory. Only the function the call runs first is checked, not what it calls
+ * through parent::, self:: or static::. */
 static void oxphp_pool_prepare_elsewhere(oxphp_pool_fcc_t *heap) {
     const zend_function *fn = heap->fcc.function_handler;
     zend_object *this_obj = heap->fcc.object;
+    bool closure = Z_TYPE(heap->callable_zv) == IS_OBJECT
+        && Z_OBJCE(heap->callable_zv) == zend_ce_closure;
 
-    if (Z_TYPE(heap->callable_zv) == IS_OBJECT && Z_OBJCE(heap->callable_zv) == zend_ce_closure) {
-        zend_object *closure = Z_OBJ(heap->callable_zv);
+    if (closure) {
+        zend_object *obj = Z_OBJ(heap->callable_zv);
         zend_function *closure_fn;
-        closure->handlers->get_closure(
-            closure, &heap->called_scope, &closure_fn, &this_obj, true);
+        obj->handlers->get_closure(obj, &heap->called_scope, &closure_fn, &this_obj, true);
         fn = closure_fn;
-        if (fn->type == ZEND_USER_FUNCTION && !(fn->common.fn_flags & ZEND_ACC_FAKE_CLOSURE)) {
-            const zend_op_array *op = &fn->op_array;
-            HashTable *vars = ZEND_MAP_PTR_GET(op->static_variables_ptr);
-            if (vars) {
-                heap->held = zend_new_array(0);
-                zend_string *name;
-                zval *val;
-                ZEND_HASH_FOREACH_STR_KEY_VAL(vars, name, val) {
-                    zend_string *what = oxphp_pool_not_copied(val, heap->held);
-                    if (what) {
-                        heap->refused_elsewhere = zend_strpprintf(0,
-                            "Variable $%s of the closure at %s:%u holds %s" OXPHP_POOL_COPY_TAIL,
-                            ZSTR_VAL(name), ZSTR_VAL(op->filename), op->line_start, ZSTR_VAL(what));
-                        zend_string_release_ex(what, 0);
-                        return;
-                    }
-                } ZEND_HASH_FOREACH_END();
-            }
-            if (this_obj && oxphp_pool_uses_this(op)) {
-                heap->refused_elsewhere = zend_strpprintf(0,
-                    "The closure at %s:%u" OXPHP_POOL_THIS_TAIL,
-                    ZSTR_VAL(op->filename), op->line_start);
-                return;
-            }
-            if (vars) {
-                /* An arrow function binds each variable its body names, the
-                 * parameters of an arrow function in it too, and one that is
-                 * not defined where it is declared stays undefined in the
-                 * table (ZEND_BIND_LEXICAL), which the serializer counts but
-                 * does not write. Such a slot is written as null, in the
-                 * pool's own copy, which no call has run yet. */
-                heap->slot_count = vars->nNumUsed;
-                heap->slots = ecalloc(vars->nNumUsed, 1);
-                for (uint32_t i = 0; i < vars->nNumUsed; i++) {
-                    zval *slot = &vars->arData[i].val;
-                    if (Z_ISREF_P(slot)) {
-                        heap->slots[i] = OXPHP_POOL_SLOT_REF;
-                    } else if (Z_ISUNDEF_P(slot)) {
-                        heap->slots[i] = OXPHP_POOL_SLOT_UNDEF;
-                        ZVAL_NULL(slot);
-                    }
-                }
-                unsigned char *buf;
-                size_t len;
-                int rc = oxphp_portable_serialize_ht(vars, &buf, &len);
-                for (uint32_t i = 0; i < vars->nNumUsed; i++) {
-                    if (heap->slots[i] == OXPHP_POOL_SLOT_UNDEF) {
-                        ZVAL_UNDEF(&vars->arData[i].val);
-                    }
-                }
-                if (rc != 0) {
-                    /* An OxPHP\Shared object it cannot name. */
+    }
+    const zend_function *code = oxphp_pool_code_of(fn);
+    if (code && oxphp_op_array_in_request_memory(&code->op_array)) {
+        heap->refused_elsewhere = oxphp_pool_refusal(code, OXPHP_POOL_SHM_TAIL);
+        return;
+    }
+
+    if (closure && fn->type == ZEND_USER_FUNCTION && !(fn->common.fn_flags & ZEND_ACC_FAKE_CLOSURE)) {
+        const zend_op_array *op = &fn->op_array;
+        HashTable *vars = ZEND_MAP_PTR_GET(op->static_variables_ptr);
+        if (vars) {
+            heap->held = zend_new_array(0);
+            zend_string *name;
+            zval *val;
+            ZEND_HASH_FOREACH_STR_KEY_VAL(vars, name, val) {
+                zend_string *what = oxphp_pool_not_copied(val, heap->held);
+                if (what) {
                     heap->refused_elsewhere = zend_strpprintf(0,
-                        "A variable of the closure at %s:%u holds a value that is not copied"
-                        OXPHP_POOL_COPY_TAIL, ZSTR_VAL(op->filename), op->line_start);
+                        "Variable $%s of the closure at %s:%u holds %s" OXPHP_POOL_COPY_TAIL,
+                        ZSTR_VAL(name), ZSTR_VAL(op->filename), op->line_start, ZSTR_VAL(what));
+                    zend_string_release_ex(what, 0);
                     return;
                 }
-                heap->vars = emalloc(len);
-                memcpy(heap->vars, buf, len);
-                heap->vars_len = len;
-                oxphp_portable_free(buf);
-            }
-            heap->rebuilt_elsewhere = true;
+            } ZEND_HASH_FOREACH_END();
+        }
+        if (this_obj && oxphp_pool_uses_this(op)) {
+            heap->refused_elsewhere = zend_strpprintf(0,
+                "The closure at %s:%u" OXPHP_POOL_THIS_TAIL,
+                ZSTR_VAL(op->filename), op->line_start);
             return;
         }
+        if (vars) {
+            /* An arrow function binds each variable its body names, the
+             * parameters of an arrow function in it too, and one that is
+             * not defined where it is declared stays undefined in the
+             * table (ZEND_BIND_LEXICAL), which the serializer counts but
+             * does not write. Such a slot is written as null, in the
+             * pool's own copy, which no call has run yet. */
+            heap->slot_count = vars->nNumUsed;
+            heap->slots = ecalloc(vars->nNumUsed, 1);
+            for (uint32_t i = 0; i < vars->nNumUsed; i++) {
+                zval *slot = &vars->arData[i].val;
+                if (Z_ISREF_P(slot)) {
+                    heap->slots[i] = OXPHP_POOL_SLOT_REF;
+                } else if (Z_ISUNDEF_P(slot)) {
+                    heap->slots[i] = OXPHP_POOL_SLOT_UNDEF;
+                    ZVAL_NULL(slot);
+                }
+            }
+            unsigned char *buf;
+            size_t len;
+            int rc = oxphp_portable_serialize_ht(vars, &buf, &len);
+            for (uint32_t i = 0; i < vars->nNumUsed; i++) {
+                if (heap->slots[i] == OXPHP_POOL_SLOT_UNDEF) {
+                    ZVAL_UNDEF(&vars->arData[i].val);
+                }
+            }
+            if (rc != 0) {
+                /* An OxPHP\Shared object it cannot name. */
+                heap->refused_elsewhere = zend_strpprintf(0,
+                    "A variable of the closure at %s:%u holds a value that is not copied"
+                    OXPHP_POOL_COPY_TAIL, ZSTR_VAL(op->filename), op->line_start);
+                return;
+            }
+            heap->vars = emalloc(len);
+            memcpy(heap->vars, buf, len);
+            heap->vars_len = len;
+            oxphp_portable_free(buf);
+        }
+        heap->rebuilt_elsewhere = true;
+        return;
     }
 
     if (!this_obj || this_obj->ce == zend_ce_closure) {
         return;
     }
-    /* A trampoline, and the built-in function of a closure made from a
-     * method __call() answers, run __call(). That function bears the method's
-     * name, which the class can still have as a private or protected method:
-     * one written in PHP, or a built-in one of another class. */
-    if (fn->common.fn_flags & ZEND_ACC_CALL_VIA_TRAMPOLINE) {
-        fn = this_obj->ce->__call;
-    } else if (fn->type != ZEND_USER_FUNCTION) {
-        const zend_function *named =
-            zend_hash_find_ptr_lc(&this_obj->ce->function_table, fn->common.function_name);
-        if (!named || named->type != ZEND_INTERNAL_FUNCTION
-                || named->common.scope != fn->common.scope) {
-            fn = this_obj->ce->__call;
-        }
-    }
-    if (fn && fn->type == ZEND_USER_FUNCTION && oxphp_pool_uses_this(&fn->op_array)) {
-        heap->refused_elsewhere = zend_strpprintf(0, "Method %s::%s()" OXPHP_POOL_THIS_TAIL,
-            ZSTR_VAL(fn->common.scope->name), ZSTR_VAL(fn->common.function_name));
+    if (code && oxphp_pool_uses_this(&code->op_array)) {
+        heap->refused_elsewhere = oxphp_pool_refusal(code, OXPHP_POOL_THIS_TAIL);
     }
 }
 
