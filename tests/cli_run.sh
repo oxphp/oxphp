@@ -52,8 +52,10 @@ run exitcode.php >/dev/null; code=$?
 out="$(docker run --rm -v "$FIX:/cli:ro" "$IMAGE" oxphp run -d memory_limit=256M /cli/ini.php)"
 [ "$out" = "256M" ] && ok "-d memory_limit override" || bad "-d override (got '$out')"
 
-# 5b. CLI ini defaults from the ini_entries blob apply (max_execution_time=0,
-#     register_argc_argv=1) — guards against the sapi_startup ini_entries drop.
+# 5b. CLI ini defaults from the ini_entries blob apply (max_execution_time=0)
+#     — guards against the sapi_startup ini_entries drop. argc needs the blob
+#     only on PHP 8.4 with a php.ini that turns register_argc_argv off; 5d
+#     covers that.
 out="$(run cliini.php)"
 met="$(printf '%s' "$out" | cut -d'|' -f1)"
 argc="$(printf '%s' "$out" | cut -d'|' -f2)"
@@ -64,9 +66,33 @@ argc="$(printf '%s' "$out" | cut -d'|' -f2)"
 out="$(docker run --rm -v "$FIX:/cli:ro" "$IMAGE" oxphp run -d max_input_vars=1234 /cli/inivar.php)"
 [ "$out" = "1234" ] && ok "-d for PHP_INI_PERDIR (max_input_vars)" || bad "-d PERDIR (got '$out')"
 
+# 5d. A php.ini that turns register_argc_argv off does not take $argv away: on
+#     PHP 8.4 the run defaults turn it back on, and 8.5 builds $argv without it.
+out="$(docker run --rm -v "$FIX:/cli:ro" -v "$FIX/argc_off.ini:/usr/local/etc/php/conf.d/zz-argc-off.ini:ro" "$IMAGE" oxphp run /cli/argv.php a)"
+[ "$out" = "$(printf '2\n/cli/argv.php|a')" ] \
+	&& ok "\$argv with php.ini register_argc_argv=Off" || bad "argv under ini Off (got '$out')"
+
 # 6. async engine available under one-shot
 out="$(run async.php)"
 printf '%s' "$out" | grep -q "async-ok" && ok "async (oxphp_sleep)" || bad "async (got '$out')"
+
+# 6b. With an async pool every pool thread opens a PHP request under the CLI
+#     SAPI as it starts, whether or not the script dispatches anything.
+out="$(docker run --rm -e ASYNC_WORKERS=1 -v "$FIX:/cli:ro" "$IMAGE" oxphp run /cli/hello.php)"; code=$?
+{ [ "$out" = "hello from oxphp run" ] && [ $code -eq 0 ]; } \
+	&& ok "ASYNC_WORKERS=1: script without tasks exits 0" || bad "pool idle (out='$out' code=$code)"
+
+# 6c. A task round-trips through a pool thread, the idle second thread stops
+#     cleanly, and the thread that runs the task writes nothing to stderr as its
+#     request starts: it starts before the await returns, while stderr is open.
+#     OPcache is off, as `run` has it without opcache.enable_cli=1 (the release
+#     image ships none), so the task's code runs from the script's own memory.
+aerr_file="$(mktemp)"
+aout="$(docker run --rm -e ASYNC_WORKERS=2 -v "$FIX:/cli:ro" "$IMAGE" oxphp run -d opcache.enable_cli=0 /cli/async_dispatch.php 2>"$aerr_file")"; acode=$?
+aerr="$(cat "$aerr_file")"; rm -f "$aerr_file"
+{ [ "$aout" = "42" ] && [ $acode -eq 0 ] && [ -z "$aerr" ]; } \
+	&& ok "ASYNC_WORKERS=2: oxphp_async() result + exit 0 + clean stderr" \
+	|| bad "async dispatch (out='$aout' code=$acode stderr='$aerr')"
 
 # 7. ox_shared classes registered
 out="$(run shared.php)"

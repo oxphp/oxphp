@@ -1853,8 +1853,8 @@ void oxphp_bridge_set_request_info(
 /* ── CLI one-shot (oxphp run) ── */
 
 void oxphp_bridge_set_cli_args(int argc, char **argv) {
-    /* php_build_argv() (called during php_request_startup when
-     * register_argc_argv is on) reads these to build $argv/$argc. The
+    /* php_build_argv() (called during php_request_startup: on PHP 8.4 only
+     * when register_argc_argv is on) reads these to build $argv/$argc. The
      * caller owns the array and must keep it alive past php_request_startup. */
     SG(request_info).argc = argc;
     SG(request_info).argv = argv;

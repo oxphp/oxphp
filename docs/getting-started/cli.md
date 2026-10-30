@@ -54,7 +54,7 @@ oxphp run -d memory_limit=512M import.php data.csv
 
 This is the role to use for migrations, cron jobs, queue consumers, and `artisan`/`console`-style commands — in the **same image** that serves your application, with no second PHP installation.
 
-The full OxPHP engine is available underneath the script: [fibers](../features/fiber-multiplexing.md) (`oxphp_sleep()`) and [shared state](../shared-state/shared-state.md) (`OxPHP\Shared\*`) work out of the box. [Async promises](../features/async-promises.md) (`oxphp_async()`) work when `ASYNC_WORKERS` is greater than `0`; the default invocation starts no async pool and therefore no background runtime.
+The full OxPHP engine is available underneath the script: [fibers](../features/fiber-multiplexing.md) (`oxphp_sleep()`) and [shared state](../shared-state/shared-state.md) (`OxPHP\Shared\*`) work out of the box. [Async promises](../features/async-promises.md) (`oxphp_async()`) work when `ASYNC_WORKERS` is greater than `0`; the default invocation starts no async pool and therefore no background runtime. A task that leaves behind a closure it created, for example one stored in `$GLOBALS`, set as an error handler, or held by a `Shared\Pool` the task registers, can crash the process when the task's code is not in OPcache's shared memory, and it can do so while the script is still running, losing the rest of its output and work. Under `run` that is every task unless `opcache.enable_cli=1` is set, because OPcache does not run for the `cli` SAPI by default.
 
 `$argv` and `$argc` are populated (`$argv[0]` is the script path), and `STDIN` / `STDOUT` / `STDERR` are defined, so Composer- and Symfony-Console-style entry points run unmodified.
 
@@ -119,7 +119,7 @@ The `run` role applies CLI-oriented defaults before your `-d` overrides and `php
 | `html_errors` | `0` | Plain-text errors for a terminal. |
 | `output_buffering` | `0` | Output is written as it is produced. |
 | `implicit_flush` | `1` | Each write is flushed immediately. |
-| `register_argc_argv` | `1` | `$argv` / `$argc` are available. |
+| `register_argc_argv` | `1` on PHP 8.4, not set on 8.5 | `$argv` / `$argc` are available. PHP 8.5 provides them without this directive, as its own `php` binary does; turning it on there, with `-d` or in `php.ini`, makes each async worker thread (`ASYNC_WORKERS` greater than `0`) raise a deprecation notice as it starts, which goes to stderr with these defaults unless your `php.ini` hides it, as `php.ini-production` does. |
 
 `run` honours [`SUPERGLOBALS_ENABLED`](../php/request-api.md#superglobals_enabled). On this path its only effect on the superglobals is whether the process environment is folded into `$_SERVER`. With the default (`true`) the environment, secrets included, is copied there; with `false` it is not. Either way `$_SERVER` keeps the script's own keys — `PHP_SELF`, `SCRIPT_NAME`, `SCRIPT_FILENAME`, `PATH_TRANSLATED` and an empty `DOCUMENT_ROOT` — and `$argv` / `$argc` are unaffected. `oxphp_superglobals_enabled()` reports the setting here as it does under `serve`. `$_ENV` does not depend on this setting: PHP fills it from the environment when `variables_order` contains `E`, and leaves it empty otherwise.
 

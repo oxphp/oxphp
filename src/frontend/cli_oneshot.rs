@@ -207,8 +207,8 @@ fn run_cli_oneshot(script: &Path, args: &[std::ffi::OsString]) -> i32 {
     sapi::set_cli_request_data(script);
 
     // Build argv = [script, args…] as C strings. PHP's php_build_argv() copies
-    // these during php_request_startup (register_argc_argv defaults on), but
-    // the array must stay valid across that call.
+    // these during php_request_startup, but the array must stay valid across
+    // that call.
     let mut argv_cstrings: Vec<CString> = Vec::with_capacity(args.len() + 1);
     argv_cstrings.push(cstring_from_bytes(script.as_os_str().as_bytes()));
     for arg in args {
@@ -310,13 +310,19 @@ defined('STDERR')||define('STDERR',fopen('php://stderr','wb'));";
 fn build_ini_entries(ini: &[(String, String)]) -> Result<CString, String> {
     let mut blob = String::from(
         "html_errors=0\n\
-         register_argc_argv=1\n\
          implicit_flush=1\n\
          output_buffering=0\n\
          max_execution_time=0\n\
          max_input_time=-1\n\
          display_errors=stderr\n",
     );
+    // 8.4 builds `$argv` only while it is on, and php-cli 8.4 forces it on over a
+    // php.ini that turns it off (both shipped templates do). 8.5 builds `$argv`
+    // from argc without it and php-cli 8.5 no longer sets it; with it on, each
+    // async pool thread (argc 0) would raise E_DEPRECATED for deriving argv from
+    // the query string as its request starts.
+    #[cfg(php_v8_4)]
+    blob.push_str("register_argc_argv=1\n");
     for (key, value) in ini {
         if key.is_empty() || key.contains(['\n', '\r', '=']) {
             return Err(format!("invalid -d key {key:?}"));
