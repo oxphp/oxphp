@@ -67,6 +67,11 @@ const ASYNCDECL_COPY_TAIL = ': on a thread other than the one that created the p
 const ASYNCDECL_THIS_TAIL = ' uses $this: on a thread other than the one that created the pool, a '
     . 'Shared\Pool callback cannot use an object of the request that created it, so the code was not run';
 
+/** The tail of the message for a method called on an object that does not use $this. */
+const ASYNCDECL_ON_OBJECT_TAIL = ' is called on an object: on a thread other than the one that created '
+    . 'the pool, a Shared\Pool callback cannot use an object of the request that created it, so the code '
+    . 'was not run';
+
 /**
  * What acquire() returns, by asyncdecl_acquire_in_task(), when variable
  * $variable of the closure at $file:$line holds $what.
@@ -88,6 +93,17 @@ function asyncdecl_not_copied(string $variable, string $what, string $file, int 
 function asyncdecl_uses_this(string $what): array
 {
     return [\Error::class, $what . ASYNCDECL_THIS_TAIL];
+}
+
+/**
+ * What acquire() returns, by asyncdecl_acquire_in_task(), when $what —
+ * "Method Class::method()" — is called on an object and does not use $this.
+ *
+ * @return array{string, string}
+ */
+function asyncdecl_on_object(string $what): array
+{
+    return [\Error::class, $what . ASYNCDECL_ON_OBJECT_TAIL];
 }
 
 /** The tail of the message for an enum a callback reaches that is not preloaded. */

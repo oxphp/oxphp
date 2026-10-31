@@ -7860,9 +7860,11 @@ static void oxphp_pool_own_closure(zval *out, zend_object *closure) {
     "a Shared\\Pool callback runs with copies of its closure's variables, and only null, " \
     "booleans, numbers, strings, arrays of these and OxPHP\\Shared objects are copied, " \
     "so the code was not run"
-#define OXPHP_POOL_THIS_TAIL " uses $this: on a thread other than the one that created the " \
-    "pool, a Shared\\Pool callback cannot use an object of the request that created it, " \
+#define OXPHP_POOL_OBJECT_TAIL ": on a thread other than the one that created the pool, " \
+    "a Shared\\Pool callback cannot use an object of the request that created it, " \
     "so the code was not run"
+#define OXPHP_POOL_THIS_TAIL " uses $this" OXPHP_POOL_OBJECT_TAIL
+#define OXPHP_POOL_ON_OBJECT_TAIL " is called on an object" OXPHP_POOL_OBJECT_TAIL
 #define OXPHP_POOL_SHM_TAIL " is not in OPcache's shared memory: on a thread other than the " \
     "one that created the pool, a Shared\\Pool callback runs only when its code is there, " \
     "so the code was not run"
@@ -7988,9 +7990,16 @@ static zend_string *oxphp_pool_refusal(const zend_function *code, const char *ta
  * reads without checking that it exists (this_guaranteed_exists()), so a
  * closure whose code uses $this, as PHP refuses to unbind one, and one whose
  * variables hold what the copy does not take, are refused there instead. So
- * is a method or __call() that uses $this, called on an object: the call
- * would run it with the object itself. So is a built-in method called on an
- * object, for which nothing says what it does with the object: it can take
+ * is a method written in PHP called on an object, __call() and __invoke()
+ * included, whether or not its code names $this. Called with the object, it
+ * can still reach it through a non-static method it calls with self::,
+ * parent::, static:: or its class name, a closure it declares or
+ * debug_backtrace(). Called without it, it breaks what PHP 8.4 and 8.5 rely
+ * on, that a method that is not static has one: parent::$x::get() in a
+ * property hook (ZEND_INIT_PARENT_PROPERTY_HOOK_CALL) and, on 8.5, the JIT
+ * for a self:: or parent:: call to a static method read This as an object
+ * unchecked. So is a built-in method called on an object, for which nothing
+ * says what it does with the object: it can take
  * an object of the request out of it (SplQueue::dequeue()) or run the
  * request's closure (Closure::call(), ReflectionFunction::invoke()). An
  * OxPHP\Shared object is made to be used from any thread, and its built-in
@@ -8098,9 +8107,8 @@ static void oxphp_pool_prepare_elsewhere(oxphp_pool_fcc_t *heap) {
         }
         return;
     }
-    if (oxphp_pool_uses_this(&code->op_array)) {
-        heap->refused_elsewhere = oxphp_pool_refusal(code, OXPHP_POOL_THIS_TAIL);
-    }
+    heap->refused_elsewhere = oxphp_pool_refusal(code, oxphp_pool_uses_this(&code->op_array)
+        ? OXPHP_POOL_THIS_TAIL : OXPHP_POOL_ON_OBJECT_TAIL);
 }
 
 /* Allocate a fcc_heap from a user callable. Returns 0 on success
