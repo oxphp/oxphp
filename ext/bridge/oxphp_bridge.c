@@ -5227,8 +5227,9 @@ static zend_string *oxphp_own_function_missing_here(const zend_function *fn,
  * memory of its own (mutable_data, static_members_table). Any other class is
  * evaluated in place by the request that loaded it, while this thread would
  * read it; that holds for an inherited constant too, which such a class copies
- * when the declaring class is immutable and shares with it when it is not
- * (do_inherit_class_constant). */
+ * when the parent or interface it inherits it from is immutable and shares
+ * with it when it is not (do_inherit_class_constant(),
+ * do_inherit_iface_constant()). */
 static zend_string *oxphp_class_data_missing_here(const zend_class_entry *ce, uint32_t *uses) {
     if (!(ce->ce_flags & ZEND_ACC_IMMUTABLE)) {
         return NULL;
