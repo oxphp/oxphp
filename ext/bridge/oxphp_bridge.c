@@ -5297,7 +5297,8 @@ static zend_string *oxphp_own_function_missing_here(const zend_function *fn,
 
 /* What `ce`'s constants and static properties hold that a callback reading
  * them through self::, static:: or parent:: reaches: a callable that names a
- * class that way, as a value or in a constant expression, and on PHP 8.5 the
+ * class that way, written as the value or in a constant expression (one the
+ * expression takes from another constant is not seen), and on PHP 8.5 the
  * closures its constant expressions hold, the default values of its
  * properties included. A thread creates such a closure the first time it reads
  * the constant or the property, or creates an object of the class. A constant
@@ -5562,13 +5563,13 @@ static zend_string *oxphp_call_missing_here(const zend_function *fn, zend_object
  * Unlike a task, such a callable can carry objects and a class with it, so
  * what it reaches through them is checked too: $this, and the classes self
  * and static stand for, when its body uses them or holds a callable that
- * names a class that way, as a literal, as a static variable's initial value,
- * as what any constant or static property of those classes holds once it
- * reads one through them, or in a parameter's default value (above); the
- * class a built-in function is called on; for __call() or __callStatic(),
- * which has no body of its own,
- * called directly or through a closure made from the method name, the class;
- * and for [$closure, '__invoke'], the closure. A class is checked whole:
+ * names a class that way, written as a literal, a static variable's initial
+ * value, the value of any constant or static property of those classes or
+ * their parents once it reads one through them, or a parameter's default
+ * value (above); the class a built-in function is called on; for __call() or
+ * __callStatic(), which has no body of its own, called directly or through a
+ * closure made from the method name, the class; and for
+ * [$closure, '__invoke'], the closure. A class is checked whole:
  * every method and property hook it and its parents declare, __destruct()
  * included, whichever the call takes.
  *
@@ -5585,7 +5586,10 @@ static zend_string *oxphp_call_missing_here(const zend_function *fn, zend_object
  * built-in object that holds others (ArrayObject, a Generator), a callable
  * naming self, static or parent that the code makes at run time from what it
  * reads (a property, a function's result, a value an OxPHP\Shared object
- * holds, a constant or a static property it reads through a class name), the
+ * holds, a global constant, a constant or a static property it reads through
+ * a class name) or that a constant, a default value or a static variable's
+ * initial value takes from a global constant or another class's constant
+ * (const CB = MAKE_CB, $cb = Other::CB), the
  * constant expressions of a class other than an enum that OPcache did not
  * make immutable, and a class that a closure made from a function or method,
  * as f(...) makes one, names when it runs on another thread as the closure
