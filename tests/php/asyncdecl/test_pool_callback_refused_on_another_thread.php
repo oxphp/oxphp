@@ -7,9 +7,9 @@ require_once __DIR__ . '/helper.php';
 // On a thread other than the one that created the pool, a factory or $destroy
 // runs with copies of its closure's variables, made there. A variable holding
 // what is not copied, an object other than an OxPHP\Shared one, a closure
-// among them, or a resource, is refused there, and so is a callback that uses
-// $this, an object of the request that created the pool, a built-in method
-// called on an object other than an OxPHP\Shared one among them: before the
+// among them, or a resource, is refused there, and so is a closure that uses
+// $this, an object of the request that created the pool, and a method called
+// on an object other than an OxPHP\Shared one, built-in or not: before the
 // callback runs, as acquire() refuses one that reaches code the thread has not
 // loaded. On the thread that created the pool the same callbacks run.
 $t = new TestCase('test_pool_callback_refused_on_another_thread', 'asyncdecl');
@@ -131,9 +131,10 @@ $cases = [
         $maker->plainPool(),
         ['returned', \stdClass::class],
     ],
+    // A method, though, has its object.
     '[$object, \'method\'] whose method does not use $this' => [
         new \OxPHP\Shared\Pool(factory: [$maker, 'plain'], destroy: null, maxSize: 1),
-        ['returned', \stdClass::class],
+        asyncdecl_on_object('Method AsyncDeclPreMaker::plain()'),
     ],
     // A closure without $this calls a method that is not static as a static one.
     'parent:: on a method that is not static' => [

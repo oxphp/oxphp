@@ -130,6 +130,89 @@ final class AsyncDeclPreInvokableMaker
     }
 }
 
+// Public methods that do not name $this, each reaching the object it is called
+// on another way; each factory returns whether it reached one. made() is the
+// static control.
+class AsyncDeclPreQuietMaker
+{
+    public function __construct(private ?\OxPHP\Shared\Counter $ran = null)
+    {
+    }
+
+    public function viaSelf(): object
+    {
+        return self::own();
+    }
+
+    public static function made(): object
+    {
+        return (object) ['v' => true];
+    }
+
+    /** A pool whose factory names a method that is not static by its class, made where $this is this object. */
+    public function classCallablePool(): \OxPHP\Shared\Pool
+    {
+        return new \OxPHP\Shared\Pool(factory: [self::class, 'viaBacktrace'], destroy: null, maxSize: 1);
+    }
+
+    public function viaClosure(): object
+    {
+        return (object) ['v' => (new \ReflectionFunction(fn (): int => 1))->getClosureThis() !== null];
+    }
+
+    public function viaBacktrace(): object
+    {
+        return (object) ['v' => isset(\debug_backtrace()[0]['object'])];
+    }
+
+    public function destroyViaSelf(object $slot): void
+    {
+        self::count();
+    }
+
+    private function own(): object
+    {
+        return (object) ['v' => $this instanceof self];
+    }
+
+    private function count(): void
+    {
+        $this->ran?->add(1);
+    }
+}
+
+final class AsyncDeclPreQuietInvokableMaker
+{
+    public function __invoke(): object
+    {
+        return (object) ['v' => isset(\debug_backtrace()[0]['object'])];
+    }
+}
+
+final class AsyncDeclPreQuietMagicMaker
+{
+    public function __call(string $name, array $args): object
+    {
+        return (object) ['v' => isset(\debug_backtrace()[0]['object'])];
+    }
+}
+
+class AsyncDeclPreHookBase
+{
+    public object $made {
+        get => (object) ['v' => $this instanceof self];
+    }
+}
+
+// parent::$made::get() calls the parent's hook on the object the hook has,
+// which PHP takes to be there without the hook naming $this.
+final class AsyncDeclPreHookMaker extends AsyncDeclPreHookBase
+{
+    public object $made {
+        get => parent::$made::get();
+    }
+}
+
 /** An enum every thread has: each creates its cases when it first reads one. */
 enum AsyncDeclPreSuit
 {

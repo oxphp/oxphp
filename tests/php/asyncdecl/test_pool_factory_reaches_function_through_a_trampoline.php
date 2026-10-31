@@ -13,7 +13,7 @@ function asyncdecl_trampoline_reach_helper(int $base = 0): int
 // of which calls a function of this file, directly or through a closure made
 // from the method name. The function such a callable resolves to has no body of
 // its own; the class, or the closure, behind it is checked.
-// A __call() that calls nothing of this file runs in a task:
+// A __callStatic() that calls nothing of this file runs in a task:
 // test_pool_trampoline_factory_in_task.
 $t = new TestCase('test_pool_factory_reaches_function_through_a_trampoline', 'asyncdecl');
 
