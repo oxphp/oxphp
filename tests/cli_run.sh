@@ -171,16 +171,59 @@ child="$(printf '%s\n' "$out" | sed -n 2p)"
 	&& [ "${child##*|}" != "${parent##*|}" ]; } \
 	&& ok "PHP_BINARY = oxphp, child started through it" || bad "PHP_BINARY (exe='$exe' out='$out')"
 
-# 9. regression: HTTP serve role still boots and answers
+# 8i. The working directory stays the one oxphp was started in, as under php:
+#     a script path with a directory in it opens, and getcwd() is the launch
+#     directory, not the script's. Once more with OPcache off, as the release
+#     image has it under run.
+for opc in "" "-d opcache.enable_cli=0"; do
+	# shellcheck disable=SC2086 # $opc is empty or two words on purpose
+	out="$(docker run --rm -w /cli -v "$FIX:/cli:ro" "$IMAGE" oxphp run $opc sub/cwd.php 2>&1)"; code=$?
+	{ [ "$out" = "/cli/sub/cwd.php|/cli" ] && [ $code -eq 0 ]; } \
+		&& ok "relative path with a directory${opc:+ ($opc)}" || bad "relative path${opc:+ ($opc)} (out='$out' code=$code)"
+done
+out="$(docker run --rm -w /cli -v "$FIX:/cli:ro" "$IMAGE" oxphp ./sub/cwd.php 2>&1)"; code=$?
+{ [ "$out" = "/cli/sub/cwd.php|/cli" ] && [ $code -eq 0 ]; } \
+	&& ok "implicit run of ./sub/cwd.php" || bad "implicit ./ path (out='$out' code=$code)"
+out="$(docker run --rm -w /tmp -v "$FIX:/cli:ro" "$IMAGE" oxphp run /cli/sub/cwd.php 2>&1)"; code=$?
+{ [ "$out" = "/cli/sub/cwd.php|/tmp" ] && [ $code -eq 0 ]; } \
+	&& ok "absolute path: getcwd() is the launch directory" || bad "absolute path cwd (out='$out' code=$code)"
+
+# 8j. The script is opened by its path, as php opens it: not looked up in
+#     include_path (incpath/ holds a decoy sub/cwd.php) and not checked against
+#     open_basedir. `__FILE__` of a symlink names its target, as under php. As
+#     under the image's php, which is ZTS (an NTS php opens with plain fopen),
+#     `..` is folded before a symlink is followed, so `l/../sub/x` with
+#     `l -> /cli/sub` names /tmp/sub/x: the check in `run` finds the file, the
+#     open does not.
+out="$(docker run --rm -w /cli -v "$FIX:/cli:ro" "$IMAGE" oxphp run -d include_path=/cli/incpath:. sub/cwd.php 2>&1)"
+[ "$out" = "/cli/sub/cwd.php|/cli" ] \
+	&& ok "script not looked up in include_path" || bad "include_path lookup (got '$out')"
+out="$(docker run --rm -w /tmp -v "$FIX:/cli:ro" "$IMAGE" oxphp run -d open_basedir=/tmp /cli/sub/cwd.php 2>&1)"; code=$?
+{ [ "$out" = "/cli/sub/cwd.php|/tmp" ] && [ $code -eq 0 ]; } \
+	&& ok "script outside open_basedir runs" || bad "open_basedir on the script (out='$out' code=$code)"
+out="$(docker run --rm -w /tmp -v "$FIX:/cli:ro" "$IMAGE" sh -c 'ln -s /cli/sub/cwd.php link.php && oxphp run link.php' 2>&1)"
+[ "$out" = "/cli/sub/cwd.php|/tmp" ] \
+	&& ok "__FILE__ of a symlinked script is its target" || bad "symlink __FILE__ (got '$out')"
+out="$(docker run --rm -w /tmp -v "$FIX:/cli:ro" "$IMAGE" sh -c 'ln -s /cli/sub l && oxphp run l/../sub/cwd.php' 2>&1)"; code=$?
+{ [ "$out" = "oxphp: Could not open input file: l/../sub/cwd.php" ] && [ $code -eq 1 ]; } \
+	&& ok ".. after a symlink is folded as under ZTS php" || bad "symlink/.. open (out='$out' code=$code)"
+
+# 9. regression: HTTP serve role still boots and answers, and still runs a
+#    script in the script's own directory, as PHP-FPM does.
 name="oxphp-serve-smoke-$$"
-docker run -d --rm --name "$name" -e LISTEN_ADDR=0.0.0.0:18080 -p 127.0.0.1:18080:18080 "$IMAGE" >/dev/null 2>&1
+probe=/var/www/html/public/cwd_probe
+docker run -d --rm --name "$name" -e LISTEN_ADDR=0.0.0.0:18080 -p 127.0.0.1:18080:18080 \
+	-v "$FIX/sub:$probe:ro" "$IMAGE" >/dev/null 2>&1
 served=""
 for _ in $(seq 1 30); do
 	if curl -fsS -o /dev/null "http://127.0.0.1:18080/" 2>/dev/null; then served=yes; break; fi
 	sleep 0.5
 done
+body="$(curl -fsS "http://127.0.0.1:18080/cwd_probe/cwd.php" 2>&1)"
 docker rm -f "$name" >/dev/null 2>&1
 [ -n "$served" ] && ok "HTTP serve role boots + responds" || bad "HTTP serve smoke (no response)"
+[ "$body" = "$probe/cwd.php|$probe" ] \
+	&& ok "serve runs a script in its own directory" || bad "serve cwd (got '$body')"
 
 echo "== $PASS passed, $FAIL failed =="
 [ $FAIL -eq 0 ]

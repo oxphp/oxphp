@@ -1884,6 +1884,32 @@ void oxphp_bridge_skip_shebang(void) {
     CG(skip_shebang) = 1;
 }
 
+/* Keep the working directory when executing the primary script, as php-cli
+ * does (sapi/cli/php_cli.c). Without it php_execute_script() changes into the
+ * script's directory and then resolves the relative name from there. */
+void oxphp_bridge_set_no_chdir(void) {
+    SG(options) |= SAPI_OPTION_NO_CHDIR;
+}
+
+/* Open the primary script as php-cli does (cli_seek_file_begin): by its path
+ * from the working directory. A handle initialised from the name instead is
+ * opened through the stream layer, which looks a relative name up in
+ * include_path, and the plain-files wrapper checks open_basedir; php-cli does
+ * neither.
+ *
+ * A FILE*, not the stream oxphp_file_handle_init_fd() makes to avoid the
+ * FILE*'s gaps: run executes one script per process, so a FILE* that phar
+ * leaves open closes at exit, and a failed read is missed as php-cli misses
+ * it. */
+int oxphp_bridge_cli_open_script(void *file_handle, const char *path) {
+    FILE *fp = VCWD_FOPEN(path, "rb");
+    if (!fp) {
+        return -1;
+    }
+    zend_stream_init_fp((zend_file_handle *)file_handle, fp, path);
+    return 0;
+}
+
 /* ── SAPI response code ── */
 
 int oxphp_bridge_get_response_code(void) {
