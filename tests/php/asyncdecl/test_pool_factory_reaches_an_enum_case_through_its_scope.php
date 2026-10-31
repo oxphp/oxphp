@@ -9,12 +9,14 @@ function asyncdecl_enum_scope_helper(int $base = 0): int
     return $base + 1;
 }
 
-// An enum's cases are created on each thread the first time they are read,
-// and creating one looks the enum up by its name. A callback that reads a case
-// or a constant through self:: or static:: in an enum, or calls the enum's
-// cases(), is refused on a thread whose tables do not hold the enum. A
-// constant read through static:: in a class that is not an enum creates
-// nothing, and that class is not checked for it.
+// An enum's cases are created the first time they are read, from the enum
+// looked up by its name, and every request that loads an enum opcache.preload
+// did not load has a copy of its own. A callback that reads a case or a
+// constant through self:: or static:: in an enum, or calls the enum's
+// cases(), reaches the copy of the request that created the pool, and is
+// refused on any other thread, one that declared an enum of the same name
+// included. A constant read through static:: in a class that is not an enum
+// creates nothing, and that class is not checked for it.
 $t = new TestCase('test_pool_factory_reaches_an_enum_case_through_its_scope', 'asyncdecl');
 
 enum AsyncDeclEnumConn: string
@@ -58,7 +60,7 @@ class AsyncDeclEnumPlain
     }
 }
 
-$refused = [\Error::class, 'Enum AsyncDeclEnumConn' . ASYNCDECL_TAIL];
+$refused = [\Error::class, 'Enum AsyncDeclEnumConn' . ASYNCDECL_ENUM_TAIL];
 $cases = [
     'self::Primary->connect()' => [[AsyncDeclEnumConn::class, 'viaCase'], $refused],
     'static::Primary->value' => [[AsyncDeclEnumConn::class, 'caseValue'], $refused],
@@ -73,6 +75,38 @@ $t->assertSame(
     'static::N of a class that is not an enum runs in the task',
     asyncdecl_acquire_in_task(AsyncDeclEnumPlain::pool()),
     ['returned', \stdClass::class],
+);
+
+// The task's thread declares an enum of the same name first. Run there, the
+// factory would create the case in this request's copy, from that thread's.
+$conn = <<<'PHP'
+    enum AsyncDeclEnumConn: string
+    {
+        case Primary = 'p';
+    }
+    PHP;
+$pool = new \OxPHP\Shared\Pool(factory: [AsyncDeclEnumConn::class, 'viaCase'], destroy: null, maxSize: 1);
+$t->assertSame(
+    'self::Primary->connect(), on a thread that declared an enum of the same name: in a task',
+    asyncdecl_settle(oxphp_async(static function () use ($pool, $conn): array {
+        if (!\enum_exists('AsyncDeclEnumConn', false)) {
+            eval($conn);
+        }
+        try {
+            $h = $pool->acquire();
+        } catch (\Throwable $e) {
+            return [$e::class, $e->getMessage()];
+        }
+        $class = $h->get()::class;
+        $h->release();
+        $pool->evict();
+        return ['returned', $class];
+    })),
+    [true, $refused],
+);
+$t->assertTrue(
+    'the case the worker thread reads is one of its own enum',
+    AsyncDeclEnumConn::Primary instanceof AsyncDeclEnumConn,
 );
 
 $h = (new \OxPHP\Shared\Pool(factory: [AsyncDeclEnumConn::class, 'viaCase'], destroy: null, maxSize: 1))->acquire();

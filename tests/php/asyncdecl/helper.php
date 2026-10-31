@@ -90,6 +90,11 @@ function asyncdecl_uses_this(string $what): array
     return [\Error::class, $what . ASYNCDECL_THIS_TAIL];
 }
 
+/** The tail of the message for an enum a callback reaches that is not preloaded. */
+const ASYNCDECL_ENUM_TAIL = ' was not loaded by opcache.preload: every request that loads such an enum has '
+    . 'a copy of its own, cases included, and on a thread other than the one that created the pool a '
+    . 'Shared\Pool callback would reach the copy of the request that created it, so the code was not run';
+
 /** The tail of the message for a callback whose code is not in OPcache's shared memory. */
 const ASYNCDECL_SHM_TAIL = " is not in OPcache's shared memory: on a thread other than the one that "
     . 'created the pool, a Shared\Pool callback runs only when its code is there, so the code was not run';
