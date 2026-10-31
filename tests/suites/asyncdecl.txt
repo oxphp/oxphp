@@ -38,6 +38,10 @@ asyncdecl/test_pool_callback_refused_on_another_thread
 asyncdecl/test_pool_method_on_object_refused_on_another_thread
 asyncdecl/test_pool_callback_on_another_thread_ignores_what_its_captures_became
 asyncdecl/test_pool_callback_run_time_cache_is_per_thread
+# One made from a function or a static method runs there as that function,
+# with the thread's own `static`s; one whose `static`s this request's memory
+# holds is refused.
+asyncdecl/test_pool_callback_made_from_a_function_runs_as_it_on_another_thread
 # A task's idle slot, when the pool goes away on the worker thread.
 asyncdecl/test_pool_idle_slot_of_a_task_outlives_the_pool
 # A factory or $destroy reaching __call(), __callStatic() or a closure's
