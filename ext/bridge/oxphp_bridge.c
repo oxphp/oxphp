@@ -5524,8 +5524,11 @@ static zend_string *oxphp_call_missing_here(const zend_function *fn, zend_object
  * default value the compiler could not fold, such as ['static', self::M], a
  * captured value, a property's), the constant expressions of a class other
  * than an enum that OPcache did not make immutable, and a class that a closure
- * made from a function or method, as f(...) makes one, names once it has run,
- * since every thread shares that closure's run-time cache and the class it
+ * made from a function or method, as f(...) makes one, names when it runs on
+ * another thread as the closure rather than as the function
+ * (oxphp_pool_prepare_elsewhere()), once it has run, or once the function has
+ * when the closure took the function's run-time cache
+ * (zend_create_closure_ex()): every thread shares that cache and the class
  * found there. A callback whose code
  * oxphp_op_array_in_request_memory() finds in request memory, where closures
  * made from one declaration share its run-time cache too, does not run on
@@ -7819,7 +7822,9 @@ int oxphp_shared_invoke_2_ret_stop(zval *callable,
  *  oxphp_pool_invoke on whichever thread runs the factory or
  *  $destroy: on that thread, through the fcc; on any other, a
  *  closure through a closure of that thread's own
- *  (oxphp_pool_call_elsewhere).
+ *  (oxphp_pool_call_elsewhere), and a closure made from a function
+ *  or method, where it can, through that function
+ *  (oxphp_pool_made_from()).
  *
  *  Per-resource zvals are emalloc'd once at factory invocation
  *  and owned by the pool; acquire ZVAL_COPYs them into user
@@ -7838,6 +7843,9 @@ typedef struct {
     zend_mm_heap *home;
     /* Why another thread does not run the callable, or NULL. */
     zend_string *refused_elsewhere;
+    /* What another thread calls instead of a closure made from a function or
+     * method (oxphp_pool_made_from()), or NULL. */
+    const zend_function *made_from;
     /* A closure not made from a function or method runs elsewhere through
      * a closure built there: its called scope, its table of variables as
      * oxphp_portable_serialize_ht() wrote it, what each slot held that the
@@ -7873,8 +7881,9 @@ typedef struct {
  * leaves references puts the object in the garbage collector's buffer of
  * possible roots of the thread making the call, writing that buffer's index
  * into the object. The copy of a closure made from a function or method runs
- * on whichever PHP thread runs the factory or $destroy, and each thread has a
- * buffer of its own: an entry in another thread's buffer points
+ * on another PHP thread too, unless that thread calls the function in its
+ * place (oxphp_pool_prepare_elsewhere()), and each thread has a buffer of its
+ * own: an entry in another thread's buffer points
  * at an object the creating request frees, and that request, freeing it,
  * takes it out of its own buffer by the other buffer's index. The copy is
  * marked not collectable, which the engine checks before it adds an object it
@@ -7906,6 +7915,9 @@ static void oxphp_pool_own_closure(zval *out, zend_object *closure) {
 #define OXPHP_POOL_SHM_TAIL " is not in OPcache's shared memory: on a thread other than the " \
     "one that created the pool, a Shared\\Pool callback runs only when its code is there, " \
     "so the code was not run"
+#define OXPHP_POOL_STATIC_TAIL " keeps its static variables in the memory of the request " \
+    "that created the pool: on a thread other than that one, a Shared\\Pool callback " \
+    "cannot use them, so the code was not run"
 
 /* What a value of a closure's variables is that oxphp_portable_serialize_ht()
  * does not copy, through references and arrays, or NULL. An array holding
@@ -7993,6 +8005,31 @@ static const zend_function *oxphp_pool_code_of(const zend_function *fn) {
     return magic && magic->type == ZEND_USER_FUNCTION ? magic : NULL;
 }
 
+/* For fn, the function of a closure made from a function or method as f(...)
+ * makes one: that function, when another thread can call it in the closure's
+ * place, its `static` variables and run-time cache being in slots each thread
+ * has of its own (MAP_PTR offsets), as OPcache gives them to the functions and
+ * linked classes' methods it keeps in shared memory (ZEND_MAP_PTR_NEW(),
+ * zend_persist.c and zend_file_cache.c, PHP 8.4, 8.5). The closure points at
+ * the `static` variables the function has on the thread that made it, and at
+ * its run-time cache when it had one (zend_create_closure_ex()). NULL for a
+ * function that keeps them in itself, as a method of a class linked in
+ * request memory does (zend_lazy_method_load()): another thread calling it
+ * would leave in it a table or a run-time cache of that thread's memory. */
+static const zend_function *oxphp_pool_made_from(const zend_function *fn) {
+    const HashTable *table = fn->common.scope ? &fn->common.scope->function_table
+                                              : EG(function_table);
+    const zend_function *named = zend_hash_find_ptr_lc(table, fn->common.function_name);
+    if (!named || named->type != ZEND_USER_FUNCTION
+            || named->op_array.opcodes != fn->op_array.opcodes) {
+        return NULL;
+    }
+    const zend_op_array *op = &named->op_array;
+    bool per_thread = ZEND_MAP_PTR_IS_OFFSET(op->run_time_cache)
+        && (!op->static_variables || ZEND_MAP_PTR_IS_OFFSET(op->static_variables_ptr));
+    return per_thread ? named : NULL;
+}
+
 /* The refusal of code, named by what it is, followed by tail. */
 static zend_string *oxphp_pool_refusal(const zend_function *code, const char *tail) {
     if ((code->common.fn_flags & (ZEND_ACC_CLOSURE | ZEND_ACC_FAKE_CLOSURE)) == ZEND_ACC_CLOSURE) {
@@ -8042,6 +8079,15 @@ static zend_string *oxphp_pool_refusal(const zend_function *code, const char *ta
  * request's closure (Closure::call(), ReflectionFunction::invoke()). An
  * OxPHP\Shared object is made to be used from any thread, and its built-in
  * methods run there.
+ *
+ * A closure made from a function or a static method uses the `static`
+ * variables the function has on this thread, and its run-time cache when it
+ * had one (zend_create_closure_ex()): another thread that set a `static`
+ * there did so with memory of its own, in a table this request goes on using
+ * and frees. There the function is called in the closure's place, as its name
+ * would call it, with that thread's own. One whose function keeps them in
+ * itself (oxphp_pool_made_from()) runs there as the closure when it has no
+ * `static`, and is refused there when it has.
  *
  * Any other callable is called there as it is called here: a built-in
  * function or static method, or one whose code
@@ -8129,6 +8175,14 @@ static void oxphp_pool_prepare_elsewhere(oxphp_pool_fcc_t *heap) {
             oxphp_portable_free(buf);
         }
         heap->rebuilt_elsewhere = true;
+        return;
+    }
+    /* A closure written in PHP is here one made from a function or method. */
+    if (closure && fn->type == ZEND_USER_FUNCTION && !this_obj) {
+        heap->made_from = oxphp_pool_made_from(fn);
+        if (!heap->made_from && fn->op_array.static_variables) {
+            heap->refused_elsewhere = oxphp_pool_refusal(code, OXPHP_POOL_STATIC_TAIL);
+        }
         return;
     }
 
@@ -8372,6 +8426,9 @@ static zend_string *oxphp_pool_invoke(const oxphp_pool_fcc_t *heap,
     oxphp_cover_map_ptr_last();
     if (elsewhere && heap->rebuilt_elsewhere) {
         oxphp_pool_call_elsewhere(heap, retval, argc, argv);
+    } else if (elsewhere && heap->made_from) {
+        zend_call_known_function((zend_function *)heap->made_from, NULL, heap->called_scope,
+            retval, argc, argv, NULL);
     } else {
         oxphp_pool_call_fcc(&heap->fcc, retval, argc, argv);
     }

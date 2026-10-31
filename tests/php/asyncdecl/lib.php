@@ -218,3 +218,18 @@ enum AsyncDeclPreSuit
 {
     case Hearts;
 }
+
+// A static method counting its calls in a `static`, and a class to call it
+// through, which static:: then stands for.
+class AsyncDeclPreCounter
+{
+    public static function next(): object
+    {
+        static $n = 0;
+        return (object) ['n' => ++$n, 'class' => static::class];
+    }
+}
+
+final class AsyncDeclPreChildCounter extends AsyncDeclPreCounter
+{
+}

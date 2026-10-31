@@ -111,6 +111,10 @@ const ASYNCDECL_ENUM_TAIL = ' was not loaded by opcache.preload: every request t
     . 'a copy of its own, cases included, and on a thread other than the one that created the pool a '
     . 'Shared\Pool callback would reach the copy of the request that created it, so the code was not run';
 
+/** The tail of the message for a callback whose static variables are in the creating request's memory. */
+const ASYNCDECL_STATIC_TAIL = ' keeps its static variables in the memory of the request that created the pool: '
+    . 'on a thread other than that one, a Shared\Pool callback cannot use them, so the code was not run';
+
 /** The tail of the message for a callback whose code is not in OPcache's shared memory. */
 const ASYNCDECL_SHM_TAIL = " is not in OPcache's shared memory: on a thread other than the one that "
     . 'created the pool, a Shared\Pool callback runs only when its code is there, so the code was not run';
