@@ -10,9 +10,9 @@ function asyncdecl_destroy_reach_helper(object $r): void
 
 // A $destroy calling only a method of an object it captured, and that method
 // calls a function of this file. A task's evict() runs $destroy on the task's
-// thread: the object's class is checked with $destroy, which is then skipped
-// the way one that throws is, and the slot is dropped all the same. On this
-// worker thread, where the function exists, a $destroy of the same shape runs.
+// thread, which gets no copy of the object: $destroy is skipped the way one
+// that throws is, and the slot is dropped all the same. On this worker thread,
+// where the function exists, a $destroy of the same shape runs.
 $t = new TestCase('test_pool_destroy_reaches_function_through_captured_object', 'asyncdecl');
 
 final class AsyncDeclDestroyCloser

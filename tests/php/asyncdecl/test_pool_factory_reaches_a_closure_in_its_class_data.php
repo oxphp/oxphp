@@ -40,4 +40,22 @@ foreach ($cases as $what => $factory) {
     $h->release();
 }
 
+// A callable naming the class as static, held by a static variable of such a
+// closure, has the class checked whole.
+$held = [
+    'a constant' => \AsyncDeclClassDataStaticInConstant::class,
+    "a parameter's default value" => \AsyncDeclClassDataStaticInDefault::class,
+];
+foreach ($held as $what => $class) {
+    $pool = new \OxPHP\Shared\Pool(factory: [$class, 'factory'], destroy: null, maxSize: 1);
+    $t->assertSame(
+        "a callable in a static variable of a closure in $what: in a task",
+        asyncdecl_acquire_in_task($pool),
+        asyncdecl_refused('asyncdecl_class_data_helper', $fixture, ASYNCDECL_CLASS_DATA_STATIC_LINE),
+    );
+    $h = $pool->acquire();
+    $t->assertSame("a callable in a static variable of a closure in $what: on the worker thread", $h->get()->v, 1);
+    $h->release();
+}
+
 $t->done();
