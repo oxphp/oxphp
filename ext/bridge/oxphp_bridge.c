@@ -8491,18 +8491,20 @@ void oxphp_pool_slot_free(void *slot_zv_heap) {
  *    too and say so: with no frame to return to, a throw from
  *    $destroy would end as a fatal error, or in a user exception
  *    handler run from inside the pool's teardown.
- *  - If $destroy throws, we serialise the message via
- *    `oxphp_bridge_capture_fatal` (operator-visible via the
- *    thread-local pop path) and clear the exception so the
- *    caller can go on to the next slot.
+ *  - If $destroy throws, its exception is dropped so that the caller
+ *    can go on to the next slot. The message is handed to
+ *    `oxphp_bridge_capture_fatal`, which only a failed async task reads
+ *    back. A destructor that throws as the exception is released throws
+ *    as one run at the frame's instruction does, and its exception is
+ *    left set for the caller.
  *  - If an exception is already in flight — the pool's last
  *    reference went away while a throw or an exit() was on its way
  *    out of a function, a built-in one included, or a destructor threw
  *    as the slot before this one was freed — it is set aside while
  *    $destroy runs and put back after, as the engine does around a
  *    destructor. Left set, it would keep the engine from calling
- *    $destroy, and the clearing above would take it for $destroy's own
- *    and clear it in the middle of the unwinding.
+ *    $destroy, and would be taken for $destroy's own and dropped in
+ *    the middle of the unwinding.
  *
  * Frees `slot_zv_heap` (zval_ptr_dtor + efree) and returns
  * OXPHP_SHARED_INVOKE_SKIPPED when a $destroy was given and no PHP
@@ -8529,14 +8531,19 @@ static int oxphp_pool_destroy_invoke_unguarded(void *destroy_fcc_heap, void *slo
          * bailout before it is put back leaves it set aside, as the engine
          * leaves the one it set aside around a destructor. */
         zend_execute_data *frame = EG(current_execute_data);
+        bool user_frame = frame->func && ZEND_USER_CODE(frame->func->common.type);
         zend_object *pending = EG(exception);
-        const zend_op *pending_opline_before = NULL;
+        /* The instruction the frame is running: the one its handler saved
+         * before letting go of the pool, or, with an exception in flight, the
+         * one recorded as having thrown. The VM gives an internal function's
+         * frame no instruction of its own, so there is nothing to read there. */
+        const zend_op *frame_opline = user_frame ? frame->opline : NULL;
         if (pending) {
-            if (frame->func && ZEND_USER_CODE(frame->func->common.type)) {
+            if (user_frame) {
                 zend_rethrow_exception(frame);
             }
-            frame->opline = EG(opline_before_exception);
-            pending_opline_before = EG(opline_before_exception);
+            frame_opline = EG(opline_before_exception);
+            frame->opline = frame_opline;
             EG(exception) = NULL;
         }
 
@@ -8565,19 +8572,29 @@ static int oxphp_pool_destroy_invoke_unguarded(void *destroy_fcc_heap, void *slo
                 oxphp_bridge_capture_fatal(
                     Z_STRVAL_P(msg_zv), Z_STRLEN_P(msg_zv));
             }
-            zend_clear_exception();
+            /* Dropped as a catch with no variable drops what it caught: out
+             * of EG(exception), the frame back on its instruction, then
+             * released, so that a destructor throwing there throws at that
+             * instruction. zend_clear_exception() (PHP 8.4.27, 8.5.12)
+             * releases with the frame still at HANDLE_EXCEPTION, and then
+             * points it at EG(opline_before_exception): the destructor's
+             * throw, if one threw. */
+            EG(exception) = NULL;
+            if (frame_opline) {
+                frame->opline = frame_opline;
+            }
+            OBJ_RELEASE(ex);
         }
 
-        /* Put back once the clearing above is done with $destroy's own. An
-         * exception set here was thrown by a destructor that clearing ran,
-         * and the one set aside is chained to it, as the engine chains it to
-         * one a destructor throws. What is released below — $destroy's
-         * return value, then the slot — is released with an exception set
-         * again, and the engine guards any destructor that runs there from it
-         * itself. */
+        /* Put back once $destroy's own is dropped. An exception set here was
+         * thrown by a destructor the release above ran, and the one set
+         * aside is chained to it, as the engine chains it to one a destructor
+         * throws. What is released below — $destroy's return value, then the
+         * slot — is released with an exception set again, and the engine
+         * guards any destructor that runs there from it itself. */
         if (pending) {
             frame->opline = EG(exception_op);
-            EG(opline_before_exception) = pending_opline_before;
+            EG(opline_before_exception) = frame_opline;
             if (EG(exception)) {
                 zend_exception_set_previous(EG(exception), pending);
             } else {
