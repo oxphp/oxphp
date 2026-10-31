@@ -8102,13 +8102,12 @@ static void oxphp_pool_prepare_elsewhere(oxphp_pool_fcc_t *heap) {
         ZVAL_OBJ(&obj, this_obj);
         if (!oxphp_is_shareable(&obj)) {
             heap->refused_elsewhere = zend_strpprintf(0, "Built-in method %s::%s()"
-                OXPHP_POOL_THIS_TAIL, ZSTR_VAL(this_obj->ce->name),
+                OXPHP_POOL_ON_OBJECT_TAIL, ZSTR_VAL(this_obj->ce->name),
                 ZSTR_VAL(fn->common.function_name));
         }
         return;
     }
-    heap->refused_elsewhere = oxphp_pool_refusal(code, oxphp_pool_uses_this(&code->op_array)
-        ? OXPHP_POOL_THIS_TAIL : OXPHP_POOL_ON_OBJECT_TAIL);
+    heap->refused_elsewhere = oxphp_pool_refusal(code, OXPHP_POOL_ON_OBJECT_TAIL);
 }
 
 /* Allocate a fcc_heap from a user callable. Returns 0 on success

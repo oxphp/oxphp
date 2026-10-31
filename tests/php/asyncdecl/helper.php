@@ -63,11 +63,11 @@ const ASYNCDECL_COPY_TAIL = ': on a thread other than the one that created the p
     . "callback runs with copies of its closure's variables, and only null, booleans, numbers, "
     . 'strings, arrays of these and OxPHP\Shared objects are copied, so the code was not run';
 
-/** The tail of the message for a callback that uses $this. */
+/** The tail of the message for a closure that uses $this. */
 const ASYNCDECL_THIS_TAIL = ' uses $this: on a thread other than the one that created the pool, a '
     . 'Shared\Pool callback cannot use an object of the request that created it, so the code was not run';
 
-/** The tail of the message for a method called on an object that does not use $this. */
+/** The tail of the message for a method called on an object, built-in or not. */
 const ASYNCDECL_ON_OBJECT_TAIL = ' is called on an object: on a thread other than the one that created '
     . 'the pool, a Shared\Pool callback cannot use an object of the request that created it, so the code '
     . 'was not run';
@@ -85,8 +85,7 @@ function asyncdecl_not_copied(string $variable, string $what, string $file, int 
 
 /**
  * What acquire() returns, by asyncdecl_acquire_in_task(), when $what — "The
- * closure at file:line", "Method Class::method()" or "Built-in method
- * Class::method()" — uses $this.
+ * closure at file:line" — uses $this.
  *
  * @return array{string, string}
  */
@@ -97,7 +96,8 @@ function asyncdecl_uses_this(string $what): array
 
 /**
  * What acquire() returns, by asyncdecl_acquire_in_task(), when $what —
- * "Method Class::method()" — is called on an object and does not use $this.
+ * "Method Class::method()" or "Built-in method Class::method()" — is called
+ * on an object.
  *
  * @return array{string, string}
  */
