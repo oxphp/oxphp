@@ -94,37 +94,37 @@ $cases = [
     ],
     '[$object, \'method\'] whose method uses $this' => [
         new \OxPHP\Shared\Pool(factory: [$maker, 'make'], destroy: null, maxSize: 1),
-        asyncdecl_uses_this('Method AsyncDeclPreMaker::make()'),
+        asyncdecl_on_object('Method AsyncDeclPreMaker::make()'),
     ],
     '$object->method(...) whose method uses $this' => [
         new \OxPHP\Shared\Pool(factory: $maker->make(...), destroy: null, maxSize: 1),
-        asyncdecl_uses_this('Method AsyncDeclPreMaker::make()'),
+        asyncdecl_on_object('Method AsyncDeclPreMaker::make()'),
     ],
     'a __call() that uses $this' => [
         new \OxPHP\Shared\Pool(factory: [new AsyncDeclPreMagicMaker(), 'make'], destroy: null, maxSize: 1),
-        asyncdecl_uses_this('Method AsyncDeclPreMagicMaker::__call()'),
+        asyncdecl_on_object('Method AsyncDeclPreMagicMaker::__call()'),
     ],
     '$object->method(...) that only __call() answers' => [
         new \OxPHP\Shared\Pool(factory: (new AsyncDeclPreMagicMaker())->make(...), destroy: null, maxSize: 1),
-        asyncdecl_uses_this('Method AsyncDeclPreMagicMaker::__call()'),
+        asyncdecl_on_object('Method AsyncDeclPreMagicMaker::__call()'),
     ],
     // The closure has the name of a method the class has, which __call()
     // answers outside it.
     '$object->method(...) that __call() answers for a private method' => [
         new \OxPHP\Shared\Pool(factory: (new AsyncDeclPreHiddenMaker())->make(...), destroy: null, maxSize: 1),
-        asyncdecl_uses_this('Method AsyncDeclPreHiddenMaker::__call()'),
+        asyncdecl_on_object('Method AsyncDeclPreHiddenMaker::__call()'),
     ],
     'Closure::fromCallable() of a private method __call() answers' => [
         new \OxPHP\Shared\Pool(factory: \Closure::fromCallable([new AsyncDeclPreHiddenMaker(), 'make']), destroy: null, maxSize: 1),
-        asyncdecl_uses_this('Method AsyncDeclPreHiddenMaker::__call()'),
+        asyncdecl_on_object('Method AsyncDeclPreHiddenMaker::__call()'),
     ],
     '$object->method(...) that __call() answers for a protected built-in method' => [
         new \OxPHP\Shared\Pool(factory: (new AsyncDeclPreHeapMaker())->compare(...), destroy: null, maxSize: 1),
-        asyncdecl_uses_this('Method AsyncDeclPreHeapMaker::__call()'),
+        asyncdecl_on_object('Method AsyncDeclPreHeapMaker::__call()'),
     ],
     'an __invoke() that uses $this' => [
         new \OxPHP\Shared\Pool(factory: new AsyncDeclPreInvokableMaker(), destroy: null, maxSize: 1),
-        asyncdecl_uses_this('Method AsyncDeclPreInvokableMaker::__invoke()'),
+        asyncdecl_on_object('Method AsyncDeclPreInvokableMaker::__invoke()'),
     ],
     // Bound to an object it does not use: the closure runs without it.
     'a factory with a $this it does not use' => [
@@ -144,16 +144,16 @@ $cases = [
     // A built-in method works on the object it is called on.
     '[$queue, \'dequeue\']' => [
         new \OxPHP\Shared\Pool(factory: [$queue, 'dequeue'], destroy: null, maxSize: 1),
-        asyncdecl_uses_this('Built-in method SplQueue::dequeue()'),
+        asyncdecl_on_object('Built-in method SplQueue::dequeue()'),
     ],
     '$queue->dequeue(...)' => [
         new \OxPHP\Shared\Pool(factory: $queue->dequeue(...), destroy: null, maxSize: 1),
-        asyncdecl_uses_this('Built-in method SplQueue::dequeue()'),
+        asyncdecl_on_object('Built-in method SplQueue::dequeue()'),
     ],
     // The method runs a closure of this request.
     '[$reflection, \'invoke\']' => [
         new \OxPHP\Shared\Pool(factory: [$reflection, 'invoke'], destroy: null, maxSize: 1),
-        asyncdecl_uses_this('Built-in method ReflectionFunction::invoke()'),
+        asyncdecl_on_object('Built-in method ReflectionFunction::invoke()'),
     ],
     'a built-in method of an OxPHP\\Shared object' => [
         new \OxPHP\Shared\Pool(factory: [new \OxPHP\Shared\Channel(1), 'tryRecv'], destroy: null, maxSize: 1),
