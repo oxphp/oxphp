@@ -16,10 +16,11 @@ function asyncdecl_class_data_helper(int $base = 0): int
 
 /** The line of each call to asyncdecl_class_data_helper() below. */
 const ASYNCDECL_CLASS_DATA_LINES = [
-    'constant' => __LINE__ + 11,
-    'static property' => __LINE__ + 22,
-    'property' => __LINE__ + 33,
-    "a child's static property" => __LINE__ + 54,
+    'a constant' => __LINE__ + 12,
+    'a static property' => __LINE__ + 23,
+    'a property' => __LINE__ + 34,
+    "a child's static property" => __LINE__ + 55,
+    "an interface's constant" => __LINE__ + 64,
 ];
 
 // Each closure is created from its class's constant expression the first time
@@ -75,4 +76,28 @@ final class AsyncDeclClassDataChild extends AsyncDeclClassDataBase
     public static \Closure $make = static function (): object {
         return (object) ['v' => asyncdecl_class_data_helper()];
     };
+}
+
+// A constant a class inherits is evaluated with the class or interface that
+// declares it as scope: self::HELPER in MAKE reads the interface's HELPER, not
+// the one the class overrides it with.
+interface AsyncDeclClassDataIface
+{
+    public const HELPER = static function (): object {
+        return (object) ['v' => asyncdecl_class_data_helper()];
+    };
+
+    public const MAKE = static function (): object {
+        return (self::HELPER)();
+    };
+}
+
+final class AsyncDeclClassDataImplements implements AsyncDeclClassDataIface
+{
+    public const HELPER = 1;
+
+    public static function make(): object
+    {
+        return (self::MAKE)();
+    }
 }

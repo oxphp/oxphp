@@ -157,41 +157,6 @@ $t->assertSame(
     ['returned', \DateTime::class],
 );
 
-// A built-in method of a class written in PHP runs its own code, not the
-// class's __callStatic(): from() of a backed enum, called without the value it
-// wants. Only an enum has such a method, and a thread that has not declared
-// the enum refuses it before that, so the task declares one of the same name
-// first. from() throws before it reads the enum.
-$suit = <<<'PHP'
-    enum AsyncDeclEvalSuit: string
-    {
-        case Hearts = 'h';
-
-        public static function __callStatic(string $name, array $args): object
-        {
-            $a = ['ts' => 86400];
-            return date_create('@' . $a['ts']);
-        }
-    }
-    PHP;
-eval($suit);
-$suitPool = new Pool(factory: [AsyncDeclEvalSuit::class, 'from'], destroy: null, maxSize: 1);
-$t->assertSame(
-    'a built-in method of a class with __callStatic() runs in a task',
-    asyncdecl_settle(oxphp_async(static function () use ($suitPool, $suit): string {
-        if (!\enum_exists('AsyncDeclEvalSuit', false)) {
-            eval($suit);
-        }
-        try {
-            $suitPool->acquire()->release();
-        } catch (\Throwable $e) {
-            return $e::class . ': ' . $e->getMessage();
-        }
-        return 'returned';
-    })),
-    [true, \ArgumentCountError::class . ': AsyncDeclEvalSuit::from() expects exactly 1 argument, 0 given'],
-);
-
 // A refused $destroy is skipped: evict() drops the slot all the same.
 $destroyed = new Counter(0);
 $destroy = eval(<<<'PHP'

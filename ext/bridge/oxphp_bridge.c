@@ -5218,9 +5218,14 @@ static zend_string *oxphp_own_function_missing_here(const zend_function *fn,
 
 #if PHP_VERSION_ID >= 80500
 /* The closures `ce`'s constant expressions hold: the values of its constants,
- * its own and inherited ones, and the default values of its properties and
- * static properties. A thread creates such a closure the first time it reads
- * the constant or the property, or creates an object of the class.
+ * and the default values of its properties and static properties. A thread
+ * creates such a closure the first time it reads the constant or the property,
+ * or creates an object of the class. A constant `ce` inherits is evaluated
+ * with the class or interface that declares it as scope, which self:: in such
+ * a closure stands for (zend_update_class_constants(),
+ * zend_get_class_constant_ex(), PHP 8.5), so that class's are looked at in
+ * its place. Each class's are looked at once: `seen` holds its constants
+ * table for that, as oxphp_class_missing_here() holds the class itself.
  *
  * Only a class OPcache made immutable is looked at: its tables, the constants
  * it inherits included, stay as compiled, and each thread evaluates them into
@@ -5230,15 +5235,18 @@ static zend_string *oxphp_own_function_missing_here(const zend_function *fn,
  * when the parent or interface it inherits it from is immutable and shares
  * with it when it is not (do_inherit_class_constant(),
  * do_inherit_iface_constant()). */
-static zend_string *oxphp_class_data_missing_here(const zend_class_entry *ce, uint32_t *uses) {
-    if (!(ce->ce_flags & ZEND_ACC_IMMUTABLE)) {
+static zend_string *oxphp_class_data_missing_here(const zend_class_entry *ce, uint32_t *uses,
+                                                  HashTable *seen) {
+    if (!(ce->ce_flags & ZEND_ACC_IMMUTABLE) || !oxphp_first_visit(seen, &ce->constants_table)) {
         return NULL;
     }
     zend_string *missing;
     zend_class_constant *c;
     ZEND_HASH_MAP_FOREACH_PTR(&ce->constants_table, c) {
         if (Z_TYPE(c->value) == IS_CONSTANT_AST) {
-            missing = oxphp_const_ast_missing_here(Z_ASTVAL(c->value), uses);
+            missing = c->ce == ce
+                ? oxphp_const_ast_missing_here(Z_ASTVAL(c->value), uses)
+                : oxphp_class_data_missing_here(c->ce, uses, seen);
             if (missing) {
                 return missing;
             }
@@ -5273,20 +5281,33 @@ static zend_string *oxphp_class_data_missing_here(const zend_class_entry *ce, ui
  * class as their scope. A built-in class has no body to check, and its parents
  * are built in too.
  *
- * An enum this thread has not declared is refused for itself: reading a case
- * the first time creates it from the enum looked up by name, and the lookup's
- * result is not checked (ZEND_AST_CONST_ENUM_INIT, PHP 8.4, 8.5). */
+ * An enum is refused for itself unless it is the one this thread's class table
+ * holds under its name, which on a thread other than the one that created the
+ * pool only an enum opcache.preload loaded is: OPcache's inheritance cache
+ * leaves enums out, so each request that loads any other links a copy of its
+ * own (zend_do_link_class(), zend_lazy_class_load(), PHP 8.4, 8.5). Reading a
+ * case the first time creates it from the enum looked up by name, whose result
+ * is not checked, and stores it in the table of the copy read, which is not
+ * immutable (ZEND_AST_CONST_ENUM_INIT, zend_class_constants_table(), PHP 8.4,
+ * 8.5). */
+#define OXPHP_ENUM_NOT_PRELOADED \
+    " was not loaded by opcache.preload: every request that loads such an enum has " \
+    "a copy of its own, cases included, and on a thread other than the one that " \
+    "created the pool a Shared\\Pool callback would reach the copy of the request " \
+    "that created it, so the code was not run"
+
 static zend_string *oxphp_class_missing_here(zend_class_entry *ce, HashTable *seen) {
     for (; ce && ce->type == ZEND_USER_CLASS; ce = ce->parent) {
         if (!oxphp_first_visit(seen, ce)) {
             return NULL;
         }
-        if ((ce->ce_flags & ZEND_ACC_ENUM) && !zend_hash_find_ptr_lc(EG(class_table), ce->name)) {
-            return zend_strpprintf(0, "Enum %s" OXPHP_NOT_LOADED_HERE, ZSTR_VAL(ce->name));
+        if ((ce->ce_flags & ZEND_ACC_ENUM)
+                && zend_hash_find_ptr_lc(EG(class_table), ce->name) != ce) {
+            return zend_strpprintf(0, "Enum %s" OXPHP_ENUM_NOT_PRELOADED, ZSTR_VAL(ce->name));
         }
         zend_string *missing;
 #if PHP_VERSION_ID >= 80500
-        missing = oxphp_class_data_missing_here(ce, NULL);
+        missing = oxphp_class_data_missing_here(ce, NULL, seen);
         if (missing) {
             return missing;
         }
@@ -5325,7 +5346,7 @@ static zend_string *oxphp_scope_data_missing_here(zend_class_entry *ce, uint32_t
     }
 #if PHP_VERSION_ID >= 80500
     for (; ce && ce->type == ZEND_USER_CLASS; ce = ce->parent) {
-        zend_string *missing = oxphp_class_data_missing_here(ce, uses);
+        zend_string *missing = oxphp_class_data_missing_here(ce, uses, seen);
         if (missing) {
             return missing;
         }
@@ -5463,11 +5484,11 @@ static zend_string *oxphp_call_missing_here(const zend_function *fn, zend_object
  * Generator), a callable string naming self, static or parent that is not
  * one of the code's literals (a static variable's initial value, a parameter's
  * default value the compiler could not fold, such as ['static', self::M], a
- * captured value, a property's), the constant expressions of a class OPcache
- * did not make immutable, every enum opcache.preload did not load among them,
- * and a class that a closure made from a function or method, as f(...) makes
- * one, names once it has run, since every thread shares that closure's
- * run-time cache and the class it found there. A callback whose code
+ * captured value, a property's), the constant expressions of a class other
+ * than an enum that OPcache did not make immutable, and a class that a closure
+ * made from a function or method, as f(...) makes one, names once it has run,
+ * since every thread shares that closure's run-time cache and the class it
+ * found there. A callback whose code
  * oxphp_op_array_in_request_memory() finds in request memory, where closures
  * made from one declaration share its run-time cache too, does not run on
  * another thread (oxphp_pool_prepare_elsewhere). */

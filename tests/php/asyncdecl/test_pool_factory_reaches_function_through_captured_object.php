@@ -96,7 +96,7 @@ $pool = new \OxPHP\Shared\Pool(
 $t->assertSame('an array that holds itself, then the object', asyncdecl_acquire_in_task($pool), $refused);
 
 // cases() of an enum is a built-in function the enum declares itself. The
-// enum is preloaded: one a thread has not declared is refused for itself.
+// enum is preloaded: one opcache.preload did not load is refused for itself.
 $suit = AsyncDeclPreSuit::Hearts;
 $pool = new \OxPHP\Shared\Pool(
     factory: static function () use ($suit, $maker): object {
