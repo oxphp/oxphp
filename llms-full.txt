@@ -7,15 +7,17 @@
 
 # Command-Line Interface
 
-The `oxphp` binary has three roles: **serve** an HTTP server, **run** a single PHP script to completion, and **config** utilities. Bare `oxphp` with no arguments is an implicit `serve`, so the published image's `CMD ["oxphp"]` keeps starting the server unchanged.
+The `oxphp` binary has three roles: **serve** an HTTP server, **run** a single PHP script to completion, and **config** utilities. Bare `oxphp` with no arguments is an implicit `serve` (one that an `oxphp run` started can read its script from standard input instead, [see below](#oxphp-run)), so the published image's `CMD ["oxphp"]` keeps starting the server unchanged.
 
 ```
 USAGE:
     oxphp [OPTIONS]
     oxphp <COMMAND> [OPTIONS]
     oxphp serve [--user=<name|uid[:gid]>]
-    oxphp run [-d key=value]... [--user=<spec>] <script.php> [args]...
-    oxphp [-d key=value]... [--user=<spec>] <script.php> [args]...
+    oxphp run [RUN OPTIONS] <script.php> [args]...
+    oxphp [RUN OPTIONS] <script.php> [args]...
+    oxphp [RUN OPTIONS] -f <script.php> [args]...
+    oxphp [RUN OPTIONS] -r <code> [args]...
 
 OPTIONS:
     -h, --help      Print this help and exit
@@ -31,7 +33,7 @@ The role is chosen by keyword. The exact tokens `serve`, `run`, and `config` sel
 
 ## `oxphp serve`
 
-Starts the HTTP application server — the default role. `oxphp` and `oxphp serve` are equivalent. Configuration is via [environment variables](../operations/configuration.md); `serve` itself takes only `--user`.
+Starts the HTTP application server — the default role. `oxphp` and `oxphp serve` are equivalent, except in a process that an `oxphp run` started, where a bare `oxphp` can read its script from standard input ([see below](#oxphp-run)). Configuration is via [environment variables](../operations/configuration.md); `serve` itself takes only `--user`.
 
 ```bash
 oxphp                 # implicit serve — best-effort drop to www-data
@@ -56,17 +58,17 @@ oxphp run -d memory_limit=512M import.php data.csv
 
 This is the role to use for migrations, cron jobs, queue consumers, and `artisan`/`console`-style commands — in the **same image** that serves your application, with no second PHP installation.
 
-The full OxPHP engine is available underneath the script: [fibers](../features/fiber-multiplexing.md) (`oxphp_sleep()`) and [shared state](../shared-state/shared-state.md) (`OxPHP\Shared\*`) work out of the box. [Async promises](../features/async-promises.md) (`oxphp_async()`) work when `ASYNC_WORKERS` is greater than `0`; the default invocation starts no async pool and therefore no background runtime. A task that leaves behind a closure it created, for example one stored in `$GLOBALS`, set as an error handler, or held by a `Shared\Pool` the task registers, can crash the process when the task's code is not in OPcache's shared memory, and it can do so while the script is still running, losing the rest of its output and work. Under `run` that is every task unless `opcache.enable_cli=1` is set, because OPcache does not run for the `cli` SAPI by default.
+The full OxPHP engine is available underneath the script: [fibers](../features/fiber-multiplexing.md) (`oxphp_sleep()`) and [shared state](../shared-state/shared-state.md) (`OxPHP\Shared\*`) work out of the box, except under [`-n`](#php-options). [Async promises](../features/async-promises.md) (`oxphp_async()`) work when `ASYNC_WORKERS` is greater than `0`; the default invocation starts no async pool and therefore no background runtime. A task that leaves behind a closure it created, for example one stored in `$GLOBALS`, set as an error handler, or held by a `Shared\Pool` the task registers, can crash the process when the task's code is not in OPcache's shared memory, and it can do so while the script is still running, losing the rest of its output and work. Under `run` that is every task unless `opcache.enable_cli=1` is set, because OPcache does not run for the `cli` SAPI by default.
 
-`$argv` and `$argc` are populated (`$argv[0]` is the script path), and `STDIN` / `STDOUT` / `STDERR` are defined, so Composer- and Symfony-Console-style entry points run unmodified.
+`$argv` and `$argc` are populated (`$argv[0]` is the script path, or `Standard input code` for code given with `-r` or on standard input, as under `php`), and `STDIN` / `STDOUT` / `STDERR` are defined, so Composer- and Symfony-Console-style entry points run unmodified.
 
 As under `php`, the working directory is the one `oxphp` was started in, not the script's directory. The script is opened by the path you give, from that directory: it is not looked up in `include_path`, and `open_basedir` applies to the files it includes and opens, not to the script itself. A phar archive is the exception: it is opened again by its path to read the archive (by `Phar::mapPhar()` in its stub, for example), and `open_basedir` applies to that open, so an archive outside `open_basedir` fails as it does under `php`.
 
 `PHP_BINARY` is the path of the `oxphp` binary (`/usr/local/bin/oxphp` in the published images), as it is the path of `php` under the `php` CLI. A library that starts PHP worker processes through `PHP_BINARY`, such as amphp/parallel, therefore starts `oxphp` for them. Each child is a run of its own: it reads `php.ini` and applies the `run` defaults below by itself, and does not inherit the parent's `-d` overrides. As under `php`, the binary's directory is searched for `php-cli.ini` / `php.ini` before `/usr/local/etc/php`.
 
-Such a child gets only the command line `oxphp` accepts: `-d` options, then a script path and its arguments. Other `php` options (`-n`, `-c`, `-r`, `-f`) are an error, `-v` prints the OxPHP version rather than PHP's, and the bare binary, with the script fed on standard input, starts the HTTP server instead. Symfony's `PhpSubprocess` passes `-n -c`, and its `PhpProcess` and PHPUnit 11's process isolation feed the script on standard input, so none of them works under `run` as is. Symfony's `PhpExecutableFinder` reads a `PHP_BINARY` environment variable ahead of the constant: set it to `/usr/local/bin/php` to send Symfony's classes to the `php` CLI. Run PHPUnit itself with `php`. A child is also started without `--user`, so under `oxphp --user=root run` it drops to `www-data` while its parent stays root; an amphp/parallel parent then hangs, waiting for a child that cannot connect back to it.
+Such a child is started with a `php` command line, and `oxphp` takes the [`php` options](#php-options) these libraries pass: Symfony's `PhpSubprocess` passes `-n -c <file>`, and PHPUnit passes `-d`, and `-f` for a `.phpt` test with a `--STDIN--` section. Symfony's `PhpProcess` and PHPUnit's process isolation start the bare binary and write the script to its standard input, and a bare `oxphp` reads it from there, as a bare `php` does, when an `oxphp run` started it. Each run sets the environment variable `OXPHP_RUN_PID` to its own process id, which its children inherit. A bare `oxphp` reads standard input only when its parent's process id is that value and its standard input is not a character device, such as a terminal or `/dev/null`; otherwise it is the server. So a child given an environment of its own that leaves the variable out is the server, and so is a bare `oxphp` started from a shell, as the image's `CMD`, or in the background through a shell, which gives it `/dev/null`. The check can still pass for an `oxphp` the run did not start itself: `system('oxphp')` when `/bin/sh` replaces itself with `oxphp`, or an orphan that a run running as PID 1 adopts. A script under `run` that starts the server should therefore call `oxphp serve`, not a bare `oxphp`. `-v` prints the OxPHP version rather than PHP's. Code on standard input takes no arguments: `oxphp -- <args>` names a script file to run, so a PHPUnit `.phpt` test with an `--ARGS--` section and no `--STDIN--` section fails under `run`. A child is also started without `--user`, so under `oxphp --user=root run` it drops to `www-data` while its parent stays root; an amphp/parallel parent then hangs, waiting for a child that cannot connect back to it.
 
-**The script path is the separator.** Every token after the script path is handed to PHP verbatim — including `--`-prefixed ones — so for ordinary arguments you do not need an explicit `--`. Flags meant for `oxphp` itself (`-d`, `--user`) must come *before* the script path; anything after it belongs to the script.
+**The script path is the separator.** Every token after the script path is handed to PHP verbatim — including `--`-prefixed ones — so for ordinary arguments you do not need an explicit `--`. Flags meant for `oxphp` itself (`-d`, `-n`, `-c`, `--user`) must come *before* the script path; anything after it belongs to the script. `-f <file>` and `-r <code>` are options, not a script path: after them, as under `php`, options are read up to the first argument or `--` (see [`php` options](#php-options)).
 
 ```bash
 oxphp run console.php migrate --force --pretend
@@ -74,7 +76,7 @@ oxphp run console.php migrate --force --pretend
 #                        $argv[1..], passed to PHP verbatim (oxphp parses nothing here)
 ```
 
-So `oxphp run console.php --force` gives the script `--force` in `$argv`, whereas `oxphp run --force console.php` is an error — `--force` precedes the script path, where `oxphp` only accepts `-d` / `--user` / `--help`.
+So `oxphp run console.php --force` gives the script `--force` in `$argv`, whereas `oxphp run --force console.php` is an error — `--force` precedes the script path, where `oxphp` only accepts its own options.
 
 ### The `--` end-of-options marker
 
@@ -90,6 +92,12 @@ After the script path there are no options left to terminate, so a `--` there is
 
 ```bash
 oxphp run app.php -- --raw      # $argv = ["app.php", "--", "--raw"]
+```
+
+After `-f <file>` or `-r <code>`, as under `php`, a `--` before the first argument is consumed and the next token is the first argument:
+
+```bash
+oxphp -r 'var_dump($argv);' -- -x   # $argv = ["Standard input code", "-x"]
 ```
 
 ### Shebang scripts
@@ -114,6 +122,19 @@ chmod +x ./greet
 ```bash
 oxphp run -d memory_limit=1G -d display_errors=1 report.php
 ```
+
+### `php` options
+
+`oxphp` takes these `php` CLI options before the script, with the meaning they have under `php`:
+
+| Option | Effect |
+|---|---|
+| `-n` | No `php.ini` is loaded except the one `-c` points to, and the `conf.d` directory is not scanned, so the extensions loaded there are not loaded either. In the OxPHP images OxPHP's own extension is one of them: as under `php -n`, `oxphp_sleep()`, `oxphp_async()` and `OxPHP\Shared\*` are then missing unless `-d extension=oxphp_sapi.so` is given too. |
+| `-c <path>` | `php.ini` is looked for in `<path>` only: the file itself, or `php-cli.ini` / `php.ini` in that directory. `conf.d` is still scanned unless `-n` is given too. |
+| `-f <file>` | Run `<file>`. As under `php`, options are read up to the first argument or `--`, after `<file>` too: `oxphp -f t.php -d k=v` sets `k`, and `oxphp -f t.php --verbose` is an error. The first argument and every token after it are the script's arguments, `serve` and `run` included. |
+| `-r <code>` | Run `<code>`, written without the `<?php` tag. `$argv[0]` is `Standard input code` and `__FILE__` is `Command line code`; an uncaught exception exits with `255`. What follows `<code>` is read as after `-f <file>`. |
+
+Only one of `-f` and `-r` may be given, once. `-n` and `-c` need a script, as `-d` does: with nothing to run, `oxphp -n` is an error rather than a server. Other `php` options, such as `-l`, `-a` or `-i`, are an error.
 
 ### Default ini for `run`
 

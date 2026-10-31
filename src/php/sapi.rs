@@ -553,9 +553,10 @@ pub fn set_boot_server_vars(script_path: &std::path::Path, document_root: &std::
 }
 
 /// Populate `$_SERVER` for the one-shot CLI role (`oxphp run`). Mirrors the
-/// variable set of PHP's own CLI SAPI: PHP_SELF / SCRIPT_NAME /
-/// SCRIPT_FILENAME / PATH_TRANSLATED point at the script, DOCUMENT_ROOT is
-/// empty. This script-identity skeleton is registered unconditionally; the
+/// variable set of PHP's own CLI SAPI: PHP_SELF / SCRIPT_NAME are `php_self`,
+/// SCRIPT_FILENAME / PATH_TRANSLATED are `script_filename` (both the script's
+/// path, or "Standard input code" and "" for code from standard input or `-r`),
+/// DOCUMENT_ROOT is empty. This script-identity skeleton is registered unconditionally; the
 /// process-environment fold is gated by `sg_enabled` (the shared
 /// `oxphp_register_server_variables` callback folds env only when set). The
 /// flag is read back from the bridge — the single source of truth that the
@@ -564,17 +565,16 @@ pub fn set_boot_server_vars(script_path: &std::path::Path, document_root: &std::
 /// set here, and are unaffected by the flag: PHP builds those from
 /// `SG(request_info).argc/argv` during `php_request_startup`. Must be called
 /// before `php_request_startup()`.
-pub fn set_cli_request_data(script_path: &std::path::Path) {
+pub fn set_cli_request_data(php_self: &str, script_filename: &str) {
     REQUEST_DATA.with(|rd| {
         let mut data = rd.borrow_mut();
         data.server_vars.clear();
 
-        let script = script_path.to_string_lossy();
         let vars = &mut data.server_vars;
-        push_server_var(vars, "PHP_SELF", &script);
-        push_server_var(vars, "SCRIPT_NAME", &script);
-        push_server_var(vars, "SCRIPT_FILENAME", &script);
-        push_server_var(vars, "PATH_TRANSLATED", &script);
+        push_server_var(vars, "PHP_SELF", php_self);
+        push_server_var(vars, "SCRIPT_NAME", php_self);
+        push_server_var(vars, "SCRIPT_FILENAME", script_filename);
+        push_server_var(vars, "PATH_TRANSLATED", script_filename);
         push_server_var(vars, "DOCUMENT_ROOT", "");
 
         data.sg_enabled = unsafe { bindings::oxphp_bridge_get_superglobals_enabled() };

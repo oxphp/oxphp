@@ -1910,6 +1910,44 @@ int oxphp_bridge_cli_open_script(void *file_handle, const char *path) {
     return 0;
 }
 
+/* Open standard input as the primary script, as a bare php-cli does. On a
+ * duplicate of fd 0, not on `stdin` itself: a handle whose script was never
+ * compiled (an error in auto_prepend_file stops it) still holds a FILE*, and
+ * zend_destroy_file_handle fcloses it before the request's shutdown functions
+ * run, while the bootstrap's STDIN constant holds `stdin` and closes it again
+ * at request end. Once compiled, Zend's closer skips `stdin` (Zend/zend_stream.c,
+ * PHP 8.4.27 and 8.5.12). The name is the one php-cli gives, which
+ * php_execute_script does not resolve as a path. */
+int oxphp_bridge_cli_open_stdin(void *file_handle) {
+    int fd = dup(STDIN_FILENO);
+    if (fd < 0) {
+        return -1;
+    }
+    FILE *fp = fdopen(fd, "rb");
+    if (!fp) {
+        close(fd);
+        return -1;
+    }
+    zend_stream_init_fp((zend_file_handle *)file_handle, fp, "Standard input code");
+    return 0;
+}
+
+/* `php -r <code>`: the same call php-cli makes, so an uncaught exception is
+ * reported and sets the exit status to 255 as there. zend_try stands in for
+ * php-cli's own around do_cli: a fatal error bails out to here.
+ *
+ * php_request_startup() leaves PG(during_request_startup) set; for a file,
+ * php_execute_script() clears it, and php-cli clears it itself before `-r`.
+ * While set, an internal function's warning names "PHP Request Startup"
+ * instead of the function, and errors are displayed only under
+ * display_startup_errors (main/main.c, PHP 8.4.27 and 8.5.12). */
+void oxphp_bridge_cli_eval_code(const char *code) {
+    PG(during_request_startup) = 0;
+    zend_try {
+        zend_eval_string_ex(code, NULL, "Command line code", 1);
+    } zend_end_try();
+}
+
 /* ── SAPI response code ── */
 
 int oxphp_bridge_get_response_code(void) {

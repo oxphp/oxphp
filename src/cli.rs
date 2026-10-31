@@ -206,19 +206,41 @@ fn lookup_group_by_name(name: &str) -> Option<u32> {
     Some(grp.gr_gid)
 }
 
-/// Options for the `run` role — execute one PHP file to completion under CLI
+/// Environment variable each `oxphp run` sets to its own pid, so that a bare
+/// `oxphp` it starts through `PHP_BINARY` can tell it was (see [`parse`]).
+pub const RUN_PID_ENV: &str = "OXPHP_RUN_PID";
+
+/// Where a `run` takes its PHP code from.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Script {
+    /// A file: the first positional argument, or `-f <file>`.
+    File(PathBuf),
+    /// `-r <code>`: code without the `<?php` tag, as `php -r` takes it.
+    Code(OsString),
+    /// Standard input, read to its end, as a bare `php` reads it.
+    Stdin,
+}
+
+/// Options for the `run` role — execute one PHP script to completion under CLI
 /// semantics, then exit with the script's exit code.
 #[derive(Debug, PartialEq, Eq)]
 pub struct RunOptions {
-    /// Path to the PHP script to execute.
-    pub script: PathBuf,
-    /// The script's argument tail (everything after the script path on the
-    /// command line). Passed through verbatim to PHP as `$argv[1..]`; flags
-    /// like `--verbose` reach the script, not the oxphp argument parser.
+    /// The PHP code to execute.
+    pub script: Script,
+    /// The script's argument tail (everything after the script path, or after
+    /// the options that follow `-f` / `-r`). Passed through verbatim to PHP as
+    /// `$argv[1..]`; flags like `--verbose` reach the script, not the oxphp
+    /// argument parser.
     pub args: Vec<OsString>,
     /// `-d key=value` ini overrides, applied before the script runs (php-CLI
     /// parity). These are oxphp's own flags, consumed before the script path.
     pub ini: Vec<(String, String)>,
+    /// `-n`, as `php -n`: no php.ini but the `-c` one and no ini directory scan,
+    /// so none of the extensions they load (in the images, OxPHP's own).
+    pub ini_ignore: bool,
+    /// `-c <path>`: the php.ini file, or the directory to look for it in, as
+    /// `php -c`.
+    pub ini_path: Option<OsString>,
     /// Privilege-drop intent applied before MINIT and script execution.
     /// Defaults to a best-effort drop to `www-data`; an explicit `--user` is
     /// fail-fast (k8s `Job` as non-root). Mirrors `ServeOptions::drop_to`; the
@@ -242,7 +264,8 @@ pub enum Role {
 #[derive(Debug, PartialEq, Eq)]
 pub enum Command {
     /// Start the HTTP server. This is the default role when no command is
-    /// given — bare `oxphp` is an implicit `oxphp serve`.
+    /// given — bare `oxphp` is an implicit `oxphp serve`, unless an
+    /// `oxphp run` started it (see [`parse`]).
     Serve(ServeOptions),
     /// Execute a single PHP script under CLI semantics and exit with the
     /// script's exit code.
@@ -305,11 +328,45 @@ pub fn dispatch() -> Role {
 /// Unknown flags and out-of-role options return an error describing the
 /// problem. Normally callers should prefer [`dispatch`] — this is exposed
 /// mainly for testing.
+///
+/// A bare `oxphp` reads its script from standard input, as a bare `php` does,
+/// only when its parent is an `oxphp run` and that input can carry a script:
+/// that is how a library starts `PHP_BINARY` with the script on its standard
+/// input (Symfony's `PhpProcess`, PHPUnit's process isolation). Otherwise a
+/// bare `oxphp` stays the server.
 pub fn parse() -> Result<Command, BoxError> {
-    parse_from(std::env::args_os().skip(1))
+    use std::os::fd::AsFd;
+    let stdin_script = started_by_run(
+        std::env::var_os(RUN_PID_ENV).as_deref(),
+        std::os::unix::process::parent_id(),
+    ) && is_script_source(std::io::stdin().as_fd());
+    parse_with(std::env::args_os().skip(1), stdin_script)
 }
 
-fn parse_from<I>(args: I) -> Result<Command, BoxError>
+/// True when `marker` (the inherited [`RUN_PID_ENV`]) names `parent`, the pid of
+/// the process that started this one.
+fn started_by_run(marker: Option<&std::ffi::OsStr>, parent: u32) -> bool {
+    marker
+        .and_then(|m| m.to_str())
+        .and_then(|m| m.parse::<u32>().ok())
+        == Some(parent)
+}
+
+/// True when `fd` is open and not a character device. The parent check alone
+/// also passes for an orphan that a `run` running as PID 1 adopts, such as a
+/// server started in the background through a shell, and a non-interactive
+/// shell gives a background job `/dev/null` as its standard input (POSIX
+/// "Asynchronous Lists"). The libraries that write a script to `PHP_BINARY`
+/// give it a pipe.
+fn is_script_source(fd: std::os::fd::BorrowedFd<'_>) -> bool {
+    use std::os::unix::fs::FileTypeExt;
+    fd.try_clone_to_owned()
+        .map(std::fs::File::from)
+        .and_then(|f| f.metadata())
+        .is_ok_and(|m| !m.file_type().is_char_device())
+}
+
+fn parse_with<I>(args: I, stdin_script: bool) -> Result<Command, BoxError>
 where
     I: IntoIterator<Item = std::ffi::OsString>,
 {
@@ -317,44 +374,136 @@ where
 
     let mut parser = lexopt::Parser::from_args(args);
 
-    // Cross-cutting flags collected before the role is known. They are applied
-    // to whichever role the first positional resolves to, then validated
-    // against that role's allow-set.
-    let mut ini: Vec<(String, String)> = Vec::new();
-    // Raw `--user` spec, resolved at role finalize (not here) so terminal
-    // flags (`--help`/`--version`) and `config` rejection don't force a
-    // passwd lookup on a spec that will never be used.
-    let mut user: Option<OsString> = None;
+    // Script flags collected before the role is known. They are applied to
+    // whichever role the first positional resolves to, then validated against
+    // that role's allow-set.
+    let mut flags = RunFlags::default();
 
     while let Some(arg) = parser.next()? {
         match arg {
             // Terminal flags short-circuit on first occurrence (first wins).
             Short('h') | Long("help") => return Ok(Command::Help),
             Short('v') | Long("version") => return Ok(Command::Version),
-            // Cross-cutting collected flags.
-            Short('d') => ini.push(parse_ini_define(parser.value()?)),
-            Long("user") => user = Some(parser.value()?),
+            Short(c) if RunFlags::OPTIONS.contains(&c) => flags.take(c, &mut parser)?,
+            Long("user") => flags.user = Some(parser.value()?),
+            // After `-f` / `-r` a positional is the code's first argument, not
+            // a keyword or a script, as under `php`.
+            Value(v) if flags.script.is_some() => return flags.finish_with_args(v, &mut parser),
             // Reserved keywords (exact match) select a subcommand role.
-            Value(v) if v == "serve" => return finish_serve(&mut parser, ini, user),
-            Value(v) if v == "run" => return finish_run(&mut parser, ini, user),
+            Value(v) if v == "serve" => return finish_serve(&mut parser, flags),
+            Value(v) if v == "run" => return finish_run(&mut parser, flags),
             Value(v) if v == "config" => {
-                reject_script_flags("config", &ini, &user)?;
+                flags.reject("config")?;
                 return parse_config_subcommand(&mut parser);
             }
             // Any other first positional is a script path → implicit run.
-            Value(v) => return build_run(v, &mut parser, ini, user),
+            Value(v) => return build_run(v, &mut parser, flags),
             other => return Err(format!("unexpected argument: {}", format_arg(&other)).into()),
         }
     }
 
-    // No positional → serve. `-d` has no meaning without a script to run;
-    // the user never typed a role here, so keep the message role-neutral.
-    if !ini.is_empty() {
-        return Err(d_requires_no_script());
+    if let Some(script) = flags.script.take() {
+        return flags.finish(script, Vec::new());
+    }
+    if stdin_script {
+        return flags.finish(Script::Stdin, Vec::new());
+    }
+    // No positional → serve. A script flag has no meaning without a script to
+    // run; the user never typed a role here, so keep the message role-neutral.
+    if let Some(flag) = flags.script_flag() {
+        return Err(format!("'-{flag}' requires a script to run").into());
     }
     Ok(Command::Serve(ServeOptions {
-        drop_to: resolve_user(user)?,
+        drop_to: resolve_user(flags.user)?,
     }))
+}
+
+/// The options of a run that come before its script, collected by both the
+/// implicit run and the `run` keyword.
+#[derive(Default)]
+struct RunFlags {
+    ini: Vec<(String, String)>,
+    ini_ignore: bool,
+    ini_path: Option<OsString>,
+    // Raw `--user` spec, resolved at role finalize (not here) so terminal
+    // flags (`--help`/`--version`) and `config` rejection don't force a
+    // passwd lookup on a spec that will never be used.
+    user: Option<OsString>,
+    /// Set by `-f` / `-r`; a positional script path is not stored here.
+    script: Option<Script>,
+}
+
+impl RunFlags {
+    /// The short options [`RunFlags::take`] handles: php CLI's `-d`, `-n`,
+    /// `-c`, `-f`, `-r`.
+    const OPTIONS: [char; 5] = ['d', 'n', 'c', 'f', 'r'];
+
+    fn take(&mut self, option: char, parser: &mut lexopt::Parser) -> Result<(), BoxError> {
+        match option {
+            'd' => self.ini.push(parse_ini_define(parser.value()?)),
+            'n' => self.ini_ignore = true,
+            'c' => self.ini_path = Some(parser.value()?),
+            'f' => self.set_script(Script::File(parser.value()?.into()))?,
+            'r' => self.set_script(Script::Code(parser.value()?))?,
+            _ => unreachable!("not in RunFlags::OPTIONS: -{option}"),
+        }
+        Ok(())
+    }
+
+    fn set_script(&mut self, script: Script) -> Result<(), BoxError> {
+        if self.script.is_some() {
+            return Err("'-f' and '-r' each name the code to run; give one of them, once".into());
+        }
+        self.script = Some(script);
+        Ok(())
+    }
+
+    /// The first collected ini option, which only a run can use. `-f` / `-r`
+    /// are not checked: a positional after them is their argument, never a role.
+    fn script_flag(&self) -> Option<char> {
+        if !self.ini.is_empty() {
+            Some('d')
+        } else if self.ini_ignore {
+            Some('n')
+        } else if self.ini_path.is_some() {
+            Some('c')
+        } else {
+            None
+        }
+    }
+
+    /// Reject the collected options before a role that runs no script.
+    fn reject(&self, role: &str) -> Result<(), BoxError> {
+        if let Some(flag) = self.script_flag() {
+            return Err(not_for_role(flag, role));
+        }
+        if role == "config" && self.user.is_some() {
+            return Err(format!("'--user' is not valid for '{role}'").into());
+        }
+        Ok(())
+    }
+
+    /// Finish with `first` and the raw rest of the command line as `$argv[1..]`.
+    fn finish_with_args(
+        mut self,
+        first: OsString,
+        parser: &mut lexopt::Parser,
+    ) -> Result<Command, BoxError> {
+        let script = self.script.take().expect("checked by the caller");
+        let args = std::iter::once(first).chain(parser.raw_args()?).collect();
+        self.finish(script, args)
+    }
+
+    fn finish(self, script: Script, args: Vec<OsString>) -> Result<Command, BoxError> {
+        Ok(Command::Run(RunOptions {
+            script,
+            args,
+            ini: self.ini,
+            ini_ignore: self.ini_ignore,
+            ini_path: self.ini_path,
+            user: resolve_user(self.user)?,
+        }))
+    }
 }
 
 /// Parse one `-d key[=value]` token. A bare key (no `=`) maps to "1" (php-cli).
@@ -371,7 +520,7 @@ fn parse_ini_define(raw: OsString) -> (String, String) {
 /// best-effort `DefaultWwwData` default, resolved later at drop time. Deferred
 /// from collection time so terminal flags (`--help`/`--version`) and out-of-role
 /// rejection (`config`) act without forcing a passwd lookup on a spec that will
-/// never be used. Still runs inside `parse_from`, so an unknown user for a real
+/// never be used. Still runs inside `parse_with`, so an unknown user for a real
 /// `serve`/`run` role fails fast, before any startup work.
 fn resolve_user(raw: Option<OsString>) -> Result<DropIntent, BoxError> {
     match raw {
@@ -382,45 +531,18 @@ fn resolve_user(raw: Option<OsString>) -> Result<DropIntent, BoxError> {
     }
 }
 
-/// One error text for `-d` given an explicit role that runs no script
-/// (`serve` / `config`).
-fn d_requires_script(role: &str) -> BoxError {
-    format!("'-d' is not valid for '{role}'; it sets an ini directive for a script to run").into()
-}
-
-/// Role-neutral variant for bare `oxphp -d …` — no script and no role keyword,
-/// so don't name `serve` the user never typed.
-fn d_requires_no_script() -> BoxError {
-    "'-d' requires a script to run; it sets a php.ini directive for that script".into()
-}
-
-/// Reject cross-cutting script flags collected before a role that does not
-/// accept them (currently `config`).
-fn reject_script_flags(
-    role: &str,
-    ini: &[(String, String)],
-    user: &Option<OsString>,
-) -> Result<(), BoxError> {
-    if !ini.is_empty() {
-        return Err(d_requires_script(role));
-    }
-    if user.is_some() {
-        return Err(format!("'--user' is not valid for '{role}'").into());
-    }
-    Ok(())
+/// One error text for a script option given an explicit role that runs no
+/// script (`serve` / `config`).
+fn not_for_role(flag: char, role: &str) -> BoxError {
+    format!("'-{flag}' is not valid for '{role}'; it is an option of a script to run").into()
 }
 
 /// Continue after the `serve` keyword (or bare flags resolving to serve).
-/// `--user` is valid here; `-d` is not.
-fn finish_serve(
-    parser: &mut lexopt::Parser,
-    ini: Vec<(String, String)>,
-    mut user: Option<OsString>,
-) -> Result<Command, BoxError> {
+/// `--user` is valid here; the script options are not.
+fn finish_serve(parser: &mut lexopt::Parser, flags: RunFlags) -> Result<Command, BoxError> {
     use lexopt::prelude::*;
-    if !ini.is_empty() {
-        return Err(d_requires_script("serve"));
-    }
+    flags.reject("serve")?;
+    let mut user = flags.user;
     while let Some(arg) = parser.next()? {
         match arg {
             // `--user=<name|name:group|uid|uid:gid>`: drop privileges to this
@@ -428,9 +550,9 @@ fn finish_serve(
             // unknown user/group fails before any startup. Requires starting
             // as root — that is enforced at drop time, not parse time.
             Long("user") => user = Some(parser.value()?),
-            // `-d` sets an ini directive for a script; `serve` runs none. Give
-            // the same explanation as `oxphp -d … serve`, not a generic error.
-            Short('d') => return Err(d_requires_script("serve")),
+            // A script option; `serve` runs none. Give the same explanation as
+            // `oxphp -d … serve`, not a generic error.
+            Short(c) if RunFlags::OPTIONS.contains(&c) => return Err(not_for_role(c, "serve")),
             other => {
                 return Err(
                     format!("unexpected argument to 'serve': {}", format_arg(&other)).into(),
@@ -443,33 +565,34 @@ fn finish_serve(
     }))
 }
 
-/// Continue after the explicit `run` keyword. Accepts `-d`/`--user` before the
-/// script path; the first positional is the script. Everything after the script
-/// is the script's argv tail (raw passthrough — implicit `--`), so script flags
-/// like `--verbose` reach PHP rather than lexopt.
-fn finish_run(
-    parser: &mut lexopt::Parser,
-    mut ini: Vec<(String, String)>,
-    mut user: Option<OsString>,
-) -> Result<Command, BoxError> {
+/// Continue after the explicit `run` keyword. Accepts the script options and
+/// `--user` before the script path; the first positional is the script, or,
+/// after `-f` / `-r`, the code's first argument. Everything after it is the
+/// argv tail (raw passthrough — implicit `--`), so script flags like
+/// `--verbose` reach PHP rather than lexopt.
+fn finish_run(parser: &mut lexopt::Parser, mut flags: RunFlags) -> Result<Command, BoxError> {
     use lexopt::prelude::*;
     while let Some(arg) = parser.next()? {
         match arg {
-            Short('d') => ini.push(parse_ini_define(parser.value()?)),
-            Long("user") => user = Some(parser.value()?),
+            Short(c) if RunFlags::OPTIONS.contains(&c) => flags.take(c, parser)?,
+            Long("user") => flags.user = Some(parser.value()?),
             Short('h') | Long("help") => {
                 // `oxphp run --help` (before the script) prints help. A
                 // `--help` *after* the script is the script's own argument.
                 return Ok(Command::Help);
             }
-            Value(script) => return build_run(script, parser, ini, user),
+            Value(v) if flags.script.is_some() => return flags.finish_with_args(v, parser),
+            Value(script) => return build_run(script, parser, flags),
             other => {
                 return Err(format!("unexpected argument to 'run': {}", format_arg(&other)).into());
             }
         }
     }
 
-    Err("'run' requires a script path: oxphp run <script.php> [args…]".into())
+    match flags.script.take() {
+        Some(script) => flags.finish(script, Vec::new()),
+        None => Err("'run' requires a script path: oxphp run <script.php> [args…]".into()),
+    }
 }
 
 /// Finalize a run role: `script` is the path; the raw tail is the script's
@@ -477,19 +600,13 @@ fn finish_run(
 fn build_run(
     script: OsString,
     parser: &mut lexopt::Parser,
-    ini: Vec<(String, String)>,
-    user: Option<OsString>,
+    flags: RunFlags,
 ) -> Result<Command, BoxError> {
     if script == "-" {
         return Err("reading the script from stdin ('-') is not yet supported".into());
     }
     let args = parser.raw_args()?.collect::<Vec<OsString>>();
-    Ok(Command::Run(RunOptions {
-        script: PathBuf::from(script),
-        args,
-        ini,
-        user: resolve_user(user)?,
-    }))
+    flags.finish(Script::File(PathBuf::from(script)), args)
 }
 
 /// Parse the tail of arguments after `oxphp config`. The parser is reused
@@ -544,8 +661,10 @@ USAGE:
     oxphp [OPTIONS]
     oxphp <COMMAND> [OPTIONS]
     oxphp serve [--user=<name|uid[:gid]>]
-    oxphp run [-d key=value]... [--user=<spec>] <script.php> [args]...
-    oxphp [-d key=value]... [--user=<spec>] <script.php> [args]...
+    oxphp run [RUN OPTIONS] <script.php> [args]...
+    oxphp [RUN OPTIONS] <script.php> [args]...
+    oxphp [RUN OPTIONS] -f <script.php> [args]...
+    oxphp [RUN OPTIONS] -r <code> [args]...
 
 OPTIONS:
     -h, --help      Print this help and exit
@@ -568,8 +687,20 @@ RUN:
     'oxphp <script.php>' is shorthand for 'oxphp run <script.php>'. Any token
     that is not 'serve', 'run', or 'config' is treated as a script path.
     -d key=value    Set a php.ini directive for this run (repeatable)
+    -n              Skip php.ini (a -c file is still read) and conf.d, with
+                    the extensions they load, OxPHP's own in the images
+    -c <path>       Look for php.ini in <path> (a file or a directory)
+    -f <file>       Run <file>
+    -r <code>       Run <code>, given without the <?php tag
     --user <spec>   Drop privileges to <spec> before running (requires root)
-    Arguments after the script path are passed to PHP as $argv.
+    Arguments after the script path are passed to PHP as $argv. After -f or
+    -r, options are read up to the first argument or '--', as by php; that
+    argument and every token after it, keywords included, are $argv.
+    A bare 'oxphp' whose parent is an 'oxphp run' (as PHP_BINARY, with the
+    OXPHP_RUN_PID it sets) reads its script from standard input, as a bare
+    'php' does, unless that input is a character device such as a terminal
+    or /dev/null; otherwise it is the server. A script that starts the
+    server should call 'oxphp serve'.
 
 Without options or a command, OxPHP starts the HTTP server.",
         version = env!("CARGO_PKG_VERSION"),
@@ -692,6 +823,11 @@ mod tests {
         items.iter().map(OsString::from).collect()
     }
 
+    /// The command line of a process that no `oxphp run` started.
+    fn parse_from(args: Vec<OsString>) -> Result<Command, BoxError> {
+        parse_with(args, false)
+    }
+
     #[test]
     fn no_args_serves() {
         // Bare `oxphp` stays an implicit `serve` — hard backward-compat
@@ -762,7 +898,7 @@ mod tests {
     #[test]
     fn run_subcommand_basic() {
         let opts = run_opts(parse_from(args(&["run", "hello.php"])).unwrap());
-        assert_eq!(opts.script, PathBuf::from("hello.php"));
+        assert_eq!(opts.script, Script::File(PathBuf::from("hello.php")));
         assert!(opts.args.is_empty());
         assert!(opts.ini.is_empty());
         assert_eq!(opts.user, DropIntent::DefaultWwwData);
@@ -771,7 +907,7 @@ mod tests {
     #[test]
     fn run_captures_script_args() {
         let opts = run_opts(parse_from(args(&["run", "s.php", "a", "b", "c"])).unwrap());
-        assert_eq!(opts.script, PathBuf::from("s.php"));
+        assert_eq!(opts.script, Script::File(PathBuf::from("s.php")));
         assert_eq!(opts.args, args(&["a", "b", "c"]));
     }
 
@@ -791,7 +927,7 @@ mod tests {
             opts.ini,
             vec![("memory_limit".to_string(), "512M".to_string())]
         );
-        assert_eq!(opts.script, PathBuf::from("s.php"));
+        assert_eq!(opts.script, Script::File(PathBuf::from("s.php")));
     }
 
     #[test]
@@ -888,7 +1024,7 @@ mod tests {
     fn bare_positional_is_implicit_run() {
         // A non-keyword first positional is a script path → implicit run.
         let opts = run_opts(parse_from(args(&["start"])).unwrap());
-        assert_eq!(opts.script, PathBuf::from("start"));
+        assert_eq!(opts.script, Script::File(PathBuf::from("start")));
         assert!(opts.args.is_empty());
         assert!(opts.ini.is_empty());
         assert_eq!(opts.user, DropIntent::DefaultWwwData);
@@ -897,7 +1033,7 @@ mod tests {
     #[test]
     fn implicit_run_php_with_args() {
         let opts = run_opts(parse_from(args(&["app.php", "a", "b", "--verbose"])).unwrap());
-        assert_eq!(opts.script, PathBuf::from("app.php"));
+        assert_eq!(opts.script, Script::File(PathBuf::from("app.php")));
         assert_eq!(opts.args, args(&["a", "b", "--verbose"]));
     }
 
@@ -906,7 +1042,7 @@ mod tests {
         // Extensionless path runs too — classification is keyword-vs-script,
         // never extension-based (php executes by file content).
         let opts = run_opts(parse_from(args(&["./bin/migrate"])).unwrap());
-        assert_eq!(opts.script, PathBuf::from("./bin/migrate"));
+        assert_eq!(opts.script, Script::File(PathBuf::from("./bin/migrate")));
     }
 
     #[test]
@@ -916,14 +1052,14 @@ mod tests {
             opts.ini,
             vec![("memory_limit".to_string(), "512M".to_string())]
         );
-        assert_eq!(opts.script, PathBuf::from("app.php"));
+        assert_eq!(opts.script, Script::File(PathBuf::from("app.php")));
     }
 
     #[test]
     fn keyword_match_is_exact() {
         // `serve.php` is not the `serve` keyword (exact match only) → implicit run.
         let opts = run_opts(parse_from(args(&["serve.php"])).unwrap());
-        assert_eq!(opts.script, PathBuf::from("serve.php"));
+        assert_eq!(opts.script, Script::File(PathBuf::from("serve.php")));
     }
 
     #[test]
@@ -984,6 +1120,169 @@ mod tests {
             Command::Version
         );
     }
+
+    fn run_started_by_run(items: &[&str]) -> RunOptions {
+        run_opts(parse_with(args(items), true).unwrap())
+    }
+
+    #[test]
+    fn n_and_c_before_script() {
+        // Symfony's PhpSubprocess: `php -n -c <ini> <script>`.
+        for prefix in [&[][..], &["run"][..]] {
+            let line: Vec<&str> = prefix
+                .iter()
+                .copied()
+                .chain(["-n", "-c", "/tmp/x.ini", "app.php", "a"])
+                .collect();
+            let opts = run_opts(parse_from(args(&line)).unwrap());
+            assert!(opts.ini_ignore);
+            assert_eq!(opts.ini_path, Some(OsString::from("/tmp/x.ini")));
+            assert_eq!(opts.script, Script::File(PathBuf::from("app.php")));
+            assert_eq!(opts.args, args(&["a"]));
+        }
+    }
+
+    #[test]
+    fn script_options_default_off() {
+        let opts = run_opts(parse_from(args(&["app.php"])).unwrap());
+        assert!(!opts.ini_ignore);
+        assert_eq!(opts.ini_path, None);
+    }
+
+    #[test]
+    fn f_takes_the_script_and_keeps_keywords_as_args() {
+        // After `-f`, a keyword is the script's argument, as under `php -f`.
+        let opts = run_opts(parse_from(args(&["-f", "t.php", "serve", "-x"])).unwrap());
+        assert_eq!(opts.script, Script::File(PathBuf::from("t.php")));
+        assert_eq!(opts.args, args(&["serve", "-x"]));
+        let opts = run_opts(parse_from(args(&["run", "-f", "t.php"])).unwrap());
+        assert_eq!(opts.script, Script::File(PathBuf::from("t.php")));
+        assert!(opts.args.is_empty());
+    }
+
+    #[test]
+    fn double_dash_after_f_starts_args() {
+        // As under `php`, a `--` right after `-f <file>` ends the options and
+        // is not an argument.
+        let opts =
+            run_opts(parse_from(args(&["-d", "a=1", "-f", "t.php", "--", "-x", "y"])).unwrap());
+        assert_eq!(opts.script, Script::File(PathBuf::from("t.php")));
+        assert_eq!(opts.args, args(&["-x", "y"]));
+        assert_eq!(opts.ini, vec![("a".into(), "1".into())]);
+    }
+
+    #[test]
+    fn options_after_f_are_read_up_to_the_first_argument() {
+        let opts = run_opts(parse_from(args(&["-f", "t.php", "-d", "a=1", "x", "-d"])).unwrap());
+        assert_eq!(opts.ini, vec![("a".into(), "1".into())]);
+        assert_eq!(opts.args, args(&["x", "-d"]));
+        let err = parse_from(args(&["-f", "t.php", "--verbose"])).unwrap_err();
+        assert!(err.to_string().contains("--verbose"), "{err}");
+        assert_eq!(
+            parse_from(args(&["-f", "t.php", "-v"])).unwrap(),
+            Command::Version
+        );
+    }
+
+    #[test]
+    fn r_takes_code_and_args() {
+        let opts = run_opts(parse_from(args(&["-r", "echo 1;", "a", "--", "b"])).unwrap());
+        assert_eq!(opts.script, Script::Code(OsString::from("echo 1;")));
+        assert_eq!(opts.args, args(&["a", "--", "b"]));
+        let opts = run_opts(parse_from(args(&["-r", "echo 1;", "--", "-x"])).unwrap());
+        assert_eq!(opts.args, args(&["-x"]));
+    }
+
+    #[test]
+    fn second_code_source_is_error() {
+        for line in [
+            &["-f", "a.php", "-f", "b.php"][..],
+            &["-r", "1;", "-f", "a.php"][..],
+            &["run", "-f", "a.php", "-r", "1;"][..],
+        ] {
+            let err = parse_from(args(line)).unwrap_err();
+            assert!(err.to_string().contains("'-f' and '-r'"), "{line:?}: {err}");
+        }
+    }
+
+    #[test]
+    fn bare_started_by_run_reads_stdin() {
+        // Symfony's PhpProcess and PHPUnit's process isolation: the bare
+        // binary, the script on standard input.
+        let opts = run_started_by_run(&[]);
+        assert_eq!(opts.script, Script::Stdin);
+        assert!(opts.args.is_empty());
+        let opts = run_started_by_run(&["-d", "memory_limit=88M"]);
+        assert_eq!(opts.script, Script::Stdin);
+        assert_eq!(opts.ini, vec![("memory_limit".into(), "88M".into())]);
+    }
+
+    #[test]
+    fn started_by_run_keeps_the_explicit_roles() {
+        assert_eq!(
+            parse_with(args(&["serve"]), true).unwrap(),
+            Command::Serve(ServeOptions::default())
+        );
+        let opts = run_started_by_run(&["app.php"]);
+        assert_eq!(opts.script, Script::File(PathBuf::from("app.php")));
+        assert_eq!(parse_with(args(&["-v"]), true).unwrap(), Command::Version);
+    }
+
+    #[test]
+    fn ini_options_without_script_are_errors() {
+        for flag in [&["-n"][..], &["-c", "/x"][..]] {
+            let err = parse_from(args(flag)).unwrap_err();
+            let msg = err.to_string();
+            assert!(msg.contains(flag[0]), "{msg}");
+            assert!(!msg.contains("serve"), "{msg}");
+        }
+    }
+
+    #[test]
+    fn script_options_rejected_by_serve_and_config() {
+        for line in [
+            &["-n", "serve"][..],
+            &["serve", "-n"][..],
+            &["serve", "-c", "/x"][..],
+            &["serve", "-f", "a.php"][..],
+            &["serve", "-r", "1;"][..],
+        ] {
+            let err = parse_from(args(line)).unwrap_err();
+            assert!(
+                err.to_string().contains("not valid for 'serve'"),
+                "{line:?}: {err}"
+            );
+        }
+        let err = parse_from(args(&["-c", "/x", "config", "--check"])).unwrap_err();
+        assert!(err.to_string().contains("not valid for 'config'"), "{err}");
+    }
+
+    #[test]
+    fn run_keyword_without_script_is_error_even_when_started_by_run() {
+        let err = parse_with(args(&["run"]), true).unwrap_err();
+        assert!(err.to_string().contains("requires a script path"));
+    }
+
+    #[test]
+    fn started_by_run_needs_the_parent_pid() {
+        let marker = |s: &str| Some(OsString::from(s));
+        assert!(started_by_run(marker("4242").as_deref(), 4242));
+        assert!(!started_by_run(marker("4242").as_deref(), 4243));
+        assert!(!started_by_run(marker("").as_deref(), 0));
+        assert!(!started_by_run(marker("x4242").as_deref(), 4242));
+        assert!(!started_by_run(None, 4242));
+    }
+
+    #[test]
+    fn stdin_script_needs_a_pipe_or_file() {
+        use std::os::fd::AsFd;
+        let dev_null = std::fs::File::open("/dev/null").unwrap();
+        assert!(!is_script_source(dev_null.as_fd()));
+        let (reader, _writer) = std::io::pipe().unwrap();
+        assert!(is_script_source(reader.as_fd()));
+        let file = std::fs::File::open(file!()).unwrap();
+        assert!(is_script_source(file.as_fd()));
+    }
 }
 
 #[cfg(all(test, unix))]
@@ -993,6 +1292,11 @@ mod privilege_drop_tests {
 
     fn args(items: &[&str]) -> Vec<OsString> {
         items.iter().map(OsString::from).collect()
+    }
+
+    /// The command line of a process that no `oxphp run` started.
+    fn parse_from(args: Vec<OsString>) -> Result<Command, BoxError> {
+        parse_with(args, false)
     }
 
     fn serve_opts(cmd: Command) -> ServeOptions {
@@ -1140,7 +1444,7 @@ mod privilege_drop_tests {
         let t = explicit_target(opts.user);
         assert_eq!(t.uid, 1000001);
         assert_eq!(t.gid, 1000002);
-        assert_eq!(opts.script, PathBuf::from("app.php"));
+        assert_eq!(opts.script, Script::File(PathBuf::from("app.php")));
     }
 
     #[test]

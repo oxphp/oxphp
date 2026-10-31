@@ -208,6 +208,71 @@ out="$(docker run --rm -w /tmp -v "$FIX:/cli:ro" "$IMAGE" sh -c 'ln -s /cli/sub 
 { [ "$out" = "oxphp: Could not open input file: l/../sub/cwd.php" ] && [ $code -eq 1 ]; } \
 	&& ok ".. after a symlink is folded as under ZTS php" || bad "symlink/.. open (out='$out' code=$code)"
 
+# 8k. A child started through PHP_BINARY with Symfony PhpSubprocess's `-n -c
+#     <ini>` loads only that ini: its memory_limit, it is the loaded file, and
+#     no conf.d file is scanned (the image has some, so `false` proves `-n`).
+out="$(run php_cli_options.php subprocess 2>&1)"
+ini="${out##*|ini=}"
+[ "$out" = "out=99M|$ini|false|code=0|err=|ini=$ini" ] \
+	&& ok "PHP_BINARY child: -n -c <ini>" || bad "-n -c (got '$out')"
+
+# 8l. The bare binary started by `oxphp run` runs the script on its standard
+#     input, as a bare php does (Symfony PhpProcess, PHPUnit process isolation),
+#     with php-cli's names for it; `-d` before it applies.
+out="$(run php_cli_options.php stdin 2>&1)"
+[ "$out" = "out=42|cli|Standard input code|Standard input code||code=0|err=" ] \
+	&& ok "PHP_BINARY child: script on stdin" || bad "stdin script (got '$out')"
+out="$(run php_cli_options.php stdin-d 2>&1)"
+[ "$out" = "out=88M|code=0|err=" ] \
+	&& ok "PHP_BINARY child: -d + script on stdin" || bad "stdin script with -d (got '$out')"
+#     A script on standard input that never compiles (the prepend throws) is
+#     opened on a duplicate of fd 0, so fd 0 is still open in the shutdown
+#     functions. php-cli closes it there; it opens the script on `stdin`, which
+#     its own STDIN constant never closes, whereas the bootstrap's STDIN here
+#     would close `stdin` a second time.
+out="$(run php_cli_options.php stdin-prepend 2>&1)"
+case "$out" in
+	"out=stdin-open|code=255|err="*"Uncaught Error: prepend"*) ok "uncompiled stdin script keeps fd 0 open" ;;
+	*) bad "stdin script after a throwing prepend (got '$out')" ;;
+esac
+
+# 8m. `-r <code>` runs the code with the arguments after it as $argv[1..], and
+#     takes its exit code from exit() or from an uncaught exception (255).
+out="$(run php_cli_options.php r 2>&1)"
+[ "$out" = "out=42|Standard input code|x|Command line code|code=0|err=" ] \
+	&& ok "PHP_BINARY child: -r" || bad "-r (got '$out')"
+out="$(run php_cli_options.php r-exit 2>&1)"
+[ "$out" = "out=|code=3|err=" ] && ok "-r exit(3) -> 3" || bad "-r exit (got '$out')"
+out="$(run php_cli_options.php r-throw 2>&1)"
+case "$out" in
+	"out=|code=255|err="*boom*) ok "-r uncaught exception -> 255" ;;
+	*) bad "-r throw (got '$out')" ;;
+esac
+out="$(run php_cli_options.php r-warn 2>&1)"
+case "$out" in
+	"out=|code=0|err="*"file_get_contents(/nonexistent): Failed to open stream"*) ok "-r warning names its function" ;;
+	*) bad "-r warning (got '$out')" ;;
+esac
+
+# 8n. `-f <file>` names the script; the arguments after it are its $argv.
+out="$(run php_cli_options.php f 2>&1)"
+[ "$out" = "out=/cli/php_cli_options.php|child-argv|y|code=0|err=" ] \
+	&& ok "PHP_BINARY child: -f <file>" || bad "-f (got '$out')"
+
+# 8o. The bare binary not started by `oxphp run` itself is still the server,
+#     even with the marker an `oxphp run` further up left in the environment and
+#     a script on its standard input.
+out="$(printf '<?php echo "STDIN-RAN\\n";' | docker run -i --rm -e OXPHP_RUN_PID=999999 \
+	-e LISTEN_ADDR=127.0.0.1:18081 "$IMAGE" timeout 5 oxphp 2>&1)"
+{ ! printf '%s' "$out" | grep -q STDIN-RAN && printf '%s' "$out" | grep -q 'Server listening'; } \
+	&& ok "bare oxphp with a foreign OXPHP_RUN_PID serves" || bad "foreign marker (got '$(printf '%s' "$out" | head -c 300)')"
+
+# 8p. A run that is PID 1 adopts an orphaned background `oxphp`, which then
+#     passes the parent check; its standard input is /dev/null, so it serves.
+out="$(run php_cli_options.php bg-serve 2>&1)"
+[ "$out" = "pid=1|adopted|served" ] \
+	&& ok "orphaned bare oxphp under a PID 1 run serves" || bad "orphan under PID 1 (got '$(printf '%s' "$out" | head -c 300)')"
+
 # 9. regression: HTTP serve role still boots and answers, and still runs a
 #    script in the script's own directory, as PHP-FPM does.
 name="oxphp-serve-smoke-$$"
