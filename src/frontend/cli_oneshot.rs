@@ -260,11 +260,21 @@ defined('STDERR')||define('STDERR',fopen('php://stderr','wb'));";
         bindings::oxphp_bridge_eval(bootstrap.as_ptr());
     }
 
+    // php-cli parity: open the file by its path, so it is not looked up in
+    // include_path and open_basedir does not apply to it. The open can fail
+    // where the check in `run` passed: like a ZTS php-cli, it folds `..` before
+    // following a symlink, so `link/../x.php` is not the file the kernel opens.
+    // (VCWD_FOPEN is virtual_fopen only under ZTS; an NTS php uses fopen.)
     let script_c = cstring_from_bytes(script.as_os_str().as_bytes());
     let mut file_handle: bindings::zend_file_handle = unsafe { std::mem::zeroed() };
-    unsafe {
-        bindings::zend_stream_init_filename(&mut file_handle, script_c.as_ptr());
-    }
+    // SAFETY: inside the request opened above; the handle copies the name, so
+    // `script_c` only has to outlive the call.
+    let opened = unsafe {
+        bindings::oxphp_bridge_cli_open_script(
+            &mut file_handle as *mut _ as *mut c_void,
+            script_c.as_ptr(),
+        )
+    } == 0;
     file_handle.primary_script = true;
 
     // php-cli parity: skip a leading `#!` shebang line when compiling the file
@@ -272,25 +282,40 @@ defined('STDERR')||define('STDERR',fopen('php://stderr','wb'));";
     // compile — robust regardless of what the bootstrap block above compiled —
     // otherwise the shebang line is emitted as inline text and leaks into the
     // script's output, breaking `#!/usr/bin/env oxphp` extensionless scripts.
+    //
+    // Also php-cli parity: keep the launch directory as the working directory.
+    // Otherwise php_execute_script changes into the script's directory first and
+    // resolves the relative name for `__FILE__` from there: `bin/bin/x.php`.
+    // SAFETY: on the main thread inside the request opened above; both calls
+    // only set a flag in this thread's engine globals.
     unsafe {
         bindings::oxphp_bridge_skip_shebang();
+        bindings::oxphp_bridge_set_no_chdir();
     }
 
-    // oxphp_execute_script_safe wraps php_execute_script in zend_try only as a
-    // last-resort guard against a stray bailout escaping FFI. In PHP 8.4+ that
-    // is effectively unreachable: exit()/die() is an ordinary function that does
-    // a graceful unwind (zend_throw_unwind_exit, not zend_bailout), and
-    // php_execute_script_ex catches its own bailouts — including the uncaught-
-    // exception path — and returns normally. So the return value is ignored.
-    unsafe {
-        bindings::oxphp_execute_script_safe(&mut file_handle as *mut _ as *mut c_void);
-    }
-    // EG(exit_status) is the single source of truth, exactly like php-cli's
-    // `return EG(exit_status)`: exit($code)/die($code) store it directly; a fatal
-    // error, uncaught exception, or parse error makes the engine set it to 255
-    // (main/main.c, Zend/zend.c); a clean run leaves it 0. Read before
-    // php_request_shutdown clears engine state.
-    let exit_status = unsafe { bindings::oxphp_bridge_get_exit_status() };
+    let exit_status = if opened {
+        // oxphp_execute_script_safe wraps php_execute_script in zend_try only as a
+        // last-resort guard against a stray bailout escaping FFI. In PHP 8.4+ that
+        // is effectively unreachable: exit()/die() is an ordinary function that does
+        // a graceful unwind (zend_throw_unwind_exit, not zend_bailout), and
+        // php_execute_script_ex catches its own bailouts — including the uncaught-
+        // exception path — and returns normally. So the return value is ignored.
+        // SAFETY: inside the request opened above, with a handle the bridge
+        // initialised from an open file.
+        unsafe {
+            bindings::oxphp_execute_script_safe(&mut file_handle as *mut _ as *mut c_void);
+        }
+        // EG(exit_status) is the single source of truth, exactly like php-cli's
+        // `return EG(exit_status)`: exit($code)/die($code) store it directly; a fatal
+        // error, uncaught exception, or parse error makes the engine set it to 255
+        // (main/main.c, Zend/zend.c); a clean run leaves it 0. Read before
+        // php_request_shutdown clears engine state.
+        // SAFETY: reads this thread's engine globals before the request closes.
+        unsafe { bindings::oxphp_bridge_get_exit_status() }
+    } else {
+        eprintln!("oxphp: Could not open input file: {}", script.display());
+        1
+    };
 
     unsafe {
         bindings::zend_destroy_file_handle(&mut file_handle);

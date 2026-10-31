@@ -450,4 +450,6 @@ extern "C" {
     pub fn oxphp_bridge_get_exit_status() -> c_int;
     pub fn oxphp_bridge_eval(code: *const c_char) -> c_int;
     pub fn oxphp_bridge_skip_shebang();
+    pub fn oxphp_bridge_set_no_chdir();
+    pub fn oxphp_bridge_cli_open_script(file_handle: *mut c_void, path: *const c_char) -> c_int;
 }

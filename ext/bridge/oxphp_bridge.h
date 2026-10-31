@@ -972,6 +972,23 @@ int oxphp_bridge_eval(const char *code);
  *  php_request_startup() and before php_execute_script(). */
 void oxphp_bridge_skip_shebang(void);
 
+/** Keep the working directory when php_execute_script() runs the primary
+ *  script, instead of changing into its directory (php-cli parity;
+ *  SAPI_OPTION_NO_CHDIR). Applies to every later script on the calling thread:
+ *  the engine never clears SG(options). Call before php_execute_script(). */
+void oxphp_bridge_set_no_chdir(void);
+
+/** Initialise a primary script's zend_file_handle from the file at `path`,
+ *  opened the way php-cli opens it: from the working directory, without an
+ *  include_path lookup or an open_basedir check. The handle holds a FILE*, as
+ *  php-cli's does, and shares its two gaps (PHP 8.4.27, 8.5.12):
+ *  zend_destroy_file_handle closes the file unless phar has replaced the handle
+ *  (a tar, zip or compressed phar), which leaves the FILE* open until the
+ *  process exits; and a read error reads as end of file, so the script compiles
+ *  from what was read before it. Returns 0, or -1 when the file cannot be
+ *  opened (the handle is then untouched). Call inside a request. */
+int oxphp_bridge_cli_open_script(void *file_handle, const char *path);
+
 /* ── Zval lifecycle ── */
 
 /** Destroy a zval (decrement refcount, free if needed). */
