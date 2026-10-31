@@ -54,19 +54,43 @@ final class AsyncDeclDefaultChild extends AsyncDeclDefaultMaker
     }
 }
 
+// A constant's name written as an expression is evaluated with the default
+// value: the object new self() creates there is thrown away at once.
+$destructLine = __LINE__ + 5;
+final class AsyncDeclDefaultNamedMaker
+{
+    public function __destruct()
+    {
+        asyncdecl_default_scope_helper();
+    }
+
+    public static function make($n = self::{new self() ? 'N' : 'N'}): object
+    {
+        return (object) ['v' => $n];
+    }
+
+    public const N = 1;
+}
+
 $refused = asyncdecl_refused('asyncdecl_default_scope_helper', __FILE__, $buildLine);
 $selfPool = new \OxPHP\Shared\Pool(factory: [AsyncDeclDefaultMaker::class, 'make'], destroy: null, maxSize: 1);
 $parentPool = new \OxPHP\Shared\Pool(factory: [AsyncDeclDefaultChild::class, 'makeParent'], destroy: null, maxSize: 1);
+$namedPool = new \OxPHP\Shared\Pool(factory: [AsyncDeclDefaultNamedMaker::class, 'make'], destroy: null, maxSize: 1);
 
 $t->assertSame('new self() as a default value', asyncdecl_acquire_in_task($selfPool), $refused);
 $t->assertSame('new parent() as a default value', asyncdecl_acquire_in_task($parentPool), $refused);
+$t->assertSame(
+    'new self() in the name of a constant a default value reads',
+    asyncdecl_acquire_in_task($namedPool),
+    asyncdecl_refused('asyncdecl_default_scope_helper', __FILE__, $destructLine),
+);
 $t->assertSame(
     'self::N as a default value runs in the task',
     asyncdecl_acquire_in_task(AsyncDeclDefaultMaker::constPool()),
     ['returned', \stdClass::class],
 );
 
-foreach (['new self()' => $selfPool, 'new parent()' => $parentPool] as $what => $pool) {
+foreach (['new self()' => $selfPool, 'new parent()' => $parentPool, 'self::{new self() ...}' => $namedPool] as $what => $pool) {
     $h = $pool->acquire();
     $t->assertSame("$what: the factory still works on the worker thread", $h->get()->v, 1);
     $h->release();

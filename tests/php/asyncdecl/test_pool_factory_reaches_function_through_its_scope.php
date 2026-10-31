@@ -9,10 +9,10 @@ function asyncdecl_scope_helper(int $base = 0): int
     return $base + 1;
 }
 
-// Factories that reach a method through self::, static:: or new static: the
-// method is found from the closure's class, not by a name this thread's tables
-// must hold. Those classes are checked with the factory when it names one of
-// them that way, and only then.
+// Factories that reach a method or a property hook through self::, static::,
+// new self or new static: it is found from the closure's class, not by a name
+// this thread's tables must hold. Those classes are checked with the factory
+// when it names one of them that way, and only then.
 $t = new TestCase('test_pool_factory_reaches_function_through_its_scope', 'asyncdecl');
 
 $makeLine = __LINE__ + 5;
@@ -80,6 +80,34 @@ final class AsyncDeclStaticChild extends AsyncDeclStaticBase
     }
 }
 
+// A hook is not a method: PHP keeps it with its property. Before the hook that
+// calls a function of this file, the class has a property without hooks and
+// one with only a get hook, which calls nothing of this file.
+$hookLine = __LINE__ + 11;
+final class AsyncDeclScopeHookedMaker
+{
+    public int $plain = 0;
+
+    public int $twice {
+        get => $this->plain * 2;
+    }
+
+    public int $v {
+        get {
+            return asyncdecl_scope_helper();
+        }
+    }
+
+    public static function pool(): \OxPHP\Shared\Pool
+    {
+        return new \OxPHP\Shared\Pool(
+            factory: static fn (): object => (object) ['v' => (new self())->v],
+            destroy: null,
+            maxSize: 1,
+        );
+    }
+}
+
 $refused = asyncdecl_refused('asyncdecl_scope_helper', __FILE__, $makeLine);
 
 $t->assertSame('self::', asyncdecl_acquire_in_task(AsyncDeclScopeMaker::selfPool()), $refused);
@@ -88,6 +116,11 @@ $t->assertSame(
     'static::, called on a subclass',
     asyncdecl_acquire_in_task(AsyncDeclStaticChild::pool()),
     asyncdecl_refused('asyncdecl_scope_helper', __FILE__, $childLine),
+);
+$t->assertSame(
+    'a property hook of an object of new self',
+    asyncdecl_acquire_in_task(AsyncDeclScopeHookedMaker::pool()),
+    asyncdecl_refused('asyncdecl_scope_helper', __FILE__, $hookLine),
 );
 
 // Bound to an object of an unrelated class, self:: still names the class the

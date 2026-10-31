@@ -93,12 +93,15 @@ $t->assertSame(
     asyncdecl_refused('asyncdecl_trampoline_reach_helper', __FILE__, $callLine),
 );
 
+// A task's thread gets no copy of a closure the factory captured, whatever it
+// calls.
 $made = (new AsyncDeclReachingCall())->make(...);
+$madeLine = __LINE__ + 1;
 $pool = new \OxPHP\Shared\Pool(factory: static fn (): object => $made(), destroy: null, maxSize: 1);
 $t->assertSame(
     'a captured $object->make(...)',
     asyncdecl_acquire_in_task($pool),
-    asyncdecl_refused('asyncdecl_trampoline_reach_helper', __FILE__, $callLine),
+    asyncdecl_not_copied('made', 'an object of class Closure', __FILE__, $madeLine),
 );
 
 // The parent's __call() reaches a method of the child through $this.

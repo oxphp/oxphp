@@ -101,3 +101,47 @@ final class AsyncDeclClassDataImplements implements AsyncDeclClassDataIface
         return (self::MAKE)();
     }
 }
+
+// The initial values of a closure's static variables are kept with its code,
+// in a constant expression as in a body.
+const ASYNCDECL_CLASS_DATA_STATIC_LINE = __LINE__ + 5;
+class AsyncDeclClassDataStaticMaker
+{
+    public static function make(): object
+    {
+        return (object) ['v' => asyncdecl_class_data_helper()];
+    }
+}
+
+final class AsyncDeclClassDataStaticInConstant extends AsyncDeclClassDataStaticMaker
+{
+    public const MAKE = static function (): object {
+        static $cb = 'static::make';
+        \set_error_handler(static fn (): bool => true, E_DEPRECATED);
+        try {
+            return \call_user_func($cb);
+        } finally {
+            \restore_error_handler();
+        }
+    };
+
+    public static function factory(): object
+    {
+        return (self::MAKE)();
+    }
+}
+
+final class AsyncDeclClassDataStaticInDefault extends AsyncDeclClassDataStaticMaker
+{
+    public static function factory(\Closure $make = static function (): object {
+        static $cb = 'static::make';
+        \set_error_handler(static fn (): bool => true, E_DEPRECATED);
+        try {
+            return \call_user_func($cb);
+        } finally {
+            \restore_error_handler();
+        }
+    }): object {
+        return $make();
+    }
+}
