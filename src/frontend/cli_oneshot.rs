@@ -1,8 +1,9 @@
 //! One-shot CLI execution: `oxphp run <script.php> [args…]`.
 //!
-//! Executes a single PHP file to completion under CLI semantics and exits with
-//! the script's exit code. Everything runs on the main thread — there is no
-//! HTTP listener, no accept loop, and no resident worker pool. What sets this
+//! Executes a single PHP file (or `-r` code, or a script on standard input) to
+//! completion under CLI semantics and exits with the script's exit code.
+//! Everything runs on the main thread — there is no HTTP listener, no accept
+//! loop, and no resident worker pool. What sets this
 //! apart from a bare `php file.php` is that the OxPHP engine is available
 //! underneath: fibers (`oxphp_sleep`), `ox_shared`, and the engine plugins
 //! (full `oxphp_async()` dispatch additionally needs `ASYNC_WORKERS>0`).
@@ -13,9 +14,8 @@
 use std::ffi::CString;
 use std::os::raw::{c_char, c_int, c_void};
 use std::os::unix::ffi::OsStrExt;
-use std::path::Path;
 
-use crate::cli::RunOptions;
+use crate::cli::{RunOptions, Script};
 use crate::php::{bindings, sapi};
 
 /// Execute `opts.script` under the CLI personality and return the process
@@ -28,17 +28,22 @@ pub fn run(opts: RunOptions) -> i32 {
     //    up the engine only to die with E_COMPILE_ERROR (exit 255). Open the
     //    file (don't just stat it) so a permission error is caught too, then
     //    reject anything that isn't a regular file (a directory opens fine). ──
-    let openable = std::fs::File::open(&opts.script)
-        .ok()
-        .and_then(|f| f.metadata().ok())
-        .is_some_and(|m| m.is_file());
-    if !openable {
-        eprintln!(
-            "oxphp: Could not open input file: {}",
-            opts.script.display()
-        );
-        return 1;
+    if let Script::File(path) = &opts.script {
+        let openable = std::fs::File::open(path)
+            .ok()
+            .and_then(|f| f.metadata().ok())
+            .is_some_and(|m| m.is_file());
+        if !openable {
+            eprintln!("oxphp: Could not open input file: {}", path.display());
+            return 1;
+        }
     }
+
+    // ── A bare `oxphp` this script starts through `PHP_BINARY` checks this
+    //    against its parent pid to read its script from standard input
+    //    (`cli::parse`). Set before plugin init: no other thread exists yet,
+    //    and `set_var` races with any thread reading the environment. ──
+    std::env::set_var(crate::cli::RUN_PID_ENV, std::process::id().to_string());
 
     // ── ini: php-cli's hardcoded defaults + the user's `-d` overrides, folded
     //    into the SAPI `ini_entries` blob (php-cli parity). Leaked for the
@@ -63,6 +68,12 @@ pub fn run(opts: RunOptions) -> i32 {
         .ok()
         .and_then(|p| CString::new(p.as_os_str().as_bytes()).ok())
         .map_or(std::ptr::null_mut(), CString::into_raw);
+
+    // ── `-c`: php.ini looked up in this path instead of the default search;
+    //    leaked like `ini_ptr`. ──
+    let ini_path_ptr: *mut c_char = opts.ini_path.as_ref().map_or(std::ptr::null_mut(), |p| {
+        cstring_from_bytes(p.as_bytes()).into_raw()
+    });
 
     // ── Engine-only plugin profile. The HTTP-frontend features (rate limit,
     //    access log, static files, metrics endpoint, …) are not PluginManager
@@ -116,14 +127,17 @@ pub fn run(opts: RunOptions) -> i32 {
 
     // ── PHP engine startup with the CLI SAPI personality. ──
     // SAFETY: the only engine startup in this process, on the main thread, before
-    // any PHP thread exists; `ini_ptr` and `exe_ptr` are leaked, so the pointers
-    // `sapi_module` keeps stay valid for the process lifetime.
+    // any PHP thread exists; `ini_ptr`, `exe_ptr` and `ini_path_ptr` are leaked,
+    // so the pointers `sapi_module` keeps stay valid for the process lifetime.
     unsafe {
         if !bindings::php_tsrm_startup() {
             eprintln!("oxphp: php_tsrm_startup() failed");
             return 1;
         }
         let mut module = sapi::build_cli_sapi_module(ini_ptr, exe_ptr);
+        // `-n` / `-c`, as php-cli sets them; sapi_startup() keeps both.
+        module.php_ini_ignore = c_int::from(opts.ini_ignore);
+        module.php_ini_path_override = ini_path_ptr;
         bindings::sapi_startup(&mut module);
         // sapi_startup() sets sapi_module.ini_entries = NULL (main/SAPI.c). php-cli
         // re-attaches the pointer right here; php_module_startup() then copies the
@@ -211,19 +225,29 @@ pub fn run(opts: RunOptions) -> i32 {
 }
 
 /// The one-shot request lifecycle: stage `$_SERVER`/`$argv`, then
-/// `php_request_startup` → define std streams → `php_execute_script` →
+/// `php_request_startup` → define std streams → execute the script or code →
 /// `php_request_shutdown`, propagating the exit code. CLI ini defaults and the
 /// `-d` overrides are not applied here — they live in the SAPI `ini_entries`
 /// blob (see `build_ini_entries`), parsed at config stage during startup.
-fn run_cli_oneshot(script: &Path, args: &[std::ffi::OsString]) -> i32 {
-    // Stage $_SERVER (PHP_SELF, SCRIPT_*, environment).
-    sapi::set_cli_request_data(script);
+fn run_cli_oneshot(script: &Script, args: &[std::ffi::OsString]) -> i32 {
+    // php-cli's names: code that is not a file is "Standard input code" in
+    // `$argv[0]` and PHP_SELF, and its SCRIPT_FILENAME is empty.
+    let (php_self, script_filename) = match script {
+        Script::File(path) => (path.as_os_str(), path.as_os_str()),
+        Script::Code(_) | Script::Stdin => ("Standard input code".as_ref(), "".as_ref()),
+    };
 
-    // Build argv = [script, args…] as C strings. PHP's php_build_argv() copies
+    // Stage $_SERVER (PHP_SELF, SCRIPT_*, environment).
+    sapi::set_cli_request_data(
+        &php_self.to_string_lossy(),
+        &script_filename.to_string_lossy(),
+    );
+
+    // Build argv = [php_self, args…] as C strings. PHP's php_build_argv() copies
     // these during php_request_startup, but the array must stay valid across
     // that call.
     let mut argv_cstrings: Vec<CString> = Vec::with_capacity(args.len() + 1);
-    argv_cstrings.push(cstring_from_bytes(script.as_os_str().as_bytes()));
+    argv_cstrings.push(cstring_from_bytes(php_self.as_bytes()));
     for arg in args {
         argv_cstrings.push(cstring_from_bytes(arg.as_bytes()));
     }
@@ -260,23 +284,6 @@ defined('STDERR')||define('STDERR',fopen('php://stderr','wb'));";
         bindings::oxphp_bridge_eval(bootstrap.as_ptr());
     }
 
-    // php-cli parity: open the file by its path, so it is not looked up in
-    // include_path and open_basedir does not apply to it. The open can fail
-    // where the check in `run` passed: like a ZTS php-cli, it folds `..` before
-    // following a symlink, so `link/../x.php` is not the file the kernel opens.
-    // (VCWD_FOPEN is virtual_fopen only under ZTS; an NTS php uses fopen.)
-    let script_c = cstring_from_bytes(script.as_os_str().as_bytes());
-    let mut file_handle: bindings::zend_file_handle = unsafe { std::mem::zeroed() };
-    // SAFETY: inside the request opened above; the handle copies the name, so
-    // `script_c` only has to outlive the call.
-    let opened = unsafe {
-        bindings::oxphp_bridge_cli_open_script(
-            &mut file_handle as *mut _ as *mut c_void,
-            script_c.as_ptr(),
-        )
-    } == 0;
-    file_handle.primary_script = true;
-
     // php-cli parity: skip a leading `#!` shebang line when compiling the file
     // (CG(skip_shebang)=1, sapi/cli/php_cli.c). Set immediately before the
     // compile — robust regardless of what the bootstrap block above compiled —
@@ -293,6 +300,60 @@ defined('STDERR')||define('STDERR',fopen('php://stderr','wb'));";
         bindings::oxphp_bridge_set_no_chdir();
     }
 
+    let exit_status = match script {
+        Script::Code(code) => {
+            let code_c = cstring_from_bytes(code.as_bytes());
+            // SAFETY: inside the request opened above; `code_c` outlives the call.
+            unsafe { bindings::oxphp_bridge_cli_eval_code(code_c.as_ptr()) };
+            // SAFETY: reads this thread's engine globals before the request closes.
+            unsafe { bindings::oxphp_bridge_get_exit_status() }
+        }
+        Script::File(path) => execute_primary_script(&path.to_string_lossy(), |handle| {
+            // php-cli parity: open the file by its path, so it is not looked up
+            // in include_path and open_basedir does not apply to it. The open can
+            // fail where the check in `run` passed: like a ZTS php-cli, it folds
+            // `..` before following a symlink, so `link/../x.php` is not the file
+            // the kernel opens. (VCWD_FOPEN is virtual_fopen only under ZTS; an
+            // NTS php uses fopen.)
+            let path_c = cstring_from_bytes(path.as_os_str().as_bytes());
+            // SAFETY: inside the request opened above; the handle copies the
+            // name, so `path_c` only has to outlive the call.
+            unsafe { bindings::oxphp_bridge_cli_open_script(handle, path_c.as_ptr()) }
+        }),
+        Script::Stdin => execute_primary_script("Standard input code", |handle| {
+            // SAFETY: inside the request opened above.
+            unsafe { bindings::oxphp_bridge_cli_open_stdin(handle) }
+        }),
+    };
+
+    // SAFETY: on the main thread, closing the request opened above.
+    unsafe { crate::php::thread::close_request() };
+    sapi::clear_request_data();
+
+    // Detach SG(request_info).argc/argv from the storage we are about to free
+    // (clear_request_data only nulls request_method/query/etc., not argv) so
+    // the engine globals never dangle. Defensive — the process exits next.
+    // SAFETY: on the main thread, after the request closed; only stores the
+    // null pair in this thread's SG(request_info).
+    unsafe {
+        bindings::oxphp_bridge_set_cli_args(0, std::ptr::null_mut());
+    }
+    drop(argv_ptrs);
+    drop(argv_cstrings);
+
+    exit_status
+}
+
+/// Open the primary script with `open` (a bridge opener: 0 on success) and run
+/// it, returning its exit code; 1 with php-cli's message when it cannot be
+/// opened. Call inside the request.
+fn execute_primary_script(name: &str, open: impl FnOnce(*mut c_void) -> c_int) -> i32 {
+    // SAFETY: an all-zero zend_file_handle is the unset state the bridge
+    // openers initialise and zend_destroy_file_handle accepts.
+    let mut file_handle: bindings::zend_file_handle = unsafe { std::mem::zeroed() };
+    let opened = open(&mut file_handle as *mut _ as *mut c_void) == 0;
+    file_handle.primary_script = true;
+
     let exit_status = if opened {
         // oxphp_execute_script_safe wraps php_execute_script in zend_try only as a
         // last-resort guard against a stray bailout escaping FFI. In PHP 8.4+ that
@@ -300,8 +361,8 @@ defined('STDERR')||define('STDERR',fopen('php://stderr','wb'));";
         // a graceful unwind (zend_throw_unwind_exit, not zend_bailout), and
         // php_execute_script_ex catches its own bailouts — including the uncaught-
         // exception path — and returns normally. So the return value is ignored.
-        // SAFETY: inside the request opened above, with a handle the bridge
-        // initialised from an open file.
+        // SAFETY: inside the request, with a handle the bridge initialised from
+        // an open file.
         unsafe {
             bindings::oxphp_execute_script_safe(&mut file_handle as *mut _ as *mut c_void);
         }
@@ -313,25 +374,13 @@ defined('STDERR')||define('STDERR',fopen('php://stderr','wb'));";
         // SAFETY: reads this thread's engine globals before the request closes.
         unsafe { bindings::oxphp_bridge_get_exit_status() }
     } else {
-        eprintln!("oxphp: Could not open input file: {}", script.display());
+        eprintln!("oxphp: Could not open input file: {name}");
         1
     };
 
-    unsafe {
-        bindings::zend_destroy_file_handle(&mut file_handle);
-        crate::php::thread::close_request();
-    }
-    sapi::clear_request_data();
-
-    // Detach SG(request_info).argc/argv from the storage we are about to free
-    // (clear_request_data only nulls request_method/query/etc., not argv) so
-    // the engine globals never dangle. Defensive — the process exits next.
-    unsafe {
-        bindings::oxphp_bridge_set_cli_args(0, std::ptr::null_mut());
-    }
-    drop(argv_ptrs);
-    drop(argv_cstrings);
-
+    // SAFETY: the handle is zeroed or initialised by the opener, and destroyed
+    // once, inside the request.
+    unsafe { bindings::zend_destroy_file_handle(&mut file_handle) };
     exit_status
 }
 

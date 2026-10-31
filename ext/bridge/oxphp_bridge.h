@@ -989,6 +989,19 @@ void oxphp_bridge_set_no_chdir(void);
  *  opened (the handle is then untouched). Call inside a request. */
 int oxphp_bridge_cli_open_script(void *file_handle, const char *path);
 
+/** Initialise a primary script's zend_file_handle from standard input, named
+ *  "Standard input code" as php-cli names it. Reads through a duplicate of fd
+ *  0, so destroying the handle leaves fd 0 and the `stdin` FILE* open, also
+ *  when the script was never compiled. Returns
+ *  0, or -1 when fd 0 cannot be duplicated. Call inside a request. */
+int oxphp_bridge_cli_open_stdin(void *file_handle);
+
+/** Execute `code` (no `<?php` tag) as `php -r` does: named "Command line
+ *  code", an uncaught exception reported with exit status 255, a bailout
+ *  caught. Read the exit code with oxphp_bridge_get_exit_status(). Call inside
+ *  a request. */
+void oxphp_bridge_cli_eval_code(const char *code);
+
 /* ── Zval lifecycle ── */
 
 /** Destroy a zval (decrement refcount, free if needed). */
