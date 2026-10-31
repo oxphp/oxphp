@@ -35,3 +35,7 @@ shared/test_registry_remove_race_double_factory
 # A pool let go of while an exception or exit() unwinds the frame holding it,
 # on a worker thread: the same test runs in the shared suite without worker mode.
 shared/test_pool_destroy_during_unwind
+# An exception $destroy throws whose destructor throws, or that holds another
+# pool, on a worker thread: the same test runs in the shared suite without
+# worker mode.
+shared/test_pool_destroy_exception_destructor_throws
