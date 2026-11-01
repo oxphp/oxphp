@@ -959,6 +959,12 @@ int oxphp_bridge_get_response_code(void);
  *  array and its strings must outlive php_request_startup(). */
 void oxphp_bridge_set_cli_args(int argc, char **argv);
 
+/** The CLI module's `ini_defaults` callback: `display_errors=stderr`, put in
+ *  the configuration hash before php.ini is read, so php.ini overrides it as
+ *  it overrides php-cli's `display_errors=1`. `configuration_hash` is a
+ *  `HashTable *`. */
+void oxphp_bridge_cli_ini_defaults(void *configuration_hash);
+
 /** Return EG(exit_status) — the script's exit code (set by exit()/die(),
  *  0 on normal completion). Read after php_execute_script(). */
 int oxphp_bridge_get_exit_status(void);
