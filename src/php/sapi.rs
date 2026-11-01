@@ -1536,19 +1536,21 @@ pub fn build_sapi_module() -> sapi_module_struct {
 ///
 /// Mirrors PHP's own `sapi/cli/php_cli.c`: the SAPI name is `"cli"` (so
 /// `PHP_SAPI === 'cli'` and `php_sapi_name()` returns `"cli"`), output goes
-/// straight to stdout, errors to stderr, and header handling is a no-op
-/// (there is no HTTP response). `register_server_variables` is shared with
-/// the web module — the CLI variable set is staged via
+/// straight to stdout, PHP's log to stderr when `error_log` is unset, and
+/// header handling is a no-op (there is no HTTP response). Displayed errors go
+/// to stderr through `display_errors=stderr`, a default php.ini overrides, as
+/// it overrides php-cli's `display_errors=1`. `register_server_variables` is
+/// shared with the web module — the CLI variable set is staged via
 /// [`set_cli_request_data`]. `$argv`/`$argc` come from
 /// `SG(request_info).argc/argv` (see [`bindings::oxphp_bridge_set_cli_args`]).
 ///
-/// `ini_entries` is a newline-separated `key=value` block (CLI defaults plus
-/// any `-d` overrides); the pointer must remain valid for the process
-/// lifetime. `executable_location` is the path PHP resolves `PHP_BINARY` from
-/// during module startup (null leaves it `''`); it must stay valid for the
-/// process lifetime too, since `sapi_module` keeps it. Unlike the web module
-/// this does NOT install the bridge ub_write/flush trampolines — CLI output
-/// bypasses the per-request buffer.
+/// `ini_entries` is a newline-separated `key=value` block (the CLI defaults
+/// other than `display_errors`, plus any `-d` overrides); the pointer must
+/// remain valid for the process lifetime. `executable_location` is the path
+/// PHP resolves `PHP_BINARY` from during module startup (null leaves it
+/// `''`); it must stay valid for the process lifetime too, since `sapi_module`
+/// keeps it. Unlike the web module this does NOT install the bridge
+/// ub_write/flush trampolines — CLI output bypasses the per-request buffer.
 pub fn build_cli_sapi_module(
     ini_entries: *const c_char,
     executable_location: *mut c_char,
@@ -1597,7 +1599,7 @@ pub fn build_cli_sapi_module(
         get_target_uid: None,
         get_target_gid: None,
         input_filter: None,
-        ini_defaults: None,
+        ini_defaults: Some(bindings::oxphp_bridge_cli_ini_defaults),
         // php-cli sets this to 1 so phpinfo() emits plain text, not HTML
         // (sapi/cli/php_cli.c).
         phpinfo_as_text: 1,

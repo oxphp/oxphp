@@ -1860,6 +1860,15 @@ void oxphp_bridge_set_cli_args(int argc, char **argv) {
     SG(request_info).argv = argv;
 }
 
+void oxphp_bridge_cli_ini_defaults(void *configuration_hash) {
+    /* php-cli's INI_DEFAULT (sapi/cli/php_cli.c). The string is persistent:
+     * the configuration hash frees it with config_zval_dtor. */
+    zval tmp;
+    ZVAL_NEW_STR(&tmp, zend_string_init("stderr", sizeof("stderr") - 1, 1));
+    zend_hash_str_update((HashTable *)configuration_hash, "display_errors",
+                         sizeof("display_errors") - 1, &tmp);
+}
+
 int oxphp_bridge_get_exit_status(void) {
     return EG(exit_status);
 }

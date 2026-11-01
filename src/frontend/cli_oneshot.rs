@@ -227,8 +227,9 @@ pub fn run(opts: RunOptions) -> i32 {
 /// The one-shot request lifecycle: stage `$_SERVER`/`$argv`, then
 /// `php_request_startup` → define std streams → execute the script or code →
 /// `php_request_shutdown`, propagating the exit code. CLI ini defaults and the
-/// `-d` overrides are not applied here — they live in the SAPI `ini_entries`
-/// blob (see `build_ini_entries`), parsed at config stage during startup.
+/// `-d` overrides are not applied here — they are set at config stage during
+/// startup, by the SAPI `ini_entries` blob (see `build_ini_entries`) and the
+/// module's `ini_defaults`.
 fn run_cli_oneshot(script: &Script, args: &[std::ffi::OsString]) -> i32 {
     // php-cli's names: code that is not a file is "Standard input code" in
     // `$argv[0]` and PHP_SELF, and its SCRIPT_FILENAME is empty.
@@ -392,6 +393,10 @@ fn execute_primary_script(name: &str, open: impl FnOnce(*mut c_void) -> c_int) -
 /// including PHP_INI_SYSTEM/PERDIR ones (`opcache.*`, `register_argc_argv`, …)
 /// that a `ZEND_INI_USER` runtime alteration would silently refuse.
 ///
+/// `display_errors=stderr` is not here: php.ini must be able to override it, as
+/// it overrides php-cli's, so the module's `ini_defaults` sets it (see
+/// `sapi::build_cli_sapi_module`).
+///
 /// `-d` keys/values are validated to contain no newline so a crafted value
 /// cannot inject an extra directive line into the blob.
 fn build_ini_entries(ini: &[(String, String)]) -> Result<CString, String> {
@@ -400,8 +405,7 @@ fn build_ini_entries(ini: &[(String, String)]) -> Result<CString, String> {
          implicit_flush=1\n\
          output_buffering=0\n\
          max_execution_time=0\n\
-         max_input_time=-1\n\
-         display_errors=stderr\n",
+         max_input_time=-1\n",
     );
     // 8.4 builds `$argv` only while it is on, and php-cli 8.4 forces it on over a
     // php.ini that turns it off (both shipped templates do). 8.5 builds `$argv`

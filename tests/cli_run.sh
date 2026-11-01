@@ -72,6 +72,15 @@ out="$(docker run --rm -v "$FIX:/cli:ro" -v "$FIX/argc_off.ini:/usr/local/etc/ph
 [ "$out" = "$(printf '2\n/cli/argv.php|a')" ] \
 	&& ok "\$argv with php.ini register_argc_argv=Off" || bad "argv under ini Off (got '$out')"
 
+# 5e. A php.ini does not override the run defaults, except display_errors, which
+#     is a default it replaces, as under php; -d overrides both.
+out="$(run runini.php)"
+[ "$out" = "0|stderr" ] && ok "run defaults without php.ini" || bad "run defaults (got '$out')"
+out="$(docker run --rm -v "$FIX:/cli:ro" -v "$FIX/runini.ini:/usr/local/etc/php/conf.d/zz-runini.ini:ro" "$IMAGE" oxphp run /cli/runini.php)"
+[ "$out" = "0|" ] && ok "php.ini sets display_errors, not max_execution_time" || bad "php.ini over run defaults (got '$out')"
+out="$(docker run --rm -v "$FIX:/cli:ro" -v "$FIX/runini.ini:/usr/local/etc/php/conf.d/zz-runini.ini:ro" "$IMAGE" oxphp run -d display_errors=stderr -d max_execution_time=5 /cli/runini.php)"
+[ "$out" = "5|stderr" ] && ok "-d over php.ini and run defaults" || bad "-d over php.ini (got '$out')"
+
 # 6. async engine available under one-shot
 out="$(run async.php)"
 printf '%s' "$out" | grep -q "async-ok" && ok "async (oxphp_sleep)" || bad "async (got '$out')"

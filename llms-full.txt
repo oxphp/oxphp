@@ -48,7 +48,7 @@ oxphp serve --user=root      # opt out: keep running as root
 
 ## `oxphp run`
 
-`oxphp run <script.php> [args…]` executes a single PHP file to completion and exits with the script's own exit code. It runs on the main thread — there is no listener, no worker pool, and no request queue. `PHP_SAPI === 'cli'`, and `phpinfo()` prints text rather than HTML, matching the stock `php` CLI.
+`oxphp run <script.php> [args…]` executes a single PHP file to completion and exits with the script's own exit code. It runs on the main thread — there is no listener, no request queue, and no pool of workers serving requests, though `ASYNC_WORKERS` greater than `0` starts a pool of async worker threads (see below). `PHP_SAPI === 'cli'`, and `phpinfo()` prints text rather than HTML, matching the stock `php` CLI.
 
 ```bash
 oxphp run migrate.php
@@ -138,13 +138,13 @@ Only one of `-f` and `-r` may be given, once. `-n` and `-c` need a script, as `-
 
 ### Default ini for `run`
 
-The `run` role applies CLI-oriented defaults before your `-d` overrides and `php.ini`:
+The `run` role applies these CLI-oriented defaults. As under `php`, `php.ini` and the files in `conf.d` do not change them, except `display_errors`; [`-d`](#-d-ini-overrides) overrides any of them:
 
 | Directive | Default | Why |
 |---|---|---|
 | `max_execution_time` | `0` | A one-shot job (migration, importer, daemon) must not be killed by PHP's execution timer. |
 | `max_input_time` | `-1` | No input-parsing deadline for CLI. |
-| `display_errors` | `stderr` | Errors go to standard error, not standard output. |
+| `display_errors` | `stderr` | Errors go to standard error, not standard output. A `display_errors` in `php.ini` or `conf.d` replaces this default, as it replaces the `1` that `php` defaults to: `On` shows errors on standard output, as under `php`, and `Off` shows none: errors the script raises then reach standard error, or wherever `error_log` sends them, only with `log_errors` on, which it is not by default. `-d display_errors=stderr` keeps them on standard error whatever `php.ini` says. |
 | `html_errors` | `0` | Plain-text errors for a terminal. |
 | `output_buffering` | `0` | Output is written as it is produced. |
 | `implicit_flush` | `1` | Each write is flushed immediately. |
