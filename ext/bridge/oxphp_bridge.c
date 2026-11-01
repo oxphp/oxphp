@@ -5295,12 +5295,13 @@ static zend_string *oxphp_own_function_missing_here(const zend_function *fn,
     return oxphp_op_array_missing_here(&fn->op_array, NULL);
 }
 
-/* What `ce`'s constants and static properties hold that a callback reading
- * them through self::, static:: or parent:: reaches: a callable that names a
- * class that way, written as the value or in a constant expression (one the
- * expression takes from another constant is not seen), and on PHP 8.5 the
- * closures its constant expressions hold, the default values of its
- * properties included. A thread creates such a closure the first time it reads
+/* What `ce`'s constants and property defaults hold that a callback reading a
+ * constant or static property through self::, static:: or parent:: reaches: a
+ * callable that names a class that way, written as the value of a constant or
+ * static property or in a constant expression, a non-static property's default
+ * included (one the expression takes from another constant is not seen), and
+ * on PHP 8.5 the closures its constant expressions hold, the default values of
+ * its properties included. A thread creates such a closure the first time it reads
  * the constant or the property, or creates an object of the class. A constant
  * `ce` inherits is evaluated with the class or interface that declares it as
  * scope, which self:: in such a closure stands for (zend_update_class_constants(),
@@ -5564,8 +5565,10 @@ static zend_string *oxphp_call_missing_here(const zend_function *fn, zend_object
  * what it reaches through them is checked too: $this, and the classes self
  * and static stand for, when its body uses them or holds a callable that
  * names a class that way, written as a literal, a static variable's initial
- * value, the value of any constant or static property of those classes or
- * their parents once it reads one through them, or a parameter's default
+ * value, the value of any constant or static property or a property default
+ * written as a constant expression, of those classes, their parents or the
+ * interfaces they inherit a constant from once it reads a constant or static
+ * property through them, or a parameter's default
  * value (above); the class a built-in function is called on; for __call() or
  * __callStatic(), which has no body of its own, called directly or through a
  * closure made from the method name, the class; and for
