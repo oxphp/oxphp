@@ -144,8 +144,8 @@ pub fn run_scan() {
         return;
     };
     let now = Instant::now();
-    for entry in reg.iter_entries() {
-        let Some(pool) = entry.inner.as_any_pool() else {
+    for inner in reg.pools() {
+        let Some(pool) = inner.as_any_pool() else {
             continue;
         };
         for owner in pool.stale_owners(now) {
