@@ -24,6 +24,7 @@ pub type SharedId = u64;
 /// | DashMap shard bucket entry                 | 32–48          |
 /// | Per-allocation malloc prologue (×3 allocs) | ~48            |
 /// | **Total**                                  | **184–216**    |
+/// | `pools` cell (pools only, not in total)    | ~25–48         |
 ///
 /// 200 is a consciously conservative pick inside the 184–216 B
 /// structural range — closer to the upper edge than the middle so
@@ -165,14 +166,13 @@ impl std::fmt::Debug for Entry {
 }
 
 impl Drop for Entry {
-    /// Runs when the last `Arc<Entry>` is dropped. Self-deregisters
-    /// from the owning registry: poisons `magic`, fires
-    /// `inner.on_drop()`, removes the `Weak` index entry, and adjusts
-    /// the registry totals. This is the single point where an entry
-    /// leaves the registry — there is no longer an `ext_refcount` /
-    /// `release` path.
+    /// Runs when the last `Arc<Entry>` is dropped: the single point where
+    /// an entry leaves the registry.
     fn drop(&mut self) {
         self.magic = 0xDEAD_BEEF;
+        if self.type_tag == SharedType::Pool {
+            self.registry.pools.remove(&self.id);
+        }
         self.inner.on_drop();
         self.registry.entries.remove(&self.id);
         self.registry.total_entries.fetch_sub(1, Ordering::Relaxed);
@@ -267,6 +267,12 @@ pub struct SharedRegistry {
     /// enumeration (`drain`, `iter_entries`). NOT touched on the FFI
     /// hot path.
     entries: DashMap<SharedId, Weak<Entry>>,
+    /// The pools among `entries`, for the idle-eviction scan. Holds each
+    /// pool's state, not its entry: a scan holding the entry could be its
+    /// last holder, and the pool would then be torn down on the scan's
+    /// thread, which has no request and lets go of every idle slot
+    /// without `$destroy`.
+    pools: DashMap<SharedId, Weak<dyn SharedInner>>,
     next_id: AtomicI64,
     total_bytes: AtomicU64,
     total_entries: AtomicU64,
@@ -291,6 +297,7 @@ pub fn registry() -> &'static SharedRegistry {
 pub fn init_registry(config: SharedConfig) {
     let reg = SharedRegistry {
         entries: DashMap::with_capacity(128),
+        pools: DashMap::new(),
         next_id: AtomicI64::new(random_id_seed()),
         total_bytes: AtomicU64::new(0),
         total_entries: AtomicU64::new(0),
@@ -438,6 +445,9 @@ impl SharedRegistry {
         // returned Arc is the sole strong ref; the caller moves it into
         // the PHP handle via Arc::into_raw.
         self.entries.insert(id, Arc::downgrade(&entry));
+        if type_tag == SharedType::Pool {
+            self.pools.insert(id, Arc::downgrade(&entry.inner));
+        }
         Ok(entry)
     }
 
@@ -531,6 +541,15 @@ impl SharedRegistry {
             .filter_map(|w| w.value().upgrade())
             .collect();
         snapshot.into_iter()
+    }
+
+    /// Snapshot of the pools' state, for the idle-eviction scan. Holding
+    /// it keeps no pool's entry alive (see the `pools` field).
+    pub fn pools(&self) -> Vec<Arc<dyn SharedInner>> {
+        self.pools
+            .iter()
+            .filter_map(|w| w.value().upgrade())
+            .collect()
     }
 
     /// Drain: wake blocked ops, mark shutting-down.
@@ -726,6 +745,7 @@ impl SharedRegistry {
     pub(crate) fn new_for_test(config: SharedConfig) -> &'static SharedRegistry {
         Box::leak(Box::new(SharedRegistry {
             entries: DashMap::with_capacity(16),
+            pools: DashMap::new(),
             next_id: AtomicI64::new(1),
             total_bytes: AtomicU64::new(0),
             total_entries: AtomicU64::new(0),

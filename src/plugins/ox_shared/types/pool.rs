@@ -5387,6 +5387,49 @@ mod tests {
         .unwrap();
     }
 
+    /// The idle-eviction scan walks the pools on the scheduler's thread,
+    /// which has no request and may free none of a pool's slots. A pool
+    /// whose last handle goes while the scan holds it must still be torn
+    /// down by the thread that let go of it, destroying that thread's own
+    /// idle slots, and not later by the scan, which would let go of every
+    /// slot without `$destroy`.
+    #[cfg(not(feature = "php"))]
+    #[test]
+    fn pool_let_go_during_a_scan_is_torn_down_by_the_thread_letting_go() {
+        use crate::bridge::ffi::mock_pool_heap_calls;
+
+        thread::spawn(|| {
+            open_request_token();
+            // A registry of its own: a snapshot another test takes of the
+            // shared one would hold this pool too.
+            let reg = SharedRegistry::new_for_test(ensure_registry().config().clone());
+            let p = inner_with_fccs(4);
+            let entry = reg.insert(SharedType::Pool, p.clone()).unwrap();
+            p.bind_entry(Arc::downgrade(&entry));
+            let weak = Arc::downgrade(&entry);
+            assert!(p.try_reserve_budget());
+            p.deposit_new(dummy_slot(current_thread_key()));
+
+            let held = reg.pools();
+            assert_eq!(held.len(), 1, "the scan must see the pool");
+            let calls = mock_pool_heap_calls();
+
+            drop(entry);
+
+            assert!(
+                weak.upgrade().is_none(),
+                "the scan's snapshot kept the pool's entry alive"
+            );
+            // Its own slot and the callables its request made.
+            assert_eq!(mock_pool_heap_calls() - calls, 1 + 2);
+            assert!(p.is_closed());
+            assert!(reg.pools().is_empty(), "a pool torn down is not scanned");
+            close_request_token();
+        })
+        .join()
+        .unwrap();
+    }
+
     #[test]
     fn ffi_acquire_local_idle_bypasses_factory() {
         // Pre-populate idle on the current thread so acquire returns
