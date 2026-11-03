@@ -200,7 +200,7 @@ The server refuses to start when `ENTRY_FILE` is unset, relative, or not a regul
 ```yaml
 services:
   api:
-    image: ghcr.io/oxphp/oxphp:0.14.0
+    image: ghcr.io/oxphp/oxphp:0.15.0
     ports:
       - "8080:80"
     volumes:
@@ -268,7 +268,7 @@ Symlinks that point outside the document root are blocked by design. Move the ta
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.14.0
+    image: ghcr.io/oxphp/oxphp:0.15.0
     ports:
       - "8080:80"
     volumes:

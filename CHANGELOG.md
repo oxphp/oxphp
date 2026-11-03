@@ -4,6 +4,24 @@ All notable changes to OxPHP are documented in this file.
 
 ## [Unreleased]
 
+## [0.15.0] - 2026-11-04
+
+### Migration from 0.14.0
+
+**`oxphp run` no longer changes into the script's directory, and opens the script by the path it is given instead of through `include_path`.** A script started from another directory that opens files by a path relative to its own — `fopen('config/app.ini')`, `require './bootstrap.php'` — now finds them relative to the directory `oxphp` was started in; build such paths from `__DIR__`. A relative script path such as `bin/console.php` is taken from the working directory, so a script that was only found through `include_path` is no longer found, and `open_basedir` applies to what the script includes and opens, not to the script itself. Nothing changes under `oxphp serve`. See Fixed.
+
+**`oxphp run`: a `display_errors` that `php.ini` or a `conf.d` file sets now applies.** With `display_errors=Off`, as in a `php.ini` copied from `php.ini-production`, `run` no longer displays a script's errors and leaves them to `log_errors`; with `display_errors=On` they go to standard output, among what the script prints. Pass `-d display_errors=stderr`, or set `display_errors=stderr` in the ini file, to keep them on standard error. The image's own ini files do not set `display_errors`, so without an ini file of your own nothing changes. See Changed.
+
+**`oxphp run`: `PHP_BINARY` is now the path of the `oxphp` binary, where it was an empty string.** Tools that start PHP processes through it — Symfony's `PhpExecutableFinder`, `PhpSubprocess` and `PhpProcess`, PHPUnit's process isolation, amphp/parallel — now start `oxphp`, where Symfony's finder used to fall back to `/usr/local/bin/php`. `oxphp` takes the `php` options `-n`, `-c`, `-d`, `-f` and `-r` and a script on standard input; other `php` options, such as `-l` or `-i`, are an error. Set the environment variable `PHP_BINARY=/usr/local/bin/php` to send Symfony's `PhpExecutableFinder` back to the `php` CLI. See Fixed and Added.
+
+**An `oxphp_async()` task that ends without awaiting a task it dispatched now cancels that task.** Work dispatched from inside a task and left to run on its own is no longer finished: a task parked in `oxphp_sleep()` or in an await is resumed with `OxPHP\Async\AsyncException`, and one running on the CPU is interrupted. Await every task whose work has to finish inside the task that dispatched it. See Fixed.
+
+**In Worker mode, and for a `Shared\Pool` created inside an `oxphp_async()` task, more factory and destroy callbacks are refused on a PHP thread other than the one that created the pool.** On a task thread of `ASYNC_WORKERS`, or on another worker for a pool bound with `Registry::pool()` or kept in a `Shared\Map`, the acquire call now throws `Error`, and a destroy callback is skipped, for a callback that calls a method on an object (`[$maker, 'make']`) even when the method does not use `$this`, calls a built-in method on an object that is not an `OxPHP\Shared` one, reaches an enum that `opcache.preload` does not load, or whose code is not in OPcache's shared memory — without OPcache, under `opcache.file_cache_only=1`, or from `eval()`. These used to run there and could corrupt memory or crash the server. Use a static method (`[Maker::class, 'make']`) or a closure that builds what it needs, preload the enums such a callback reaches, and keep OPcache enabled. A closure made from a function, `make(...)`, now runs there with that thread's own `static` variables of the function. On the thread that created the pool nothing changes. See Fixed.
+
+**`DOCUMENT_ROOT` set to `false`, `off`, `0` or `no`, in any case, now switches the document root off, and a value that is not valid UTF-8 now stops startup instead of falling back to the default.** With the root off, every request goes to `ENTRY_FILE`, and the server refuses to start unless that is an absolute path to a regular file. An empty `DOCUMENT_ROOT=` now means the default `/var/www/html/public`, where the server used to stop at startup. See Added.
+
+**An extension built from source with `phpize && ./configure` in `ext/` now needs the server's version: `./configure` reads it from the checkout's `Cargo.toml` and stops with an error when it cannot.** A build that copies only `ext/` into a stage of its own has to pass `OXPHP_VERSION=<version>` to `./configure`. `phpversion('oxphp_sapi')`, `ReflectionExtension::getVersion()` and `oxphp_server_info()['version']` now report that version instead of `0.1.0`. See Fixed.
+
 ### Added
 
 - **`oxphp` takes the `php` options `-n`, `-c <path>`, `-f <file>` and `-r <code>`, and a bare `oxphp` started by an `oxphp run` script reads its script from standard input, as a bare `php` does.** That is the command line Symfony's `PhpSubprocess` and `PhpProcess` and PHPUnit's process isolation give `PHP_BINARY`, which under `oxphp run` is `oxphp`, so they now work there. Each `oxphp run` sets the environment variable `OXPHP_RUN_PID` to its own process id, and a bare `oxphp` reads standard input only when its parent's process id is that value and its standard input is not a terminal or `/dev/null`. Started any other way — from a shell, as the image's `CMD`, or in the background through a shell — a bare `oxphp` is the server; a script under `run` that starts the server itself should call `oxphp serve`, because `system('oxphp')` can still pass the check. `-n` and `-c` with nothing to run are an error, as `-d` is. Code on standard input takes no arguments: `oxphp -- <args>` still names a script file, so a PHPUnit `.phpt` test with `--ARGS--` and no `--STDIN--` fails under `run`. See [`php` options](docs/getting-started/cli.md#php-options).
@@ -1348,6 +1366,7 @@ and built-in observability.
 | `WORKER_MAX_MEMORY_MIB` | `0` (unlimited) | Max worker memory before restart |
 | `EXECUTOR` | `sapi` | Executor type: sapi/stub |
 
+[0.15.0]: https://github.com/oxphp/oxphp/releases/tag/v0.15.0
 [0.14.0]: https://github.com/oxphp/oxphp/releases/tag/v0.14.0
 [0.13.0]: https://github.com/oxphp/oxphp/releases/tag/v0.13.0
 [0.12.0]: https://github.com/oxphp/oxphp/releases/tag/v0.12.0

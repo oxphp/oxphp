@@ -13,7 +13,7 @@
  * per-request execution timer to N seconds from now.
  *
  * @package OxPHP
- * @version 0.14.0
+ * @version 0.15.0
  * @link https://github.com/oxphp/oxphp
  */
 
@@ -108,7 +108,7 @@ function oxphp_worker_id(): int {}
  *
  * @example
  * $info = oxphp_server_info();
- * // ["version" => "0.14.0", "worker_id" => 3, "request_time" => 1740000000.123, "worker_mode" => false, "runtime_hooks" => []]
+ * // ["version" => "0.15.0", "worker_id" => 3, "request_time" => 1740000000.123, "worker_mode" => false, "runtime_hooks" => []]
  */
 function oxphp_server_info(): array {}
 
