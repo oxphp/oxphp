@@ -5706,17 +5706,13 @@ static zend_string *oxphp_call_missing_here(const zend_function *fn, zend_object
  * (oxphp_pool_prepare_elsewhere()).
  *
  * Other ways a callable reaches code are not checked: among them an object's
- * properties, what a static variable or a static property holds once set, a
- * built-in object that holds others (ArrayObject, a Generator), a callable
- * naming self, static or parent that the code makes at run time from what it
- * reads (a property, a function's result, a value an OxPHP\Shared object
- * holds, a global constant, a constant or a static property it reads through
- * a class name) or that a constant, a default value or a static variable's
- * initial value takes from a global constant or another class's constant
- * (const CB = MAKE_CB, $cb = Other::CB). A callback whose code
+ * properties, what a static variable or a static property holds once set, and
+ * a built-in object that holds others (ArrayObject, a Generator). A callback whose code
  * oxphp_op_array_in_request_memory() finds in request memory, where closures
  * made from one declaration share its run-time cache too, does not run on
- * another thread (oxphp_pool_prepare_elsewhere). */
+ * another thread (oxphp_pool_prepare_elsewhere). A callable with self, static or
+ * parent as its class that the code makes at run time is not found here either:
+ * it is checked at the call, as PHP resolves it (oxphp_scope_callable_observer()). */
 static zend_string *oxphp_pool_callable_missing_here(const zend_fcall_info_cache *fcc,
                                                      bool captures) {
     const zend_function *fn = fcc->function_handler;
@@ -5733,6 +5729,65 @@ static zend_string *oxphp_pool_callable_missing_here(const zend_fcall_info_cache
     }
     zend_hash_destroy(&seen);
     return missing;
+}
+
+/* === A callable with self, static or parent as its class, as PHP resolves it === */
+
+#include "Zend/zend_observer.h"
+
+/* PHP resolves such a callable from the class of the nearest PHP frame, whether
+ * this thread has loaded that class or not, and deprecates it just before
+ * (zend_is_callable_check_class(), 8.4.27 and 8.5.12). So a callable built at
+ * run time, which no reading of a callback before its call finds, is seen here.
+ * Observers run before any error handler, whatever error_reporting says
+ * (zend_error_zstr_at()), but on 8.5 a recorded error that is not fatal reaches
+ * them only when replayed. OPcache records for the whole compile of a file, where
+ * a stream wrapper can run, so a callable such a wrapper resolves is seen after
+ * its method has run, from the frame of the include.
+ *
+ * A class in this thread's table has what its methods call on this thread, and
+ * legacy code can make such calls in a loop, so only another thread's class is
+ * walked.
+ *
+ * An exception pending when zend_is_callable_check_class() returns makes the
+ * callable invalid (GH-21699), so the method does not start. ZEND_INIT_USER_CALL,
+ * what call_user_func() compiles to, then throws a TypeError of its own with this
+ * Error as its previous exception, as it does for an error handler that throws. */
+static void oxphp_scope_callable_observer(int type, zend_string *file, uint32_t line,
+                                          zend_string *message) {
+    (void) file;
+    (void) line;
+    if (type != E_DEPRECATED
+            || !(zend_string_equals_literal(message, "Use of \"static\" in callables is deprecated")
+              || zend_string_equals_literal(message, "Use of \"self\" in callables is deprecated")
+              || zend_string_equals_literal(message, "Use of \"parent\" in callables is deprecated"))) {
+        return;
+    }
+    zend_execute_data *frame = EG(current_execute_data);
+    while (frame && (!frame->func || !ZEND_USER_CODE(frame->func->type))) {
+        frame = frame->prev_execute_data;
+    }
+    if (!frame) {
+        return;
+    }
+    zend_class_entry *classes[] = {frame->func->common.scope, zend_get_called_scope(frame)};
+    HashTable seen;
+    zend_hash_init(&seen, 8, NULL, NULL, 0);
+    zend_string *missing = NULL;
+    for (size_t i = 0; !missing && i < sizeof(classes) / sizeof(classes[0]); i++) {
+        if (classes[i] && zend_hash_find_ptr_lc(EG(class_table), classes[i]->name) != classes[i]) {
+            missing = oxphp_class_missing_here(classes[i], &seen);
+        }
+    }
+    zend_hash_destroy(&seen);
+    if (missing) {
+        zend_throw_error(NULL, "%s", ZSTR_VAL(missing));
+        zend_string_release_ex(missing, 0);
+    }
+}
+
+void oxphp_scope_callable_check_register(void) {
+    zend_observer_error_register(oxphp_scope_callable_observer);
 }
 
 /* === Code compiled for another thread: cover its MAP_PTR slots here === */

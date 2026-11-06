@@ -140,6 +140,7 @@ async/test_orphan_cpu_bound_cancelled_at_request_end
 # A pool bound to a name runs its factory on the worker thread that acquires;
 # one written in a file only the other worker included is refused there.
 worker/test_pool_factory_from_file_peer_never_loaded
+worker/test_pool_factory_reaches_scope_through_a_run_time_callable_on_a_peer
 # On the other worker the factory runs with copies of what it captured and of
 # its `static`, made there.
 worker/test_pool_callback_on_peer_worker_copies_captures
