@@ -15,5 +15,8 @@ return new class ($mark) {
     {
         file_put_contents($this->mark, 'ran');
         @trigger_error('oxphp-error-of-the-driver-window', E_USER_WARNING);
+        if (function_exists('stream_last_errors')) {
+            fopen('/nonexistent/oxphp-driver-window', 'r', false, stream_context_create(['stream' => ['error_mode' => StreamErrorMode::Silent]]));
+        }
     }
 };
