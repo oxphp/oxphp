@@ -91,6 +91,16 @@ final class LateHandler implements SessionHandlerInterface
     {
         return 0;
     }
+
+    public function create_sid(): string
+    {
+        return bin2hex(random_bytes(16));
+    }
+
+    public function validateId(string $id): bool
+    {
+        return true;
+    }
 }
 
 $out = (string) ($_GET['out'] ?? '');

@@ -10,6 +10,7 @@ services:
       dockerfile: docker/dev/Dockerfile
       args:
         PHP_VERSION:
+        BASE_IMAGE:
     ports:
       - "80"
     networks: [test-net]

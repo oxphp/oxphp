@@ -3573,10 +3573,9 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
              * string rather than NULL, so the E_ALL default below would
              * never apply and every request would start at level 0.
              * zend_ini_str_ex() keeps the NULL that INI_STR() returned.
-             * PHP's own fiber start took that replacement and has the same
-             * defect: https://github.com/php/php-src/issues/23921 — so a
-             * userland `new Fiber` inside a request still starts at level 0
-             * until that is fixed upstream. */
+             * PHP's own fiber start has no such default as of 8.6.0RC5, so
+             * a userland `new Fiber` inside a request starts at level 0 when
+             * the directive is unset. */
             zend_long error_reporting = zend_ini_long_literal("error_reporting");
             if (!error_reporting
                 && !zend_ini_str_ex("error_reporting", sizeof("error_reporting") - 1, false, NULL)) {
@@ -4504,7 +4503,7 @@ static void oxphp_reset_filter_input_storage(void) {
  * everything ahead of the tag table, which url_rewriter.tags and
  * session.trans_sid_tags configure.
  * SYNC: php-src/ext/standard/url_scanner_ex.re php_url_scanner_ex_activate() */
-#define OXPHP_URL_REWRITER_REQUEST_PART XtOffsetOf(url_adapt_state_ex_t, tags)
+#define OXPHP_URL_REWRITER_REQUEST_PART offsetof(url_adapt_state_ex_t, tags)
 
 /* Free what `ctx` holds for a request and zero it, as the engine's request
  * shutdown does. Not while a rewriter's output handler can still run: the
@@ -5601,7 +5600,11 @@ typedef struct {
     const ps_module *default_mod;
     const ps_serializer *serializer;
     zval names[OXPHP_SESSION_USER_NAMES];
+#if PHP_VERSION_ID >= 80600
+    bool uses_object_methods;
+#else
     zend_string *class_name;
+#endif
 } oxphp_session_handler;
 
 /* What an open session takes off the thread besides what oxphp_session_park()
@@ -5639,8 +5642,13 @@ static void oxphp_session_handler_take(oxphp_session_handler *h) {
         ZVAL_COPY_VALUE(&h->names[i], &names[i]);
         ZVAL_UNDEF(&names[i]);
     }
+#if PHP_VERSION_ID >= 80600
+    h->uses_object_methods = PS(mod_user_uses_object_methods_as_handlers);
+    PS(mod_user_uses_object_methods_as_handlers) = false;
+#else
     h->class_name = PS(mod_user_class_name);
     PS(mod_user_class_name) = NULL;
+#endif
 }
 
 /* Install `h` on a thread oxphp_session_handler_take() has emptied. The thread
@@ -5654,8 +5662,12 @@ static void oxphp_session_handler_put(const oxphp_session_handler *h) {
         ZEND_ASSERT(Z_ISUNDEF(names[i]));
         ZVAL_COPY_VALUE(&names[i], &h->names[i]);
     }
+#if PHP_VERSION_ID >= 80600
+    PS(mod_user_uses_object_methods_as_handlers) = h->uses_object_methods;
+#else
     ZEND_ASSERT(PS(mod_user_class_name) == NULL);
     PS(mod_user_class_name) = h->class_name;
+#endif
 }
 
 /* Install `h` on a thread oxphp_session_handler_take() has emptied, with
@@ -5669,8 +5681,12 @@ static void oxphp_session_handler_put_copy(const oxphp_session_handler *h) {
         ZEND_ASSERT(Z_ISUNDEF(names[i]));
         ZVAL_COPY(&names[i], &h->names[i]);
     }
+#if PHP_VERSION_ID >= 80600
+    PS(mod_user_uses_object_methods_as_handlers) = h->uses_object_methods;
+#else
     ZEND_ASSERT(PS(mod_user_class_name) == NULL);
     PS(mod_user_class_name) = h->class_name ? zend_string_copy(h->class_name) : NULL;
+#endif
 }
 
 /* The thread's handler, with references of its own. */
@@ -5682,7 +5698,11 @@ static void oxphp_session_handler_copy(oxphp_session_handler *h) {
     for (size_t i = 0; i < OXPHP_SESSION_USER_NAMES; i++) {
         ZVAL_COPY(&h->names[i], &names[i]);
     }
+#if PHP_VERSION_ID >= 80600
+    h->uses_object_methods = PS(mod_user_uses_object_methods_as_handlers);
+#else
     h->class_name = PS(mod_user_class_name) ? zend_string_copy(PS(mod_user_class_name)) : NULL;
+#endif
 }
 
 /* Whether the thread still has `h` installed: nothing has configured another
@@ -5735,10 +5755,12 @@ static void oxphp_session_handler_release(oxphp_session_handler *h) {
             oxphp_recover_from_bailout(&mark);
         } zend_end_try();
     }
+#if PHP_VERSION_ID < 80600
     if (h->class_name) {
         zend_string_release(h->class_name);
         h->class_name = NULL;
     }
+#endif
 }
 
 /* Take what a session left on the thread into `fiber`, which is parking: its id,

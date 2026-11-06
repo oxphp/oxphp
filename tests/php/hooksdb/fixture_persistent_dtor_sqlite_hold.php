@@ -3,10 +3,11 @@
 declare(strict_types=1);
 
 // The holder for the driver whose end-of-request cleanup is the easiest to see:
-// pdo_sqlite's unregisters every SQL function registered on the connection. PDO
-// runs that cleanup from an object's destructor, before it looks at whether other
-// objects still share the pooled connection — so another request dropping its
-// own handle on this connection takes this request's functions away from it.
+// pdo_sqlite's unregisters every SQL function registered on the connection. Before
+// PHP 8.6 PDO runs that cleanup from an object's destructor, without looking at
+// whether other objects still share the pooled connection — so another request
+// dropping its own handle on this connection takes this request's functions away
+// from it.
 //
 // A statement before the flag, because a claim is taken by a call on the
 // connection and not by the constructor that built it.
@@ -32,9 +33,10 @@ try {
 
     $before = $pdo->query('SELECT ox_dtor_f(21)')->fetchColumn();
 
-    // And this request dropping its own handle still cleans up, as PDO always
+    // And before 8.6 this request dropping its own handle still cleans up, as PDO
     // has: the rule keeps the cleanup away from a connection another request
-    // holds, not from the one holding it.
+    // holds, not from the one holding it. From 8.6 the handle the test keeps on
+    // this connection leaves the cleanup to that one.
     unset($pdo);
     $again = PDO::connect('sqlite::memory:', null, null, $opts);
     $marker = $again->query("SELECT count(*) FROM sqlite_master WHERE name = 'ox_dtor_marker'")
