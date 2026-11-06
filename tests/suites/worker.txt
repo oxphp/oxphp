@@ -146,6 +146,9 @@ worker/test_pool_callback_on_peer_worker_copies_captures
 # One made from a function runs there as the function, with that thread's own
 # `static`.
 worker/test_pool_callback_made_from_a_function_on_peer_worker
+# A method of an enum this request linked in its own memory: named, one with a
+# `static` is refused there, one with none runs.
+worker/test_pool_named_callback_to_a_linked_method_on_peer_worker
 
 # A pool bound to a name outlives the worker that created it. The other worker
 # keeps the slots idle on it, but makes no new one and evicts without $destroy

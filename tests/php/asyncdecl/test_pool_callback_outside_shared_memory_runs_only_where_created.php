@@ -93,25 +93,26 @@ function asyncdecl_outside_shm_roots(Pool $pool): array
     return $ok ? $result : [false, $result];
 }
 
+// __call() and __callStatic() are looked at through the class, which is refused
+// for itself before the code of the method that answers is.
+$linked = [\Error::class, 'Class AsyncDeclEvalMaker' . ASYNCDECL_LINKED_TAIL];
 $factories = [
-    'a closure' => [$closure, $closure],
-    'the name of a function' => ['asyncdecl_eval_make', 'Function asyncdecl_eval_make()'],
-    'a closure made from a function' => [asyncdecl_eval_make(...), 'Function asyncdecl_eval_make()'],
-    'a static method' => [[AsyncDeclEvalMaker::class, 'build'], 'Method AsyncDeclEvalMaker::build()'],
-    'an object with __invoke()' => [$maker, 'Method AsyncDeclEvalMaker::__invoke()'],
-    'a method only __call() answers' => [[$maker, 'make'], 'Method AsyncDeclEvalMaker::__call()'],
-    'a closure made from a method only __call() answers'
-        => [$maker->make(...), 'Method AsyncDeclEvalMaker::__call()'],
-    'a static method only __callStatic() answers'
-        => [[AsyncDeclEvalMaker::class, 'make'], 'Method AsyncDeclEvalMaker::__callStatic()'],
-    'a closure made from a static method only __callStatic() answers'
-        => [AsyncDeclEvalMaker::make(...), 'Method AsyncDeclEvalMaker::__callStatic()'],
-    "[\$closure, '__invoke']" => [[$closure, '__invoke'], $closure],
+    'a closure' => [$closure, asyncdecl_outside_shm($closure)],
+    'the name of a function' => ['asyncdecl_eval_make', asyncdecl_outside_shm('Function asyncdecl_eval_make()')],
+    'a closure made from a function'
+        => [asyncdecl_eval_make(...), asyncdecl_outside_shm('Function asyncdecl_eval_make()')],
+    'a static method' => [[AsyncDeclEvalMaker::class, 'build'], asyncdecl_outside_shm('Method AsyncDeclEvalMaker::build()')],
+    'an object with __invoke()' => [$maker, asyncdecl_outside_shm('Method AsyncDeclEvalMaker::__invoke()')],
+    'a method only __call() answers' => [[$maker, 'make'], $linked],
+    'a closure made from a method only __call() answers' => [$maker->make(...), $linked],
+    'a static method only __callStatic() answers' => [[AsyncDeclEvalMaker::class, 'make'], $linked],
+    'a closure made from a static method only __callStatic() answers' => [AsyncDeclEvalMaker::make(...), $linked],
+    "[\$closure, '__invoke']" => [[$closure, '__invoke'], asyncdecl_outside_shm($closure)],
 ];
 
-foreach ($factories as $what => [$factory, $named]) {
+foreach ($factories as $what => [$factory, $refusal]) {
     $pool = new Pool(factory: $factory, destroy: null, maxSize: 1);
-    $t->assertSame("$what: refused in a task", asyncdecl_acquire_in_task($pool), asyncdecl_outside_shm($named));
+    $t->assertSame("$what: refused in a task", asyncdecl_acquire_in_task($pool), $refusal);
     $h = $pool->acquire();
     $t->assertSame("$what: runs on the thread that created the pool", $h->get()->getTimestamp(), 86400);
     $h->release();

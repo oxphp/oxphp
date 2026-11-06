@@ -6,7 +6,13 @@ All notable changes to OxPHP are documented in this file.
 
 ### Changed
 
+- **In Worker mode, and for a `Shared\Pool` created inside an `oxphp_async()` task, a factory or destroy callback that reaches a class each request links in its own memory is refused on a PHP thread other than the one that created the pool.** Such a class can be one whose parent class, interface or trait OPcache does not keep in its shared memory — one declared in `eval()`, say — one with a method whose type PHP checks against such a class or against an enum `opcache.preload` does not load when it links the class — a method returning that enum where the interface declares `\UnitEnum`, say — or one linked while that memory is full. A callback that reaches it through `self::`, `static::`, `parent::`, `new static`, `forward_static_call()` or `forward_static_call_array()`, or that its `__callStatic()` answers, ran on that thread before, with the memory of the request that created the pool. It now throws `Error` from the acquire call there, or is skipped as a destroy callback, and still runs on the thread that created the pool. To run it elsewhere, load the class and what it depends on with `opcache.preload`.
+
 - **The Docker guide and `examples/dockerfile/Dockerfile` install Xdebug with [PIE](https://github.com/php/pie) instead of `pecl`, which the official PHP images no longer ship from 8.6 on.** The `php-dev` stage copies `pie` from `ghcr.io/php/pie:1-bin` and needs `unzip` while it runs; the extension and its ini file are the same as before. A Dockerfile that still calls `pecl install` keeps working on PHP 8.4 and 8.5.
+
+### Fixed
+
+- **In Worker mode, and for a `Shared\Pool` created inside an `oxphp_async()` task, a factory or destroy callback that names a method with `static` variables no longer crashes the server when a class each request links in its own memory declares the method.** With `[Suit::class, 'make']` for an enum `opcache.preload` does not load, or the same for a class whose parent class, interface or trait OPcache does not keep in its shared memory, a PHP thread other than the one that created the pool wrote its own memory into the `static` variables and run-time cache of the creating request, and PHP aborted with `zend_mm_heap corrupted`. Such a method is now refused on that thread, as a closure made from it already was. A method with no `static` variables runs there with a run-time cache of its own for each call, and so does a closure made from it, `Suit::make(...)`: that thread looks a class up itself instead of reusing the one the creating request found through a run-time cache they shared, and throws `Class "…" not found` when it does not have it and no autoloader finds it.
 
 ## [0.15.0] - 2026-11-04
 

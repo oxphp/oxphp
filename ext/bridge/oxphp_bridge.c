@@ -5081,7 +5081,8 @@ static zend_string *oxphp_op_array_missing_here(const zend_op_array *op, uint32_
 /* The body uses $this. */
 #define OXPHP_USES_THIS (1u << 0)
 /* The body calls a method, or creates an object, through self::, static:: or
- * parent::, or holds a callable that names its class that way. */
+ * parent::, or holds a callable that names its class that way or the name of
+ * forward_static_call(). */
 #define OXPHP_USES_SCOPE (1u << 1)
 /* The body reads a constant or a static property through self::, static:: or
  * parent::. */
@@ -5099,10 +5100,24 @@ static bool oxphp_names_scope(const char *name, size_t len) {
  * way: "static::make", the "static::" of 'static::' . $name, or the "self" of
  * ['self', 'make']. A callable resolves such a name from the class of the
  * function that calls it (zend_is_callable_check_class(), PHP 8.4, 8.5).
- * The arrays it is given do not hold themselves. */
+ * The name of forward_static_call() or forward_static_call_array() counts too:
+ * called with a method of a parent, they pass on the class their caller was
+ * called through, with none of those names in sight (PHP 8.4, 8.5). A call by
+ * name skips one leading backslash (zend_is_callable_check_func(), PHP 8.4,
+ * 8.5). The arrays it is given do not hold themselves. */
 static bool oxphp_value_names_scope(const zval *zv) {
     ZVAL_DEREF(zv);
     if (Z_TYPE_P(zv) == IS_STRING) {
+        const char *function = Z_STRVAL_P(zv);
+        size_t function_len = Z_STRLEN_P(zv);
+        if (function_len > 0 && function[0] == '\\') {
+            function++;
+            function_len--;
+        }
+        if (zend_binary_strcasecmp(function, function_len, ZEND_STRL("forward_static_call")) == 0
+                || zend_binary_strcasecmp(function, function_len, ZEND_STRL("forward_static_call_array")) == 0) {
+            return true;
+        }
         const char *colons = zend_memnstr(Z_STRVAL_P(zv), "::", sizeof("::") - 1,
             Z_STRVAL_P(zv) + Z_STRLEN_P(zv));
         return oxphp_names_scope(Z_STRVAL_P(zv),
@@ -5337,11 +5352,9 @@ static zend_string *oxphp_own_function_missing_here(const zend_function *fn,
  * Only a class OPcache made immutable is looked at: its tables, the constants
  * it inherits included, stay as compiled, and each thread evaluates them into
  * memory of its own (mutable_data, static_members_table). Any other class is
- * evaluated in place by the request that loaded it, while this thread would
- * read it; that holds for an inherited constant too, which such a class copies
- * when the parent or interface it inherits it from is immutable and shares
- * with it when it is not (do_inherit_class_constant(),
- * do_inherit_iface_constant()). */
+ * evaluated in place by the request that loaded it. Such a class is refused on
+ * any other thread (oxphp_class_of_another_request()), and the thread that
+ * loaded it has no need of the check. */
 static zend_string *oxphp_class_data_missing_here(const zend_class_entry *ce, uint32_t *uses,
                                                   HashTable *seen) {
     if (!(ce->ce_flags & ZEND_ACC_IMMUTABLE) || !oxphp_first_visit(seen, &ce->constants_table)) {
@@ -5385,37 +5398,66 @@ static zend_string *oxphp_class_data_missing_here(const zend_class_entry *ce, ui
     return NULL;
 }
 
-/* Every method and property hook `ce` declares, and every one its parents
- * declare, and on PHP 8.5 the closures in their constant expressions. A
- * trait's methods and hooks are copied into the class that uses it, with that
- * class as their scope. A built-in class has no body to check, and its parents
- * are built in too.
- *
- * An enum is refused for itself unless it is the one this thread's class table
- * holds under its name, which on a thread other than the one that created the
- * pool only an enum opcache.preload loaded is: OPcache's inheritance cache
- * leaves enums out, so each request that loads any other links a copy of its
- * own (zend_do_link_class(), zend_lazy_class_load(), PHP 8.4, 8.5). Reading a
- * case the first time creates it from the enum looked up by name, whose result
- * is not checked, and stores it in the table of the copy read, which is not
- * immutable (ZEND_AST_CONST_ENUM_INIT, zend_class_constants_table(), PHP 8.4,
- * 8.5). */
 #define OXPHP_ENUM_NOT_PRELOADED \
     " was not loaded by opcache.preload: every request that loads such an enum has " \
     "a copy of its own, cases included, and on a thread other than the one that " \
     "created the pool a Shared\\Pool callback would reach the copy of the request " \
     "that created it, so the code was not run"
+#define OXPHP_CLASS_LINKED_IN_REQUEST \
+    " was linked in the memory of the request that loaded it, not in OPcache's shared " \
+    "memory: every request that loads such a class has a copy of its own, and on a " \
+    "thread other than the one that created the pool a Shared\\Pool callback would " \
+    "reach the copy of the request that created it, so the code was not run"
 
+/* The refusal of `ce`, a class written in PHP, when it belongs to a request
+ * other than the one this thread runs and this thread's class table does not
+ * hold it; NULL otherwise.
+ *
+ * A class OPcache did not make immutable belongs to the request that loaded it.
+ * Each request links a copy of its own of such a class, among them an enum
+ * opcache.preload did not load, which OPcache's inheritance cache leaves out, a
+ * class whose parent, interface or trait is not in shared memory, one with a
+ * method whose type was checked against a class like these
+ * (track_class_dependency()), and one linked while that memory was full
+ * (zend_do_link_class(), zend_lazy_class_load(), PHP 8.4, 8.5).
+ * Such a class and the methods it declares keep static properties, `static`
+ * variables and run-time caches in that request's memory, behind direct pointers
+ * rather than the slots each thread has of its own (zend_lazy_method_load()),
+ * and a thread that runs them writes its own memory there
+ * (zend_class_init_statics(), init_func_run_time_cache_i(), ZEND_BIND_STATIC).
+ * Reading an enum's case the first time creates it from the enum looked up by
+ * name, whose result is not checked, and stores it in the table of the copy read
+ * (ZEND_AST_CONST_ENUM_INIT, zend_class_constants_table(), PHP 8.4, 8.5).
+ *
+ * A class opcache.preload loaded is the one every class table holds.
+ *
+ * The name may be another thread's: zend_hash_find_ptr_lc() would take a
+ * reference to one with nothing to lower (zend_string_tolower(), PHP 8.4, 8.5). */
+static zend_string *oxphp_class_of_another_request(const zend_class_entry *ce) {
+    if ((ce->ce_flags & ZEND_ACC_IMMUTABLE)
+            || zend_hash_str_find_ptr_lc(EG(class_table), ZSTR_VAL(ce->name), ZSTR_LEN(ce->name))
+                == ce) {
+        return NULL;
+    }
+    return (ce->ce_flags & ZEND_ACC_ENUM)
+        ? zend_strpprintf(0, "Enum %s" OXPHP_ENUM_NOT_PRELOADED, ZSTR_VAL(ce->name))
+        : zend_strpprintf(0, "Class %s" OXPHP_CLASS_LINKED_IN_REQUEST, ZSTR_VAL(ce->name));
+}
+
+/* Every method and property hook `ce` declares, and every one its parents
+ * declare, and on PHP 8.5 the closures in their constant expressions. A
+ * trait's methods and hooks are copied into the class that uses it, with that
+ * class as their scope. A built-in class has no body to check, and its parents
+ * are built in too. A class of another request is refused for itself. */
 static zend_string *oxphp_class_missing_here(zend_class_entry *ce, HashTable *seen) {
     for (; ce && ce->type == ZEND_USER_CLASS; ce = ce->parent) {
         if (!oxphp_first_visit(seen, ce)) {
             return NULL;
         }
-        if ((ce->ce_flags & ZEND_ACC_ENUM)
-                && zend_hash_find_ptr_lc(EG(class_table), ce->name) != ce) {
-            return zend_strpprintf(0, "Enum %s" OXPHP_ENUM_NOT_PRELOADED, ZSTR_VAL(ce->name));
+        zend_string *missing = oxphp_class_of_another_request(ce);
+        if (missing) {
+            return missing;
         }
-        zend_string *missing;
 #if PHP_VERSION_ID >= 80500
         missing = oxphp_class_data_missing_here(ce, NULL, seen);
         if (missing) {
@@ -5447,15 +5489,19 @@ static zend_string *oxphp_class_missing_here(zend_class_entry *ce, HashTable *se
 
 /* A class whose constant or static property a body reads through self::,
  * static:: or parent::. An enum is checked whole, as its cases are among its
- * constants and reading one can create it. Any other class has what its
- * constants and static properties hold looked at, and its parents'. */
+ * constants and reading one can create it. Any other class is refused when it
+ * is another request's, and has what its constants and static properties hold
+ * looked at otherwise, as have its parents. */
 static zend_string *oxphp_scope_data_missing_here(zend_class_entry *ce, uint32_t *uses,
                                                   HashTable *seen) {
     if (ce && (ce->ce_flags & ZEND_ACC_ENUM)) {
         return oxphp_class_missing_here(ce, seen);
     }
     for (; ce && ce->type == ZEND_USER_CLASS; ce = ce->parent) {
-        zend_string *missing = oxphp_class_data_missing_here(ce, uses, seen);
+        zend_string *missing = oxphp_class_of_another_request(ce);
+        if (!missing) {
+            missing = oxphp_class_data_missing_here(ce, uses, seen);
+        }
         if (missing) {
             return missing;
         }
@@ -5589,7 +5635,8 @@ static zend_string *oxphp_call_missing_here(const zend_function *fn, zend_object
  * Unlike a task, such a callable can carry objects and a class with it, so
  * what it reaches through them is checked too: $this, and the classes self
  * and static stand for, when its body uses them or holds a callable that
- * names a class that way, written as a literal, a static variable's initial
+ * names a class that way or the name of forward_static_call(), written as a
+ * literal, a static variable's initial
  * value, the value of any constant or static property or a property default
  * written as a constant expression, of those classes, their parents or the
  * interfaces they inherit a constant from once it reads a constant or static
@@ -5617,14 +5664,7 @@ static zend_string *oxphp_call_missing_here(const zend_function *fn, zend_object
  * holds, a global constant, a constant or a static property it reads through
  * a class name) or that a constant, a default value or a static variable's
  * initial value takes from a global constant or another class's constant
- * (const CB = MAKE_CB, $cb = Other::CB), the
- * constant expressions of a class other than an enum that OPcache did not
- * make immutable, and a class that a closure made from a function or method,
- * as f(...) makes one, names when it runs on another thread as the closure
- * rather than as the function (oxphp_pool_prepare_elsewhere()), once it has
- * run, or once the function has when the closure took the function's run-time
- * cache (zend_create_closure_ex()): every thread shares that cache and the
- * class found there. A callback whose code
+ * (const CB = MAKE_CB, $cb = Other::CB). A callback whose code
  * oxphp_op_array_in_request_memory() finds in request memory, where closures
  * made from one declaration share its run-time cache too, does not run on
  * another thread (oxphp_pool_prepare_elsewhere). */
@@ -7918,9 +7958,10 @@ int oxphp_shared_invoke_2_ret_stop(zval *callable,
  *  oxphp_pool_invoke on whichever thread runs the factory or
  *  $destroy: on that thread, through the fcc; on any other, a
  *  closure through a closure of that thread's own
- *  (oxphp_pool_call_elsewhere), and a closure made from a function
- *  or method, where it can, through that function
- *  (oxphp_pool_made_from()).
+ *  (oxphp_pool_call_elsewhere), a closure made from a function or
+ *  method, where it can, through that function
+ *  (oxphp_pool_made_from()), and a function that keeps its run-time
+ *  cache in itself through a closure of that thread's own too.
  *
  *  Per-resource zvals are emalloc'd once at factory invocation
  *  and owned by the pool; acquire ZVAL_COPYs them into user
@@ -7942,12 +7983,14 @@ typedef struct {
     /* What another thread calls instead of a closure made from a function or
      * method (oxphp_pool_made_from()), or NULL. */
     const zend_function *made_from;
-    /* A closure not made from a function or method runs elsewhere through
-     * a closure built there: its called scope, its table of variables as
+    /* What another thread builds a closure from to run the callable
+     * (oxphp_pool_call_elsewhere), or NULL: a closure not made from a function
+     * or method, or a function that keeps its run-time cache in itself. For
+     * such a closure, also its table of variables as
      * oxphp_portable_serialize_ht() wrote it, what each slot held that the
      * table as written does not keep (OXPHP_POOL_SLOT_*), and the
      * OxPHP\Shared objects in it, which the table names by id only. */
-    bool rebuilt_elsewhere;
+    const zend_function *rebuilt_from;
     zend_class_entry *called_scope;
     /* Whether a variable of the table holds a callable naming a class as
      * self, static or parent. */
@@ -7979,9 +8022,9 @@ typedef struct {
  * returns (zend_call_function(), the VM's leave helper), and a drop that
  * leaves references puts the object in the garbage collector's buffer of
  * possible roots of the thread making the call, writing that buffer's index
- * into the object. The copy of a closure made from a function or method runs
- * on another PHP thread too, unless that thread calls the function in its
- * place (oxphp_pool_prepare_elsewhere()), and each thread has a buffer of its
+ * into the object. The copy of a closure made from a built-in function, or from
+ * a method only __call() or __callStatic() answers, runs on another PHP thread
+ * too (oxphp_pool_prepare_elsewhere()), and each thread has a buffer of its
  * own: an entry in another thread's buffer points
  * at an object the creating request frees, and that request, freeing it,
  * takes it out of its own buffer by the other buffer's index. The copy is
@@ -8104,17 +8147,23 @@ static const zend_function *oxphp_pool_code_of(const zend_function *fn) {
     return magic && magic->type == ZEND_USER_FUNCTION ? magic : NULL;
 }
 
+/* Whether another thread can call a function directly: its `static` variables
+ * and run-time cache are in slots each thread has of its own (MAP_PTR offsets),
+ * as OPcache gives them to the functions and linked classes' methods it keeps
+ * in shared memory (ZEND_MAP_PTR_NEW(), zend_persist.c and zend_file_cache.c,
+ * PHP 8.4, 8.5). A function that keeps them in itself, as a method that a class
+ * linked in request memory declares does (zend_lazy_method_load()), would be
+ * left a table or a run-time cache of that thread's memory. */
+static bool oxphp_pool_slots_per_thread(const zend_op_array *op) {
+    return ZEND_MAP_PTR_IS_OFFSET(op->run_time_cache)
+        && (!op->static_variables || ZEND_MAP_PTR_IS_OFFSET(op->static_variables_ptr));
+}
+
 /* For fn, the function of a closure made from a function or method as f(...)
  * makes one: that function, when another thread can call it in the closure's
- * place, its `static` variables and run-time cache being in slots each thread
- * has of its own (MAP_PTR offsets), as OPcache gives them to the functions and
- * linked classes' methods it keeps in shared memory (ZEND_MAP_PTR_NEW(),
- * zend_persist.c and zend_file_cache.c, PHP 8.4, 8.5). The closure points at
- * the `static` variables the function has on the thread that made it, and at
- * its run-time cache when it had one (zend_create_closure_ex()). NULL for a
- * function that keeps them in itself, as a method of a class linked in
- * request memory does (zend_lazy_method_load()): another thread calling it
- * would leave in it a table or a run-time cache of that thread's memory. */
+ * place (oxphp_pool_slots_per_thread()), or NULL. The closure points at the
+ * `static` variables the function has on the thread that made it, and at its
+ * run-time cache when it had one (zend_create_closure_ex()). */
 static const zend_function *oxphp_pool_made_from(const zend_function *fn) {
     const HashTable *table = fn->common.scope ? &fn->common.scope->function_table
                                               : EG(function_table);
@@ -8123,10 +8172,7 @@ static const zend_function *oxphp_pool_made_from(const zend_function *fn) {
             || named->op_array.opcodes != fn->op_array.opcodes) {
         return NULL;
     }
-    const zend_op_array *op = &named->op_array;
-    bool per_thread = ZEND_MAP_PTR_IS_OFFSET(op->run_time_cache)
-        && (!op->static_variables || ZEND_MAP_PTR_IS_OFFSET(op->static_variables_ptr));
-    return per_thread ? named : NULL;
+    return oxphp_pool_slots_per_thread(&named->op_array) ? named : NULL;
 }
 
 /* The refusal of code, named by what it is, followed by tail. */
@@ -8184,15 +8230,18 @@ static zend_string *oxphp_pool_refusal(const zend_function *code, const char *ta
  * had one (zend_create_closure_ex()): another thread that set a `static`
  * there did so with memory of its own, in a table this request goes on using
  * and frees. There the function is called in the closure's place, as its name
- * would call it, with that thread's own. One whose function keeps them in
- * itself (oxphp_pool_made_from()) runs there as the closure when it has no
- * `static`, and is refused there when it has.
+ * would call it, with that thread's own.
+ *
+ * A function that keeps them in itself (oxphp_pool_slots_per_thread()) has no
+ * such slots for that thread, whether a closure or its name leads to it: it is
+ * refused there when it has a `static`, and when it has none runs there through
+ * a closure built on that thread, whose run-time cache is its own.
  *
  * Any other callable is called there as it is called here: a built-in
  * function or static method, or one whose code
- * oxphp_op_array_in_request_memory() does not find in request memory. Only
- * the function the call runs first is checked, not what it calls through
- * parent::, self:: or static::. */
+ * oxphp_op_array_in_request_memory() does not find in request memory. What a
+ * call reaches through self::, static::, parent:: or __callStatic() is looked
+ * at when it is made (oxphp_pool_callable_missing_here()). */
 static void oxphp_pool_prepare_elsewhere(oxphp_pool_fcc_t *heap) {
     const zend_function *fn = heap->fcc.function_handler;
     zend_object *this_obj = heap->fcc.object;
@@ -8204,6 +8253,8 @@ static void oxphp_pool_prepare_elsewhere(oxphp_pool_fcc_t *heap) {
         zend_function *closure_fn;
         obj->handlers->get_closure(obj, &heap->called_scope, &closure_fn, &this_obj, true);
         fn = closure_fn;
+    } else {
+        heap->called_scope = heap->fcc.called_scope;
     }
     const zend_function *code = oxphp_pool_code_of(fn);
     if (code && oxphp_op_array_in_request_memory(&code->op_array)) {
@@ -8277,14 +8328,22 @@ static void oxphp_pool_prepare_elsewhere(oxphp_pool_fcc_t *heap) {
             heap->vars_len = len;
             oxphp_portable_free(buf);
         }
-        heap->rebuilt_elsewhere = true;
+        heap->rebuilt_from = fn;
         return;
     }
-    /* A closure written in PHP is here one made from a function or method. */
-    if (closure && fn->type == ZEND_USER_FUNCTION && !this_obj) {
-        heap->made_from = oxphp_pool_made_from(fn);
-        if (!heap->made_from && fn->op_array.static_variables) {
+    /* A closure written in PHP is here one made from a function or method, and
+     * what its name would call takes its place; a name calls that already. A
+     * trampoline has no slots or `static` of its own: its class is looked at. */
+    if (!this_obj && fn->type == ZEND_USER_FUNCTION
+            && !(fn->common.fn_flags & ZEND_ACC_CALL_VIA_TRAMPOLINE)) {
+        heap->made_from = closure ? oxphp_pool_made_from(fn) : NULL;
+        if (heap->made_from || oxphp_pool_slots_per_thread(&fn->op_array)) {
+            return;
+        }
+        if (fn->op_array.static_variables) {
             heap->refused_elsewhere = oxphp_pool_refusal(code, OXPHP_POOL_STATIC_TAIL);
+        } else {
+            heap->rebuilt_from = fn;
         }
         return;
     }
@@ -8421,13 +8480,13 @@ static void oxphp_pool_call_fcc(const zend_fcall_info_cache *fcc,
     zend_call_known_function(func, fcc->object, fcc->called_scope, retval, argc, argv, NULL);
 }
 
-/* Call a closure the pool stores on a thread other than the one that created
- * the pool, through a closure built on this thread from the pool's copy, as
- * oxphp_reconstruct_async_closure() builds a task's: the copy's body, scope
- * and called scope, no $this, and the copy's variables as they were when the
- * pool was created, in memory of this thread. Released when the call returns,
- * before the caller looks at what it threw: the release runs the destructor
- * of an object the call put in a `static`. */
+/* Call what the pool stores on a thread other than the one that created the
+ * pool, through a closure built on this thread from heap->rebuilt_from, as
+ * oxphp_reconstruct_async_closure() builds a task's: its body, scope and called
+ * scope, no $this, and the variables of the pool's copy of a closure as they
+ * were when the pool was created, in memory of this thread. Released when the
+ * call returns, before the caller looks at what it threw: the release runs the
+ * destructor of an object the call put in a `static`. */
 static void oxphp_pool_call_elsewhere(const oxphp_pool_fcc_t *heap,
                                       zval *retval, uint32_t argc, zval *argv) {
     HashTable *vars = NULL;
@@ -8437,7 +8496,7 @@ static void oxphp_pool_call_elsewhere(const oxphp_pool_fcc_t *heap,
     }
 
     zend_function func;
-    memcpy(&func, zend_get_closure_method_def(Z_OBJ(heap->callable_zv)), sizeof(zend_op_array));
+    memcpy(&func, heap->rebuilt_from, sizeof(zend_op_array));
     /* The body's refcount and the name may live in the memory of the request
      * that created the pool, which a count from this thread must not touch. */
     func.op_array.refcount = NULL;
@@ -8451,14 +8510,23 @@ static void oxphp_pool_call_elsewhere(const oxphp_pool_fcc_t *heap,
      * PHP 8.5 and from op_array.static_variables on 8.4. */
     func.op_array.static_variables = vars;
     ZEND_MAP_PTR_INIT(func.op_array.static_variables_ptr, vars);
-    /* The copy's run-time cache, which it usually shares with the closure it
-     * was made from, holds what calls on the thread that created the pool
-     * looked up, a class of a script this thread never loaded among them.
-     * With this flag set zend_create_closure() gives the closure a cache of
-     * its own, in this thread's memory, which the closure frees; the copy's
-     * pointer to its cache is never NULL, which would have it make one in
-     * the arena. */
+    /* The run-time cache it has, which it usually shares with the closure or
+     * the function it was made from, holds what calls on the thread that
+     * created the pool looked up, a class of a script this thread never loaded
+     * among them. With this flag set zend_create_closure() gives the closure a
+     * cache of its own, in this thread's memory, which the closure frees. It
+     * makes one in the arena only for a closure with no cache, and a closure
+     * that exists has one, while a function is no closure at that point
+     * (zend_create_closure_ex(), PHP 8.4, 8.5). */
     func.op_array.fn_flags |= ZEND_ACC_HEAP_RT_CACHE;
+    /* A function called by its name stays one to the code it runs, as a closure
+     * made from it does: on PHP 8.5 Closure::getCurrent() throws, and leaving
+     * its frame releases the closure on the slow path, as code the JIT compiled
+     * for a function releases none on the fast one (zend_jit_leave_func(),
+     * PHP 8.4, 8.5). */
+    if (!(func.common.fn_flags & ZEND_ACC_CLOSURE)) {
+        func.common.fn_flags |= ZEND_ACC_FAKE_CLOSURE;
+    }
 
     zval closure;
     zend_create_closure(&closure, &func, func.common.scope, heap->called_scope, NULL);
@@ -8491,9 +8559,9 @@ static void oxphp_pool_call_elsewhere(const oxphp_pool_fcc_t *heap,
     zval_ptr_dtor(&closure);
 }
 
-/* oxphp_pool_callable_missing_here() for a closure that runs here as one built
- * from the pool's copy (oxphp_pool_call_elsewhere): what it captured is not
- * looked at. It runs with copies of the variables as they were when the pool
+/* oxphp_pool_callable_missing_here() for a callable that runs here through a
+ * closure built on this thread (oxphp_pool_call_elsewhere): what it captured is
+ * not looked at. It runs with copies of the variables as they were when the pool
  * was created, which hold no object but OxPHP\Shared ones, and whether one
  * holds a callable naming a class as self, static or parent was found there
  * (oxphp_pool_prepare_elsewhere()). The copy's own table shares a variable
@@ -8503,7 +8571,7 @@ static zend_string *oxphp_pool_rebuilt_missing_here(const oxphp_pool_fcc_t *heap
     HashTable seen;
     zend_hash_init(&seen, 8, NULL, NULL, 0);
     zend_string *missing = oxphp_call_missing_here(
-        zend_get_closure_method_def(Z_OBJ(heap->callable_zv)), NULL, heap->called_scope,
+        heap->rebuilt_from, NULL, heap->called_scope,
         heap->vars_name_scope ? OXPHP_USES_SCOPE : 0, false, &seen);
     zend_hash_destroy(&seen);
     return missing;
@@ -8516,7 +8584,7 @@ static zend_string *oxphp_pool_rebuilt_missing_here(const oxphp_pool_fcc_t *heap
 static zend_string *oxphp_pool_invoke(const oxphp_pool_fcc_t *heap,
                                       zval *retval, uint32_t argc, zval *argv) {
     bool elsewhere = zend_mm_get_heap() != heap->home;
-    zend_string *missing = elsewhere && heap->rebuilt_elsewhere
+    zend_string *missing = elsewhere && heap->rebuilt_from
         ? oxphp_pool_rebuilt_missing_here(heap)
         : oxphp_pool_callable_missing_here(&heap->fcc, !elsewhere);
     if (missing) {
@@ -8528,7 +8596,7 @@ static zend_string *oxphp_pool_invoke(const oxphp_pool_fcc_t *heap,
             ZSTR_VAL(heap->refused_elsewhere), ZSTR_LEN(heap->refused_elsewhere), 0);
     }
     oxphp_cover_map_ptr_last();
-    if (elsewhere && heap->rebuilt_elsewhere) {
+    if (elsewhere && heap->rebuilt_from) {
         oxphp_pool_call_elsewhere(heap, retval, argc, argv);
     } else if (elsewhere && heap->made_from) {
         zend_call_known_function((zend_function *)heap->made_from, NULL, heap->called_scope,

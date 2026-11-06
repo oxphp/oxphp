@@ -121,8 +121,8 @@ unset($pool);
 // method a run-time cache in that thread's memory, and the class this thread
 // then found there would be found by the task too. Closure::fromCallable()
 // gives the closure a run-time cache of its own while the method has none;
-// AsyncDeclMadeFromLateChild::made(...) gives the method one first and
-// shares it.
+// once the method has one, AsyncDeclMadeFromLateChild::made(...) below shares
+// it, and the task still looks the class up itself.
 $pool = new Pool(
     factory: Closure::fromCallable([AsyncDeclMadeFromLateChild::class, 'made']),
     destroy: null,
@@ -141,6 +141,14 @@ $t->assertSame(
 );
 $t->assertSame(
     'a method of a class this request linked, naming a class: still not found in a task',
+    asyncdecl_acquire_in_task($pool),
+    $late_target_missing,
+);
+unset($pool);
+
+$pool = new Pool(factory: AsyncDeclMadeFromLateChild::made(...), destroy: null, maxSize: 1);
+$t->assertSame(
+    "a method of a class this request linked, sharing the method's run-time cache: not found in a task",
     asyncdecl_acquire_in_task($pool),
     $late_target_missing,
 );
@@ -174,6 +182,19 @@ $t->assertSame(
 $t->assertSame("a static method: on this thread the pool's closure counts on from the method's", asyncdecl_made_from_here($pool, 'n'), 2);
 unset($pool);
 $t->assertSame('a static method: the method counts on from the closure', AsyncDeclPreCounter::next()->n, 3);
+
+// The name of a static method of a preloaded class: each thread has `static`s
+// of its own here too, and static:: is the class the name gives.
+AsyncDeclPreNamedCounter::next();
+$pool = new Pool(factory: [AsyncDeclPreNamedCounter::class, 'next'], destroy: null, maxSize: 1);
+$t->assertSame('a static method, by name: the task counts from its own', asyncdecl_made_from_twice_in_task($pool, 'n'), [1, 2]);
+$t->assertSame(
+    'a static method, by name: static:: is the class the name gives',
+    asyncdecl_made_from_twice_in_task($pool, 'class'),
+    [AsyncDeclPreNamedCounter::class, AsyncDeclPreNamedCounter::class],
+);
+unset($pool);
+$t->assertSame('a static method, by name: this thread counts on from its own', AsyncDeclPreNamedCounter::next()->n, 2);
 
 // A function this thread never called: what the task sets is not this
 // thread's.

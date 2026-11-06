@@ -233,3 +233,52 @@ class AsyncDeclPreCounter
 final class AsyncDeclPreChildCounter extends AsyncDeclPreCounter
 {
 }
+
+// A `static` of its own: what a task counts stays on that thread for the next
+// test that runs there.
+final class AsyncDeclPreNamedCounter
+{
+    public static function next(): object
+    {
+        static $n = 0;
+        return (object) ['n' => ++$n, 'class' => static::class];
+    }
+}
+
+// forward_static_call() passes on the class the method calling it was called
+// through, with no self::, static:: or parent:: in that method to show it. Every
+// thread has this class, so a task can resolve the call the way a request can.
+class AsyncDeclPreForwarder
+{
+    public static function forwarded(): object
+    {
+        return forward_static_call([self::class, 'target']);
+    }
+
+    public static function forwardedArray(): object
+    {
+        return forward_static_call_array([self::class, 'target'], []);
+    }
+
+    public static function forwardedInAnotherCase(): object
+    {
+        static $call = 'Forward_Static_Call';
+        return $call([self::class, 'target']);
+    }
+
+    public static function forwardedWithALeadingBackslash(): object
+    {
+        static $call = '\forward_static_call';
+        return $call([self::class, 'target']);
+    }
+
+    public static function target(): object
+    {
+        return static::helper();
+    }
+
+    public static function helper(): object
+    {
+        return (object) ['v' => 0];
+    }
+}
