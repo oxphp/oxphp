@@ -17,6 +17,9 @@ $req = oxphp_http_request();
 // something to say. There is no meta() here for the same reason it would not
 // help: this test runs in the runner's pipe form, which emits a fixed empty
 // meta object, so anything put there is discarded.
+//
+// preg_match() with the u flag rather than mb_check_encoding(): the php:8.6 base
+// images come without mbstring.
 
 $expectedHex = 'ff00fe80';
 
@@ -32,7 +35,7 @@ $t->assertSame('query(bin) === $_GET[bin]', $queryHex, $getHex);
 $t->assertSame('query(bin) is 4 bytes long', strlen((string) $req->query('bin')), 4);
 $t->assertFalse(
     'query(bin) is not valid UTF-8 — no replacement happened',
-    mb_check_encoding((string) $req->query('bin'), 'UTF-8')
+    preg_match('//u', (string) $req->query('bin')) === 1
 );
 
 // === Cookie ===
@@ -41,7 +44,7 @@ $t->assertSame('cookie(bin) keeps raw bytes', $reqCkHex, $expectedHex);
 $t->assertSame('cookie(bin) === $_COOKIE[bin]', $reqCkHex, $cookieHex);
 $t->assertFalse(
     'cookie(bin) is not valid UTF-8 — no replacement happened',
-    mb_check_encoding((string) $req->cookie('bin'), 'UTF-8')
+    preg_match('//u', (string) $req->cookie('bin')) === 1
 );
 
 // === Present-but-empty is "", not absent ===

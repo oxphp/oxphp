@@ -98,10 +98,12 @@ $t->assertContains(
     $body,
     'persistent-dtor-sqlite-done: before:42 '
 );
+// From PHP 8.6 PDO leaves the cleanup to the last object on a connection, and this
+// request still keeps one on it.
 $t->assertContains(
-    'and dropping its own handle unregistered it, as PDO always has',
+    'and dropping its own handle unregistered it, unless PDO leaves that to the last one',
     $body,
-    ' after:unregistered'
+    PHP_VERSION_ID >= 80600 ? ' after:still-registered:42' : ' after:unregistered'
 );
 
 // The premise: the handle dropped was on the holder's connection. An in-memory

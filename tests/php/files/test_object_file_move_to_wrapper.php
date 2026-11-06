@@ -7,8 +7,9 @@ require_once __DIR__ . '/../test_helper.php';
 // A stream-wrapper destination: move_uploaded_file() cannot rename to it, so it
 // copies through the wrapper, and type() opens the URL again through the
 // wrapper. file:// reads the file back; compress.zlib:// reads it back too but
-// cannot stat it, which mime_content_type() needs, so type() falls back to
-// application/octet-stream (with a warning on PHP 8.4, without one on 8.5).
+// cannot stat it. Before PHP 8.6 mime_content_type() needs that, so type() falls
+// back to application/octet-stream (with a warning on PHP 8.4, without one on
+// 8.5). From 8.6 it identifies what it reads anyway.
 // Sent via curl as -F "a=@small.txt" -F "b=@small.txt" (contents "hello world").
 $t = new TestCase('object_file_move_to_wrapper', 'files');
 
@@ -38,7 +39,11 @@ $typeB = $b->type();
 restore_error_handler();
 $t->assertSame('moveTo() to a compress.zlib:// URL', $movedB, true);
 $t->assertSame('the gzip destination holds the upload', is_file($dir . '/b.gz') ? gzdecode(file_get_contents($dir . '/b.gz')) : '', 'hello world');
-$t->assertSame('type() cannot stat a compress.zlib:// URL', $typeB, 'application/octet-stream');
+$t->assertSame(
+    'type() of a compress.zlib:// URL, which cannot be stat-ed',
+    $typeB,
+    PHP_VERSION_ID >= 80600 ? 'text/plain' : 'application/octet-stream'
+);
 $t->assertCount('a warning on PHP 8.4 only', $warnings, PHP_VERSION_ID < 80500 ? 1 : 0);
 foreach ($warnings as $warning) {
     // Not a failed open, which would warn on both versions.

@@ -16,6 +16,7 @@ services:
       dockerfile: docker/dev/Dockerfile
       args:
         PHP_VERSION:
+        BASE_IMAGE:
     command:
       - sh
       - -c

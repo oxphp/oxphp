@@ -9,6 +9,10 @@ declare(strict_types=1);
 // anything, and this fiber is suspended in that read — one operation deep inside
 // the write — until the read's own timeout of two seconds runs out.
 //
+// fprintf(), which opens no stream error operation of its own. From PHP 8.6 an
+// fwrite() keeps the notice until it has finished with the stream and calls the
+// handler then, with no write left to go on.
+//
 // The first socket is handed to the request that fired this one through the
 // worker's shared state, so that it can be closed from there while this fiber is
 // parked.
@@ -28,7 +32,7 @@ try {
         fread($quiet, 1);
         return true;
     });
-    fwrite($outer, 'x');
+    fprintf($outer, 'x');
     restore_error_handler();
 
     echo 'nested-done:' . $handled;

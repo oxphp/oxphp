@@ -24,11 +24,15 @@ COPY --from=ghcr.io/php/pie:1-bin /pie /usr/local/bin/pie
 # serializers (igbinary, lzf, zstd, msgpack) off unless a flag asks for them, which
 # keeps the build to the default protocol handling this profile exercises, and
 # enables it from the docker-php-ext-redis.ini that the next RUN renames (PIE 1.5).
+# phpredis 6.3.0 does not build on PHP 8.6 and no later release exists, so 8.6
+# takes a pinned commit of its develop branch.
 # $PHPIZE_DEPS comes from the PHP base image; PIE needs unzip for what it downloads.
 RUN set -eux; \
     apk add --no-cache --virtual .hooks-db-build $PHPIZE_DEPS unzip; \
     docker-php-ext-install pdo_mysql mysqli; \
-    pie install --no-cache phpredis/phpredis; \
+    phpredis=phpredis/phpredis; \
+    if [ "$(php-config --vernum)" -ge 80600 ]; then phpredis='phpredis/phpredis:dev-develop#b7c382c82c83df3831efebfd7dc36cd7a9f6d864'; fi; \
+    pie install --no-cache "$phpredis"; \
     apk del .hooks-db-build; \
     php -m | grep -E '^(pdo_mysql|mysqli|redis)$'
 
