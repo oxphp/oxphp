@@ -42,6 +42,12 @@ asyncdecl/test_pool_callback_run_time_cache_is_per_thread
 # with the thread's own `static`s; one whose `static`s this request's memory
 # holds is refused.
 asyncdecl/test_pool_callback_made_from_a_function_runs_as_it_on_another_thread
+# A method of a class this request linked in its own memory: named, one with a
+# `static` is refused there; one with none runs with a run-time cache of its
+# own. A callback that reaches such a class through self::, static::, parent::
+# or __callStatic() is refused.
+asyncdecl/test_pool_named_callback_to_a_method_keeping_statics_in_request_memory_is_refused_on_another_thread
+asyncdecl/test_pool_callback_reaching_a_class_linked_in_request_memory_on_another_thread
 # A task's idle slot, when the pool goes away on the worker thread.
 asyncdecl/test_pool_idle_slot_of_a_task_outlives_the_pool
 # A factory or $destroy reaching __call(), __callStatic() or a closure's

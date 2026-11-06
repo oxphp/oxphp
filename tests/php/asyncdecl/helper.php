@@ -26,23 +26,23 @@ const ASYNCDECL_TAIL = ': it belongs to a script this PHP thread has not loaded;
 
 /**
  * acquire() a slot of $pool in a task, release it and evict it there: ['returned',
- * the slot's class] when the factory ran, [the class, the message] of what
- * acquire() threw when it did not.
+ * the slot's $property, or its class with none named] when the factory ran, [the
+ * class, the message] of what acquire() threw when it did not.
  *
- * @return array{string, string}
+ * @return array{string, mixed}
  */
-function asyncdecl_acquire_in_task(\OxPHP\Shared\Pool $pool): array
+function asyncdecl_acquire_in_task(\OxPHP\Shared\Pool $pool, ?string $property = null): array
 {
-    [$ok, $result] = asyncdecl_settle(oxphp_async(static function () use ($pool): array {
+    [$ok, $result] = asyncdecl_settle(oxphp_async(static function () use ($pool, $property): array {
         try {
             $h = $pool->acquire();
         } catch (\Throwable $e) {
             return [$e::class, $e->getMessage()];
         }
-        $class = $h->get()::class;
+        $read = $property === null ? $h->get()::class : $h->get()->$property;
         $h->release();
         $pool->evict();
-        return ['returned', $class];
+        return ['returned', $read];
     }));
     return $ok ? $result : ['the task failed', $result];
 }
@@ -114,6 +114,37 @@ const ASYNCDECL_ENUM_TAIL = ' was not loaded by opcache.preload: every request t
 /** The tail of the message for a callback whose static variables are in the creating request's memory. */
 const ASYNCDECL_STATIC_TAIL = ' keeps its static variables in the memory of the request that created the pool: '
     . 'on a thread other than that one, a Shared\Pool callback cannot use them, so the code was not run';
+
+/** The tail of the message for a class a callback reaches that its request linked in its own memory. */
+const ASYNCDECL_LINKED_TAIL = " was linked in the memory of the request that loaded it, not in OPcache's shared "
+    . 'memory: every request that loads such a class has a copy of its own, and on a thread other than the one '
+    . 'that created the pool a Shared\Pool callback would reach the copy of the request that created it, so the '
+    . 'code was not run';
+
+/**
+ * Declare the classes of fixture_named_callback_late_classes.php, which their
+ * request links in its own memory, once for this thread.
+ */
+function asyncdecl_load_linked_classes(): void
+{
+    if (\class_exists('AsyncDeclLinkedEvalParent', false)) {
+        return;
+    }
+    eval(<<<'PHP'
+        class AsyncDeclLinkedEvalParent
+        {
+            public static function make(): object
+            {
+                return (object) ['v' => 4];
+            }
+        }
+
+        interface AsyncDeclLinkedEvalInterface
+        {
+        }
+        PHP);
+    require __DIR__ . '/fixture_named_callback_late_classes.php';
+}
 
 /** The tail of the message for a callback whose code is not in OPcache's shared memory. */
 const ASYNCDECL_SHM_TAIL = " is not in OPcache's shared memory: on a thread other than the one that "
