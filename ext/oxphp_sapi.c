@@ -9831,6 +9831,8 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
     /* Register decorator observer */
     zend_observer_fcall_register(oxphp_decorator_observer_init);
 
+    oxphp_scope_callable_check_register();
+
     /* Register profiler observer. The init callback always returns
      * handlers for user functions; the begin/end pair early-returns
      * when g_prof.mode != PROFILE_ALL.
