@@ -35,6 +35,7 @@
 #include "main/rfc1867.h"     /* destroy_uploaded_files_hash: $_FILES temp files */
 #include "ext/session/php_session.h" /* PS(): session state is per thread, not per request */
 #include "ext/standard/basic_functions.h"
+#include "ext/standard/file.h" /* FG(): the stream error state is per thread on 8.6 */
 #include "Zend/zend_smart_str.h" /* smart_str_free: what the URL rewriter appends */
 #include "ext/standard/php_fopen_wrappers.h" /* php_stream_php_wrapper: php://input makes bodies */
 #include <unistd.h> /* close/read for the epoll and timerfd descriptors */
@@ -2410,6 +2411,43 @@ static void oxphp_release_superseded_parses(oxphp_request_fiber *fiber,
     }
 }
 
+#if PHP_VERSION_ID >= 80600
+/* PHP 8.6 keeps one stream error state per thread: a stack of open operations
+ * and what stream_last_errors() reports. An error joins whichever operation is
+ * on top and is raised when that operation ends, so one left standing by a
+ * parked request takes the errors of the request served in the window and raises
+ * them in the parked request, through its handler. The whole state leaves with
+ * the request.
+ *
+ * current_operation points into the pool inside FG's struct. It is right again
+ * once the struct is copied back, since a fiber resumes on the thread it parked
+ * on, and nothing reads it in between. Read from php-8.6.0RC5. */
+static void oxphp_stream_errors_park(oxphp_request_fiber *fiber) {
+    fiber->php_state.stream_errors = FG(stream_error_state);
+    memset(&FG(stream_error_state), 0, sizeof(FG(stream_error_state)));
+}
+
+/* What stands on the thread here was raised outside every slice and is nobody's. */
+static void oxphp_stream_errors_unpark(oxphp_request_fiber *fiber) {
+    php_stream_error_state_cleanup();
+    FG(stream_error_state) = fiber->php_state.stream_errors;
+    memset(&fiber->php_state.stream_errors, 0, sizeof(fiber->php_state.stream_errors));
+}
+
+/* The engine's cleanup only works on FG, so the parked state goes through there. */
+static void oxphp_stream_errors_drop(oxphp_request_fiber *fiber) {
+    php_stream_error_state standing = FG(stream_error_state);
+    FG(stream_error_state) = fiber->php_state.stream_errors;
+    php_stream_error_state_cleanup();
+    FG(stream_error_state) = standing;
+    memset(&fiber->php_state.stream_errors, 0, sizeof(fiber->php_state.stream_errors));
+}
+#else
+#define oxphp_stream_errors_park(fiber) ((void)(fiber))
+#define oxphp_stream_errors_unpark(fiber) ((void)(fiber))
+#define oxphp_stream_errors_drop(fiber) ((void)(fiber))
+#endif
+
 /* Free per-fiber owned state at teardown: the task-mode payload (reconstructed
  * closure, captured return value, captured-exception strings) and any parked
  * unhandled-exception capture. The borrowed task_args belong to the Rust driver
@@ -2464,6 +2502,7 @@ static void oxphp_fiber_free_task_payload(oxphp_request_fiber *fiber) {
         zend_string_release(fiber->php_state.last_error_file);
         fiber->php_state.last_error_file = NULL;
     }
+    oxphp_stream_errors_drop(fiber);
 #if PHP_VERSION_ID >= 80500
     /* And the backtrace of its last fatal, with everything that fatal's frames
      * were given. */
@@ -4627,6 +4666,11 @@ void oxphp_url_rewriter_reset(void) {
 }
 
 void oxphp_fiber_save_php_state(oxphp_request_fiber *fiber) {
+    /* First, as the restore takes it back last: what the steps below can run, a
+     * destructor an ini handler drops, must raise into no operation of this
+     * request. */
+    oxphp_stream_errors_park(fiber);
+
     /* ORDERING IS CRITICAL:
      * 1. Park the output buffers this request has open — before the Rust TLS
      *    below, so nothing this request wrote can reach another one's response
@@ -5066,9 +5110,11 @@ void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber) {
      * multiplexing targets the wrong request. */
     oxphp_bridge_set_cancel_ptr(fiber->request_cancel_ptr);
 
-    /* And its ini directives, last: the Rust ctx restored above is what a
-     * handler's report is logged against. */
+    /* And its ini directives: the Rust ctx restored above is what a handler's
+     * report is logged against. */
     oxphp_fiber_unpark_ini(fiber);
+
+    oxphp_stream_errors_unpark(fiber);
 }
 
 /* ─── Shared per-request superglobal rebuild ───────────── */
@@ -6133,6 +6179,12 @@ void oxphp_fiber_init_request_state(void) {
     }
     PG(last_error_type) = 0;
     PG(last_error_lineno) = 0;
+#if PHP_VERSION_ID >= 80600
+    /* As for stream_last_errors(), and for the operations a bailout left open.
+     * The engine only clears these in php_request_shutdown(), which a worker
+     * does not reach between requests. */
+    php_stream_error_state_cleanup();
+#endif
 }
 
 /* ─── Execution deadlines ──────────────────────────────── */
@@ -7898,8 +7950,12 @@ static void oxphp_task_start_fiber(oxphp_fiber_scheduler *sched, oxphp_request_f
     oxphp_fiber_install_stack_limits(fiber);
 
     oxphp_task_last_error_release();
+#if PHP_VERSION_ID >= 80600
+    php_stream_error_state_cleanup();
+#endif
     oxphp_fiber_enter(fiber, NULL);
     oxphp_task_last_error_park(fiber);
+    oxphp_stream_errors_park(fiber);
 
     EG(stack_base) = saved_stack_base;
     EG(stack_limit) = saved_stack_limit;
@@ -7923,8 +7979,10 @@ static void oxphp_task_resume_fiber(oxphp_fiber_scheduler *sched,
     oxphp_fiber_install_stack_limits(fiber);
 
     oxphp_task_last_error_unpark(fiber);
+    oxphp_stream_errors_unpark(fiber);
     oxphp_fiber_enter(fiber, value);
     oxphp_task_last_error_park(fiber);
+    oxphp_stream_errors_park(fiber);
 
     EG(stack_base) = saved_stack_base;
     EG(stack_limit) = saved_stack_limit;

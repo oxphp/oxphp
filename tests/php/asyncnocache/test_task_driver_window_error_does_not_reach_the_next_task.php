@@ -31,11 +31,16 @@ $t->assertSame('the task returns', oxphp_async_await(oxphp_async(static function
 $t->assertTrue('the destructor ran once the task ended', file_exists($mark));
 @unlink($mark);
 
-[$readAt, $seen] = oxphp_async_await(oxphp_async(static function (): array {
-    return [microtime(true), error_get_last()['message'] ?? null];
+[$readAt, $seen, $seenStream] = oxphp_async_await(oxphp_async(static function (): array {
+    return [
+        microtime(true),
+        error_get_last()['message'] ?? null,
+        function_exists('stream_last_errors') ? count(stream_last_errors()) : 0,
+    ];
 }));
 [$started, $ended] = oxphp_async_await($sentinel);
 $t->assertTrue('the async thread is not idle in between', $started < $readAt && $readAt < $ended);
 $t->assertNull('the next task finds no error of the release', $seen);
+$t->assertSame('nor a stored stream error of it', $seenStream, 0);
 
 $t->done();

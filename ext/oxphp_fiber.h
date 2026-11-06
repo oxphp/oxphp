@@ -357,6 +357,13 @@ typedef struct {
         uint32_t started_lineno;
         struct oxphp_session_lifted *lifted;
     } session;
+
+#if PHP_VERSION_ID >= 80600
+    /* Its stream error state, off the thread while it is parked. See
+     * oxphp_stream_errors_park(). Owned while parked; all zero otherwise, which
+     * is also the engine's empty state. */
+    php_stream_error_state stream_errors;
+#endif
 } oxphp_fiber_php_state;
 
 /* A request or task as PDO handle teardown tells them apart: the fiber it runs on

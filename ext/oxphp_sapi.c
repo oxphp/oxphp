@@ -6586,6 +6586,10 @@ static void oxphp_soft_reset(void) {
     PG(last_error_type) = 0;
     PG(last_error_lineno) = 0;
     PG(connection_status) = PHP_CONNECTION_NORMAL;
+#if PHP_VERSION_ID >= 80600
+    /* As oxphp_fiber_init_request_state() does on the event-loop path. */
+    php_stream_error_state_cleanup();
+#endif
 
 #ifndef ZEND_MAX_EXECUTION_TIMERS
     /* 5. Reset execution timer (max_execution_time) to prevent timeout across
