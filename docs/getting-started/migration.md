@@ -19,7 +19,7 @@ Most applications move without code changes. The default mode runs each request 
 | `try_files $uri $uri/ /index.php` with several PHP entry points — WordPress, OpenCart | `ENTRY_FILE` unset (Traditional) |
 | `try_files $uri /index.html` — single-page app | `ENTRY_FILE=index.html` (SPA) |
 
-**2. Build the image.** Start from the two-line Dockerfile in [Quick Start](quick-start.md). Extensions must be built for thread-safe PHP, in a `php:*-zts-alpine` stage with the same PHP minor as the OxPHP image — see [Installing PHP extensions](docker.md#installing-php-extensions-in-production). Check that every PECL extension you use supports ZTS.
+**2. Build the image.** Start from the two-line Dockerfile in [Quick Start](quick-start.md). Extensions must be built for thread-safe PHP, in a `php:*-zts-alpine` stage with the same PHP minor as the OxPHP image — see [Installing PHP extensions](docker.md#installing-php-extensions-in-production). Check that every third-party extension you use supports ZTS.
 
 **3. Translate the configuration.** The image loads no `php.ini`. Keep your PHP settings (`memory_limit`, `upload_max_filesize`, OPcache, …) in a file of your own anywhere in the project, for example `docker/php.ini`, and copy it into the image's PHP config directory — a path inside the container, not in your project:
 

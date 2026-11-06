@@ -1,6 +1,6 @@
 # Test image: OxPHP dev image + the two client extensions this profile needs.
 # pdo_mysql speaks the MySQL protocol through the bundled mysqlnd; phpredis is
-# an independently maintained PECL extension. Both read their server's replies
+# an independently maintained extension. Both read their server's replies
 # with php_stream_read() on a tcp:// stream, which is the path the socket hooks
 # replace — that is what makes them worth testing together.
 #
@@ -15,19 +15,20 @@ FROM ${BASE_IMAGE}
 
 USER root
 
+COPY --from=ghcr.io/php/pie:1-bin /pie /usr/local/bin/pie
+
 # pdo_mysql and mysqli both compile against the bundled mysqlnd, so neither needs
 # a client library. Both are installed because they reach mysqlnd by different
 # routes and the tests need both: pdo_mysql through PDO's methods, mysqli through
-# the procedural functions WordPress calls. phpredis asks four yes/no questions
-# about optional serializers (igbinary, lzf, zstd, msgpack); answering "no" to all
-# keeps the build to the default protocol handling this profile exercises.
-# $PHPIZE_DEPS comes from the PHP base image.
+# the procedural functions WordPress calls. PIE leaves phpredis's optional
+# serializers (igbinary, lzf, zstd, msgpack) off unless a flag asks for them, which
+# keeps the build to the default protocol handling this profile exercises, and
+# enables it from the docker-php-ext-redis.ini that the next RUN renames (PIE 1.5).
+# $PHPIZE_DEPS comes from the PHP base image; PIE needs unzip for what it downloads.
 RUN set -eux; \
-    apk add --no-cache --virtual .hooks-db-build $PHPIZE_DEPS; \
+    apk add --no-cache --virtual .hooks-db-build $PHPIZE_DEPS unzip; \
     docker-php-ext-install pdo_mysql mysqli; \
-    printf 'no\nno\nno\nno\n' | pecl install redis; \
-    docker-php-ext-enable redis; \
-    pecl clear-cache; \
+    pie install --no-cache phpredis/phpredis; \
     apk del .hooks-db-build; \
     php -m | grep -E '^(pdo_mysql|mysqli|redis)$'
 

@@ -49,10 +49,11 @@ RUN apk add --no-cache \
 # ══════════════════════════════════════════════════════════════
 FROM php-base AS php-dev
 
-RUN apk add --no-cache $PHPIZE_DEPS linux-headers \
-    && pecl install xdebug \
-    && docker-php-ext-enable xdebug \
-    && apk del $PHPIZE_DEPS linux-headers
+COPY --from=ghcr.io/php/pie:1-bin /pie /usr/local/bin/pie
+
+RUN apk add --no-cache $PHPIZE_DEPS linux-headers unzip \
+    && pie install --no-cache xdebug/xdebug \
+    && apk del $PHPIZE_DEPS linux-headers unzip
 
 # ══════════════════════════════════════════════════════════════
 # Stage: composer — official Composer image
@@ -66,7 +67,7 @@ FROM composer:2 AS composer
 # php-base stage by construction. For production hardening, pin by digest
 # instead of tag (tags are mutable, digests are not):
 #   FROM ghcr.io/oxphp/oxphp:0.15.0-php8.4-alpine3.23@sha256:<digest> AS oxphp
-# The same applies to php:*-zts-alpine* and composer:2 above.
+# The same applies to php:*-zts-alpine*, ghcr.io/php/pie:1-bin and composer:2 above.
 # ══════════════════════════════════════════════════════════════
 FROM ghcr.io/oxphp/oxphp:${OXPHP_VERSION}-php${PHP_VERSION}-alpine${ALPINE_VERSION} AS oxphp
 
@@ -204,7 +205,7 @@ RUN EXT_DIR=$(php -r 'echo ini_get("extension_dir");') && \
 #   - Your app code
 # Does NOT contain:
 #   - PHP CLI (`/usr/local/bin/php`)
-#   - phpize, docker-php-*, pecl, pear
+#   - phpize, docker-php-*, pie, pecl, pear
 #   - Composer (use prod-cli target for that)
 #   - Any build toolchain
 #
