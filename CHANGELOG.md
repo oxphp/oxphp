@@ -4,6 +4,10 @@ All notable changes to OxPHP are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **The Docker guide and `examples/dockerfile/Dockerfile` install Xdebug with [PIE](https://github.com/php/pie) instead of `pecl`, which the official PHP images no longer ship from 8.6 on.** The `php-dev` stage copies `pie` from `ghcr.io/php/pie:1-bin` and needs `unzip` while it runs; the extension and its ini file are the same as before. A Dockerfile that still calls `pecl install` keeps working on PHP 8.4 and 8.5.
+
 ## [0.15.0] - 2026-11-04
 
 ### Migration from 0.14.0

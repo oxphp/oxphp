@@ -44,10 +44,11 @@ RUN apk add --no-cache \
 # ── Stage: php-dev — add Xdebug on top of base ───────────────
 FROM php-base AS php-dev
 
-RUN apk add --no-cache $PHPIZE_DEPS linux-headers \
-    && pecl install xdebug \
-    && docker-php-ext-enable xdebug \
-    && apk del $PHPIZE_DEPS linux-headers
+COPY --from=ghcr.io/php/pie:1-bin /pie /usr/local/bin/pie
+
+RUN apk add --no-cache $PHPIZE_DEPS linux-headers unzip \
+    && pie install --no-cache xdebug/xdebug \
+    && apk del $PHPIZE_DEPS linux-headers unzip
 
 # ── Stage: composer ───────────────────────────────────────────
 FROM composer:2 AS composer

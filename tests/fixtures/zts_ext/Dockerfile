@@ -17,15 +17,16 @@ FROM ${BASE_IMAGE}
 
 USER root
 
+COPY --from=ghcr.io/php/pie:1-bin /pie /usr/local/bin/pie
+
 # parallel refuses to build against a non-ZTS PHP, so the grep at the end is a
 # build-time assert that the base image is still the ZTS one: a silent switch to
 # an NTS base would otherwise surface as every test in this profile failing for
-# reasons that look unrelated. $PHPIZE_DEPS comes from the PHP base image.
+# reasons that look unrelated. $PHPIZE_DEPS comes from the PHP base image; PIE
+# needs unzip for what it downloads and enables the extension itself.
 RUN set -eux; \
-    apk add --no-cache --virtual .zts-ext-build $PHPIZE_DEPS; \
-    printf '\n' | pecl install parallel; \
-    docker-php-ext-enable parallel; \
-    pecl clear-cache; \
+    apk add --no-cache --virtual .zts-ext-build $PHPIZE_DEPS unzip; \
+    pie install --no-cache pecl/parallel; \
     apk del .zts-ext-build; \
     php -m | grep -E '^parallel$'; \
     php -r 'exit(PHP_ZTS ? 0 : 1);'
