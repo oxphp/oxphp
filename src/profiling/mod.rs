@@ -262,8 +262,8 @@ impl ProfilingContext {
             spans: Vec::with_capacity(8),
             finished: Vec::with_capacity(256),
             next_id: 1,
-            trace_id: Arc::from(""),
-            root_span_id: Arc::from(""),
+            trace_id: Arc::default(),
+            root_span_id: Arc::default(),
             seq_to_local: smallvec::SmallVec::new(),
             max_depth: 0,
             observer_open: 0,
@@ -286,8 +286,8 @@ impl ProfilingContext {
             spans: Vec::new(),
             finished: Vec::new(),
             next_id: 1,
-            trace_id: Arc::from(""),
-            root_span_id: Arc::from(""),
+            trace_id: Arc::default(),
+            root_span_id: Arc::default(),
             seq_to_local: smallvec::SmallVec::new(),
             max_depth: 0,
             observer_open: 0,
@@ -296,14 +296,14 @@ impl ProfilingContext {
 
     /// Reset the stack for a new request, clearing all spans and setting
     /// the profiling mode + trace context.
-    pub fn reset(&mut self, mode: ProfilingMode, trace_id: String, root_span_id: String) {
+    pub fn reset(&mut self, mode: ProfilingMode, trace_id: Arc<str>, root_span_id: Arc<str>) {
         self.mode = mode;
         self.spans.clear();
         self.finished.clear();
         self.seq_to_local.clear();
         self.next_id = 1;
-        self.trace_id = Arc::from(trace_id);
-        self.root_span_id = Arc::from(root_span_id);
+        self.trace_id = trace_id;
+        self.root_span_id = root_span_id;
         self.max_depth = max_span_depth();
         self.observer_open = 0;
     }
@@ -656,6 +656,17 @@ impl ProfilingContext {
                 }
             }
         }
+    }
+
+    /// [`finalize`](Self::finalize) when the request finished a span, without
+    /// building a tree only to drop it when it did not — the usual case under
+    /// `ApmOnly`.
+    pub fn finalize_nonempty(&mut self) -> Option<Arc<SpanTree>> {
+        self.force_close_all();
+        if self.finished.is_empty() {
+            return None;
+        }
+        Some(self.finalize())
     }
 
     /// Close all currently-open spans (marking them `leaked = true`),

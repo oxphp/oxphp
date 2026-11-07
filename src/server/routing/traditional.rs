@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use super::{ResolveCtx, RouteResult};
 
@@ -18,7 +19,7 @@ use super::{ResolveCtx, RouteResult};
 /// 5. Root `/index.html` fallback
 /// 6. NotFound
 pub(crate) struct TraditionalRouter {
-    root_index_php: PathBuf,
+    root_index_php: Arc<Path>,
     root_index_html: PathBuf,
     root_index_php_key: String,
     root_index_html_key: String,
@@ -31,7 +32,7 @@ impl TraditionalRouter {
         let root_index_php_key = root_index_php.to_string_lossy().into_owned();
         let root_index_html_key = root_index_html.to_string_lossy().into_owned();
         Self {
-            root_index_php,
+            root_index_php: root_index_php.into(),
             root_index_html,
             root_index_php_key,
             root_index_html_key,
@@ -82,7 +83,7 @@ impl TraditionalRouter {
                 } else {
                     None
                 };
-                return Some(RouteResult::Execute(candidate, path_info, None));
+                return Some(RouteResult::Execute(candidate.into(), path_info, None));
             }
             i = end;
         }
@@ -116,7 +117,7 @@ impl TraditionalRouter {
         if ctx.file_cache.is_dir(&file_key).await {
             let php_idx = file_path.join("index.php");
             if ctx.file_cache.is_file(&php_idx.to_string_lossy()).await {
-                return RouteResult::Execute(php_idx, None, None);
+                return RouteResult::Execute(php_idx.into(), None, None);
             }
             let html_idx = file_path.join("index.html");
             if ctx.file_cache.is_file(&html_idx.to_string_lossy()).await {
@@ -137,7 +138,7 @@ impl TraditionalRouter {
 
         // Exact `.php` file on disk
         if ctx.file_cache.is_file(&file_key).await {
-            return RouteResult::Execute(file_path, None, None);
+            return RouteResult::Execute(file_path.into(), None, None);
         }
 
         // PATH_INFO split — `$uri` contains `.php/` somewhere

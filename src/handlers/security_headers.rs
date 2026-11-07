@@ -122,7 +122,7 @@ mod tests {
 
     fn make_event() -> ResponseBuilding {
         ResponseBuilding {
-            request_id: "test123".to_string(),
+            request_id: "test123".into(),
             response: Response::builder()
                 .status(200)
                 .body(full_body(Bytes::from_static(b"OK")))

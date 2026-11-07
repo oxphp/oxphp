@@ -993,12 +993,12 @@ mod tests {
         })
     }
 
-    fn meta_from(metadata: &[(String, String)]) -> storage::RunMeta {
+    fn meta_from(metadata: &[crate::events::MetadataEntry]) -> storage::RunMeta {
         meta_from_request(metadata, None)
     }
 
     fn meta_from_request(
-        metadata: &[(String, String)],
+        metadata: &[crate::events::MetadataEntry],
         user_agent: Option<&http::HeaderValue>,
     ) -> storage::RunMeta {
         let tree = empty_tree();
@@ -1032,7 +1032,7 @@ mod tests {
             ("query", ActivationSource::Query),
             ("sample", ActivationSource::SampleRate),
         ] {
-            let metadata = vec![(META_SOURCE.to_string(), wire.to_string())];
+            let metadata = vec![(META_SOURCE.into(), wire.into())];
             let meta = meta_from(&metadata);
             assert_eq!(meta.source, expected, "source for {wire}");
             // Two fields, two facts: the request id in full, and a run id of
@@ -1071,7 +1071,7 @@ mod tests {
     #[test]
     fn run_meta_records_the_user_agent() {
         let ua = http::HeaderValue::from_static("test-bot/1.0");
-        let header = [(META_SOURCE.to_string(), "header".to_string())];
+        let header: [crate::events::MetadataEntry; 1] = [(META_SOURCE.into(), "header".into())];
         for metadata in [&header[..], &[]] {
             let meta = meta_from_request(metadata, Some(&ua));
             assert_eq!(
@@ -1089,7 +1089,7 @@ mod tests {
         // Only the entry the request handler writes is trusted. One that does
         // not name a source falls back to the same place a missing one does,
         // rather than to the first variant.
-        let metadata = vec![(META_SOURCE.to_string(), "Header".to_string())];
+        let metadata = vec![(META_SOURCE.into(), "Header".into())];
         assert_eq!(meta_from(&metadata).source, ActivationSource::Sdk);
     }
 }

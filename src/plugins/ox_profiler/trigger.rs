@@ -246,7 +246,7 @@ mod tests {
         method: Method,
         uri: Uri,
         headers: HeaderMap,
-        metadata: Vec<(String, String)>,
+        metadata: Vec<crate::events::MetadataEntry>,
         request_id: String,
         addr: SocketAddr,
     }

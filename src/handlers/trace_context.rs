@@ -1,12 +1,15 @@
-use crate::events::{EventHandler, Priority, Propagation, RequestReceived, ResponseBuilding};
+use std::sync::Arc;
+
+use http::HeaderName;
+
+use crate::events::{
+    EventHandler, MetadataEntry, Priority, Propagation, RequestReceived, ResponseBuilding,
+};
 use crate::trace_context::TraceContext;
 
 /// Look up a key in the metadata vector.
-fn metadata_get<'a>(metadata: &'a [(String, String)], key: &str) -> Option<&'a str> {
-    metadata
-        .iter()
-        .find(|(k, _)| k == key)
-        .map(|(_, v)| v.as_str())
+fn metadata_get<'a>(metadata: &'a [MetadataEntry], key: &str) -> Option<&'a str> {
+    metadata.iter().find(|(k, _)| k == key).map(|(_, v)| &**v)
 }
 
 /// Parses or generates a W3C Trace Context from incoming request headers
@@ -33,25 +36,26 @@ impl EventHandler<RequestReceived> for TraceContextRequestHandler {
         // Store the pre-built traceparent header value to avoid format!() in the
         // response handler. The traceparent_cache is a [u8; 55] fixed array that
         // already contains "00-{trace_id}-{span_id}-{flags}".
+        event.metadata.reserve(6);
         event
             .metadata
-            .push(("traceparent".into(), ctx.traceparent().to_string()));
+            .push(("traceparent".into(), ctx.traceparent().into()));
         event
             .metadata
-            .push(("trace_id".into(), ctx.trace_id().to_string()));
+            .push(("trace_id".into(), ctx.trace_id().into()));
         event
             .metadata
-            .push(("span_id".into(), ctx.span_id().to_string()));
+            .push(("span_id".into(), ctx.span_id().into()));
         event.metadata.push((
             "parent_span_id".into(),
-            ctx.parent_span_id().unwrap_or("").to_string(),
+            ctx.parent_span_id().map_or_else(Arc::default, Arc::from),
         ));
         event
             .metadata
-            .push(("trace_flags".into(), ctx.trace_flags_hex().to_string()));
+            .push(("trace_flags".into(), ctx.trace_flags_hex().into()));
 
         if let Some(ts) = ctx.tracestate() {
-            event.metadata.push(("tracestate".into(), ts.to_string()));
+            event.metadata.push(("tracestate".into(), ts.into()));
         }
 
         Propagation::Continue
@@ -88,12 +92,18 @@ impl EventHandler<ResponseBuilding> for TraceContextResponseHandler {
         };
 
         if let Ok(hv) = http::HeaderValue::from_str(traceparent) {
-            event.response.headers_mut().insert("traceparent", hv);
+            event
+                .response
+                .headers_mut()
+                .insert(HeaderName::from_static("traceparent"), hv);
         }
 
         if let Some(ts) = metadata_get(&event.metadata, "tracestate") {
             if let Ok(hv) = http::HeaderValue::from_str(ts) {
-                event.response.headers_mut().insert("tracestate", hv);
+                event
+                    .response
+                    .headers_mut()
+                    .insert(HeaderName::from_static("tracestate"), hv);
             }
         }
 
@@ -127,16 +137,16 @@ mod tests {
         RequestReceived {
             parts,
             remote_addr: SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 8080),
-            request_id: String::new(),
+            request_id: Default::default(),
             early_response: None,
             metadata: Vec::new(),
             profiling_mode: None,
         }
     }
 
-    fn make_response_event(metadata: Vec<(String, String)>) -> ResponseBuilding {
+    fn make_response_event(metadata: Vec<MetadataEntry>) -> ResponseBuilding {
         ResponseBuilding {
-            request_id: "test-id".to_string(),
+            request_id: "test-id".into(),
             response: Response::builder()
                 .status(200)
                 .body(full_body(Bytes::from_static(b"OK")))
@@ -222,15 +232,12 @@ mod tests {
         let handler = TraceContextResponseHandler::new(true);
         let metadata = vec![
             (
-                "traceparent".to_string(),
-                "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string(),
+                "traceparent".into(),
+                "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".into(),
             ),
-            (
-                "trace_id".to_string(),
-                "4bf92f3577b34da6a3ce929d0e0e4736".to_string(),
-            ),
-            ("span_id".to_string(), "00f067aa0ba902b7".to_string()),
-            ("trace_flags".to_string(), "01".to_string()),
+            ("trace_id".into(), "4bf92f3577b34da6a3ce929d0e0e4736".into()),
+            ("span_id".into(), "00f067aa0ba902b7".into()),
+            ("trace_flags".into(), "01".into()),
         ];
         let mut event = make_response_event(metadata);
 
@@ -254,15 +261,12 @@ mod tests {
         let handler = TraceContextResponseHandler::new(false);
         let metadata = vec![
             (
-                "traceparent".to_string(),
-                "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string(),
+                "traceparent".into(),
+                "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".into(),
             ),
-            (
-                "trace_id".to_string(),
-                "4bf92f3577b34da6a3ce929d0e0e4736".to_string(),
-            ),
-            ("span_id".to_string(), "00f067aa0ba902b7".to_string()),
-            ("trace_flags".to_string(), "01".to_string()),
+            ("trace_id".into(), "4bf92f3577b34da6a3ce929d0e0e4736".into()),
+            ("span_id".into(), "00f067aa0ba902b7".into()),
+            ("trace_flags".into(), "01".into()),
         ];
         let mut event = make_response_event(metadata);
 
@@ -276,19 +280,13 @@ mod tests {
         let handler = TraceContextResponseHandler::new(true);
         let metadata = vec![
             (
-                "traceparent".to_string(),
-                "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".to_string(),
+                "traceparent".into(),
+                "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01".into(),
             ),
-            (
-                "trace_id".to_string(),
-                "4bf92f3577b34da6a3ce929d0e0e4736".to_string(),
-            ),
-            ("span_id".to_string(), "00f067aa0ba902b7".to_string()),
-            ("trace_flags".to_string(), "01".to_string()),
-            (
-                "tracestate".to_string(),
-                "vendor1=value1,vendor2=value2".to_string(),
-            ),
+            ("trace_id".into(), "4bf92f3577b34da6a3ce929d0e0e4736".into()),
+            ("span_id".into(), "00f067aa0ba902b7".into()),
+            ("trace_flags".into(), "01".into()),
+            ("tracestate".into(), "vendor1=value1,vendor2=value2".into()),
         ];
         let mut event = make_response_event(metadata);
 

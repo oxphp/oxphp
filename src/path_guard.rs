@@ -59,10 +59,40 @@ pub(crate) fn path_allowed(
 /// was raised; past it the refusal is returned as an error.
 pub(crate) const LEASE_WAIT: Duration = Duration::from_secs(50);
 
+/// The spellings a descriptor's location has: one on Linux, up to two on macOS.
+pub(crate) type DescriptorPaths = smallvec::SmallVec<[PathBuf; 2]>;
+
 /// Path of the file behind `fd`, as the kernel records it.
 #[cfg(target_os = "linux")]
-pub(crate) fn descriptor_paths(fd: RawFd) -> io::Result<Vec<PathBuf>> {
-    std::fs::read_link(format!("/proc/self/fd/{fd}")).map(|path| vec![path])
+pub(crate) fn descriptor_paths(fd: RawFd) -> io::Result<DescriptorPaths> {
+    use std::io::Write;
+    use std::os::unix::ffi::OsStrExt;
+    let mut link = [0u8; 32];
+    write!(&mut link[..], "/proc/self/fd/{fd}\0")?;
+    let mut buf = [0u8; libc::PATH_MAX as usize];
+    // SAFETY: `link` is NUL-terminated, being longer than the path written to
+    // it, and readlink stores at most `buf.len()` bytes into `buf`.
+    let len = unsafe {
+        libc::readlink(
+            link.as_ptr() as *const libc::c_char,
+            buf.as_mut_ptr() as *mut libc::c_char,
+            buf.len(),
+        )
+    };
+    let Ok(len) = usize::try_from(len) else {
+        return Err(io::Error::last_os_error());
+    };
+    if len == buf.len() {
+        // May have been cut short: a path can outgrow PATH_MAX when it was
+        // reached through relative steps. `read_link` grows its buffer for it.
+        return std::fs::read_link(format!("/proc/self/fd/{fd}"))
+            .map(|path| smallvec::smallvec![path]);
+    }
+    // One spare byte: the path ends up a C string, and this spares that a copy.
+    let mut path = PathBuf::with_capacity(len + 1);
+    path.as_mut_os_string()
+        .push(std::ffi::OsStr::from_bytes(&buf[..len]));
+    Ok(smallvec::smallvec![path])
 }
 
 /// Paths of the file behind `fd`, as the kernel records it: with and without
@@ -71,8 +101,9 @@ pub(crate) fn descriptor_paths(fd: RawFd) -> io::Result<Vec<PathBuf>> {
 /// reports the firmlinked one, so a root written through the data volume
 /// would otherwise refuse every file under it.
 #[cfg(target_os = "macos")]
-pub(crate) fn descriptor_paths(fd: RawFd) -> io::Result<Vec<PathBuf>> {
-    let mut paths = vec![fcntl_path(fd, libc::F_GETPATH)?];
+pub(crate) fn descriptor_paths(fd: RawFd) -> io::Result<DescriptorPaths> {
+    let mut paths = DescriptorPaths::new();
+    paths.push(fcntl_path(fd, libc::F_GETPATH)?);
     if let Ok(path) = fcntl_path(fd, libc::F_GETPATH_NOFIRMLINK) {
         paths.push(path);
     }
@@ -94,7 +125,7 @@ fn fcntl_path(fd: RawFd, cmd: libc::c_int) -> io::Result<PathBuf> {
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-pub(crate) fn descriptor_paths(_fd: RawFd) -> io::Result<Vec<PathBuf>> {
+pub(crate) fn descriptor_paths(_fd: RawFd) -> io::Result<DescriptorPaths> {
     Err(io::ErrorKind::Unsupported.into())
 }
 

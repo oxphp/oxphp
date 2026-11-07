@@ -7,14 +7,17 @@ use std::time::{Instant, SystemTime};
 
 use bytes::Bytes;
 use http::header;
-use http::{HeaderName, HeaderValue};
+use http::{HeaderMap, HeaderName, HeaderValue};
 use tokio::sync::oneshot;
 
 use crate::async_types::{await_timeout, AsyncResult, AsyncTask, CancelShared, PromiseCleanup};
 use crate::executor::idle_clock::LastActive;
 use crate::metrics::{WorkerMetrics, WorkerStats};
 use crate::php::bindings::{self, *};
-use crate::php::request_decode::{header_field_value, parse_query_pairs, url_decode, value_ptr};
+use crate::php::request_buffers::{reset_string, take_output, PackedPairs, RawPairs, ReusedCStr};
+use crate::php::request_decode::{
+    header_field_value, parse_query_pairs, url_decode_into, value_ptr,
+};
 use crate::php::response_spool::{self, Spool, Spooled};
 use crate::php::stream_wait::{NoRoom, StreamSender};
 use crate::plugin::php::{PluginNativeFunction, PluginNativeFunctionDef};
@@ -25,7 +28,7 @@ use crate::types::{ScriptRequest, ScriptResponse};
 #[derive(Default)]
 pub(crate) struct ResponseBuffers {
     pub(crate) output: Vec<u8>,
-    pub(crate) headers: Vec<(String, String)>,
+    pub(crate) headers: PackedPairs,
     pub(crate) status_code: u16,
     /// Whether the start of `output` has moved to a spool file.
     pub(crate) spooled: Spooled,
@@ -35,7 +38,7 @@ impl ResponseBuffers {
     fn new() -> Self {
         Self {
             output: Vec::with_capacity(8192),
-            headers: Vec::new(),
+            headers: PackedPairs::default(),
             status_code: 200,
             spooled: Spooled::InMemory,
         }
@@ -379,27 +382,29 @@ unsafe fn pop_worker_unhandled_exception() -> Option<crate::types::PhpScriptErro
 }
 
 /// Per-request data stored in thread-local for SAPI callbacks to access.
-/// Reused across requests — `server_vars` Vec capacity is retained.
+/// Reused across requests: every buffer keeps its capacity up to the limits in
+/// `request_buffers`, and past them gives it back when the slot is next filled
+/// or cleared, whichever comes first. A worker clears its slot only on exit.
 ///
 /// Under worker-mode fiber multiplexing this travels with the request rather
 /// than with the thread: a suspended request's copy is parked in its fiber's
 /// TLS slot (`take_request_data` / `restore_request_data`) so the request the
 /// worker serves in the window gets a slot of its own to fill.
 pub(crate) struct RequestData {
-    /// Pre-built $_SERVER key-value pairs as CStrings (must outlive php_request_shutdown).
-    server_vars: Vec<(CString, CString)>,
+    /// Pre-built $_SERVER key-value pairs (must outlive php_request_shutdown).
+    server_vars: PackedPairs,
     /// Raw Cookie header string for read_cookies callback (must outlive request).
-    cookie_string: Option<CString>,
+    cookie_string: ReusedCStr,
     /// Request method for SG(request_info) — must outlive php_request_shutdown.
-    method_cstr: Option<CString>,
+    method_cstr: ReusedCStr,
     /// Query string for SG(request_info) — must outlive php_request_shutdown.
-    query_string: Option<CString>,
+    query_string: ReusedCStr,
     /// Content-Type string for SG(request_info) — must outlive php_request_shutdown.
-    content_type_string: Option<CString>,
+    content_type_string: ReusedCStr,
     /// Body length declared by the request, for SG(request_info).
     content_length: i64,
-    /// Request ID CString — must outlive php_request_shutdown.
-    request_id_cstr: Option<CString>,
+    /// Request ID, re-installed on the bridge when a parked fiber resumes.
+    request_id_cstr: ReusedCStr,
     /// Request body for read_post callback.
     body: Bytes,
     /// How many bytes of body have been read so far.
@@ -431,30 +436,30 @@ pub(crate) struct RequestData {
     /// Whether TLS is active.
     is_secure: bool,
     /// Raw headers as (lowercase_name, value) pairs.
-    headers_raw: Vec<(String, String)>,
+    headers_raw: PackedPairs,
     /// Parsed cookies as (raw name, decoded value) byte pairs.
-    cookies_parsed: Vec<(Vec<u8>, Vec<u8>)>,
+    cookies_parsed: PackedPairs,
     /// Parsed query parameters as (decoded name, decoded value) byte pairs.
     ///
     /// Decoded up front rather than sliced out of `query_string_raw` on
     /// demand: the accessor callbacks hand a borrowed pointer back to C, so
     /// the decoded bytes need an owner that lives as long as the request.
-    /// This costs one allocation per name and value on every request that
-    /// carries a query string, in line with `headers_raw` and
-    /// `cookies_parsed` above; `parse_query_pairs` caps how far that can go.
-    query_parsed: Vec<(Vec<u8>, Vec<u8>)>,
+    /// `parse_query_pairs` caps how far that can go.
+    query_parsed: PackedPairs,
 }
 
 impl RequestData {
+    /// Allocates nothing: a request parked on a fiber leaves one of these in
+    /// its place, and the next request may never come before it resumes.
     pub(crate) fn new() -> Self {
         Self {
-            server_vars: Vec::with_capacity(32),
-            cookie_string: None,
-            method_cstr: None,
-            query_string: None,
-            content_type_string: None,
+            server_vars: PackedPairs::default(),
+            cookie_string: ReusedCStr::default(),
+            method_cstr: ReusedCStr::default(),
+            query_string: ReusedCStr::default(),
+            content_type_string: ReusedCStr::default(),
             content_length: 0,
-            request_id_cstr: None,
+            request_id_cstr: ReusedCStr::default(),
             body: Bytes::new(),
             body_offset: 0,
             active: false,
@@ -469,9 +474,9 @@ impl RequestData {
             remote_addr_str: String::new(),
             protocol_version_str: String::new(),
             is_secure: false,
-            headers_raw: Vec::with_capacity(16),
-            cookies_parsed: Vec::new(),
-            query_parsed: Vec::new(),
+            headers_raw: PackedPairs::default(),
+            cookies_parsed: PackedPairs::default(),
+            query_parsed: PackedPairs::default(),
         }
     }
 }
@@ -493,10 +498,24 @@ fn env_snapshot() -> &'static [(CString, CString)] {
 
 /// Push a server variable, skipping entries with embedded null bytes.
 #[inline]
-fn push_server_var(vars: &mut Vec<(CString, CString)>, key: &str, val: &str) {
-    if let (Ok(k), Ok(v)) = (CString::new(key), CString::new(val)) {
-        vars.push((k, v));
-    }
+fn push_server_var(vars: &mut PackedPairs, key: &str, val: &str) {
+    vars.push_c_with(
+        |out| out.extend_from_slice(key.as_bytes()),
+        |out| out.extend_from_slice(val.as_bytes()),
+    );
+}
+
+/// [`push_server_var`] for a value that has to be built: it is formatted
+/// straight into the list, with no string of its own.
+#[inline]
+fn push_server_var_fmt(vars: &mut PackedPairs, key: &str, val: std::fmt::Arguments<'_>) {
+    vars.push_c_with(
+        |out| out.extend_from_slice(key.as_bytes()),
+        |out| {
+            // Writing to a `Vec` cannot fail.
+            let _ = std::io::Write::write_fmt(out, val);
+        },
+    );
 }
 
 /// Parse a Host header value into (server_name, server_port).
@@ -625,16 +644,31 @@ pub(crate) fn restore_worker_cancel_state(
     WORKER_CANCEL_STATE.with(|slot| *slot.borrow_mut() = val);
 }
 
-/// Parse raw header strings into typed `HeaderName`/`HeaderValue` pairs.
-/// Shared between early send and normal response paths.
-pub fn parse_raw_headers(raw: Vec<(String, String)>) -> Vec<(HeaderName, HeaderValue)> {
-    raw.into_iter()
-        .filter_map(|(name, value)| {
-            let hn = HeaderName::from_bytes(name.as_bytes()).ok()?;
-            let hv = HeaderValue::from_str(&value).ok()?;
-            Some((hn, hv))
-        })
-        .collect()
+/// Parse the headers a script set into typed `HeaderName`/`HeaderValue` pairs,
+/// leaving out what HTTP cannot carry.
+///
+/// A `HeaderMap` has a hard limit on distinct names. Names a script emits past
+/// it are dropped: this runs on a worker, and `reserve` and `append` would
+/// panic there.
+pub fn parse_raw_headers(raw: &PackedPairs) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    let _ = headers.try_reserve(raw.len() + crate::types::HEADERS_ADDED_AFTER_SCRIPT);
+    for (name, value) in raw.iter_shared_values() {
+        // PHP's own header, on every response while `expose_php` is on, and
+        // not a standard name the `http` crate would hold without a copy.
+        let name = if name.eq_ignore_ascii_case(b"x-powered-by") {
+            HeaderName::from_static("x-powered-by")
+        } else {
+            let Ok(name) = HeaderName::from_bytes(name) else {
+                continue;
+            };
+            name
+        };
+        if let Ok(value) = HeaderValue::from_maybe_shared(value) {
+            let _ = headers.try_append(name, value);
+        }
+    }
+    headers
 }
 
 /// Attempt to send the response early if `oxphp_bridge_is_finished()` is true
@@ -656,9 +690,7 @@ pub fn try_early_send() -> bool {
     EARLY_TX.with(|slot| {
         let entry = slot.borrow_mut().take();
         if let Some((start, tx)) = entry {
-            let (raw_output, raw_headers, status, spool) = take_response();
-            let body = Bytes::from(raw_output);
-            let headers = parse_raw_headers(raw_headers);
+            let (body, headers, status, spool) = take_response();
             let _ = tx.send(ScriptResponse {
                 status,
                 headers,
@@ -712,9 +744,7 @@ pub fn send_streaming_headers() -> bool {
             // a streamed `http_response_code(500)` would ship as 200.
             collect_response_code();
 
-            let (raw_output, raw_headers, status, spool) = take_response();
-            let body = Bytes::from(raw_output);
-            let headers = parse_raw_headers(raw_headers);
+            let (body, headers, status, spool) = take_response();
             let _ = tx.send(ScriptResponse {
                 status,
                 headers,
@@ -793,7 +823,7 @@ fn flush_stream_chunk(wait_here: bool, room_fd: &mut c_int) -> bool {
                 }
                 Err(NoRoom::Stopped) => return true,
             };
-            let chunk = RESPONSE.with(|r| Bytes::from(std::mem::take(&mut r.borrow_mut().output)));
+            let chunk = RESPONSE.with(|r| take_output(&mut r.borrow_mut().output));
             room.send(chunk);
         }
         cancel_stream_for_drain();
@@ -866,7 +896,7 @@ pub fn set_stream_tokio_handle(handle: tokio::runtime::Handle) {
 fn finish_stream() {
     if flush_stream_chunk(false, &mut -1) {
         let tx = STREAM_TX.with(|slot| slot.borrow_mut().take().map(StreamSender::into_sender));
-        let chunk = RESPONSE.with(|r| Bytes::from(std::mem::take(&mut r.borrow_mut().output)));
+        let chunk = RESPONSE.with(|r| take_output(&mut r.borrow_mut().output));
         if let Some(tx) = tx {
             match STREAM_TOKIO_HANDLE.get() {
                 Some(handle) => {
@@ -912,24 +942,32 @@ pub fn set_request_data(req: &ScriptRequest) {
 /// Everything [`set_request_data`] does short of writing `SG(request_info)` —
 /// the one step that needs the engine started on the calling thread.
 fn fill_request_data(req: &ScriptRequest) {
-    REQUEST_DATA.with(|rd| {
-        let mut data = rd.borrow_mut();
+    use std::fmt::Write as _;
 
-        // Extract cookie string for read_cookies callback (before borrowing server_vars)
-        data.cookie_string = req
+    REQUEST_DATA.with(|rd| {
+        let mut guard = rd.borrow_mut();
+        // Through a plain reference, or the fields could not be borrowed apart.
+        let data = &mut *guard;
+        let query_string = req.query_string();
+
+        // Extract cookie string for read_cookies callback
+        data.cookie_string.reset();
+        if let Some(cookie) = req
             .headers
             .get(header::COOKIE)
             .and_then(|v| v.to_str().ok())
-            .and_then(|s| CString::new(s).ok());
+        {
+            data.cookie_string.set(cookie.as_bytes());
+        }
 
         let sg_enabled = unsafe { bindings::oxphp_bridge_get_superglobals_enabled() };
         data.sg_enabled = sg_enabled;
 
-        // Clear previous values but keep the Vec allocation
-        data.server_vars.clear();
+        data.server_vars.reset();
 
         // Format remote IP once — reused for both server_vars and object API
-        let remote_ip = req.remote_addr.ip().to_string();
+        data.remote_addr_str.clear();
+        let _ = write!(data.remote_addr_str, "{}", req.remote_addr.ip());
 
         if !sg_enabled {
             // Skip server_vars population — object API fields below are always populated.
@@ -950,7 +988,7 @@ fn fill_request_data(req: &ScriptRequest) {
                     .map(|pq| pq.as_str())
                     .unwrap_or("/"),
             );
-            push_server_var(vars, "QUERY_STRING", &req.query_string);
+            push_server_var(vars, "QUERY_STRING", query_string);
             let protocol = match req.version {
                 http::Version::HTTP_10 => "HTTP/1.0",
                 http::Version::HTTP_11 => "HTTP/1.1",
@@ -999,52 +1037,34 @@ fn fill_request_data(req: &ScriptRequest) {
             } else {
                 // SCRIPT_NAME is the resolved script path relative to the
                 // document root — both decoded, since `script_path` is built by
-                // joining the *decoded* sanitized URI onto `document_root`. The
-                // old code subtracted the decoded PATH_INFO length from the raw
-                // percent-encoded URI, which produced an empty SCRIPT_NAME in
-                // Framework mode and mis-sliced under percent-encoding.
+                // joining the *decoded* sanitized URI onto `document_root`, so
+                // it cannot be sliced out of the percent-encoded URI.
                 let script_name = req
                     .script_path
                     .strip_prefix(&*req.document_root)
                     .ok()
-                    .map(|rel| {
-                        let rel = rel.to_string_lossy();
-                        let mut s = String::with_capacity(rel.len() + 1);
-                        s.push('/');
-                        // On Unix the path separator is already `/`, so push the
-                        // borrowed slice directly — no extra scan/allocation on
-                        // the hot path. Only Windows needs separator translation.
-                        #[cfg(windows)]
-                        s.push_str(&rel.replace('\\', "/"));
-                        #[cfg(not(windows))]
-                        s.push_str(&rel);
-                        s
-                    })
+                    .map(|rel| rel.to_string_lossy())
                     .unwrap_or_else(|| {
                         // Worker script configured outside the document root —
                         // fall back to its basename.
-                        let base = req
-                            .script_path
+                        req.script_path
                             .file_name()
-                            .map(|f| f.to_string_lossy().into_owned())
-                            .unwrap_or_default();
-                        let mut s = String::with_capacity(base.len() + 1);
-                        s.push('/');
-                        s.push_str(&base);
-                        s
+                            .map(|f| f.to_string_lossy())
+                            .unwrap_or_default()
                     });
 
-                push_server_var(vars, "SCRIPT_NAME", &script_name);
-                push_server_var(vars, "DOCUMENT_URI", &script_name);
+                push_server_var_fmt(vars, "SCRIPT_NAME", format_args!("/{script_name}"));
+                push_server_var_fmt(vars, "DOCUMENT_URI", format_args!("/{script_name}"));
 
                 if let Some(ref path_info) = req.path_info {
-                    let mut php_self = String::with_capacity(script_name.len() + path_info.len());
-                    php_self.push_str(&script_name);
-                    php_self.push_str(path_info);
-                    push_server_var(vars, "PHP_SELF", &php_self);
+                    push_server_var_fmt(
+                        vars,
+                        "PHP_SELF",
+                        format_args!("/{script_name}{path_info}"),
+                    );
                     push_server_var(vars, "PATH_INFO", path_info);
                 } else {
-                    push_server_var(vars, "PHP_SELF", &script_name);
+                    push_server_var_fmt(vars, "PHP_SELF", format_args!("/{script_name}"));
                 }
             }
 
@@ -1059,8 +1079,12 @@ fn fill_request_data(req: &ScriptRequest) {
             push_server_var(vars, "GATEWAY_INTERFACE", "CGI/1.1");
 
             // Connection info
-            push_server_var(vars, "REMOTE_ADDR", &remote_ip);
-            push_server_var(vars, "REMOTE_PORT", &req.remote_addr.port().to_string());
+            push_server_var(vars, "REMOTE_ADDR", &data.remote_addr_str);
+            push_server_var_fmt(
+                vars,
+                "REMOTE_PORT",
+                format_args!("{}", req.remote_addr.port()),
+            );
 
             // HTTPS indicator (CGI/1.1: "on" when TLS is active)
             // Check forwarded proto first, then direct TLS
@@ -1117,7 +1141,6 @@ fn fill_request_data(req: &ScriptRequest) {
             // Request headers as HTTP_{UPPER_SNAKE_CASE}, one key per name
             // (except Content-Type and Content-Length which are handled above without HTTP_ prefix,
             // and names with `_` or `.`, skipped below)
-            let mut header_buf = String::with_capacity(64);
             for name in req.headers.keys() {
                 if name == header::CONTENT_TYPE || name == header::CONTENT_LENGTH {
                     continue;
@@ -1134,23 +1157,26 @@ fn fill_request_data(req: &ScriptRequest) {
                     continue;
                 };
 
-                header_buf.clear();
-                header_buf.push_str("HTTP_");
-                for b in name.as_str().bytes() {
-                    header_buf.push(if b == b'-' {
-                        '_'
-                    } else {
-                        b.to_ascii_uppercase() as char
-                    });
-                }
-                push_server_var(vars, &header_buf, &val_str);
+                vars.push_c_with(
+                    |out| {
+                        out.extend_from_slice(b"HTTP_");
+                        out.extend(name.as_str().bytes().map(|b| {
+                            if b == b'-' {
+                                b'_'
+                            } else {
+                                b.to_ascii_uppercase()
+                            }
+                        }));
+                    },
+                    |out| out.extend_from_slice(val_str.as_bytes()),
+                );
             }
 
             // REQUEST_TIME and REQUEST_TIME_FLOAT from bridge (set in setup_request_tls)
             let rt = unsafe { bindings::oxphp_bridge_get_request_time() };
             if rt > 0.0 {
-                push_server_var(vars, "REQUEST_TIME", &(rt as u64).to_string());
-                push_server_var(vars, "REQUEST_TIME_FLOAT", &format!("{rt:.6}"));
+                push_server_var_fmt(vars, "REQUEST_TIME", format_args!("{}", rt as u64));
+                push_server_var_fmt(vars, "REQUEST_TIME_FLOAT", format_args!("{rt:.6}"));
             }
 
             // Trace context variables (when tracing is enabled)
@@ -1161,25 +1187,26 @@ fn fill_request_data(req: &ScriptRequest) {
             }
         } // end if sg_enabled
 
-        // Strings for SG(request_info) — stored as CStrings so pointers
+        // Strings for SG(request_info) — stored as C strings so pointers
         // remain valid through php_request_shutdown().
-        data.query_string = if req.query_string.is_empty() {
-            None
-        } else {
-            CString::new(req.query_string.as_str()).ok()
-        };
+        data.query_string.reset();
+        if !query_string.is_empty() {
+            data.query_string.set(query_string.as_bytes());
+        }
 
-        data.content_type_string = header_field_value(&req.headers, &header::CONTENT_TYPE)
-            .and_then(|s| CString::new(s.as_ref()).ok());
+        data.content_type_string.reset();
+        if let Some(content_type) = header_field_value(&req.headers, &header::CONTENT_TYPE) {
+            data.content_type_string.set(content_type.as_bytes());
+        }
 
         data.body = req.body.clone();
         data.body_offset = 0;
 
         // ── Object API fields ──
-        data.method_str.clear();
+        reset_string(&mut data.method_str);
         data.method_str.push_str(req.method.as_str());
 
-        data.path_str.clear();
+        reset_string(&mut data.path_str);
         data.path_str.push_str(req.uri.path());
 
         // is_secure: forwarded proto takes priority
@@ -1195,7 +1222,7 @@ fn fill_request_data(req: &ScriptRequest) {
             .push_str(if effective_tls { "https" } else { "http" });
 
         // Parse host and port: forwarded host takes priority
-        data.host_str.clear();
+        reset_string(&mut data.host_str);
         data.port_val = if effective_tls { 443 } else { 80 };
 
         let host_source = req
@@ -1227,16 +1254,13 @@ fn fill_request_data(req: &ScriptRequest) {
             data.port_val = p;
         }
 
-        data.query_string_raw.clear();
-        data.query_string_raw.push_str(&req.query_string);
+        reset_string(&mut data.query_string_raw);
+        data.query_string_raw.push_str(query_string);
 
         // `queryString()` keeps reporting the raw form above; the object API's
         // query() reads the decoded pairs so it agrees with $_GET.
-        data.query_parsed.clear();
-        parse_query_pairs(&req.query_string, &mut data.query_parsed);
-
-        data.remote_addr_str.clear();
-        data.remote_addr_str.push_str(&remote_ip);
+        data.query_parsed.reset();
+        parse_query_pairs(query_string, &mut data.query_parsed);
 
         data.protocol_version_str.clear();
         data.protocol_version_str.push_str(match req.version {
@@ -1250,35 +1274,31 @@ fn fill_request_data(req: &ScriptRequest) {
 
         // Build full URI: scheme://host[:port]/path[?query]
         {
-            let scheme = if effective_tls { "https" } else { "http" };
-            let port = data.port_val;
             let default_port: u16 = if effective_tls { 443 } else { 80 };
-            let path = req.uri.path();
-            let qs = &req.query_string;
-            let port_part = if port != default_port {
-                format!(":{port}")
-            } else {
-                String::new()
-            };
-            let qs_part = if qs.is_empty() {
-                String::new()
-            } else {
-                format!("?{qs}")
-            };
-            data.full_uri_str = format!("{scheme}://{}{port_part}{path}{qs_part}", data.host_str);
+            let uri = &mut data.full_uri_str;
+            reset_string(uri);
+            let _ = write!(uri, "{}://{}", data.scheme_str, data.host_str);
+            if data.port_val != default_port {
+                let _ = write!(uri, ":{}", data.port_val);
+            }
+            uri.push_str(req.uri.path());
+            if !query_string.is_empty() {
+                uri.push('?');
+                uri.push_str(query_string);
+            }
         }
 
         // Store raw headers for object API iteration, one entry per name
-        data.headers_raw.clear();
+        data.headers_raw.reset();
         for name in req.headers.keys() {
             if let Some(v) = header_field_value(&req.headers, name) {
                 data.headers_raw
-                    .push((name.as_str().to_owned(), v.into_owned()));
+                    .push(name.as_str().as_bytes(), v.as_bytes());
             }
         }
 
         // Parse cookies from Cookie header
-        data.cookies_parsed.clear();
+        data.cookies_parsed.reset();
         if let Some(cookie_hdr) = req.headers.get(header::COOKIE) {
             if let Ok(cookie_str) = cookie_hdr.to_str() {
                 for pair in cookie_str.split(';') {
@@ -1287,8 +1307,10 @@ fn fill_request_data(req: &ScriptRequest) {
                         // Cookie names are not decoded (PHP leaves them raw),
                         // values are percent-decoded but keep a literal '+'.
                         let bytes = pair.as_bytes();
-                        data.cookies_parsed
-                            .push((bytes[..eq].to_vec(), url_decode(&bytes[eq + 1..], false)));
+                        data.cookies_parsed.push_with(
+                            |name| name.extend_from_slice(&bytes[..eq]),
+                            |value| url_decode_into(&bytes[eq + 1..], false, value),
+                        );
                     }
                 }
             }
@@ -1297,16 +1319,17 @@ fn fill_request_data(req: &ScriptRequest) {
         data.active = true;
 
         // Set request ID in bridge TLS so oxphp_request_id() returns it.
-        let rid_cstr = CString::new(req.request_id.as_str()).unwrap_or_default();
+        data.request_id_cstr.set(req.request_id.as_bytes());
+        // SAFETY: a NUL-terminated pointer, valid for this call; the bridge
+        // copies the bytes into its own per-request context.
         unsafe {
-            bindings::oxphp_bridge_set_request_id(rid_cstr.as_ptr());
+            bindings::oxphp_bridge_set_request_id(data.request_id_cstr.as_ptr());
         }
-        data.request_id_cstr = Some(rid_cstr);
 
         // The method string is owned by the slot rather than by this call: PHP
         // holds the pointer for the whole request, and a resumed fiber has to be
         // handed the same one again (see `restore_request_data`).
-        data.method_cstr = CString::new(req.method.as_str()).ok();
+        data.method_cstr.set(req.method.as_str().as_bytes());
         data.content_length = req
             .headers
             .get(header::CONTENT_LENGTH)
@@ -1320,17 +1343,16 @@ fn fill_request_data(req: &ScriptRequest) {
 /// that owns the strings. PHP keeps them for the whole request, so they must
 /// come from `RequestData` and not from a temporary.
 fn request_info_ptrs(data: &RequestData) -> (*const c_char, *const c_char, *const c_char, c_long) {
-    let ptr_of = |s: &Option<CString>| s.as_ref().map_or(std::ptr::null(), |cs| cs.as_ptr());
     (
-        ptr_of(&data.method_cstr),
+        data.method_cstr.as_ptr(),
         // A query string is only handed over when superglobals are on: it is
         // what PHP parses $_GET out of.
         if data.sg_enabled {
-            ptr_of(&data.query_string)
+            data.query_string.as_ptr()
         } else {
             std::ptr::null()
         },
-        ptr_of(&data.content_type_string),
+        data.content_type_string.as_ptr(),
         data.content_length as c_long,
     )
 }
@@ -1377,18 +1399,15 @@ pub(crate) fn restore_profiling_was_active(value: bool) {
 /// `oxphp_fiber_restore_php_state` has: it restores the Rust context first and
 /// the saved SAPI headers after.
 pub(crate) fn restore_request_data(data: RequestData) {
-    // The pointers are projected under the borrow and handed on without it, the
-    // way the SAPI callbacks do it: they name strings the slot owns, and the
-    // slot is only ever rebuilt between requests.
+    // The pointers are projected under the borrow and handed on without it: they
+    // name the strings of the request this call has just put in the slot, and
+    // nothing that could replace them runs before the bridge has them.
     let (method, query_string, content_type, content_length, request_id) =
         REQUEST_DATA.with(|rd| {
             let mut slot = rd.borrow_mut();
             *slot = data;
             let (method, query_string, content_type, content_length) = request_info_ptrs(&slot);
-            let request_id = slot
-                .request_id_cstr
-                .as_ref()
-                .map_or(std::ptr::null(), |cs| cs.as_ptr());
+            let request_id = slot.request_id_cstr.as_ptr();
             (
                 method,
                 query_string,
@@ -1405,46 +1424,38 @@ pub(crate) fn restore_request_data(data: RequestData) {
     }
 }
 
-/// Typical number of $_SERVER variables per request (~20 CGI vars + headers).
-/// If the Vec grows beyond 2x this, shrink it to avoid monotonic growth from
-/// anomalous requests with many headers.
-const SERVER_VARS_NORMAL_CAPACITY: usize = 64;
-
 /// Clear request data from thread-local.
-/// Retains Vec capacity for reuse by the next request, but shrinks if oversized.
+/// Retains buffer capacity for reuse by the next request, but shrinks if oversized.
 /// Must be called AFTER php_request_shutdown().
 pub fn clear_request_data() {
     REQUEST_DATA.with(|rd| {
         let mut data = rd.borrow_mut();
-        data.server_vars.clear();
-        if data.server_vars.capacity() > SERVER_VARS_NORMAL_CAPACITY {
-            data.server_vars.shrink_to(SERVER_VARS_NORMAL_CAPACITY);
-        }
-        data.cookie_string = None;
-        data.method_cstr = None;
-        data.query_string = None;
-        data.content_type_string = None;
+        data.server_vars.reset();
+        data.cookie_string.reset();
+        data.method_cstr.reset();
+        data.query_string.reset();
+        data.content_type_string.reset();
         data.content_length = 0;
-        data.request_id_cstr = None;
+        data.request_id_cstr.reset();
         data.body = Bytes::new();
         data.body_offset = 0;
         data.active = false;
         data.sg_enabled = true;
 
         // Clear object API fields (retain Vec capacity for reuse)
-        data.method_str.clear();
-        data.path_str.clear();
-        data.full_uri_str.clear();
+        reset_string(&mut data.method_str);
+        reset_string(&mut data.path_str);
+        reset_string(&mut data.full_uri_str);
         data.scheme_str.clear();
-        data.host_str.clear();
+        reset_string(&mut data.host_str);
         data.port_val = 0;
-        data.query_string_raw.clear();
+        reset_string(&mut data.query_string_raw);
         data.remote_addr_str.clear();
         data.protocol_version_str.clear();
         data.is_secure = false;
-        data.headers_raw.clear();
-        data.cookies_parsed.clear();
-        data.query_parsed.clear();
+        data.headers_raw.reset();
+        data.cookies_parsed.reset();
+        data.query_parsed.reset();
     });
 
     // Clear SG(request_info) and bridge context so PHP doesn't hold stale references.
@@ -1694,8 +1705,8 @@ unsafe extern "C" fn cli_log_message(message: *const c_char, _syslog_type: c_int
 /// Registers static env snapshot first (by reference — no per-request clone),
 /// then per-request CGI/HTTP vars which override any env duplicates.
 ///
-/// The `REQUEST_DATA` borrow is projected to a raw slice and released before
-/// the first call into PHP. `php_register_variable_safe` allocates on the Zend
+/// The `REQUEST_DATA` borrow is projected to the buffers' addresses and released
+/// before the first call into PHP. `php_register_variable_safe` allocates on the Zend
 /// heap, and up to PHP 8.4.26 / 8.5.11 an allocation that hits `memory_limit`
 /// raises a fatal on the spot. On any release it can also raise a warning,
 /// which runs the script's error handler, if it has set one, from inside this
@@ -1708,19 +1719,17 @@ unsafe extern "C" fn cli_log_message(message: *const c_char, _syslog_type: c_int
 /// the unconsumed request body through that same state from
 /// `php_request_shutdown` on every request, so the abort is immediate.
 ///
-/// Dropping the guard is safe for the walk: `REQUEST_DATA` is thread-local,
-/// and `server_vars` is only ever rebuilt between requests by
-/// `set_request_data` / `clear_request_data`, never from inside PHP.
+/// Dropping the guard is safe for the walk, which holds the buffers and not the
+/// slot. An error handler run from inside it can park the fiber, and the request
+/// the worker then admits fills the slot: `take_request_data` has by then moved
+/// this request's `RequestData` out of it, and moving it leaves the buffers where
+/// they are. Only filling or clearing the slot changes them, and neither happens
+/// to this request's data until its walk has ended.
 unsafe extern "C" fn oxphp_register_server_variables(track_vars_array: *mut c_void) {
-    let Some((sg_enabled, vars_ptr, vars_len)) = REQUEST_DATA.with(|rd| {
+    let Some((sg_enabled, vars)) = REQUEST_DATA.with(|rd| {
         let data = rd.borrow();
-        data.active.then(|| {
-            (
-                data.sg_enabled,
-                data.server_vars.as_ptr(),
-                data.server_vars.len(),
-            )
-        })
+        data.active
+            .then(|| (data.sg_enabled, data.server_vars.as_raw()))
     }) else {
         return;
     };
@@ -1739,25 +1748,29 @@ unsafe extern "C" fn oxphp_register_server_variables(track_vars_array: *mut c_vo
     }
 
     // Register per-request CGI/HTTP variables (override env vars).
-    for (key, value) in std::slice::from_raw_parts(vars_ptr, vars_len) {
+    // SAFETY: the buffers are left alone for the length of the walk, as above.
+    // Pairs bound for C hold no NUL of their own, so the pointers are C strings.
+    for (key, value) in vars.iter() {
         php_register_variable_safe(
-            key.as_ptr(),
-            value.as_ptr(),
-            value.to_bytes().len(),
+            key.as_ptr() as *const c_char,
+            value.as_ptr() as *const c_char,
+            value.len(),
             track_vars_array,
         );
     }
 }
 
 /// Callback: return raw Cookie header string for PHP to parse into $_COOKIE.
-/// The returned pointer must remain valid through php_request_shutdown().
-/// We store the CString in RequestData, so it lives long enough.
+/// The returned pointer must remain valid through php_request_shutdown(). It
+/// names a buffer this request's `RequestData` owns, which only filling or
+/// clearing its slot overwrites, and both come after that shutdown.
 unsafe extern "C" fn oxphp_read_cookies() -> *mut c_char {
     REQUEST_DATA.with(|rd| {
         let data = rd.borrow();
-        match data.cookie_string.as_ref() {
-            Some(cs) if data.active => cs.as_ptr() as *mut c_char,
-            _ => std::ptr::null_mut(),
+        if data.active {
+            data.cookie_string.as_ptr() as *mut c_char
+        } else {
+            std::ptr::null_mut()
         }
     })
 }
@@ -1947,10 +1960,10 @@ unsafe extern "C" fn oxphp_header_handler(
 
         match op {
             sapi_header_op_enum::SAPI_HEADER_DELETE => {
-                let name = header_str.trim();
+                let name = header_str.trim().as_bytes();
                 r.borrow_mut()
                     .headers
-                    .retain(|(n, _)| !n.eq_ignore_ascii_case(name));
+                    .retain(|n, _| !n.eq_ignore_ascii_case(name));
                 0
             }
             sapi_header_op_enum::SAPI_HEADER_REPLACE | sapi_header_op_enum::SAPI_HEADER_ADD => {
@@ -1961,8 +1974,8 @@ unsafe extern "C" fn oxphp_header_handler(
                     // so headers_list() stays consistent with what goes on the wire.
                     return 0;
                 };
-                let name = header_str[..colon_pos].trim().to_string();
-                let value = header_str[colon_pos + 1..].trim().to_string();
+                let name = header_str[..colon_pos].trim();
+                let value = header_str[colon_pos + 1..].trim();
 
                 // Auto-detect SSE: enable streaming when PHP sets Content-Type: text/event-stream
                 if name.eq_ignore_ascii_case("content-type") && value.contains("text/event-stream")
@@ -1972,9 +1985,10 @@ unsafe extern "C" fn oxphp_header_handler(
 
                 let mut resp = r.borrow_mut();
                 if op == sapi_header_op_enum::SAPI_HEADER_REPLACE {
-                    resp.headers.retain(|(n, _)| !n.eq_ignore_ascii_case(&name));
+                    resp.headers
+                        .retain(|n, _| !n.eq_ignore_ascii_case(name.as_bytes()));
                 }
-                resp.headers.push((name, value));
+                resp.headers.push(name.as_bytes(), value.as_bytes());
                 SAPI_HEADER_ADD_TO_LIST
             }
             #[cfg(any(php_v8_5, php_v8_6))]
@@ -2302,17 +2316,19 @@ fn resolve_collected_status(sg_code: std::os::raw::c_int, cancel_reason: u8) -> 
 
 /// The output, headers and status. Output that outgrew memory comes as the
 /// spool file that holds all of it, with the in-memory output left empty.
-pub type TakenResponse = (Vec<u8>, Vec<(String, String)>, u16, Option<Box<Spool>>);
+pub type TakenResponse = (Bytes, HeaderMap, u16, Option<Box<Spool>>);
 
 /// Take the response — or, for one whose output could not be spooled, the
-/// 503 that replaces it.
+/// 503 that replaces it. Headers are parsed here, on the worker thread, so the
+/// Tokio runtime does not pay for it.
 pub fn take_response() -> TakenResponse {
     let config = response_spool::config();
     RESPONSE.with(|r| {
         let resp = &mut *r.borrow_mut();
         let spool = resp.spooled.take(&mut resp.output, config);
-        let output = std::mem::take(&mut resp.output);
-        let headers = std::mem::take(&mut resp.headers);
+        let output = take_output(&mut resp.output);
+        let headers = parse_raw_headers(&resp.headers);
+        resp.headers.clear();
         let status = resp.status_code;
         resp.status_code = 200;
         if resp.spooled.is_refused() {
@@ -2344,7 +2360,7 @@ pub fn clear_buffers() {
     RESPONSE.with(|r| {
         let mut resp = r.borrow_mut();
         resp.output.clear();
-        resp.headers.clear();
+        resp.headers.reset();
         resp.status_code = 200;
         resp.spooled = Spooled::InMemory;
     });
@@ -3424,9 +3440,7 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
 
     // Take accumulated response and send via oneshot. Any handler-body throw was
     // already pulled into REQUEST_ERRORS (and forced the status) at the top.
-    let (raw_output, raw_headers, status, spool) = take_response();
-    let body = Bytes::from(raw_output);
-    let headers = parse_raw_headers(raw_headers);
+    let (body, headers, status, spool) = take_response();
 
     // Finalize APM / profiler spans on the PHP worker thread before sending
     // the response. Mirrors the traditional executor's RSHUTDOWN logic: drain
@@ -3447,16 +3461,13 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
             #[cfg(feature = "plugin-profiler")]
             crate::profiling::profiler_rshutdown_flush();
 
-            let tree = crate::profiling::PROFILING_CONTEXT.with(|ctx| ctx.borrow_mut().finalize());
+            let tree = crate::profiling::PROFILING_CONTEXT
+                .with(|ctx| ctx.borrow_mut().finalize_nonempty());
 
             #[cfg(feature = "plugin-profiler")]
             crate::profiling::set_profiling_mode(crate::profiling::ProfilingMode::Off);
 
-            if tree.is_empty() {
-                None
-            } else {
-                Some(tree)
-            }
+            tree
         } else {
             None
         }
@@ -6002,8 +6013,8 @@ unsafe extern "C" fn req_content_type_cb(out_len: *mut usize) -> *const c_char {
             return std::ptr::null();
         }
         // Find content-type in headers_raw
-        for (k, v) in &data.headers_raw {
-            if k == "content-type" {
+        for (k, v) in data.headers_raw.iter() {
+            if k == b"content-type" {
                 *out_len = v.len();
                 return v.as_ptr() as *const c_char;
             }
@@ -6025,9 +6036,8 @@ unsafe extern "C" fn req_header_cb(
             return std::ptr::null();
         }
         let key = std::slice::from_raw_parts(name as *const u8, name_len);
-        let key_str = std::str::from_utf8_unchecked(key);
-        for (k, v) in &data.headers_raw {
-            if k.eq_ignore_ascii_case(key_str) {
+        for (k, v) in data.headers_raw.iter() {
+            if k.eq_ignore_ascii_case(key) {
                 *out_len = v.len();
                 return v.as_ptr() as *const c_char;
             }
@@ -6051,8 +6061,8 @@ unsafe extern "C" fn req_cookie_cb(
         // Compared as bytes: a PHP caller may pass any byte string as the
         // name, so validating it as UTF-8 would be a lie either way.
         let key = std::slice::from_raw_parts(name as *const u8, name_len);
-        for (k, v) in &data.cookies_parsed {
-            if k.as_slice() == key {
+        for (k, v) in data.cookies_parsed.iter() {
+            if k == key {
                 let (ptr, len) = value_ptr(v);
                 *out_len = len;
                 return ptr;
@@ -6078,8 +6088,8 @@ unsafe extern "C" fn req_query_param_cb(
         // is found by the name PHP callers actually pass — and a name that is
         // not valid UTF-8 compares correctly instead of being assumed.
         let search = std::slice::from_raw_parts(key as *const u8, key_len);
-        for (k, v) in &data.query_parsed {
-            if k.as_slice() == search {
+        for (k, v) in data.query_parsed.iter() {
+            if k == search {
                 let (ptr, len) = value_ptr(v);
                 *out_len = len;
                 return ptr;
@@ -6100,49 +6110,37 @@ type PairsCb = unsafe extern "C" fn(*const c_char, usize, *const c_char, usize, 
 /// raised by one of those allocations — see
 /// `oxphp_register_server_variables` for why no borrow guard may be alive
 /// across that. `project` runs under the borrow and hands back only the list's
-/// address and length; the list is rebuilt only between requests, so it stays
-/// put for the walk.
-unsafe fn visit_request_pairs<T: AsRef<[u8]>>(
-    project: impl FnOnce(&RequestData) -> (*const (T, T), usize),
+/// buffers by address, which stay put for the walk for the reason given there.
+unsafe fn visit_request_pairs(
+    project: impl FnOnce(&RequestData) -> RawPairs,
     cb: PairsCb,
     user_data: *mut c_void,
 ) {
-    let Some((ptr, len)) = REQUEST_DATA.with(|rd| {
+    let Some(pairs) = REQUEST_DATA.with(|rd| {
         let data = rd.borrow();
         data.active.then(|| project(&data))
     }) else {
         return;
     };
 
-    for (k, v) in std::slice::from_raw_parts(ptr, len) {
-        let (key_ptr, key_len) = value_ptr(k.as_ref());
-        let (val_ptr, val_len) = value_ptr(v.as_ref());
+    // SAFETY: the buffers are left alone for the length of the walk, as above.
+    for (k, v) in pairs.iter() {
+        let (key_ptr, key_len) = value_ptr(k);
+        let (val_ptr, val_len) = value_ptr(v);
         cb(key_ptr, key_len, val_ptr, val_len, user_data);
     }
 }
 
 unsafe extern "C" fn req_headers_all_cb(cb: PairsCb, user_data: *mut c_void) {
-    visit_request_pairs(
-        |data| (data.headers_raw.as_ptr(), data.headers_raw.len()),
-        cb,
-        user_data,
-    );
+    visit_request_pairs(|data| data.headers_raw.as_raw(), cb, user_data);
 }
 
 unsafe extern "C" fn req_cookies_all_cb(cb: PairsCb, user_data: *mut c_void) {
-    visit_request_pairs(
-        |data| (data.cookies_parsed.as_ptr(), data.cookies_parsed.len()),
-        cb,
-        user_data,
-    );
+    visit_request_pairs(|data| data.cookies_parsed.as_raw(), cb, user_data);
 }
 
 unsafe extern "C" fn req_query_params_all_cb(cb: PairsCb, user_data: *mut c_void) {
-    visit_request_pairs(
-        |data| (data.query_parsed.as_ptr(), data.query_parsed.len()),
-        cb,
-        user_data,
-    );
+    visit_request_pairs(|data| data.query_parsed.as_raw(), cb, user_data);
 }
 
 unsafe extern "C" fn req_body_cb(out_len: *mut usize) -> *const u8 {
@@ -6193,6 +6191,36 @@ pub fn register_request_accessors() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_raw_headers_leaves_out_what_http_cannot_carry() {
+        let mut raw = PackedPairs::default();
+        raw.push(b"X-Powered-By", b"PHP");
+        raw.push(b"Set-Cookie", b"a=1");
+        raw.push(b"bad name", b"dropped");
+        raw.push(b"X-Bad-Value", b"line\nbreak");
+        raw.push(b"Set-Cookie", b"b=2");
+
+        let headers = parse_raw_headers(&raw);
+
+        assert_eq!(headers.len(), 3);
+        assert_eq!(headers["x-powered-by"], "PHP");
+        let cookies: Vec<_> = headers.get_all("set-cookie").iter().collect();
+        assert_eq!(cookies, ["a=1", "b=2"]);
+    }
+
+    #[test]
+    fn parse_raw_headers_past_the_map_limit_does_not_panic() {
+        let mut raw = PackedPairs::default();
+        for i in 0..40_000 {
+            raw.push(format!("x-h{i}").as_bytes(), b"v");
+        }
+
+        let headers = parse_raw_headers(&raw);
+
+        assert!(headers.contains_key("x-h0"));
+        assert!(headers.len() < 40_000);
+    }
 
     #[test]
     fn error_type_str_known_types() {
@@ -6654,20 +6682,19 @@ mod tests {
         unsafe { bindings::oxphp_bridge_set_superglobals_enabled(true) };
 
         let req = ScriptRequest {
-            request_id: "test-denied".to_string(),
-            script_path: std::path::PathBuf::from("/var/www/html/_security/denied.php"),
+            request_id: "test-denied".into(),
+            script_path: std::path::Path::new("/var/www/html/_security/denied.php").into(),
             method: http::Method::GET,
             uri: http::Uri::from_static("/uploads/shell.php"),
-            query_string: String::new(),
             headers: http::HeaderMap::new(),
             body: Bytes::new(),
             remote_addr: "127.0.0.1:0".parse().unwrap(),
             document_root: Arc::new(std::path::PathBuf::from("/var/www/html")),
             path_policy: crate::path_guard::test_policy("/var/www/html"),
             cancel_state: Arc::new(crate::bridge::cancel::CancellationState::new()),
-            trace_id: String::new(),
-            span_id: String::new(),
-            parent_span_id: String::new(),
+            trace_id: Default::default(),
+            span_id: Default::default(),
+            parent_span_id: Default::default(),
             is_tls: false,
             version: http::Version::HTTP_11,
             path_info: None,
@@ -6692,8 +6719,8 @@ mod tests {
                 rd.borrow()
                     .server_vars
                     .iter()
-                    .find(|(k, _)| k.as_bytes() == key)
-                    .map(|(_, v)| String::from_utf8_lossy(v.as_bytes()).into_owned())
+                    .find(|(k, _)| *k == key)
+                    .map(|(_, v)| String::from_utf8_lossy(v).into_owned())
             })
         };
 
@@ -6718,6 +6745,79 @@ mod tests {
         // is thread-local and the harness runs each test on its own thread.
     }
 
+    /// A worker clears its slot only on exit, so what one oversized request left
+    /// has to go when the next request fills the slot.
+    #[test]
+    fn filling_the_slot_gives_back_what_an_oversized_request_left() {
+        use crate::php::request_buffers::{RETAINED_BYTES, RETAINED_PAIRS};
+
+        let over = RETAINED_BYTES + 1024;
+        let long = "x".repeat(over);
+        let long_path = format!("/{long}");
+        let long_query = format!("/?q={long}");
+        let many_cookies = "a=1;".repeat(RETAINED_PAIRS * 8);
+        for uri in [long_path.as_str(), long_query.as_str()] {
+            // SAFETY: writes one process-wide flag and touches nothing else.
+            unsafe { bindings::oxphp_bridge_set_superglobals_enabled(true) };
+            let mut req = queued_request(None).script;
+            req.uri = uri.parse().unwrap();
+            req.method = http::Method::from_bytes(long.as_bytes()).unwrap();
+            req.headers
+                .insert(header::HOST, HeaderValue::from_str(&long).unwrap());
+            req.headers.insert(
+                header::COOKIE,
+                HeaderValue::from_str(&format!("{many_cookies}b={long}")).unwrap(),
+            );
+            req.headers
+                .insert(header::CONTENT_TYPE, HeaderValue::from_str(&long).unwrap());
+            fill_request_data(&req);
+            let oversized = strings_held_in_the_slot()
+                .into_iter()
+                .filter(|(_, capacity)| *capacity > RETAINED_BYTES)
+                .count();
+            assert!(oversized >= 2, "the request did not fill the slot");
+
+            fill_request_data(&queued_request(None).script);
+
+            for (name, capacity) in strings_held_in_the_slot() {
+                assert!(capacity <= RETAINED_BYTES, "{name} kept {capacity} bytes");
+            }
+            REQUEST_DATA.with(|rd| {
+                let data = rd.borrow();
+                for (name, list) in [
+                    ("server_vars", &data.server_vars),
+                    ("headers_raw", &data.headers_raw),
+                    ("cookies_parsed", &data.cookies_parsed),
+                    ("query_parsed", &data.query_parsed),
+                ] {
+                    let (bytes, pairs) = list.capacities();
+                    assert!(bytes <= RETAINED_BYTES, "{name} kept {bytes} bytes");
+                    assert!(
+                        pairs <= RETAINED_PAIRS,
+                        "{name} kept room for {pairs} pairs"
+                    );
+                }
+            });
+        }
+    }
+
+    fn strings_held_in_the_slot() -> Vec<(&'static str, usize)> {
+        REQUEST_DATA.with(|rd| {
+            let data = rd.borrow();
+            vec![
+                ("method_str", data.method_str.capacity()),
+                ("path_str", data.path_str.capacity()),
+                ("full_uri_str", data.full_uri_str.capacity()),
+                ("host_str", data.host_str.capacity()),
+                ("query_string_raw", data.query_string_raw.capacity()),
+                ("cookie_string", data.cookie_string.capacity()),
+                ("method_cstr", data.method_cstr.capacity()),
+                ("query_string", data.query_string.capacity()),
+                ("content_type_string", data.content_type_string.capacity()),
+            ]
+        })
+    }
+
     /// Fill the request slot from a request carrying `lines`, each appended as
     /// a field line of its own the way hyper and h2 store them.
     fn fill_with_header_lines(lines: &[(http::HeaderName, &[u8])]) {
@@ -6738,8 +6838,8 @@ mod tests {
             rd.borrow()
                 .server_vars
                 .iter()
-                .filter(|(k, _)| k.as_bytes() == key.as_bytes())
-                .map(|(_, v)| v.to_str().unwrap().to_owned())
+                .filter(|(k, _)| *k == key.as_bytes())
+                .map(|(_, v)| std::str::from_utf8(v).unwrap().to_owned())
                 .collect()
         })
     }
@@ -6750,8 +6850,8 @@ mod tests {
             rd.borrow()
                 .headers_raw
                 .iter()
-                .filter(|(k, _)| k == name)
-                .map(|(_, v)| v.clone())
+                .filter(|(k, _)| *k == name.as_bytes())
+                .map(|(_, v)| std::str::from_utf8(v).unwrap().to_owned())
                 .collect()
         })
     }
@@ -6782,8 +6882,8 @@ mod tests {
         // picks the body parser and takes a multipart boundary from.
         REQUEST_DATA.with(|rd| {
             assert_eq!(
-                rd.borrow().content_type_string.as_deref(),
-                Some(c"text/plain")
+                rd.borrow().content_type_string.to_bytes(),
+                Some(&b"text/plain"[..])
             );
         });
     }
@@ -6833,7 +6933,7 @@ mod tests {
         let mut req = queued_request(None).script;
         req.headers
             .insert(header::COOKIE, HeaderValue::from_static("a=1"));
-        req.query_string = "q=1".to_string();
+        req.uri = http::Uri::from_static("/?q=1");
         // Not `set_request_data`: see `denied_path_server_var_keeps_leading_slash`.
         fill_request_data(&req);
 
@@ -6868,20 +6968,19 @@ mod tests {
         let (response_tx, _) = oneshot::channel();
         WorkerIncomingRequest {
             script: ScriptRequest {
-                request_id: "test-pickup".to_string(),
-                script_path: std::path::PathBuf::from("/var/www/html/index.php"),
+                request_id: "test-pickup".into(),
+                script_path: std::path::Path::new("/var/www/html/index.php").into(),
                 method: http::Method::GET,
                 uri: http::Uri::from_static("/"),
-                query_string: String::new(),
                 headers: http::HeaderMap::new(),
                 body: Bytes::new(),
                 remote_addr: "127.0.0.1:0".parse().unwrap(),
                 document_root: Arc::new(std::path::PathBuf::from("/var/www/html")),
                 path_policy: crate::path_guard::test_policy("/var/www/html"),
                 cancel_state: Arc::new(crate::bridge::cancel::CancellationState::new()),
-                trace_id: String::new(),
-                span_id: String::new(),
-                parent_span_id: String::new(),
+                trace_id: Default::default(),
+                span_id: Default::default(),
+                parent_span_id: Default::default(),
                 is_tls: false,
                 version: http::Version::HTTP_11,
                 path_info: None,

@@ -7,6 +7,7 @@ All notable changes to OxPHP are documented in this file.
 ### Changed
 
 - **The Docker guide and `examples/dockerfile/Dockerfile` install Xdebug with [PIE](https://github.com/php/pie) instead of `pecl`, which the official PHP images no longer ship from 8.6 on.** The `php-dev` stage copies `pie` from `ghcr.io/php/pie:1-bin` and needs `unzip` while it runs; the extension and its ini file are the same as before. A Dockerfile that still calls `pecl install` keeps working on PHP 8.4 and 8.5.
+- **A request now costs far fewer heap allocations on the server's side.** Counted on PHP 8.4 over keep-alive, a request to a PHP script went from about 130 allocations to 14, a cached static file from 24 to 8, a `304` on a cached file from 18 to 10, and an idle server from about 190 allocations per second to none. PHP's own request memory is not part of these figures. In CPU time this is worth about 7% on a cached static file and nothing measurable on a request that runs a script, and memory use does not change. To get there each PHP worker thread keeps its request and output buffers between requests: up to 32 KiB for each set of request strings and 64 KiB of output. A larger request still works, and its thread gives the extra memory back when the request ends or, in Worker mode, when the next one starts.
 
 ## [0.15.0] - 2026-11-04
 

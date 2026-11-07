@@ -2,7 +2,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
-use http::HeaderValue;
+use http::{HeaderName, HeaderValue};
 
 use crate::events::ResponseBuilding;
 use crate::events::{EventHandler, Priority, Propagation};
@@ -82,7 +82,8 @@ impl EventHandler<ResponseBuilding> for ServerHeaderHandler {
         headers.insert(http::header::DATE, get_date_header());
 
         if let Ok(hv) = HeaderValue::from_str(&event.request_id) {
-            headers.insert("x-request-id", hv);
+            // By its static name: a `&str` key is copied into the map.
+            headers.insert(HeaderName::from_static("x-request-id"), hv);
         }
 
         Propagation::Continue
@@ -105,7 +106,7 @@ mod tests {
     fn test_adds_server_header() {
         let handler = ServerHeaderHandler;
         let mut event = ResponseBuilding {
-            request_id: "abc123".to_string(),
+            request_id: "abc123".into(),
             response: Response::builder()
                 .status(200)
                 .body(full_body(Bytes::from_static(b"OK")))
@@ -131,7 +132,7 @@ mod tests {
     fn test_adds_request_id_header() {
         let handler = ServerHeaderHandler;
         let mut event = ResponseBuilding {
-            request_id: "deadbeef12345678".to_string(),
+            request_id: "deadbeef12345678".into(),
             response: Response::builder()
                 .status(200)
                 .body(full_body(Bytes::from_static(b"OK")))
@@ -156,7 +157,7 @@ mod tests {
     fn test_adds_date_header() {
         let handler = ServerHeaderHandler;
         let mut event = ResponseBuilding {
-            request_id: "abc123".to_string(),
+            request_id: "abc123".into(),
             response: Response::builder()
                 .status(200)
                 .body(full_body(Bytes::from_static(b"OK")))

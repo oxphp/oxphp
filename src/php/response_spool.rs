@@ -35,7 +35,8 @@ use std::task::{ready, Context, Poll};
 
 use bytes::Bytes;
 use futures_util::StreamExt;
-use http_body_util::{BodyExt, StreamBody};
+use http::header::{self, HeaderMap, HeaderValue};
+use http_body_util::StreamBody;
 use hyper::body::{Body, Frame, SizeHint};
 use tokio::io::{AsyncRead, ReadBuf};
 
@@ -287,13 +288,16 @@ impl Spooled {
 
 /// Body, headers and status that answer a refused response. The script's
 /// own headers go with its output: they describe a body that is not there.
-pub fn refusal() -> (Vec<u8>, Vec<(String, String)>, u16) {
+pub fn refusal() -> (Bytes, HeaderMap, u16) {
     (
-        b"503 Service Unavailable".to_vec(),
-        vec![
-            ("Content-Type".into(), "text/plain; charset=utf-8".into()),
-            ("Retry-After".into(), "5".into()),
-        ],
+        Bytes::from_static(b"503 Service Unavailable"),
+        HeaderMap::from_iter([
+            (
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/plain; charset=utf-8"),
+            ),
+            (header::RETRY_AFTER, HeaderValue::from_static("5")),
+        ]),
         503,
     )
 }
@@ -338,11 +342,10 @@ pub fn body(
                 .map(Ok),
         )
         .map(|chunk| chunk.map(Frame::data));
-    SpooledBody {
-        inner: BodyExt::boxed(StreamBody::new(frames)),
+    ResponseBody::boxed(SpooledBody {
+        inner: ResponseBody::boxed(StreamBody::new(frames)),
         remaining,
-    }
-    .boxed()
+    })
 }
 
 /// The spool file as the body reads it, with the file's share of the budget.
@@ -449,6 +452,7 @@ fn create_unlinked(dir: &Path) -> io::Result<File> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use http_body_util::BodyExt;
 
     fn test_config(buffer_bytes: usize, max_bytes: u64) -> (SpoolConfig, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();

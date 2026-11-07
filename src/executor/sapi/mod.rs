@@ -160,7 +160,7 @@ fn send_admitted(
     response_tx: tokio::sync::oneshot::Sender<ScriptResponse>,
     permit: tokio::sync::OwnedSemaphorePermit,
     deadline: Option<std::time::Instant>,
-) -> Result<(), ScriptResponse> {
+) -> Result<(), Box<ScriptResponse>> {
     let worker_request = WorkerRequest {
         script,
         response_tx,
@@ -180,7 +180,7 @@ fn send_admitted(
                  count and queue capacity have diverged; shedding this request"
             );
             metrics.request_admission_refused(ShedReason::QueueFull);
-            Err(shed_response(ShedReason::QueueFull))
+            Err(Box::new(shed_response(ShedReason::QueueFull)))
         }
         Err(TrySendError::Disconnected(_)) => {
             // No receiver left: every worker thread is gone, which is a dead
@@ -190,7 +190,7 @@ fn send_admitted(
             // only in the logs.
             tracing::error!("PHP worker queue has no receivers — the pool is gone");
             metrics.request_admission_refused(ShedReason::PoolUnavailable);
-            Err(shed_response(ShedReason::PoolUnavailable))
+            Err(Box::new(shed_response(ShedReason::PoolUnavailable)))
         }
     }
 }
@@ -217,7 +217,7 @@ fn shed_response(reason: ShedReason) -> ScriptResponse {
 fn shutting_down_response() -> ScriptResponse {
     ScriptResponse {
         status: 503,
-        headers: vec![
+        headers: http::HeaderMap::from_iter([
             (
                 HeaderName::from_static("content-type"),
                 HeaderValue::from_static("text/plain; charset=utf-8"),
@@ -226,7 +226,7 @@ fn shutting_down_response() -> ScriptResponse {
                 HeaderName::from_static("retry-after"),
                 HeaderValue::from_static("5"),
             ),
-        ],
+        ]),
         body: Bytes::from_static(b"Server is shutting down"),
         refused: true,
         shed_reason: Some(ShedReason::ShuttingDown),
@@ -238,10 +238,10 @@ fn shutting_down_response() -> ScriptResponse {
 fn pool_unavailable_response() -> ScriptResponse {
     ScriptResponse {
         status: 500,
-        headers: vec![(
+        headers: http::HeaderMap::from_iter([(
             HeaderName::from_static("content-type"),
             HeaderValue::from_static("text/plain; charset=utf-8"),
-        )],
+        )]),
         body: Bytes::from_static(b"PHP worker pool unavailable"),
         refused: true,
         shed_reason: Some(ShedReason::PoolUnavailable),
@@ -379,7 +379,7 @@ impl ScriptExecutor for SapiExecutor {
                         deadline,
                         wait_at_ceiling,
                     }),
-                    Err(resp) => ExecuteResult::Rejected(resp),
+                    Err(resp) => ExecuteResult::Rejected(*resp),
                 }
             }
             Err(reason) => reason,
@@ -456,13 +456,13 @@ impl ScriptExecutor for SapiExecutor {
                     if request.cancel_state.get() != crate::bridge::cancel::CancelReason::None {
                         return Err(ScriptResponse::client_closed());
                     }
-                    send_admitted(&tx, &metrics, request, response_tx, permit, Some(deadline)).map(
-                        |()| crate::executor::Queued {
+                    send_admitted(&tx, &metrics, request, response_tx, permit, Some(deadline))
+                        .map(|()| crate::executor::Queued {
                             rx: response_rx,
                             deadline: Some(deadline),
                             wait_at_ceiling,
-                        },
-                    )
+                        })
+                        .map_err(|resp| *resp)
                 }
                 Admitted::Shed(reason) => {
                     // The queue deadline's reasoning, for the other budget:
@@ -1179,23 +1179,22 @@ mod tests {
 
     fn make_request() -> ScriptRequest {
         use http::{HeaderMap, Method, Uri};
-        use std::path::PathBuf;
+        use std::path::{Path, PathBuf};
 
         ScriptRequest {
-            request_id: String::new(),
-            script_path: PathBuf::from("/var/www/public/index.php"),
+            request_id: Arc::default(),
+            script_path: Path::new("/var/www/public/index.php").into(),
             method: Method::GET,
             uri: Uri::from_static("/"),
-            query_string: String::new(),
             headers: HeaderMap::new(),
             body: Bytes::new(),
             remote_addr: "127.0.0.1:0".parse().unwrap(),
             document_root: Arc::new(PathBuf::from("/var/www/public")),
             path_policy: crate::path_guard::test_policy("/var/www/public"),
             cancel_state: std::sync::Arc::new(crate::bridge::cancel::CancellationState::new()),
-            trace_id: String::new(),
-            span_id: String::new(),
-            parent_span_id: String::new(),
+            trace_id: Default::default(),
+            span_id: Default::default(),
+            parent_span_id: Default::default(),
             is_tls: false,
             version: http::Version::HTTP_11,
             path_info: None,

@@ -1,10 +1,12 @@
+use std::borrow::Cow;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use http::{HeaderName, HeaderValue, Method, StatusCode, Uri};
 
 use super::cookies::{find_raw_cookie, CookieOptions, PluginCookies, PluginSetCookie};
-use crate::events::Priority;
+use crate::events::{MetadataEntry, Priority};
 use crate::types::ResponseBody;
 
 // ─── Blocked headers ─────────────────────────────────────────
@@ -28,7 +30,7 @@ pub struct PluginRequestView<'a> {
     pub request_id: &'a str,
     headers: &'a http::HeaderMap,
     cookies: PluginCookies,
-    metadata: &'a [(String, String)],
+    metadata: &'a [MetadataEntry],
 }
 
 impl<'a> PluginRequestView<'a> {
@@ -39,7 +41,7 @@ impl<'a> PluginRequestView<'a> {
         request_id: &'a str,
         headers: &'a http::HeaderMap,
         cookies: PluginCookies,
-        metadata: &'a [(String, String)],
+        metadata: &'a [MetadataEntry],
     ) -> Self {
         Self {
             method,
@@ -86,13 +88,13 @@ impl<'a> PluginRequestView<'a> {
         self.metadata
             .iter()
             .find(|(k, _)| k == key)
-            .map(|(_, v)| v.as_str())
+            .map(|(_, v)| &**v)
     }
 }
 
 /// Actions a plugin can take during request processing.
 pub struct PluginRequestActions {
-    pub(crate) metadata: Vec<(String, String)>,
+    pub(crate) metadata: Vec<MetadataEntry>,
     pub(crate) early_response: Option<http::Response<ResponseBody>>,
     pub(crate) request_id_override: Option<String>,
     pub(crate) profiling_mode: Option<crate::profiling::ProfilingMode>,
@@ -109,7 +111,7 @@ impl PluginRequestActions {
     }
 
     /// Add metadata (visible to other plugins and core via event metadata).
-    pub fn set_metadata(&mut self, key: impl Into<String>, value: impl Into<String>) {
+    pub fn set_metadata(&mut self, key: impl Into<Cow<'static, str>>, value: impl Into<Arc<str>>) {
         self.metadata.push((key.into(), value.into()));
     }
 
@@ -141,7 +143,7 @@ pub struct PluginResponseView<'a> {
     pub status: StatusCode,
     pub request_id: &'a str,
     headers: &'a http::HeaderMap,
-    metadata: &'a [(String, String)],
+    metadata: &'a [MetadataEntry],
 }
 
 impl<'a> PluginResponseView<'a> {
@@ -149,7 +151,7 @@ impl<'a> PluginResponseView<'a> {
         status: StatusCode,
         request_id: &'a str,
         headers: &'a http::HeaderMap,
-        metadata: &'a [(String, String)],
+        metadata: &'a [MetadataEntry],
     ) -> Self {
         Self {
             status,
@@ -168,7 +170,7 @@ impl<'a> PluginResponseView<'a> {
         self.metadata
             .iter()
             .find(|(k, _)| k == key)
-            .map(|(_, v)| v.as_str())
+            .map(|(_, v)| &**v)
     }
 }
 
@@ -224,7 +226,7 @@ pub struct PluginCompleteView<'a> {
     pub remote_addr: SocketAddr,
     pub request_body_size: u64,
     pub response_size: u64,
-    metadata: &'a [(String, String)],
+    metadata: &'a [MetadataEntry],
     /// PHP errors captured during script execution (empty for static files).
     pub php_errors: &'a [crate::types::PhpScriptError],
     /// Finalized span tree for the request. `None` when APM is disabled or no spans.
@@ -250,7 +252,7 @@ impl<'a> PluginCompleteView<'a> {
         remote_addr: SocketAddr,
         request_body_size: u64,
         response_size: u64,
-        metadata: &'a [(String, String)],
+        metadata: &'a [MetadataEntry],
         php_errors: &'a [crate::types::PhpScriptError],
         profile_tree: Option<&'a std::sync::Arc<crate::profiling::SpanTree>>,
         queue_wait_us: Option<u64>,
@@ -282,7 +284,7 @@ impl<'a> PluginCompleteView<'a> {
         self.metadata
             .iter()
             .find(|(k, _)| k == key)
-            .map(|(_, v)| v.as_str())
+            .map(|(_, v)| &**v)
     }
 
     /// The request's `User-Agent` as text — the first field line where there
@@ -431,10 +433,8 @@ mod tests {
         let mut actions = PluginRequestActions::new();
         actions.set_metadata("user_id", "42");
         assert_eq!(actions.metadata.len(), 1);
-        assert_eq!(
-            actions.metadata[0],
-            ("user_id".to_string(), "42".to_string())
-        );
+        assert_eq!(actions.metadata[0].0, "user_id");
+        assert_eq!(&*actions.metadata[0].1, "42");
     }
 
     #[test]
@@ -507,8 +507,8 @@ mod tests {
         let addr: SocketAddr = "127.0.0.1:8080".parse().unwrap();
         let uri: Uri = "/test".parse().unwrap();
         let metadata = vec![
-            ("trace_id".to_string(), "abc123".to_string()),
-            ("span_id".to_string(), "def456".to_string()),
+            ("trace_id".into(), "abc123".into()),
+            ("span_id".into(), "def456".into()),
         ];
         let view = PluginRequestView::new(
             &Method::GET,

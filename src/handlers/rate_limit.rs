@@ -53,7 +53,7 @@ mod tests {
         RequestReceived {
             parts,
             remote_addr: SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 8080),
-            request_id: "test123".to_string(),
+            request_id: "test123".into(),
             early_response: None,
             metadata: Vec::new(),
             profiling_mode: None,

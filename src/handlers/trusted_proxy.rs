@@ -22,10 +22,6 @@ impl EventHandler<RequestReceived> for TrustedProxyHandler {
             return Propagation::Continue;
         }
 
-        event
-            .metadata
-            .push(("peer_addr".into(), event.remote_addr.to_string()));
-
         // Collect all Forwarded header values (RFC 7230 §3.2.2: may span multiple lines).
         // A line that is not readable text counts as an empty one: a hop
         // without an address, which the walk does not get past. It still
@@ -58,35 +54,25 @@ impl EventHandler<RequestReceived> for TrustedProxyHandler {
             if let Some(proto) = entries.first().and_then(|e| e.proto) {
                 event
                     .metadata
-                    .push(("forwarded_proto".into(), proto.to_string()));
+                    .push(("forwarded_proto".into(), proto.into()));
             }
 
             if let Some(host) = entries.first().and_then(|e| e.host) {
-                event
-                    .metadata
-                    .push(("forwarded_host".into(), host.to_string()));
+                event.metadata.push(("forwarded_host".into(), host.into()));
             }
         } else {
-            // Collect all X-Forwarded-For values (may span multiple header
-            // lines); an unreadable line counts as an empty one, as above.
-            let xff_values: Vec<&str> = event
+            // All X-Forwarded-For values (may span multiple header lines); an
+            // unreadable line counts as an empty one, as above. A node may
+            // carry the source port the way a `Forwarded` node does (`ip:port`,
+            // `[ipv6]:port`); some load balancers write it.
+            chain = event
                 .parts
                 .headers
                 .get_all("x-forwarded-for")
                 .iter()
-                .map(|v| v.to_str().unwrap_or(""))
+                .flat_map(|v| v.to_str().unwrap_or("").split(','))
+                .map(|s| parse_forwarded_for(s.trim()))
                 .collect();
-            // A node may carry the source port the way a `Forwarded` node does
-            // (`ip:port`, `[ipv6]:port`); some load balancers write it.
-            chain = if xff_values.is_empty() {
-                Chain::default()
-            } else {
-                xff_values
-                    .join(", ")
-                    .split(',')
-                    .map(|s| parse_forwarded_for(s.trim()))
-                    .collect()
-            };
 
             if let Some(proto) = event
                 .parts
@@ -96,7 +82,7 @@ impl EventHandler<RequestReceived> for TrustedProxyHandler {
             {
                 event
                     .metadata
-                    .push(("forwarded_proto".into(), proto.trim().to_string()));
+                    .push(("forwarded_proto".into(), proto.trim().into()));
             }
 
             if let Some(host) = event
@@ -107,7 +93,7 @@ impl EventHandler<RequestReceived> for TrustedProxyHandler {
             {
                 event
                     .metadata
-                    .push(("forwarded_host".into(), host.trim().to_string()));
+                    .push(("forwarded_host".into(), host.trim().into()));
             }
 
             // X-Forwarded-Port: the public port the proxy listens on. A single
@@ -118,12 +104,10 @@ impl EventHandler<RequestReceived> for TrustedProxyHandler {
                 .headers
                 .get("x-forwarded-port")
                 .and_then(|v| v.to_str().ok())
-                .and_then(|s| s.trim().parse::<u16>().ok())
-                .filter(|p| *p > 0)
+                .map(str::trim)
+                .filter(|s| s.parse::<u16>().is_ok_and(|p| p > 0))
             {
-                event
-                    .metadata
-                    .push(("forwarded_port".into(), port.to_string()));
+                event.metadata.push(("forwarded_port".into(), port.into()));
             }
         }
 
@@ -193,8 +177,9 @@ impl TrustedProxyHandler {
 struct Chain {
     /// The hops right of the last one whose address is missing or did not
     /// parse, leftmost first — as far as a walk from the peer can vouch for.
-    /// What lies left of such a hop may be only what the client sent.
-    hops: Vec<(IpAddr, Option<u16>)>,
+    /// What lies left of such a hop may be only what the client sent. Inline
+    /// room covers the usual CDN, balancer and ingress without an allocation.
+    hops: smallvec::SmallVec<[(IpAddr, Option<u16>); 4]>,
 }
 
 impl FromIterator<Option<(IpAddr, Option<u16>)>> for Chain {
@@ -312,7 +297,7 @@ mod tests {
         RequestReceived {
             parts,
             remote_addr,
-            request_id: "test123".to_string(),
+            request_id: "test123".into(),
             early_response: None,
             metadata: Vec::new(),
             profiling_mode: None,
@@ -528,7 +513,6 @@ mod tests {
         assert_eq!(result, Propagation::Continue);
         // remote_addr must be unchanged
         assert_eq!(event.remote_addr, original_addr);
-        // metadata must be empty (no peer_addr saved)
         assert!(event.metadata.is_empty());
     }
 
@@ -565,13 +549,13 @@ mod tests {
             .metadata
             .iter()
             .find(|(k, _)| k == "forwarded_proto")
-            .map(|(_, v)| v.as_str());
+            .map(|(_, v)| &**v);
         assert_eq!(proto, Some("https"));
         let host = event
             .metadata
             .iter()
             .find(|(k, _)| k == "forwarded_host")
-            .map(|(_, v)| v.as_str());
+            .map(|(_, v)| &**v);
         assert_eq!(host, Some("example.com"));
     }
 
@@ -591,13 +575,13 @@ mod tests {
             .metadata
             .iter()
             .find(|(k, _)| k == "forwarded_proto")
-            .map(|(_, v)| v.as_str());
+            .map(|(_, v)| &**v);
         assert_eq!(proto, Some("https"));
         let host = event
             .metadata
             .iter()
             .find(|(k, _)| k == "forwarded_host")
-            .map(|(_, v)| v.as_str());
+            .map(|(_, v)| &**v);
         assert_eq!(host, Some("example.com"));
     }
 
@@ -622,7 +606,7 @@ mod tests {
             .metadata
             .iter()
             .find(|(k, _)| k == "forwarded_proto")
-            .map(|(_, v)| v.as_str());
+            .map(|(_, v)| &**v);
         assert_eq!(proto, Some("https"));
     }
 
@@ -631,7 +615,7 @@ mod tests {
             .metadata
             .iter()
             .find(|(k, _)| k == key)
-            .map(|(_, v)| v.as_str())
+            .map(|(_, v)| &**v)
     }
 
     #[test]
@@ -768,20 +752,12 @@ mod tests {
     }
 
     #[test]
-    fn test_handler_no_headers_preserves_peer_addr_in_metadata() {
+    fn test_handler_no_headers_keeps_the_peer_address() {
         let handler = TrustedProxyHandler::new(make_config("10.0.0.0/8"));
         let mut event = make_event_with_headers(trusted_addr(), vec![]);
         let original_addr = event.remote_addr;
         handler.handle(&mut event);
-        // remote_addr unchanged (no forwarding headers)
         assert_eq!(event.remote_addr, original_addr);
-        // peer_addr must be saved in metadata
-        let peer = event
-            .metadata
-            .iter()
-            .find(|(k, _)| k == "peer_addr")
-            .map(|(_, v)| v.as_str());
-        assert_eq!(peer, Some(original_addr.to_string().as_str()));
     }
 
     // ── Cloudflare ───────────────────────────────────────────────────────────
@@ -1026,14 +1002,14 @@ mod tests {
         let b = (ip("192.0.2.2").0, Some(80));
         let c = ip("192.0.2.3");
         let chain: Chain = [Some(a), None, Some(b), Some(c)].into_iter().collect();
-        assert_eq!(chain.hops, [b, c]);
+        assert_eq!(chain.hops[..], [b, c]);
 
         let chain: Chain = [Some(a), Some(b), None].into_iter().collect();
         assert!(chain.hops.is_empty());
 
         // Hops that do not parse take no room, however many there are.
         let chain: Chain = std::iter::repeat_n(None, 10_000).collect();
-        assert_eq!(chain.hops.capacity(), 0);
+        assert!(!chain.hops.spilled());
     }
 
     #[test]

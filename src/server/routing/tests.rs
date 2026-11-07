@@ -765,7 +765,7 @@ async fn test_entry_only_sends_every_uri_to_the_php_entry() {
         for uri in ENTRY_ONLY_URIS {
             let result = rc.resolve_request(uri, &cache).await;
             assert!(
-                matches!(&*result, RouteResult::Execute(p, None, None) if *p == entry),
+                matches!(&*result, RouteResult::Execute(p, None, None) if **p == *entry),
                 "{uri} (worker mode {worker_mode}): {result:?}"
             );
         }
@@ -810,7 +810,7 @@ async fn test_entry_only_reads_the_extension_of_a_non_utf8_entry_name() {
         make_entry_only_config(dir.path(), OsStr::from_bytes(b"caf\xe9.PHP"), false, &[]);
     let result = rc.resolve_request("/", &cache).await;
     assert!(
-        matches!(&*result, RouteResult::Execute(p, None, None) if *p == entry),
+        matches!(&*result, RouteResult::Execute(p, None, None) if **p == *entry),
         "{result:?}"
     );
 }
@@ -2058,7 +2058,7 @@ mod deny_file_integration {
         ] {
             match &*rc.resolve_request(uri, &cache).await {
                 RouteResult::Execute(path, None, None) => {
-                    assert_eq!(path, &dir.path().join("index.php"), "{uri}")
+                    assert_eq!(&**path, dir.path().join("index.php"), "{uri}")
                 }
                 other => panic!("{uri}: expected the front controller, got {other:?}"),
             }
@@ -2113,7 +2113,7 @@ mod deny_file_integration {
         );
         match &*rc.resolve_request("/storage/invoice.pdf", &cache).await {
             RouteResult::Execute(path, None, None) => {
-                assert_eq!(path, &dir.path().join("worker.php"))
+                assert_eq!(&**path, dir.path().join("worker.php"))
             }
             other => panic!("expected the worker entry, got {other:?}"),
         }

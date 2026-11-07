@@ -164,7 +164,7 @@ use super::sapi::{ResponseBuffers, RESPONSE};
 #[allow(dead_code)] // Fields used in tests
 pub(crate) struct ResponseBuffers {
     pub(crate) output: Vec<u8>,
-    pub(crate) headers: Vec<(String, String)>,
+    pub(crate) headers: super::request_buffers::PackedPairs,
     pub(crate) status_code: u16,
     pub(crate) spooled: super::response_spool::Spooled,
 }
@@ -363,6 +363,12 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
+    fn fiber_header(value: &[u8]) -> crate::php::request_buffers::PackedPairs {
+        let mut headers = crate::php::request_buffers::PackedPairs::default();
+        headers.push(b"X-Fiber", value);
+        headers
+    }
+
     // ── Timer tests ──────────────────────────────────────────
 
     #[test]
@@ -503,7 +509,7 @@ mod tests {
         let slot1 = FiberTlsSlot {
             response: ResponseBuffers {
                 output: b"fiber1-output".to_vec(),
-                headers: vec![("X-Fiber".to_string(), "1".to_string())],
+                headers: fiber_header(b"1"),
                 status_code: 200,
                 ..Default::default()
             },
@@ -536,7 +542,7 @@ mod tests {
         let slot2 = FiberTlsSlot {
             response: ResponseBuffers {
                 output: b"fiber2-output".to_vec(),
-                headers: vec![("X-Fiber".to_string(), "2".to_string())],
+                headers: fiber_header(b"2"),
                 status_code: 404,
                 ..Default::default()
             },
@@ -574,7 +580,7 @@ mod tests {
             assert_eq!(slot.response.output, b"fiber1-output");
             assert_eq!(slot.response.status_code, 200);
             assert_eq!(slot.response.headers.len(), 1);
-            assert_eq!(slot.response.headers[0].1, "1");
+            assert_eq!(slot.response.headers.iter().next().unwrap().1, b"1");
         });
 
         // Restore fiber 2 — verify its data.
@@ -585,7 +591,7 @@ mod tests {
                 .expect("fiber 2 slot should exist");
             assert_eq!(slot.response.output, b"fiber2-output");
             assert_eq!(slot.response.status_code, 404);
-            assert_eq!(slot.response.headers[0].1, "2");
+            assert_eq!(slot.response.headers.iter().next().unwrap().1, b"2");
         });
 
         // Both slots should now be empty.
@@ -601,7 +607,7 @@ mod tests {
         let slot = FiberTlsSlot {
             response: ResponseBuffers {
                 output: b"temp".to_vec(),
-                headers: Vec::new(),
+                headers: Default::default(),
                 status_code: 200,
                 ..Default::default()
             },

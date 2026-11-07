@@ -4,7 +4,7 @@
 
 use std::ffi::CString;
 use std::os::fd::IntoRawFd;
-use std::os::unix::ffi::OsStrExt;
+use std::os::unix::ffi::OsStringExt;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -149,10 +149,10 @@ fn answer_departed_client(wr: WorkerRequest, expired: bool) {
 fn refuse_script(path: &Path, error: ScriptOpenError) -> ScriptResponse {
     let not_found = || ScriptResponse {
         status: 404,
-        headers: vec![(
+        headers: http::HeaderMap::from_iter([(
             http::header::CONTENT_TYPE,
             http::HeaderValue::from_static("text/plain; charset=utf-8"),
-        )],
+        )]),
         body: Bytes::from_static(b"404 Not Found"),
         ..Default::default()
     };
@@ -494,7 +494,8 @@ fn execute_request(
     // the process instead of reaching the catch_unwind in worker_thread.
     let request_open = crate::executor::AbortOnUnwind("with a PHP request open");
 
-    let opened_path = CString::new(verified.opened_path.as_os_str().as_bytes()).unwrap_or_default();
+    let opened_path =
+        CString::new(verified.opened_path.into_os_string().into_vec()).unwrap_or_default();
 
     // From here the handle owns the descriptor (as a PHP stream);
     // zend_destroy_file_handle() below closes it.
@@ -558,12 +559,7 @@ fn execute_request(
     note_if_abandoned(request);
 
     // Single batched TLS lookup for all response data.
-    let (raw_output, raw_headers, status, spool) = sapi::take_response();
-    let body = Bytes::from(raw_output);
-
-    // Parse header strings into typed HeaderName/HeaderValue on the worker thread,
-    // so the single-threaded Tokio runtime doesn't pay the parsing cost.
-    let headers = sapi::parse_raw_headers(raw_headers);
+    let (body, headers, status, spool) = sapi::take_response();
 
     // Finalize the profiling context if any mode-aware plugin is compiled in —
     // mirrors the reset() guard above. Without this, `plugin-profiler` alone
@@ -591,7 +587,8 @@ fn execute_request(
             #[cfg(feature = "plugin-profiler")]
             crate::profiling::profiler_rshutdown_flush();
 
-            let tree = crate::profiling::PROFILING_CONTEXT.with(|ctx| ctx.borrow_mut().finalize());
+            let tree = crate::profiling::PROFILING_CONTEXT
+                .with(|ctx| ctx.borrow_mut().finalize_nonempty());
 
             // Reset the C-side mode so the next request on this worker
             // thread starts cleanly. Also clears the sticky was-active
@@ -599,11 +596,7 @@ fn execute_request(
             #[cfg(feature = "plugin-profiler")]
             crate::profiling::set_profiling_mode(crate::profiling::ProfilingMode::Off);
 
-            if tree.is_empty() {
-                None
-            } else {
-                Some(tree)
-            }
+            tree
         } else {
             None
         }

@@ -66,7 +66,7 @@ fn metadata<'a>(event: &'a RequestReceived, key: &str) -> Option<&'a str> {
         .metadata
         .iter()
         .find(|(k, _)| k == key)
-        .map(|(_, v)| v.as_str())
+        .map(|(_, v)| &**v)
 }
 
 fn init_profiler_dispatcher() -> (PluginManager, EventDispatcher) {
@@ -91,9 +91,10 @@ impl EventHandler<RequestReceived> for RequestIdReplacer {
         // ends up replaced either way, and only this says the replacement
         // happened *after* the profiler saw the request.
         let profiler_ran = event.metadata.iter().any(|(k, _)| k == "profiler.source");
-        event
-            .metadata
-            .push(("test.profiler_ran_first".into(), profiler_ran.to_string()));
+        event.metadata.push((
+            "test.profiler_ran_first".into(),
+            profiler_ran.to_string().into(),
+        ));
         event.request_id = "4bf92f3577b34da6-00f067aa".into();
         Propagation::Continue
     }
@@ -198,7 +199,7 @@ fn a_later_handler_still_gets_to_change_the_id_the_run_will_be_filed_under() {
         "the profiler should decide before a handler that rewrites the id"
     );
     assert_eq!(
-        event.request_id, "4bf92f3577b34da6-00f067aa",
+        &*event.request_id, "4bf92f3577b34da6-00f067aa",
         "and that handler should still own the final request id"
     );
 

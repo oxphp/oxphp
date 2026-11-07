@@ -79,7 +79,7 @@ pub enum RouteResult {
     /// `Arc` keeps the variant 8-byte-tagged in the common (None) case and
     /// turns the rare-path clone into one atomic increment.
     Execute(
-        PathBuf,
+        Arc<Path>,
         Option<String>,
         Option<Arc<crate::config::DeniedMeta>>,
     ),
@@ -286,7 +286,7 @@ impl RouteConfig {
             .extension()
             .is_some_and(|e| e.eq_ignore_ascii_case("php"))
         {
-            RouteResult::Execute(entry, None, None)
+            RouteResult::Execute(entry.into(), None, None)
         } else {
             RouteResult::Serve(entry)
         };
@@ -338,7 +338,7 @@ impl RouteConfig {
     /// request that does not resolve to a static file is dispatched to this
     /// PHP file.
     pub fn set_worker_route(&mut self, path: PathBuf) {
-        self.worker_route = Some(RouteResult::Execute(path, None, None));
+        self.worker_route = Some(RouteResult::Execute(path.into(), None, None));
     }
 
     /// Apply `PHP_DENY_PATHS` to a candidate path and build the deny route on
@@ -544,12 +544,16 @@ impl RouteConfig {
         // Symlink-escape protection: the resolved path must live inside
         // the canonical document root. The worker file is an admin-configured
         // trusted path that may sit outside DOCUMENT_ROOT — skip it.
-        let result = match &result {
-            RouteResult::Serve(path) | RouteResult::Execute(path, _, _) => {
-                let is_worker = self
-                    .worker_route
-                    .as_ref()
-                    .is_some_and(|wr| matches!(wr, RouteResult::Execute(wf, _, _) if wf == path));
+        let resolved: Option<&Path> = match &result {
+            RouteResult::Serve(path) => Some(path),
+            RouteResult::Execute(path, _, _) => Some(path),
+            RouteResult::NotFound | RouteResult::Denied { .. } => None,
+        };
+        let result = match resolved {
+            Some(path) => {
+                let is_worker = self.worker_route.as_ref().is_some_and(
+                    |wr| matches!(wr, RouteResult::Execute(wf, _, _) if **wf == *path),
+                );
                 if !is_worker && !self.validate_path(path, file_cache).await {
                     tracing::warn!(
                         path = %path.display(),
@@ -560,7 +564,7 @@ impl RouteConfig {
                     result
                 }
             }
-            RouteResult::NotFound | RouteResult::Denied { .. } => result,
+            None => result,
         };
 
         let arc = Arc::new(result);
@@ -643,7 +647,7 @@ fn denied_route(
             path,
             uri: script_uri,
         } => RouteResult::Execute(
-            path.clone(),
+            path.as_path().into(),
             // path_info=None: SAPI reads the original URI from
             // `denied_meta.path` instead — avoids a duplicate
             // String allocation on the fallback path.

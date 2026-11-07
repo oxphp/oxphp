@@ -1,12 +1,17 @@
 use std::borrow::Cow;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use http::request::Parts;
-use http::{HeaderValue, Method, Response};
+use http::{HeaderValue, Method, Response, Uri};
 
 use super::Event;
 use crate::types::ResponseBody;
+
+/// One entry of a request's metadata. Keys are nearly always literals and the
+/// values go on to the script request, so neither needs a copy per request.
+pub type MetadataEntry = (Cow<'static, str>, Arc<str>);
 
 // ── Server lifecycle ──
 
@@ -82,11 +87,11 @@ impl Event for ConnectionClosed {
 pub struct RequestReceived {
     pub parts: Parts,
     pub remote_addr: SocketAddr,
-    pub request_id: String,
+    pub request_id: Arc<str>,
     /// Set by a handler to short-circuit the pipeline with an early response.
     pub early_response: Option<Response<ResponseBody>>,
     /// Plugin metadata accumulated from plugin handlers.
-    pub metadata: Vec<(String, String)>,
+    pub metadata: Vec<MetadataEntry>,
     /// Profiling mode selected by a plugin (e.g. `ox_profiler`), drained into
     /// `ScriptRequest.profiling_mode` before worker dispatch. `None` means no
     /// plugin asked for a mode — the executor falls back to `ApmOnly` when
@@ -114,9 +119,11 @@ impl Event for RouteResolved {
 
 /// Fired after the full request is complete (response sent).
 pub struct RequestComplete {
-    pub request_id: String,
+    pub request_id: Arc<str>,
     pub method: Method,
-    pub path: String,
+    /// The request target. Its bytes are shared with the request, where a copy
+    /// of just the path would be an allocation on every request.
+    pub uri: Uri,
     pub status: u16,
     pub duration: Duration,
     pub remote_addr: SocketAddr,
@@ -126,7 +133,7 @@ pub struct RequestComplete {
     pub response_size: u64,
     /// Plugin metadata propagated through the event pipeline.
     /// Used for extensible string key-value data (trace context, plugin-specific).
-    pub metadata: Vec<(String, String)>,
+    pub metadata: Vec<MetadataEntry>,
     /// PHP errors captured during script execution (empty for static files).
     pub php_errors: Vec<crate::types::PhpScriptError>,
     /// Finalized span tree for the request. `None` when APM is disabled or no spans.
@@ -233,10 +240,10 @@ impl Event for ScriptExecutionComplete {
 /// Fired while building the HTTP response, before sending.
 /// Handlers can modify the response (e.g., add headers, replace error page body).
 pub struct ResponseBuilding {
-    pub request_id: String,
+    pub request_id: Arc<str>,
     pub response: Response<ResponseBody>,
     /// Plugin metadata propagated through the event pipeline.
-    pub metadata: Vec<(String, String)>,
+    pub metadata: Vec<MetadataEntry>,
 }
 
 impl Event for ResponseBuilding {

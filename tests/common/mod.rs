@@ -93,7 +93,7 @@ pub async fn start_test_server_with_executor(
         512 * 1024, // max_query_body: 512 KB
         entry_file.map(|name| document_root.join(name)),
         false, // worker_mode_enabled
-        Some("public, max-age=86400".to_string()),
+        Some(http::HeaderValue::from_static("public, max-age=86400")),
         false,                            // static_revalidate
         Arc::new(AtomicBool::new(false)), // shutdown flag
     ));

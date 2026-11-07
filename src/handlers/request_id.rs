@@ -1,6 +1,6 @@
-use std::fmt::Write;
+use std::io::Write;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 use std::time::SystemTime;
 
 use crate::events::{EventHandler, Priority, Propagation, RequestReceived};
@@ -32,7 +32,7 @@ fn process_id() -> u16 {
 ///
 /// The timestamp is cached in an atomic and refreshed every 256 requests
 /// to avoid calling `SystemTime::now()` on every request.
-fn generate_request_id() -> String {
+fn generate_request_id() -> Arc<str> {
     let counter = REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed) as u32;
 
     // Refresh timestamp every 256 requests (amortized syscall cost)
@@ -48,9 +48,9 @@ fn generate_request_id() -> String {
     };
 
     let pid = process_id();
-    let mut id = String::with_capacity(20);
-    write!(id, "{ts:08x}{pid:04x}{counter:08x}").unwrap();
-    id
+    let mut id = [0u8; 20];
+    write!(&mut id[..], "{ts:08x}{pid:04x}{counter:08x}").unwrap();
+    std::str::from_utf8(&id).unwrap().into()
 }
 
 /// Check that a request ID contains only safe characters and is reasonable length.
@@ -74,7 +74,7 @@ impl EventHandler<RequestReceived> for RequestIdGenerator {
             .get("x-request-id")
             .and_then(|v: &http::HeaderValue| v.to_str().ok())
             .filter(|s| is_valid_request_id(s))
-            .map(|s: &str| s.to_string())
+            .map(Arc::from)
             .unwrap_or_else(generate_request_id);
 
         event.request_id = id;
@@ -104,7 +104,7 @@ mod tests {
         RequestReceived {
             parts,
             remote_addr: SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 8080),
-            request_id: String::new(),
+            request_id: Arc::default(),
             early_response: None,
             metadata: Vec::new(),
             profiling_mode: None,
@@ -131,13 +131,13 @@ mod tests {
             .insert("x-request-id", HeaderValue::from_static("my-custom-id"));
 
         handler.handle(&mut event);
-        assert_eq!(event.request_id, "my-custom-id");
+        assert_eq!(&*event.request_id, "my-custom-id");
     }
 
     #[test]
     fn test_unique_ids() {
         let handler = RequestIdGenerator;
-        let ids: Vec<String> = (0..100)
+        let ids: Vec<Arc<str>> = (0..100)
             .map(|_| {
                 let mut event = make_event();
                 handler.handle(&mut event);
@@ -167,7 +167,7 @@ mod tests {
 
         handler.handle(&mut event);
         // Should generate a new ID, not use the invalid one
-        assert_ne!(event.request_id, "has spaces");
+        assert_ne!(&*event.request_id, "has spaces");
         assert_eq!(event.request_id.len(), 20);
     }
 
@@ -195,7 +195,7 @@ mod tests {
             .insert("x-request-id", HeaderValue::from_str(&long_id).unwrap());
 
         handler.handle(&mut event);
-        assert_ne!(event.request_id, long_id);
+        assert_ne!(&*event.request_id, long_id);
         assert_eq!(event.request_id.len(), 20);
     }
 
