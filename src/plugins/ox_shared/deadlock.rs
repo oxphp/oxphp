@@ -129,6 +129,12 @@ pub fn start_detector(level: LockDiagnosticsLevel, interval: Duration) {
 }
 
 fn run_cycle_scan(level: LockDiagnosticsLevel) {
+    // Iterating a DashMap allocates per shard even when it is empty, and this
+    // runs on a timer for applications that never take a shared lock.
+    if graph().is_empty() {
+        return;
+    }
+
     // Snapshot the wait-for graph into plain HashMaps for DFS.
     let mut waits_on: HashMap<ThreadId, Vec<SharedId>> = HashMap::new();
     let mut held_by: HashMap<SharedId, ThreadId> = HashMap::new();

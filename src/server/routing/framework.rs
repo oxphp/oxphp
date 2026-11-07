@@ -1,4 +1,5 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::sync::Arc;
 
 use super::{ResolveCtx, RouteResult};
 
@@ -24,7 +25,7 @@ use super::{ResolveCtx, RouteResult};
 ///   the entry file with a trailing segment (`/index.php/extra` → `/extra`);
 ///   for app routes the original path is exposed via `REQUEST_URI`.
 pub(crate) struct FrameworkRouter {
-    index_file_path: PathBuf,
+    index_file_path: Arc<Path>,
     index_file_key: String,
     /// Front-controller filename, e.g. `index.php` (no leading slash, matching
     /// the leading-slash-free sanitized request path). Used to split honest CGI
@@ -37,7 +38,7 @@ impl FrameworkRouter {
         let index_file_path = document_root.join(index_file);
         let index_file_key = index_file_path.to_string_lossy().into_owned();
         Self {
-            index_file_path,
+            index_file_path: index_file_path.into(),
             index_file_key,
             entry_segment: index_file.to_string(),
         }

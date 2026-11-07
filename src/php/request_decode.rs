@@ -18,6 +18,8 @@ use std::os::raw::c_char;
 use http::header::{CONTENT_LENGTH, CONTENT_TYPE, HOST};
 use http::{HeaderMap, HeaderName};
 
+use crate::php::request_buffers::PackedPairs;
+
 /// Upper bound on query pairs materialised per request.
 ///
 /// Bounds how far a long query string can amplify into per-request memory:
@@ -39,15 +41,19 @@ const MAX_QUERY_PAIRS: usize = 1000;
 /// builds the superglobals (`main/php_variables.c`): query strings go through
 /// `php_url_decode`, which also turns `+` into a space, while cookie values go
 /// through `php_raw_url_decode`, which leaves `+` alone.
-pub fn url_decode(s: &[u8], plus_as_space: bool) -> Vec<u8> {
-    if plus_as_space && s.contains(&b'+') {
-        let swapped: Vec<u8> = s
-            .iter()
-            .map(|&b| if b == b'+' { b' ' } else { b })
-            .collect();
-        percent_encoding::percent_decode(&swapped).collect()
-    } else {
-        percent_encoding::percent_decode(s).collect()
+///
+/// Splitting on `+` decodes what swapping it for a space first would: neither
+/// can be part of a percent-escape.
+pub fn url_decode_into(s: &[u8], plus_as_space: bool, out: &mut Vec<u8>) {
+    if !plus_as_space {
+        out.extend(percent_encoding::percent_decode(s));
+        return;
+    }
+    for (i, part) in s.split(|&b| b == b'+').enumerate() {
+        if i > 0 {
+            out.push(b' ');
+        }
+        out.extend(percent_encoding::percent_decode(part));
     }
 }
 
@@ -63,7 +69,7 @@ pub fn url_decode(s: &[u8], plus_as_space: bool) -> Vec<u8> {
 /// `?a.b=1` lands in `$_GET` as `a_b` while this returns `a.b` — the name the
 /// client actually sent. The decoding rules match; the key mangling
 /// deliberately does not.
-pub fn parse_query_pairs(query: &str, out: &mut Vec<(Vec<u8>, Vec<u8>)>) {
+pub fn parse_query_pairs(query: &str, out: &mut PackedPairs) {
     for pair in query.split('&') {
         if pair.is_empty() {
             continue;
@@ -73,11 +79,11 @@ pub fn parse_query_pairs(query: &str, out: &mut Vec<(Vec<u8>, Vec<u8>)>) {
         }
         let bytes = pair.as_bytes();
         match bytes.iter().position(|&b| b == b'=') {
-            Some(eq) => out.push((
-                url_decode(&bytes[..eq], true),
-                url_decode(&bytes[eq + 1..], true),
-            )),
-            None => out.push((url_decode(bytes, true), Vec::new())),
+            Some(eq) => out.push_with(
+                |name| url_decode_into(&bytes[..eq], true, name),
+                |value| url_decode_into(&bytes[eq + 1..], true, value),
+            ),
+            None => out.push_with(|name| url_decode_into(bytes, true, name), |_| {}),
         }
     }
 }
@@ -140,10 +146,18 @@ pub fn value_ptr(v: &[u8]) -> (*const c_char, usize) {
 mod tests {
     use super::*;
 
-    fn pairs(query: &str) -> Vec<(Vec<u8>, Vec<u8>)> {
+    fn url_decode(s: &[u8], plus_as_space: bool) -> Vec<u8> {
         let mut out = Vec::new();
-        parse_query_pairs(query, &mut out);
+        url_decode_into(s, plus_as_space, &mut out);
         out
+    }
+
+    fn pairs(query: &str) -> Vec<(Vec<u8>, Vec<u8>)> {
+        let mut out = PackedPairs::default();
+        parse_query_pairs(query, &mut out);
+        out.iter()
+            .map(|(name, value)| (name.to_vec(), value.to_vec()))
+            .collect()
     }
 
     /// Readable comparison helper for the ASCII/UTF-8 cases.
@@ -163,6 +177,11 @@ mod tests {
         assert_eq!(url_decode(b"a+b", true), b"a b");
         assert_eq!(url_decode(b"a%20b", true), b"a b");
         assert_eq!(url_decode(b"a%26b", true), b"a&b");
+        // A plus decoded from an escape stays a plus, and one between the
+        // digits of an escape breaks it the way a space would.
+        assert_eq!(url_decode(b"a%2Bb+c", true), b"a+b c");
+        assert_eq!(url_decode(b"%+41%4+1", true), b"% 41%4 1");
+        assert_eq!(url_decode(b"++", true), b"  ");
     }
 
     #[test]

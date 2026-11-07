@@ -9,7 +9,7 @@ use hyper::body::Body as _;
 use hyper::body::Incoming;
 
 use crate::bridge::cancel::{CancelReason, CancellationState};
-use crate::events::{RequestComplete, RequestReceived, ResponseBuilding};
+use crate::events::{MetadataEntry, RequestComplete, RequestReceived, ResponseBuilding};
 use crate::executor::ExecuteResult;
 use crate::metrics::Metrics;
 use crate::php::response_spool;
@@ -180,14 +180,14 @@ fn query_lacks_content_type(method: &Method, headers: &http::HeaderMap) -> bool 
     is_query_method(method) && !headers.contains_key(http::header::CONTENT_TYPE)
 }
 
-/// Look up a key in the metadata vector, returning empty string if not found.
+/// A metadata value, empty if the key is absent. `Arc::default()` holds the
+/// empty text without an allocation.
 #[inline]
-fn metadata_get<'a>(metadata: &'a [(String, String)], key: &str) -> &'a str {
+fn metadata_shared(metadata: &[MetadataEntry], key: &str) -> std::sync::Arc<str> {
     metadata
         .iter()
         .find(|(k, _)| k == key)
-        .map(|(_, v)| v.as_str())
-        .unwrap_or("")
+        .map_or_else(std::sync::Arc::default, |(_, v)| v.clone())
 }
 
 /// Parse Content-Length from raw bytes without UTF-8 validation.
@@ -324,19 +324,11 @@ pub async fn handle_request(
     let mut received_event = RequestReceived {
         parts,
         remote_addr,
-        request_id: String::new(),
+        request_id: std::sync::Arc::default(),
         early_response: None,
-        // Pre-allocate for the common case: traceparent + trace_id + span_id
-        // + parent_span_id + trace_flags + tracestate + peer_addr
-        // + forwarded_proto + forwarded_host + forwarded_port ≈ 10 entries.
-        // This is a hint, not a bound. A request that collects everything at
-        // once — tracing on, so `ox_otel` adds its start time, behind a proxy
-        // sending all three forwarded headers, and profiled, so the profiler
-        // adds which trigger admitted it — reaches twelve and pays for one
-        // grow. The capacity is not raised to cover it: every entry past the
-        // tenth belongs to a feature that is off by default, and a request
-        // carrying all of them is already paying for a full profile.
-        metadata: Vec::with_capacity(11),
+        // Everything that adds an entry is off by default, and an empty `Vec`
+        // allocates nothing, so requests that have none pay nothing for this.
+        metadata: Vec::new(),
         profiling_mode: None,
     };
     server.dispatcher.dispatch(&mut received_event);
@@ -360,7 +352,7 @@ pub async fn handle_request(
         let mut complete_event = RequestComplete {
             request_id,
             method: received_event.parts.method.clone(),
-            path: received_event.parts.uri.path().to_string(),
+            uri: received_event.parts.uri.clone(),
             status,
             duration: elapsed,
             remote_addr,
@@ -384,9 +376,10 @@ pub async fn handle_request(
     }
 
     let mut parts = received_event.parts;
-    // Clone method (cheap enum copy) and path before parts are consumed
+    // Clone method (cheap enum copy) and URI (shares its bytes) before parts
+    // are consumed
     let method = parts.method.clone();
-    let path_str = parts.uri.path().to_string();
+    let uri = parts.uri.clone();
     // The headers go to the executor with the request. Cloning the value
     // shares its bytes rather than copying them.
     let user_agent = parts.headers.get(header::USER_AGENT).cloned();
@@ -446,7 +439,7 @@ pub async fn handle_request(
     let (response, request_body_size, mut php_exec) = match result {
         Ok((resp, body_size, exec)) => (resp, body_size, exec),
         Err(e) => {
-            tracing::error!(error = %e, path = %path_str, request_id = %request_id, "Internal server error");
+            tracing::error!(error = %e, path = %uri.path(), request_id = %request_id, "Internal server error");
             (
                 Response::builder()
                     .status(StatusCode::INTERNAL_SERVER_ERROR)
@@ -483,16 +476,7 @@ pub async fn handle_request(
     {
         schedule_artifact(server, wanted);
     }
-    let response = if let Some(saving) = response
-        .extensions()
-        .get::<static_file::PrecompressedSaving>()
-        .copied()
-    {
-        // Body is already a cached artifact — nothing left to compress, and the
-        // saving is only knowable where the identity length was.
-        server.metrics.record_compression(saving.0 as u64);
-        response
-    } else if let Some(coding) = accepted.per_request() {
+    let response = if let Some(coding) = accepted.per_request() {
         let pre_size = response.body().size_hint().exact().unwrap_or(0);
         let compressed =
             compression::maybe_compress(response, coding, server.compression.level(coding)).await;
@@ -532,7 +516,7 @@ pub async fn handle_request(
     let mut complete_event = RequestComplete {
         request_id, // move — no clone
         method,
-        path: path_str,
+        uri,
         status,
         duration: elapsed,
         remote_addr,
@@ -724,8 +708,8 @@ async fn dispatch_request(
     body: Incoming,
     server: &Server,
     remote_addr: SocketAddr,
-    request_id: &str,
-    metadata: &[(String, String)],
+    request_id: &std::sync::Arc<str>,
+    metadata: &[MetadataEntry],
     profiling_mode_override: Option<crate::profiling::ProfilingMode>,
     cancel_state: std::sync::Arc<crate::bridge::cancel::CancellationState>,
     coding: Option<compression::Coding>,
@@ -802,11 +786,12 @@ async fn dispatch_request(
             let response = static_file::serve(
                 file_path,
                 &server.file_cache,
+                &server.metrics,
                 server.route_config.canonical_root(),
                 server.route_config.symlink_allow(),
                 &parts.method,
                 &parts.headers,
-                server.static_cache_control.as_deref(),
+                server.static_cache_control.as_ref(),
                 coding,
                 server.compression,
             )
@@ -899,7 +884,6 @@ async fn dispatch_request(
             };
 
             request_body_size = body_bytes.len();
-            let query_string = parts.uri.query().unwrap_or("").to_string();
 
             // Profiling mode fallback: if no plugin opted in, default to
             // ApmOnly when the APM plugin is compiled in (preserves pre-PR
@@ -922,20 +906,19 @@ async fn dispatch_request(
             });
 
             let script_request = ScriptRequest {
-                request_id: request_id.to_string(),
+                request_id: request_id.clone(),
                 script_path,
                 method: parts.method,
                 uri: parts.uri,
-                query_string,
                 headers: parts.headers,
                 body: body_bytes,
                 remote_addr,
                 document_root: server.route_config.document_root_arc(),
                 path_policy: server.route_config.path_policy(),
                 cancel_state,
-                trace_id: metadata_get(metadata, "trace_id").to_string(),
-                span_id: metadata_get(metadata, "span_id").to_string(),
-                parent_span_id: metadata_get(metadata, "parent_span_id").to_string(),
+                trace_id: metadata_shared(metadata, "trace_id"),
+                span_id: metadata_shared(metadata, "span_id"),
+                parent_span_id: metadata_shared(metadata, "parent_span_id"),
                 is_tls: server.is_tls(),
                 version: parts.version,
                 path_info,
@@ -1095,14 +1078,11 @@ async fn dispatch_request(
             // instance. Userland-set Retry-After wins.
             if script_response.cancel_reason == CancelReason::Shutdown as u8
                 && script_response.status == 503
-                && !script_response
-                    .headers
-                    .iter()
-                    .any(|(n, _)| n == header::RETRY_AFTER)
+                && !script_response.headers.contains_key(header::RETRY_AFTER)
             {
                 script_response
                     .headers
-                    .push((header::RETRY_AFTER, http::HeaderValue::from_static("5")));
+                    .insert(header::RETRY_AFTER, http::HeaderValue::from_static("5"));
             }
 
             // Move PHP errors and profile tree into typed exec data.
@@ -1114,17 +1094,15 @@ async fn dispatch_request(
                 ..exec_data
             };
 
-            let mut builder = Response::builder().status(script_response.status);
-            for (name, value) in &script_response.headers {
-                builder = builder.header(name, value);
-            }
-            let response = builder
+            let mut response = Response::builder()
+                .status(script_response.status)
                 .body(response_spool::body(
                     script_response.spool,
                     script_response.body,
                     script_response.stream_rx,
                 ))
                 .unwrap();
+            *response.headers_mut() = script_response.headers;
             (response, exec_data)
         }
         RouteResult::NotFound => (
@@ -1711,7 +1689,7 @@ mod tests {
         let mut event = RequestReceived {
             parts,
             remote_addr: SocketAddr::new(std::net::Ipv4Addr::new(127, 0, 0, 1).into(), 8080),
-            request_id: String::new(),
+            request_id: Default::default(),
             early_response: None,
             metadata: Vec::new(),
             profiling_mode: None,
@@ -1725,7 +1703,7 @@ mod tests {
     #[test]
     fn test_request_id_uniqueness() {
         let handler = RequestIdGenerator;
-        let ids: Vec<String> = (0..100)
+        let ids: Vec<std::sync::Arc<str>> = (0..100)
             .map(|_| {
                 let (parts, _) = http::Request::builder()
                     .method(http::Method::GET)
@@ -1740,7 +1718,7 @@ mod tests {
                         std::net::Ipv4Addr::new(127, 0, 0, 1).into(),
                         8080,
                     ),
-                    request_id: String::new(),
+                    request_id: Default::default(),
                     early_response: None,
                     metadata: Vec::new(),
                     profiling_mode: None,

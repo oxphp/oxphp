@@ -1,12 +1,12 @@
 use std::net::SocketAddr;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bytes::Bytes;
 use futures_util::StreamExt;
 use http::{HeaderMap, HeaderName, HeaderValue, Method, Uri, Version};
 use http_body_util::{combinators::BoxBody, BodyExt, Full, StreamBody};
-use hyper::body::Frame;
+use hyper::body::{Body, Frame, SizeHint};
 
 /// Convenience alias for a boxed error that is Send + Sync.
 /// Used throughout the codebase for fallible operations.
@@ -14,12 +14,59 @@ pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 
 /// Unified response body type supporting both buffered and streaming responses.
 /// Uses `std::io::Error` as the error type to be compatible with `ReaderStream`.
-pub type ResponseBody = BoxBody<Bytes, std::io::Error>;
+///
+/// Buffered bytes stay inline because nearly every response is one, and boxing
+/// them would cost each of those an allocation.
+pub enum ResponseBody {
+    Full(Full<Bytes>),
+    Boxed(BoxBody<Bytes, std::io::Error>),
+}
+
+impl Body for ResponseBody {
+    type Data = Bytes;
+    type Error = std::io::Error;
+
+    fn poll_frame(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Option<Result<Frame<Bytes>, std::io::Error>>> {
+        match self.get_mut() {
+            Self::Full(body) => std::pin::Pin::new(body)
+                .poll_frame(cx)
+                .map_err(|never| match never {}),
+            Self::Boxed(body) => std::pin::Pin::new(body).poll_frame(cx),
+        }
+    }
+
+    fn is_end_stream(&self) -> bool {
+        match self {
+            Self::Full(body) => body.is_end_stream(),
+            Self::Boxed(body) => body.is_end_stream(),
+        }
+    }
+
+    fn size_hint(&self) -> SizeHint {
+        match self {
+            Self::Full(body) => body.size_hint(),
+            Self::Boxed(body) => body.size_hint(),
+        }
+    }
+}
+
+impl ResponseBody {
+    /// A body that is not buffered bytes.
+    pub fn boxed<B>(body: B) -> Self
+    where
+        B: Body<Data = Bytes, Error = std::io::Error> + Send + Sync + 'static,
+    {
+        Self::Boxed(BodyExt::boxed(body))
+    }
+}
 
 /// Create a `ResponseBody` from a `Bytes` value (buffered, non-streaming).
 #[inline]
 pub fn full_body(bytes: Bytes) -> ResponseBody {
-    Full::new(bytes).map_err(|never| match never {}).boxed()
+    ResponseBody::Full(Full::new(bytes))
 }
 
 /// Create a streaming `ResponseBody` from an optional first chunk and an mpsc receiver.
@@ -30,14 +77,14 @@ pub fn stream_body(first_chunk: Bytes, rx: tokio::sync::mpsc::Receiver<Bytes>) -
         tokio_stream::wrappers::ReceiverStream::new(rx).map(Ok::<Bytes, std::io::Error>);
 
     if first_chunk.is_empty() {
-        BodyExt::boxed(StreamBody::new(
+        ResponseBody::boxed(StreamBody::new(
             rx_stream.map(|r: Result<Bytes, std::io::Error>| r.map(Frame::data)),
         ))
     } else {
         let first =
             futures_util::stream::once(async move { Ok::<Bytes, std::io::Error>(first_chunk) });
         let combined = first.chain(rx_stream);
-        BodyExt::boxed(StreamBody::new(
+        ResponseBody::boxed(StreamBody::new(
             combined.map(|r: Result<Bytes, std::io::Error>| r.map(Frame::data)),
         ))
     }
@@ -46,11 +93,10 @@ pub fn stream_body(first_chunk: Bytes, rx: tokio::sync::mpsc::Receiver<Bytes>) -
 /// Request sent from Tokio task to PHP worker thread.
 #[derive(Debug)]
 pub struct ScriptRequest {
-    pub request_id: String,
-    pub script_path: PathBuf,
+    pub request_id: Arc<str>,
+    pub script_path: Arc<Path>,
     pub method: Method,
     pub uri: Uri,
-    pub query_string: String,
     pub headers: HeaderMap,
     pub body: Bytes,
     pub remote_addr: SocketAddr,
@@ -64,11 +110,11 @@ pub struct ScriptRequest {
     /// the tokio future is dropped before the worker finishes.
     pub cancel_state: std::sync::Arc<crate::bridge::cancel::CancellationState>,
     /// W3C Trace Context: trace ID (32 hex chars, empty if tracing disabled).
-    pub trace_id: String,
+    pub trace_id: Arc<str>,
     /// W3C Trace Context: span ID (16 hex chars, empty if tracing disabled).
-    pub span_id: String,
+    pub span_id: Arc<str>,
     /// W3C Trace Context: parent span ID (16 hex chars or empty).
-    pub parent_span_id: String,
+    pub parent_span_id: Arc<str>,
     /// Whether this request arrived over TLS.
     pub is_tls: bool,
     /// HTTP version of the request (e.g., HTTP/1.0, HTTP/1.1, HTTP/2).
@@ -82,10 +128,10 @@ pub struct ScriptRequest {
     pub path_info: Option<String>,
     /// Original protocol from trusted proxy (e.g. "https").
     /// Set from `Forwarded: proto=` or `X-Forwarded-Proto` header.
-    pub forwarded_proto: Option<String>,
+    pub forwarded_proto: Option<Arc<str>>,
     /// Original host from trusted proxy (e.g. "example.com:8443").
     /// Set from `Forwarded: host=` or `X-Forwarded-Host` header.
-    pub forwarded_host: Option<String>,
+    pub forwarded_host: Option<Arc<str>>,
     /// Public port from a trusted proxy's `X-Forwarded-Port` header.
     /// Takes priority over the port suffix of `forwarded_host`/`Host` when
     /// building `SERVER_PORT`. `None` when the header is absent or invalid.
@@ -102,6 +148,13 @@ pub struct ScriptRequest {
     /// `PluginRequestActions::set_profiling_mode`; the worker thread reads
     /// it and passes it into `ProfilingContext::reset` at RINIT.
     pub profiling_mode: crate::profiling::ProfilingMode,
+}
+
+impl ScriptRequest {
+    /// The query string without its `?`, empty when there is none.
+    pub fn query_string(&self) -> &str {
+        self.uri.query().unwrap_or("")
+    }
 }
 
 /// A PHP error captured during script execution (E_ERROR/E_WARNING/E_NOTICE, exceptions).
@@ -140,10 +193,14 @@ pub struct CapturedException {
     pub line: Option<u32>,
 }
 
+/// Room a script's response keeps in its header map for what the response
+/// handlers and compression add, so that adding them does not grow the map.
+pub const HEADERS_ADDED_AFTER_SCRIPT: usize = 8;
+
 /// Response sent from PHP worker thread back to Tokio task.
 pub struct ScriptResponse {
     pub status: u16,
-    pub headers: Vec<(HeaderName, HeaderValue)>,
+    pub headers: HeaderMap,
     pub body: Bytes,
     /// The spool file holding the whole output, when it outgrew memory;
     /// `body` is then empty.
@@ -213,7 +270,7 @@ impl Default for ScriptResponse {
     fn default() -> Self {
         Self {
             status: 200,
-            headers: Vec::new(),
+            headers: HeaderMap::new(),
             body: Bytes::new(),
             spool: None,
             execution_time_us: 0,
@@ -271,7 +328,7 @@ impl ScriptResponse {
     pub fn overloaded(reason: crate::executor::admission::ShedReason) -> Self {
         Self {
             status: 529,
-            headers: vec![
+            headers: HeaderMap::from_iter([
                 (
                     HeaderName::from_static("content-type"),
                     HeaderValue::from_static("text/plain; charset=utf-8"),
@@ -280,7 +337,7 @@ impl ScriptResponse {
                     HeaderName::from_static("retry-after"),
                     HeaderValue::from_static("3"),
                 ),
-            ],
+            ]),
             body: Bytes::from_static(b"Site is overloaded"),
             refused: true,
             shed_reason: Some(reason),

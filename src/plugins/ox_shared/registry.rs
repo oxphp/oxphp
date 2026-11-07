@@ -546,6 +546,11 @@ impl SharedRegistry {
     /// Snapshot of the pools' state, for the idle-eviction scan. Holding
     /// it keeps no pool's entry alive (see the `pools` field).
     pub fn pools(&self) -> Vec<Arc<dyn SharedInner>> {
+        // Iterating a DashMap allocates per shard even when it is empty, and
+        // the scan runs on a timer for applications that have no pool at all.
+        if self.pools.is_empty() {
+            return Vec::new();
+        }
         self.pools
             .iter()
             .filter_map(|w| w.value().upgrade())

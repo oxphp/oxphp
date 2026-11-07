@@ -1057,11 +1057,8 @@ mod tests {
         let headers = http::HeaderMap::new();
         let cookies = crate::plugin::cookies::PluginCookies { cookies: vec![] };
         let metadata = vec![
-            (
-                "trace_id".to_string(),
-                "4bf92f3577b34da6a3ce929d0e0e4736".to_string(),
-            ),
-            ("span_id".to_string(), "00f067aa0ba902b7".to_string()),
+            ("trace_id".into(), "4bf92f3577b34da6a3ce929d0e0e4736".into()),
+            ("span_id".into(), "00f067aa0ba902b7".into()),
         ];
 
         let view =
@@ -1135,11 +1132,8 @@ mod tests {
             stacktrace_max: 8192,
         };
         let metadata = vec![
-            (
-                "trace_id".to_string(),
-                "4bf92f3577b34da6a3ce929d0e0e4736".to_string(),
-            ),
-            ("span_id".to_string(), "00f067aa0ba902b7".to_string()),
+            ("trace_id".into(), "4bf92f3577b34da6a3ce929d0e0e4736".into()),
+            ("span_id".into(), "00f067aa0ba902b7".into()),
         ];
         let view = PluginCompleteView::new(
             "req1",
@@ -1205,13 +1199,10 @@ mod tests {
             stacktrace_max: 8192,
         };
         let metadata = vec![
-            (
-                "trace_id".to_string(),
-                "4bf92f3577b34da6a3ce929d0e0e4736".to_string(),
-            ),
-            ("span_id".to_string(), "00f067aa0ba902b7".to_string()),
-            ("otel.start_us".to_string(), "1".to_string()),
-            ("trace_flags".to_string(), "01".to_string()),
+            ("trace_id".into(), "4bf92f3577b34da6a3ce929d0e0e4736".into()),
+            ("span_id".into(), "00f067aa0ba902b7".into()),
+            ("otel.start_us".into(), "1".into()),
+            ("trace_flags".into(), "01".into()),
         ];
         let view = PluginCompleteView::new(
             "req1",

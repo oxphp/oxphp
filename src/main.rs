@@ -567,9 +567,10 @@ async fn async_main(
         config.max_query_body,
         config.entry_file.clone(),
         config.worker_mode_enabled,
-        config
-            .static_max_age
-            .map(|secs| format!("public, max-age={secs}")),
+        config.static_max_age.map(|secs| {
+            http::HeaderValue::from_str(&format!("public, max-age={secs}"))
+                .expect("a number of seconds is a valid header value")
+        }),
         config.static_revalidate,
         Arc::clone(&shutdown_flag),
     ));

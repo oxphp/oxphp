@@ -84,7 +84,7 @@ mod tests {
         let handler = ErrorPagesHandler::new(pages);
 
         let mut event = ResponseBuilding {
-            request_id: "test".to_string(),
+            request_id: "test".into(),
             response: make_response(404),
             metadata: Vec::new(),
         };
@@ -103,7 +103,7 @@ mod tests {
         let handler = ErrorPagesHandler::new(pages);
 
         let mut event = ResponseBuilding {
-            request_id: "test".to_string(),
+            request_id: "test".into(),
             response: make_response(200),
             metadata: Vec::new(),
         };
@@ -120,7 +120,7 @@ mod tests {
         let handler = ErrorPagesHandler::new(pages);
 
         let mut event = ResponseBuilding {
-            request_id: "test".to_string(),
+            request_id: "test".into(),
             response: make_response(403),
             metadata: Vec::new(),
         };
@@ -148,7 +148,7 @@ mod tests {
             .body(full_body(Bytes::from_static(b"416 Range Not Satisfiable")))
             .unwrap();
         let mut event = ResponseBuilding {
-            request_id: "test".to_string(),
+            request_id: "test".into(),
             response,
             metadata: Vec::new(),
         };
@@ -198,7 +198,7 @@ mod tests {
             .body(full_body(Bytes::from_static(b"\x1f\x8b...")))
             .unwrap();
         let mut event = ResponseBuilding {
-            request_id: "test".to_string(),
+            request_id: "test".into(),
             response,
             metadata: Vec::new(),
         };

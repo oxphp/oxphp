@@ -6,8 +6,9 @@ use std::time::{Duration, Instant, SystemTime};
 
 use bytes::Bytes;
 use futures_util::StreamExt;
-use http::{header, HeaderMap, Response, StatusCode};
-use http_body_util::{BodyExt, StreamBody};
+use http::header::InvalidHeaderValue;
+use http::{header, HeaderMap, HeaderValue, Response, StatusCode};
+use http_body_util::StreamBody;
 use hyper::body::Frame;
 use lru::LruCache;
 use parking_lot::{Mutex, RwLock};
@@ -49,14 +50,46 @@ pub enum FileType {
     Dir,
 }
 
+/// Header map room for a static response and what the response handlers add
+/// to it, so that building it does not grow the map.
+const STATIC_RESPONSE_HEADERS: usize = 16;
+
+/// A file's header values. Cloning one shares its bytes, so a cache hit copies
+/// none of them.
+#[derive(Clone)]
+pub struct ContentHeaders {
+    content_type: HeaderValue,
+    content_length: HeaderValue,
+    etag: HeaderValue,
+    /// What the ETag becomes on an encoded copy of the file.
+    weak_etag: HeaderValue,
+    last_modified: HeaderValue,
+}
+
+impl ContentHeaders {
+    fn new(
+        mime_type: &str,
+        size: u64,
+        etag: &str,
+        last_modified: &str,
+    ) -> Result<Self, InvalidHeaderValue> {
+        Ok(Self {
+            content_type: HeaderValue::from_str(mime_type)?,
+            content_length: crate::server::compression::content_length_value(size),
+            etag: HeaderValue::from_str(etag)?,
+            weak_etag: HeaderValue::from_str(&format!("W/{etag}"))?,
+            last_modified: HeaderValue::from_str(last_modified)?,
+        })
+    }
+}
+
 /// Content cache entry (LRU ordering managed by LruCache).
 struct ContentEntry {
     bytes: Bytes,
     mime_type: Arc<str>,
     modified: SystemTime,
     etag: Arc<str>,
-    /// Pre-formatted HTTP date for Last-Modified header (avoids per-request formatting).
-    last_modified_str: Arc<str>,
+    headers: ContentHeaders,
     /// When this entry's mtime was last verified against disk. Used by TTL-based
     /// revalidation to skip the `stat()` while the window is still open.
     last_checked: Instant,
@@ -104,7 +137,7 @@ pub enum Lookup {
     /// Cached and the request's conditional headers indicate 304 Not Modified.
     NotModified {
         etag: Arc<str>,
-        last_modified_str: Arc<str>,
+        headers: ContentHeaders,
     },
     /// Cached content to serve as a 200 (or range) response.
     Content {
@@ -112,7 +145,7 @@ pub enum Lookup {
         mime_type: Arc<str>,
         modified: SystemTime,
         etag: Arc<str>,
-        last_modified_str: Arc<str>,
+        headers: ContentHeaders,
         /// Where this entry stands with respect to the artifact for the
         /// coding this request negotiated. `Absent` when it negotiated none —
         /// a client that accepts no coding has no artifact to consider, and
@@ -120,14 +153,6 @@ pub enum Lookup {
         artifact: ArtifactState,
     },
 }
-
-/// Reports that this response body is a cached artifact rather than the
-/// identity bytes, and how many bytes that saved. Static serving cannot reach
-/// the metrics registry, and the compression layer downstream sees an
-/// already-encoded response and has nothing to measure — without this the
-/// bytes-saved counter would quietly stop counting static traffic.
-#[derive(Clone, Copy)]
-pub struct PrecompressedSaving(pub usize);
 
 /// Asks the caller to build one coding's artifact for a cached entry that does
 /// not have it yet. Static serving decides (it holds the cache and the
@@ -251,7 +276,7 @@ impl FileCache {
         if try_304 && check_not_modified(headers, &entry.etag, &entry.modified) {
             Lookup::NotModified {
                 etag: entry.etag.clone(),
-                last_modified_str: entry.last_modified_str.clone(),
+                headers: entry.headers.clone(),
             }
         } else {
             Lookup::Content {
@@ -259,7 +284,7 @@ impl FileCache {
                 mime_type: entry.mime_type.clone(),
                 modified: entry.modified,
                 etag: entry.etag.clone(),
-                last_modified_str: entry.last_modified_str.clone(),
+                headers: entry.headers.clone(),
                 artifact: coding.map_or(ArtifactState::Absent, |coding| {
                     entry.artifacts[coding.slot()].clone()
                 }),
@@ -419,16 +444,25 @@ impl FileCache {
                 mime_type,
                 modified,
                 etag,
-                last_modified_str,
+                headers,
                 artifact: _,
-            } => Some((bytes, mime_type, modified, etag, last_modified_str)),
+            } => Some((
+                bytes,
+                mime_type,
+                modified,
+                etag,
+                headers.last_modified.to_str().unwrap().into(),
+            )),
             // try_304 = false never produces a NotModified result.
             Lookup::NotModified { .. } => None,
         }
     }
 
-    /// Insert file content into the cache. Skips files larger than MAX_CACHE_FILE_SIZE.
-    /// Evicts LRU entries when total cache size exceeds MAX_CACHE_TOTAL_BYTES.
+    /// Test-only thin wrapper over [`insert`] that builds the header values.
+    /// Production code uses [`insert`].
+    ///
+    /// [`insert`]: Self::insert
+    #[cfg(test)]
     pub fn insert_content(
         &self,
         key: String,
@@ -437,6 +471,22 @@ impl FileCache {
         modified: SystemTime,
         etag: Arc<str>,
         last_modified_str: Arc<str>,
+    ) {
+        let headers =
+            ContentHeaders::new(&mime_type, bytes.len() as u64, &etag, &last_modified_str).unwrap();
+        self.insert(key, bytes, mime_type, modified, etag, &headers);
+    }
+
+    /// Insert file content into the cache. Skips files larger than MAX_CACHE_FILE_SIZE.
+    /// Evicts LRU entries when total cache size exceeds MAX_CACHE_TOTAL_BYTES.
+    fn insert(
+        &self,
+        key: String,
+        bytes: Bytes,
+        mime_type: Arc<str>,
+        modified: SystemTime,
+        etag: Arc<str>,
+        headers: &ContentHeaders,
     ) {
         if bytes.len() > MAX_CACHE_FILE_SIZE {
             return;
@@ -466,7 +516,7 @@ impl FileCache {
                 mime_type,
                 modified,
                 etag,
-                last_modified_str,
+                headers: headers.clone(),
                 last_checked: Instant::now(),
                 artifacts: std::array::from_fn(|_| ArtifactState::Absent),
             },
@@ -850,14 +900,14 @@ fn check_not_modified(headers: &HeaderMap, etag: &str, modified: &SystemTime) ->
     false
 }
 
-/// ETag to send on a 304: if the client's matching `If-None-Match` tag was
-/// weak, it cached a representation whose tag the compression layer
-/// downgraded — echo the weak form. Answering with the strong tag would let
-/// the cache "re-strengthen" the stored entry's validator (RFC 9111 §4.3.4
-/// header update), re-opening the If-Range representation-mixing hole the
-/// downgrade exists to close.
-fn etag_for_304(headers: &HeaderMap, etag: &str) -> String {
-    let client_tag_weak = headers
+/// Whether a 304 has to carry the weak form of the ETag: the client's matching
+/// `If-None-Match` tag was weak, so it cached a representation whose tag the
+/// compression layer downgraded. Answering with the strong tag would let the
+/// cache "re-strengthen" the stored entry's validator (RFC 9111 §4.3.4 header
+/// update), re-opening the If-Range representation-mixing hole the downgrade
+/// exists to close.
+fn client_tag_is_weak(headers: &HeaderMap, etag: &str) -> bool {
+    headers
         .get(header::IF_NONE_MATCH)
         .and_then(|v| v.to_str().ok())
         .is_some_and(|val| {
@@ -865,37 +915,35 @@ fn etag_for_304(headers: &HeaderMap, etag: &str) -> String {
                 let t = tag.trim();
                 t.starts_with("W/") && etag_weak_eq(t, etag)
             })
-        });
-    if client_tag_weak {
-        format!("W/{etag}")
-    } else {
-        etag.to_string()
-    }
+        })
 }
 
 /// Build a 304 Not Modified response with caching headers.
-fn build_304(etag: &str, last_modified_str: &str, cache_control: &str) -> Response<ResponseBody> {
+fn build_304(
+    etag: HeaderValue,
+    last_modified: HeaderValue,
+    cache_control: &HeaderValue,
+) -> Response<ResponseBody> {
     Response::builder()
         .status(StatusCode::NOT_MODIFIED)
         .header(header::ETAG, etag)
-        .header(header::LAST_MODIFIED, last_modified_str)
+        .header(header::LAST_MODIFIED, last_modified)
         .header(header::CACHE_CONTROL, cache_control)
         .body(full_body(Bytes::new()))
         .unwrap()
 }
 
-/// Add caching headers to a response builder.
+/// Add caching headers to a response's header map.
 /// Note: `Vary: Accept-Encoding` is NOT added here — the compression layer appends it.
 fn add_cache_headers(
-    builder: http::response::Builder,
-    etag: &str,
-    last_modified_str: &str,
-    cache_control: &str,
-) -> http::response::Builder {
-    builder
-        .header(header::ETAG, etag)
-        .header(header::LAST_MODIFIED, last_modified_str)
-        .header(header::CACHE_CONTROL, cache_control)
+    response_headers: &mut HeaderMap,
+    etag: HeaderValue,
+    last_modified: HeaderValue,
+    cache_control: &HeaderValue,
+) {
+    response_headers.insert(header::ETAG, etag);
+    response_headers.insert(header::LAST_MODIFIED, last_modified);
+    response_headers.insert(header::CACHE_CONTROL, cache_control.clone());
 }
 
 /// Should range handling apply to a buffered response with this MIME type
@@ -915,11 +963,11 @@ fn ranges_allowed(will_encode: bool, levels: Levels, mime_type: &str, size: u64)
 #[allow(clippy::too_many_arguments)]
 fn respond_bytes(
     bytes: Bytes,
+    headers: &ContentHeaders,
     mime_type: &str,
     etag: &str,
-    last_modified_str: &str,
     modified: &SystemTime,
-    cache_control: Option<&str>,
+    cache_control: Option<&HeaderValue>,
     method: &http::Method,
     request_headers: &HeaderMap,
     allow_ranges: bool,
@@ -937,12 +985,15 @@ fn respond_bytes(
     } else {
         RangePlan::Full
     };
-    let (status, body, content_range) = match plan {
-        RangePlan::Full => (StatusCode::OK, bytes, None),
+    let (status, body, content_length, content_range) = match plan {
+        RangePlan::Full => (StatusCode::OK, bytes, headers.content_length.clone(), None),
         RangePlan::Partial { start, end } => (
             StatusCode::PARTIAL_CONTENT,
             bytes.slice(start as usize..(end + 1) as usize),
-            Some(format!("bytes {start}-{end}/{size}")),
+            crate::server::compression::content_length_value(end - start + 1),
+            Some(HeaderValue::from_str(&format!(
+                "bytes {start}-{end}/{size}"
+            ))?),
         ),
         RangePlan::NotSatisfiable => {
             // A client that accepts a coding would have gotten a full 200
@@ -959,27 +1010,33 @@ fn respond_bytes(
         }
     };
 
-    let mut builder = Response::builder()
-        .status(status)
-        .header(header::CONTENT_TYPE, mime_type)
-        .header(header::CONTENT_LENGTH, body.len());
+    let mut response = Response::builder().status(status).body(full_body(body))?;
+    let response_headers = response.headers_mut();
+    response_headers.reserve(STATIC_RESPONSE_HEADERS);
+    response_headers.insert(header::CONTENT_TYPE, headers.content_type.clone());
+    response_headers.insert(header::CONTENT_LENGTH, content_length);
     // Advertise ranges only when this request would actually honor them.
     // Compression removes the header too, but an encoder can decline to encode
     // (output not smaller) — relying on that removal would leave an identity
     // response advertising ranges the server just ignored.
     if allow_ranges {
-        builder = builder.header(header::ACCEPT_RANGES, "bytes");
+        response_headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
     }
     if varies_by_encoding {
-        builder = builder.header(header::VARY, "Accept-Encoding");
+        response_headers.insert(header::VARY, HeaderValue::from_static("Accept-Encoding"));
     }
     if let Some(cr) = content_range {
-        builder = builder.header(header::CONTENT_RANGE, cr);
+        response_headers.insert(header::CONTENT_RANGE, cr);
     }
     if let Some(cc) = cache_control {
-        builder = add_cache_headers(builder, etag, last_modified_str, cc);
+        add_cache_headers(
+            response_headers,
+            headers.etag.clone(),
+            headers.last_modified.clone(),
+            cc,
+        );
     }
-    builder.body(full_body(body))
+    Ok(response)
 }
 
 /// Serve a static file with MIME type detection, content caching, and streaming.
@@ -1005,11 +1062,12 @@ fn respond_bytes(
 pub async fn serve(
     file_path: &Path,
     cache: &FileCache,
+    metrics: &crate::metrics::Metrics,
     canonical_root: &Path,
     allow_list: &crate::config::SymlinkAllowList,
     method: &http::Method,
     request_headers: &HeaderMap,
-    cache_control: Option<&str>,
+    cache_control: Option<&HeaderValue>,
     coding: Option<Coding>,
     levels: Levels,
 ) -> Result<Response<ResponseBody>, crate::types::BoxError> {
@@ -1027,23 +1085,21 @@ pub async fn serve(
     // conditional method with a Cache-Control to echo.
     let try_304 = conditional && cache_control.is_some();
     match cache.lookup(&cache_key, request_headers, try_304, coding) {
-        Some(Lookup::NotModified {
-            etag,
-            last_modified_str,
-        }) => {
+        Some(Lookup::NotModified { etag, headers }) => {
             let cc = cache_control.expect("try_304 implies cache_control is Some");
-            return Ok(build_304(
-                &etag_for_304(request_headers, &etag),
-                &last_modified_str,
-                cc,
-            ));
+            let tag = if client_tag_is_weak(request_headers, &etag) {
+                headers.weak_etag
+            } else {
+                headers.etag
+            };
+            return Ok(build_304(tag, headers.last_modified, cc));
         }
         Some(Lookup::Content {
             bytes,
             mime_type,
             modified,
             etag,
-            last_modified_str,
+            headers,
             artifact,
         }) => {
             let identity_len = bytes.len();
@@ -1051,9 +1107,9 @@ pub async fn serve(
                 ranges_allowed(coding.is_some(), levels, &mime_type, identity_len as u64);
             let mut response = respond_bytes(
                 bytes.clone(),
+                &headers,
                 &mime_type,
                 &etag,
-                &last_modified_str,
                 &modified,
                 cache_control,
                 method,
@@ -1068,10 +1124,17 @@ pub async fn serve(
             if let Some(coding) = coding.filter(|_| !allow_ranges) {
                 match artifact {
                     ArtifactState::Ready(artifact) => {
-                        let saved = identity_len.saturating_sub(artifact.len());
+                        // The compression layer downstream sees an encoded
+                        // response and has nothing to measure; the saving is
+                        // only knowable here, where the identity length is.
+                        metrics
+                            .record_compression(identity_len.saturating_sub(artifact.len()) as u64);
                         *response.body_mut() = full_body(artifact);
+                        // `mark_encoded` leaves a tag it finds weak as it is.
+                        if let Some(etag) = response.headers_mut().get_mut(header::ETAG) {
+                            *etag = headers.weak_etag.clone();
+                        }
                         crate::server::compression::mark_encoded(&mut response, coding);
-                        response.extensions_mut().insert(PrecompressedSaving(saved));
                     }
                     // No artifact yet: this request is served the per-request
                     // way and the caller is asked to build one for the next.
@@ -1141,9 +1204,14 @@ pub async fn serve(
     if conditional {
         if let Some(cc) = cache_control {
             if check_not_modified(request_headers, &etag_str, &modified) {
+                let tag = if client_tag_is_weak(request_headers, &etag_str) {
+                    format!("W/{etag_str}")
+                } else {
+                    etag_str
+                };
                 return Ok(build_304(
-                    &etag_for_304(request_headers, &etag_str),
-                    &last_modified_str,
+                    HeaderValue::from_str(&tag)?,
+                    HeaderValue::from_str(&last_modified_str)?,
                     cc,
                 ));
             }
@@ -1152,7 +1220,6 @@ pub async fn serve(
 
     // Allocate Arc<str> only after 304 check passes
     let etag: Arc<str> = etag_str.as_str().into();
-    let last_modified_arc: Arc<str> = last_modified_str.as_str().into();
 
     // 4. Read the file in full and answer from memory. Files up to the cache
     //    limit are also kept; a larger one is read only when the alternative
@@ -1197,25 +1264,26 @@ pub async fn serve(
                 .header(header::CONTENT_LENGTH, bytes.len())
                 .body(full_body(bytes))?);
         }
+        let headers = ContentHeaders::new(&mime_type, file_size, &etag, &last_modified_str)?;
         // Refused for anything above the cache limit, which is the point:
         // a file read only to be compressed must not evict the small files
         // the cache exists for, nor be re-served from a budget it would fill
         // on its own.
-        cache.insert_content(
+        cache.insert(
             cache_key.into_owned(),
             bytes.clone(),
             mime_type.clone(),
             modified,
             etag.clone(),
-            last_modified_arc.clone(),
+            &headers,
         );
 
         let allow_ranges = ranges_allowed(coding.is_some(), levels, &mime_type, file_size);
         let mut response = respond_bytes(
             bytes,
+            &headers,
             &mime_type,
             &etag,
-            &last_modified_str,
             &modified,
             cache_control,
             method,
@@ -1295,11 +1363,16 @@ pub async fn serve(
     let stream_body =
         StreamBody::new(stream.map(|result: Result<Bytes, io::Error>| result.map(Frame::data)));
 
+    let mut response = builder.body(ResponseBody::boxed(stream_body))?;
     if let Some(cc) = cache_control {
-        builder = add_cache_headers(builder, &etag, &last_modified_str, cc);
+        add_cache_headers(
+            response.headers_mut(),
+            HeaderValue::from_str(&etag)?,
+            HeaderValue::from_str(&last_modified_str)?,
+            cc,
+        );
     }
-
-    Ok(builder.body(BodyExt::boxed(stream_body))?)
+    Ok(response)
 }
 
 #[cfg(test)]
@@ -1432,11 +1505,12 @@ mod tests {
         let response = serve(
             &file_path,
             &cache,
+            &crate::metrics::Metrics::new(),
             &canonical_root(&dir),
             &empty_allow(),
             &http::Method::GET,
             &HeaderMap::new(),
-            Some("public, max-age=86400"),
+            Some(&HeaderValue::from_static("public, max-age=86400")),
             None,
             offered(),
         )
@@ -1457,11 +1531,12 @@ mod tests {
         let response = serve(
             &file_path,
             &cache,
+            &crate::metrics::Metrics::new(),
             &canonical_root(&dir),
             &empty_allow(),
             &http::Method::GET,
             &HeaderMap::new(),
-            Some("public, max-age=86400"),
+            Some(&HeaderValue::from_static("public, max-age=86400")),
             None,
             offered(),
         )
@@ -1483,11 +1558,12 @@ mod tests {
         let response = serve(
             &file_path,
             &cache,
+            &crate::metrics::Metrics::new(),
             &canonical_root(&dir),
             &empty_allow(),
             &http::Method::GET,
             &HeaderMap::new(),
-            Some("public, max-age=86400"),
+            Some(&HeaderValue::from_static("public, max-age=86400")),
             None,
             offered(),
         )
@@ -1509,11 +1585,12 @@ mod tests {
         let response = serve(
             &dir.path().join("nonexistent.txt"),
             &cache,
+            &crate::metrics::Metrics::new(),
             &canonical_root(&dir),
             &empty_allow(),
             &http::Method::GET,
             &HeaderMap::new(),
-            Some("public, max-age=86400"),
+            Some(&HeaderValue::from_static("public, max-age=86400")),
             None,
             offered(),
         )
@@ -1742,11 +1819,12 @@ mod tests {
         let _response = serve(
             &file_path,
             &cache,
+            &crate::metrics::Metrics::new(),
             &canonical_root(&dir),
             &empty_allow(),
             &http::Method::GET,
             &HeaderMap::new(),
-            Some("public, max-age=86400"),
+            Some(&HeaderValue::from_static("public, max-age=86400")),
             None,
             offered(),
         )
@@ -1763,11 +1841,12 @@ mod tests {
         let response2 = serve(
             &file_path,
             &cache,
+            &crate::metrics::Metrics::new(),
             &canonical_root(&dir),
             &empty_allow(),
             &http::Method::GET,
             &HeaderMap::new(),
-            Some("public, max-age=86400"),
+            Some(&HeaderValue::from_static("public, max-age=86400")),
             None,
             offered(),
         )
@@ -1891,11 +1970,12 @@ mod tests {
         let response = serve(
             &file_path,
             &cache,
+            &crate::metrics::Metrics::new(),
             &canonical_root(&dir),
             &empty_allow(),
             &http::Method::GET,
             &HeaderMap::new(),
-            Some("public, max-age=3600"),
+            Some(&HeaderValue::from_static("public, max-age=3600")),
             None,
             offered(),
         )
@@ -1926,6 +2006,7 @@ mod tests {
         let response = serve(
             &file_path,
             &cache,
+            &crate::metrics::Metrics::new(),
             &canonical_root(&dir),
             &empty_allow(),
             &http::Method::GET,
@@ -1955,11 +2036,12 @@ mod tests {
         let response = serve(
             &file_path,
             &cache,
+            &crate::metrics::Metrics::new(),
             &canonical_root(&dir),
             &empty_allow(),
             &http::Method::GET,
             &HeaderMap::new(),
-            Some("public, max-age=86400"),
+            Some(&HeaderValue::from_static("public, max-age=86400")),
             None,
             offered(),
         )
@@ -1979,11 +2061,12 @@ mod tests {
         let response = serve(
             &file_path,
             &cache,
+            &crate::metrics::Metrics::new(),
             &canonical_root(&dir),
             &empty_allow(),
             &http::Method::GET,
             &headers,
-            Some("public, max-age=86400"),
+            Some(&HeaderValue::from_static("public, max-age=86400")),
             None,
             offered(),
         )
@@ -2004,11 +2087,12 @@ mod tests {
         let response = serve(
             &file_path,
             &cache,
+            &crate::metrics::Metrics::new(),
             &canonical_root(&dir),
             &empty_allow(),
             &http::Method::GET,
             &headers,
-            Some("public, max-age=86400"),
+            Some(&HeaderValue::from_static("public, max-age=86400")),
             None,
             offered(),
         )
@@ -2029,11 +2113,12 @@ mod tests {
         let response = serve(
             &file_path,
             &cache,
+            &crate::metrics::Metrics::new(),
             &canonical_root(&dir),
             &empty_allow(),
             &http::Method::GET,
             &HeaderMap::new(),
-            Some("public, max-age=86400"),
+            Some(&HeaderValue::from_static("public, max-age=86400")),
             None,
             offered(),
         )
@@ -2053,11 +2138,12 @@ mod tests {
         let response = serve(
             &file_path,
             &cache,
+            &crate::metrics::Metrics::new(),
             &canonical_root(&dir),
             &empty_allow(),
             &http::Method::GET,
             &headers,
-            Some("public, max-age=86400"),
+            Some(&HeaderValue::from_static("public, max-age=86400")),
             None,
             offered(),
         )
@@ -2414,11 +2500,12 @@ mod tests {
         serve(
             file_path,
             cache,
+            &crate::metrics::Metrics::new(),
             &canonical_root(dir),
             &empty_allow(),
             &http::Method::GET,
             &HeaderMap::new(),
-            Some("public, max-age=86400"),
+            Some(&HeaderValue::from_static("public, max-age=86400")),
             Some(coding),
             offered(),
         )
@@ -2510,12 +2597,31 @@ mod tests {
             .get_all(header::VARY)
             .iter()
             .any(|v| v.to_str().unwrap().eq_ignore_ascii_case("accept-encoding")));
-        assert_eq!(
-            third.extensions().get::<PrecompressedSaving>().unwrap().0,
-            body.len() - artifact_len
-        );
         assert!(third.extensions().get::<ArtifactWanted>().is_none());
         assert_eq!(body_bytes(third).await.len(), artifact_len);
+
+        // The compression layer downstream has nothing to measure on an
+        // encoded response, so serving the artifact is what counts its saving.
+        let metrics = crate::metrics::Metrics::new();
+        serve(
+            &file_path,
+            &cache,
+            &metrics,
+            &canonical_root(&dir),
+            &empty_allow(),
+            &http::Method::GET,
+            &HeaderMap::new(),
+            Some(&HeaderValue::from_static("public, max-age=86400")),
+            Some(Coding::Br),
+            offered(),
+        )
+        .await
+        .unwrap();
+        let saved = format!(
+            "oxphp_compression_bytes_saved_total {}\n",
+            body.len() - artifact_len
+        );
+        assert!(metrics.to_prometheus().contains(&saved));
     }
 
     #[tokio::test]
@@ -2798,11 +2904,12 @@ mod tests {
         serve(
             file_path,
             cache,
+            &crate::metrics::Metrics::new(),
             &canonical_root(dir),
             &empty_allow(),
             &http::Method::GET,
             &headers,
-            Some("public, max-age=86400"),
+            Some(&HeaderValue::from_static("public, max-age=86400")),
             None,
             levels,
         )
@@ -2822,7 +2929,7 @@ mod tests {
     }
 
     #[test]
-    fn test_etag_for_304_echoes_client_weakness() {
+    fn test_client_tag_is_weak_follows_the_matching_tag() {
         let modified = test_modified();
         let etag = generate_etag(100, &modified);
 
@@ -2830,14 +2937,14 @@ mod tests {
         // the 304 must echo the weak form, not re-strengthen it.
         let mut headers = HeaderMap::new();
         headers.insert(header::IF_NONE_MATCH, format!("W/{etag}").parse().unwrap());
-        assert_eq!(etag_for_304(&headers, &etag), format!("W/{etag}"));
+        assert!(client_tag_is_weak(&headers, &etag));
 
         // Client with an identity copy keeps the strong tag.
         headers.insert(header::IF_NONE_MATCH, etag.parse().unwrap());
-        assert_eq!(etag_for_304(&headers, &etag), etag);
+        assert!(!client_tag_is_weak(&headers, &etag));
 
         // No If-None-Match (date-based 304): strong tag.
-        assert_eq!(etag_for_304(&HeaderMap::new(), &etag), etag);
+        assert!(!client_tag_is_weak(&HeaderMap::new(), &etag));
     }
 
     #[tokio::test]
@@ -2856,19 +2963,17 @@ mod tests {
             .unwrap()
             .to_string();
 
+        let weak = format!("W/{etag}");
         let mut headers = HeaderMap::new();
-        headers.insert(header::IF_NONE_MATCH, format!("W/{etag}").parse().unwrap());
-        let response = serve_with(&file_path, &dir, &cache, headers).await;
-        assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
-        assert_eq!(
-            response
-                .headers()
-                .get(header::ETAG)
-                .unwrap()
-                .to_str()
-                .unwrap(),
-            format!("W/{etag}")
-        );
+        headers.insert(header::IF_NONE_MATCH, weak.parse().unwrap());
+        // From the cache, then from a cache that does not have the file, which
+        // builds the answer another way.
+        for cache in [cache, FileCache::new(10)] {
+            let response = serve_with(&file_path, &dir, &cache, headers.clone()).await;
+            assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+            assert_eq!(response.headers().get(header::ETAG).unwrap(), weak.as_str());
+            assert!(response.headers().contains_key(header::LAST_MODIFIED));
+        }
     }
 
     #[tokio::test]
@@ -3060,11 +3165,12 @@ mod tests {
         let response = serve(
             &file_path,
             &cache,
+            &crate::metrics::Metrics::new(),
             &canonical_root(&dir),
             &empty_allow(),
             &http::Method::HEAD,
             &range_headers("bytes=0-0"),
-            Some("public, max-age=86400"),
+            Some(&HeaderValue::from_static("public, max-age=86400")),
             None,
             offered(),
         )
@@ -3088,11 +3194,12 @@ mod tests {
         let response = serve(
             &file_path,
             &cache,
+            &crate::metrics::Metrics::new(),
             &canonical_root(&dir),
             &empty_allow(),
             &http::Method::POST,
             &range_headers("bytes=0-4"),
-            Some("public, max-age=86400"),
+            Some(&HeaderValue::from_static("public, max-age=86400")),
             None,
             offered(),
         )
@@ -3125,11 +3232,12 @@ mod tests {
         let response = serve(
             &file_path,
             &cache,
+            &crate::metrics::Metrics::new(),
             &canonical_root(&dir),
             &empty_allow(),
             &http::Method::POST,
             &headers,
-            Some("public, max-age=86400"),
+            Some(&HeaderValue::from_static("public, max-age=86400")),
             None,
             offered(),
         )
@@ -3167,11 +3275,12 @@ mod tests {
         let response = serve(
             &file_path,
             &cache,
+            &crate::metrics::Metrics::new(),
             &canonical_root(&dir),
             &empty_allow(),
             &http::Method::GET,
             &range_headers("bytes=0-9"),
-            Some("public, max-age=86400"),
+            Some(&HeaderValue::from_static("public, max-age=86400")),
             Some(Coding::Br),
             offered(),
         )
@@ -3188,11 +3297,12 @@ mod tests {
         let response = serve(
             &file_path,
             &cache,
+            &crate::metrics::Metrics::new(),
             &canonical_root(&dir),
             &empty_allow(),
             &http::Method::GET,
             &range_headers("bytes=0-9"),
-            Some("public, max-age=86400"),
+            Some(&HeaderValue::from_static("public, max-age=86400")),
             None,
             offered(),
         )
@@ -3214,11 +3324,12 @@ mod tests {
         let response = serve(
             &file_path,
             &cache,
+            &crate::metrics::Metrics::new(),
             &canonical_root(&dir),
             &empty_allow(),
             &http::Method::GET,
             &range_headers("bytes=0-9"),
-            Some("public, max-age=86400"),
+            Some(&HeaderValue::from_static("public, max-age=86400")),
             Some(Coding::Br),
             offered(),
         )
@@ -3251,11 +3362,12 @@ mod tests {
         let response = serve(
             &file_path,
             &cache,
+            &crate::metrics::Metrics::new(),
             &canonical_root(&dir),
             &empty_allow(),
             &http::Method::GET,
             &range_headers("bytes=0-9"),
-            Some("public, max-age=86400"),
+            Some(&HeaderValue::from_static("public, max-age=86400")),
             Some(Coding::Br), // irrelevant on the streaming path
             offered(),
         )
@@ -3551,11 +3663,12 @@ mod tests {
         let response = serve(
             file_path,
             cache,
+            &crate::metrics::Metrics::new(),
             &canonical_root(dir),
             allow,
             &http::Method::GET,
             &HeaderMap::new(),
-            Some("public, max-age=86400"),
+            Some(&HeaderValue::from_static("public, max-age=86400")),
             None,
             offered(),
         )
@@ -3794,11 +3907,12 @@ mod tests {
         let response = serve(
             &root.join("a.txt"),
             &cache,
+            &crate::metrics::Metrics::new(),
             &root,
             &empty_allow(),
             &http::Method::GET,
             &HeaderMap::new(),
-            Some("public, max-age=86400"),
+            Some(&HeaderValue::from_static("public, max-age=86400")),
             None,
             offered(),
         )

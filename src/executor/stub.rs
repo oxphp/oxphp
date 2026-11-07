@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use http::{HeaderName, HeaderValue};
+use http::{HeaderMap, HeaderName, HeaderValue};
 
 use crate::executor::{ExecuteResult, ScriptExecutor};
 use crate::types::{ScriptRequest, ScriptResponse};
@@ -25,10 +25,10 @@ impl ScriptExecutor for StubExecutor {
         request.cancel_state.mark_taken();
         ExecuteResult::Immediate(ScriptResponse {
             status: 200,
-            headers: vec![(
+            headers: HeaderMap::from_iter([(
                 HeaderName::from_static("content-type"),
                 HeaderValue::from_static("text/plain"),
-            )],
+            )]),
             body: Bytes::from_static(b"OK"),
             spool: None,
             execution_time_us: 0,
@@ -49,7 +49,7 @@ impl ScriptExecutor for StubExecutor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
 
     use bytes::Bytes;
@@ -57,20 +57,19 @@ mod tests {
 
     fn make_request() -> ScriptRequest {
         ScriptRequest {
-            request_id: "test-1".to_string(),
-            script_path: PathBuf::from("/var/www/html/test.php"),
+            request_id: "test-1".into(),
+            script_path: Path::new("/var/www/html/test.php").into(),
             method: Method::GET,
             uri: Uri::from_static("/test.php"),
-            query_string: String::new(),
             headers: HeaderMap::new(),
             body: Bytes::new(),
             remote_addr: "127.0.0.1:0".parse().unwrap(),
             document_root: Arc::new(PathBuf::from("/var/www/html")),
             path_policy: crate::path_guard::test_policy("/var/www/html"),
             cancel_state: std::sync::Arc::new(crate::bridge::cancel::CancellationState::new()),
-            trace_id: String::new(),
-            span_id: String::new(),
-            parent_span_id: String::new(),
+            trace_id: Default::default(),
+            span_id: Default::default(),
+            parent_span_id: Default::default(),
             is_tls: false,
             version: http::Version::HTTP_11,
             path_info: None,
@@ -93,8 +92,7 @@ mod tests {
         assert_eq!(response.status, 200);
         assert_eq!(response.body, &b"OK"[..]);
         assert_eq!(response.headers.len(), 1);
-        assert_eq!(response.headers[0].0, "content-type");
-        assert_eq!(response.headers[0].1, "text/plain");
+        assert_eq!(response.headers["content-type"], "text/plain");
     }
 
     /// The dispatch side records a queue wait only for a request some executor

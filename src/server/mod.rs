@@ -106,7 +106,7 @@ pub struct Server {
     pub(crate) max_query_body: usize,
     /// Pre-computed `Cache-Control` header value, e.g. `"public, max-age=2592000"`.
     /// `None` = caching disabled.
-    pub(crate) static_cache_control: Option<String>,
+    pub(crate) static_cache_control: Option<http::HeaderValue>,
     /// Pre-configured HTTP builder reused across all connections.
     http_builder: Builder<hyper_util::rt::TokioExecutor>,
     shutdown: Arc<AtomicBool>,
@@ -133,7 +133,7 @@ impl Server {
         max_query_body: usize,
         entry_file: Option<PathBuf>,
         worker_mode_enabled: bool,
-        static_cache_control: Option<String>,
+        static_cache_control: Option<http::HeaderValue>,
         static_revalidate: bool,
         shutdown: Arc<AtomicBool>,
     ) -> Self {

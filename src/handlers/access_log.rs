@@ -33,12 +33,12 @@ impl EventHandler<RequestComplete> for AccessLogHandler {
             .metadata
             .iter()
             .find(|(k, _)| k == "trace_id")
-            .map(|(_, v)| v.as_str());
+            .map(|(_, v)| &**v);
         let span_id = event
             .metadata
             .iter()
             .find(|(k, _)| k == "span_id")
-            .map(|(_, v)| v.as_str());
+            .map(|(_, v)| &**v);
         // Absent from the entry when the request sent none.
         let user_agent = event
             .user_agent
@@ -52,7 +52,7 @@ impl EventHandler<RequestComplete> for AccessLogHandler {
                 trace_id = tid,
                 span_id = sid,
                 method = %event.method,
-                path = %event.path,
+                path = %event.uri.path(),
                 status = event.status,
                 duration_us = event.duration.as_micros() as u64,
                 remote_ip = %event.remote_addr.ip(),
@@ -64,7 +64,7 @@ impl EventHandler<RequestComplete> for AccessLogHandler {
                 target: TARGET,
                 request_id = %event.request_id,
                 method = %event.method,
-                path = %event.path,
+                path = %event.uri.path(),
                 status = event.status,
                 duration_us = event.duration.as_micros() as u64,
                 remote_ip = %event.remote_addr.ip(),
@@ -89,9 +89,9 @@ mod tests {
 
     fn make_event(status: u16) -> RequestComplete {
         RequestComplete {
-            request_id: "test123".to_string(),
+            request_id: "test123".into(),
             method: http::Method::GET,
-            path: "/".to_string(),
+            uri: http::Uri::from_static("/"),
             status,
             duration: Duration::from_micros(500),
             remote_addr: SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 8080),

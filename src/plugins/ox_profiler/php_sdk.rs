@@ -60,8 +60,8 @@ pub fn register_functions(
             PROFILING_CONTEXT.with(|cell| {
                 let mut ctx = cell.borrow_mut();
                 if ctx.mode != ProfilingMode::ProfileAll {
-                    let trace_id = ctx.trace_id().to_string();
-                    let root = ctx.root_span_id().to_string();
+                    let trace_id = ctx.trace_id().into();
+                    let root = ctx.root_span_id().into();
                     ctx.reset(ProfilingMode::ProfileAll, trace_id, root);
                 }
             });

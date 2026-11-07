@@ -78,7 +78,7 @@ mod tests {
         let mut event = RequestReceived {
             parts,
             remote_addr: SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 8080),
-            request_id: "test".to_string(),
+            request_id: "test".into(),
             early_response: None,
             metadata: Vec::new(),
             profiling_mode: None,
@@ -95,9 +95,9 @@ mod tests {
         let handler = MetricsResponseHandler::new(Arc::clone(&metrics));
 
         let mut event = RequestComplete {
-            request_id: "test".to_string(),
+            request_id: "test".into(),
             method: http::Method::GET,
-            path: "/".to_string(),
+            uri: http::Uri::from_static("/"),
             status: 200,
             duration: Duration::from_micros(500),
             remote_addr: SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 8080),

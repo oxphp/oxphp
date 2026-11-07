@@ -261,7 +261,7 @@ pub async fn maybe_compress(
         // going out as a complete empty body.
         Err(err) => {
             let failed = futures_util::stream::once(async move { Err::<Frame<Bytes>, _>(err) });
-            return Response::from_parts(parts, StreamBody::new(failed).boxed());
+            return Response::from_parts(parts, ResponseBody::boxed(StreamBody::new(failed)));
         }
     };
 
@@ -337,7 +337,12 @@ pub(crate) fn mark_encoded(response: &mut Response<ResponseBody>, coding: Coding
         .get(header::ETAG)
         .and_then(|v| v.to_str().ok())
         .filter(|tag| !tag.starts_with("W/"))
-        .and_then(|tag| HeaderValue::from_str(&format!("W/{tag}")).ok());
+        .and_then(|tag| {
+            let mut weak = Vec::with_capacity(tag.len() + 2);
+            weak.extend_from_slice(b"W/");
+            weak.extend_from_slice(tag.as_bytes());
+            HeaderValue::from_maybe_shared(Bytes::from(weak)).ok()
+        });
     if let Some(weak_etag) = weakened {
         response.headers_mut().insert(header::ETAG, weak_etag);
     }
@@ -349,12 +354,23 @@ pub(crate) fn mark_encoded(response: &mut Response<ResponseBody>, coding: Coding
     response.headers_mut().remove(header::ACCEPT_RANGES);
     response
         .headers_mut()
-        .insert(header::CONTENT_LENGTH, HeaderValue::from(encoded_len));
+        .insert(header::CONTENT_LENGTH, content_length_value(encoded_len));
     // Append Vary: Accept-Encoding so caches store both compressed and
     // uncompressed variants — unless the origin already declared it (static
     // serving does, on representations whose range behavior depends on the
     // encoding).
     append_vary(response);
+}
+
+/// A `Content-Length` value. `HeaderValue::from(u64)` takes two allocations for
+/// the same text, one for its oversized buffer and one to share that.
+pub(crate) fn content_length_value(len: u64) -> HeaderValue {
+    let mut digits = [0u8; 20];
+    let mut rest = &mut digits[..];
+    std::io::Write::write_fmt(&mut rest, format_args!("{len}"))
+        .expect("20 bytes hold any u64 in decimal");
+    let written = 20 - rest.len();
+    HeaderValue::from_bytes(&digits[..written]).expect("decimal digits are a valid header value")
 }
 
 /// Declare `Vary: Accept-Encoding` unless the response already carries it.
@@ -955,7 +971,7 @@ mod tests {
         let response = Response::builder()
             .status(StatusCode::OK)
             .header(header::CONTENT_TYPE, "text/html")
-            .body(FailingBody(4096).boxed())
+            .body(ResponseBody::boxed(FailingBody(4096)))
             .unwrap();
 
         let result = maybe_compress(response, Coding::Br, 4).await;

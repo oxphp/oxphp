@@ -44,7 +44,7 @@ impl<H: PluginRequestHandler + 'static> EventHandler<RequestReceived> for Plugin
                     event.early_response = Some(resp);
                 }
                 if let Some(id) = actions.request_id_override {
-                    event.request_id = id;
+                    event.request_id = id.into();
                 }
                 event.metadata.extend(actions.metadata);
                 if let Some(mode) = actions.profiling_mode {
@@ -136,7 +136,7 @@ impl<H: PluginCompleteHandler + 'static> EventHandler<RequestComplete>
             let view = PluginCompleteView::new(
                 &event.request_id,
                 event.method.as_str(),
-                &event.path,
+                event.uri.path(),
                 event.status,
                 event.duration,
                 event.remote_addr,
@@ -185,7 +185,7 @@ mod tests {
         RequestReceived {
             parts,
             remote_addr: SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 8080),
-            request_id: "test123".to_string(),
+            request_id: "test123".into(),
             early_response: None,
             metadata: Vec::new(),
             profiling_mode: None,
@@ -260,7 +260,7 @@ mod tests {
         let mut event = RequestComplete {
             request_id: "test123".into(),
             method: http::Method::GET,
-            path: "/test".into(),
+            uri: http::Uri::from_static("/test"),
             status: 200,
             duration: std::time::Duration::from_millis(10),
             remote_addr: SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 8080),
@@ -300,7 +300,7 @@ mod tests {
         assert!(event
             .metadata
             .iter()
-            .any(|(k, v)| k == "user_id" && v == "42"));
+            .any(|(k, v)| k == "user_id" && &**v == "42"));
     }
 
     struct HeaderHandler;
@@ -368,7 +368,7 @@ mod tests {
         let mut event = RequestComplete {
             request_id: "req1".into(),
             method: http::Method::GET,
-            path: "/test".into(),
+            uri: http::Uri::from_static("/test"),
             status: 200,
             duration: std::time::Duration::from_millis(5),
             remote_addr: SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 8080),
@@ -410,7 +410,7 @@ mod tests {
         let mut event = RequestComplete {
             request_id: "req1".into(),
             method: http::Method::GET,
-            path: "/test".into(),
+            uri: http::Uri::from_static("/test"),
             status: 529,
             duration: std::time::Duration::from_millis(5),
             remote_addr: SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 8080),
@@ -449,7 +449,7 @@ mod tests {
         let mut event = RequestComplete {
             request_id: "req1".into(),
             method: http::Method::GET,
-            path: "/test".into(),
+            uri: http::Uri::from_static("/test"),
             status: 200,
             duration: std::time::Duration::from_millis(5),
             remote_addr: SocketAddr::new(Ipv4Addr::new(127, 0, 0, 1).into(), 8080),
