@@ -301,13 +301,12 @@ defined('STDERR')||define('STDERR',fopen('php://stderr','wb'));";
         bindings::oxphp_bridge_set_no_chdir();
     }
 
-    let exit_status = match script {
+    let ran = match script {
         Script::Code(code) => {
             let code_c = cstring_from_bytes(code.as_bytes());
             // SAFETY: inside the request opened above; `code_c` outlives the call.
             unsafe { bindings::oxphp_bridge_cli_eval_code(code_c.as_ptr()) };
-            // SAFETY: reads this thread's engine globals before the request closes.
-            unsafe { bindings::oxphp_bridge_get_exit_status() }
+            true
         }
         Script::File(path) => execute_primary_script(&path.to_string_lossy(), |handle| {
             // php-cli parity: open the file by its path, so it is not looked up
@@ -329,6 +328,18 @@ defined('STDERR')||define('STDERR',fopen('php://stderr','wb'));";
 
     // SAFETY: on the main thread, closing the request opened above.
     unsafe { crate::php::thread::close_request() };
+
+    // Read once the request has shut down, as php-cli reads it: shutdown
+    // functions and destructors run in the shutdown and can still set it, and
+    // the shutdown never resets it (PHP 8.4.27, 8.5.12). exit()/die() store
+    // the code; a fatal error, uncaught exception or parse error makes it 255.
+    let exit_status = if ran {
+        // SAFETY: on the main thread, still attached to PHP; reads its engine
+        // globals.
+        unsafe { bindings::oxphp_bridge_get_exit_status() }
+    } else {
+        1
+    };
     sapi::clear_request_data();
 
     // Detach SG(request_info).argc/argv from the storage we are about to free
@@ -346,16 +357,16 @@ defined('STDERR')||define('STDERR',fopen('php://stderr','wb'));";
 }
 
 /// Open the primary script with `open` (a bridge opener: 0 on success) and run
-/// it, returning its exit code; 1 with php-cli's message when it cannot be
-/// opened. Call inside the request.
-fn execute_primary_script(name: &str, open: impl FnOnce(*mut c_void) -> c_int) -> i32 {
+/// it. `false`, with php-cli's message, when it cannot be opened. Call inside
+/// the request.
+fn execute_primary_script(name: &str, open: impl FnOnce(*mut c_void) -> c_int) -> bool {
     // SAFETY: an all-zero zend_file_handle is the unset state the bridge
     // openers initialise and zend_destroy_file_handle accepts.
     let mut file_handle: bindings::zend_file_handle = unsafe { std::mem::zeroed() };
     let opened = open(&mut file_handle as *mut _ as *mut c_void) == 0;
     file_handle.primary_script = true;
 
-    let exit_status = if opened {
+    if opened {
         // oxphp_execute_script_safe wraps php_execute_script in zend_try only as a
         // last-resort guard against a stray bailout escaping FFI. In PHP 8.4+ that
         // is effectively unreachable: exit()/die() is an ordinary function that does
@@ -367,22 +378,14 @@ fn execute_primary_script(name: &str, open: impl FnOnce(*mut c_void) -> c_int) -
         unsafe {
             bindings::oxphp_execute_script_safe(&mut file_handle as *mut _ as *mut c_void);
         }
-        // EG(exit_status) is the single source of truth, exactly like php-cli's
-        // `return EG(exit_status)`: exit($code)/die($code) store it directly; a fatal
-        // error, uncaught exception, or parse error makes the engine set it to 255
-        // (main/main.c, Zend/zend.c); a clean run leaves it 0. Read before
-        // php_request_shutdown clears engine state.
-        // SAFETY: reads this thread's engine globals before the request closes.
-        unsafe { bindings::oxphp_bridge_get_exit_status() }
     } else {
         eprintln!("oxphp: Could not open input file: {name}");
-        1
-    };
+    }
 
     // SAFETY: the handle is zeroed or initialised by the opener, and destroyed
     // once, inside the request.
     unsafe { bindings::zend_destroy_file_handle(&mut file_handle) };
-    exit_status
+    opened
 }
 
 /// Build the SAPI `ini_entries` blob: php-cli's hardcoded defaults followed by

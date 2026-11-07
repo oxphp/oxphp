@@ -282,6 +282,32 @@ out="$(run php_cli_options.php bg-serve 2>&1)"
 [ "$out" = "pid=1|adopted|served" ] \
 	&& ok "orphaned bare oxphp under a PID 1 run serves" || bad "orphan under PID 1 (got '$(printf '%s' "$out" | head -c 300)')"
 
+# 8q. The exit code is the one the request has when it has shut down, as under
+#     php: exit() in a shutdown function or a destructor sets it, an uncaught
+#     exception there makes it 255, and a shutdown function's exit(0) replaces
+#     the script's exit(3). Each case runs as a file, as `-r` code and as a
+#     script on standard input, and prints "<file>|<-r>|<stdin>".
+late_exit() {
+	docker run --rm "$IMAGE" sh -c '
+		printf "<?php %s" "$1" > /tmp/late.php
+		oxphp run /tmp/late.php >/dev/null 2>&1; f=$?
+		oxphp run -r "$1" >/dev/null 2>&1; r=$?
+		OXPHP_RUN_PID=$$ oxphp < /tmp/late.php >/dev/null 2>&1; s=$?
+		echo "$f|$r|$s"' sh "$1"
+}
+for case in \
+	'5|register_shutdown_function(function () { exit(5); });' \
+	'255|register_shutdown_function(function () { throw new Exception("late"); });' \
+	'7|$d = new class { function __destruct() { exit(7); } };' \
+	'255|$d = new class { function __destruct() { throw new Exception("dtor"); } };' \
+	'0|register_shutdown_function(function () { exit(0); }); exit(3);'; do
+	want="${case%%|*}"
+	code="${case#*|}"
+	out="$(late_exit "$code")"
+	[ "$out" = "$want|$want|$want" ] \
+		&& ok "exit code after shutdown: $want for $code" || bad "exit code after shutdown, want $want (got '$out' for $code)"
+done
+
 # 9. regression: HTTP serve role still boots and answers, and still runs a
 #    script in the script's own directory, as PHP-FPM does.
 name="oxphp-serve-smoke-$$"
