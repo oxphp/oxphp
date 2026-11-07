@@ -5081,8 +5081,8 @@ static zend_string *oxphp_op_array_missing_here(const zend_op_array *op, uint32_
 /* The body uses $this. */
 #define OXPHP_USES_THIS (1u << 0)
 /* The body calls a method, or creates an object, through self::, static:: or
- * parent::, or holds a callable that names its class that way or the name of
- * forward_static_call(). */
+ * parent::, runs eval() or include, or holds a callable that names its class
+ * that way or the name of forward_static_call(). */
 #define OXPHP_USES_SCOPE (1u << 1)
 /* The body reads a constant or a static property through self::, static:: or
  * parent::. */
@@ -5276,6 +5276,14 @@ static zend_string *oxphp_op_array_missing_here(const zend_op_array *op, uint32_
                  * named in the code is a constant, and an expression a
                  * variable. */
                 if (uses && opline->op1_type == IS_UNUSED) {
+                    *uses |= OXPHP_USES_SCOPE;
+                }
+                break;
+            case ZEND_INCLUDE_OR_EVAL:
+                /* The code it runs takes this frame's scope and called scope
+                 * for self and static (PHP 8.4, 8.5), so what that code names
+                 * through them is not in this body to be found. */
+                if (uses) {
                     *uses |= OXPHP_USES_SCOPE;
                 }
                 break;
@@ -5634,8 +5642,9 @@ static zend_string *oxphp_call_missing_here(const zend_function *fn, zend_object
 /* The same check for a stored callable, a Shared\Pool factory or $destroy.
  * Unlike a task, such a callable can carry objects and a class with it, so
  * what it reaches through them is checked too: $this, and the classes self
- * and static stand for, when its body uses them or holds a callable that
- * names a class that way or the name of forward_static_call(), written as a
+ * and static stand for, when its body uses them, runs eval() or include, or
+ * holds a callable that names a class that way or the name of
+ * forward_static_call(), written as a
  * literal, a static variable's initial
  * value, the value of any constant or static property or a property default
  * written as a constant expression, of those classes, their parents or the

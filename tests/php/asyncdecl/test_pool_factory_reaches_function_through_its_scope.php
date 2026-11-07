@@ -10,9 +10,11 @@ function asyncdecl_scope_helper(int $base = 0): int
 }
 
 // Factories that reach a method or a property hook through self::, static::,
-// new self or new static: it is found from the closure's class, not by a name
-// this thread's tables must hold. Those classes are checked with the factory
-// when it names one of them that way, and only then.
+// new self or new static, in their own code or in code eval() or include runs
+// for them: it is found from the closure's class, not by a name this thread's
+// tables must hold. Those classes are checked with the factory when it names
+// one of them that way or runs eval() or include; a factory of the same class
+// that does neither runs in the task.
 $t = new TestCase('test_pool_factory_reaches_function_through_its_scope', 'asyncdecl');
 
 $makeLine = __LINE__ + 5;
@@ -36,6 +38,25 @@ class AsyncDeclScopeMaker
     {
         return new \OxPHP\Shared\Pool(
             factory: static fn (): object => (new static())->make(),
+            destroy: null,
+            maxSize: 1,
+        );
+    }
+
+    // Code eval() runs, and a file include runs, take the closure's class.
+    public static function evalPool(): \OxPHP\Shared\Pool
+    {
+        return new \OxPHP\Shared\Pool(
+            factory: static fn (): object => eval('return self::make();'),
+            destroy: null,
+            maxSize: 1,
+        );
+    }
+
+    public static function includePool(): \OxPHP\Shared\Pool
+    {
+        return new \OxPHP\Shared\Pool(
+            factory: static fn (): object => include __DIR__ . '/fixture_include_makes_self.php',
             destroy: null,
             maxSize: 1,
         );
@@ -112,6 +133,8 @@ $refused = asyncdecl_refused('asyncdecl_scope_helper', __FILE__, $makeLine);
 
 $t->assertSame('self::', asyncdecl_acquire_in_task(AsyncDeclScopeMaker::selfPool()), $refused);
 $t->assertSame('new static', asyncdecl_acquire_in_task(AsyncDeclScopeMaker::newStaticPool()), $refused);
+$t->assertSame('self:: in code eval() runs', asyncdecl_acquire_in_task(AsyncDeclScopeMaker::evalPool()), $refused);
+$t->assertSame('self:: in a file it includes', asyncdecl_acquire_in_task(AsyncDeclScopeMaker::includePool()), $refused);
 $t->assertSame(
     'static::, called on a subclass',
     asyncdecl_acquire_in_task(AsyncDeclStaticChild::pool()),
