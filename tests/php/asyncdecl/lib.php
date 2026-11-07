@@ -309,3 +309,14 @@ class AsyncDeclPreScopeBase
 class AsyncDeclPreScopeMiddle extends AsyncDeclPreScopeBase
 {
 }
+
+class AsyncDeclPreScopeMagic
+{
+    public static int $calls = 0;
+
+    public static function __callStatic(string $name, array $arguments): object
+    {
+        self::$calls++;
+        return new \stdClass();
+    }
+}

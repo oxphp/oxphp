@@ -5805,8 +5805,13 @@ static void oxphp_scope_callable_observer(int type, zend_string *file, uint32_t 
     HashTable seen;
     zend_hash_init(&seen, 8, NULL, NULL, 0);
     zend_string *missing = NULL;
+    if (classes[1] == classes[0]) {
+        classes[1] = NULL;
+    }
     for (size_t i = 0; !missing && i < sizeof(classes) / sizeof(classes[0]); i++) {
-        if (classes[i] && zend_hash_find_ptr_lc(EG(class_table), classes[i]->name) != classes[i]) {
+        /* The _str_ form lowercases on the stack; legacy code makes these calls in a loop. */
+        if (classes[i] && zend_hash_str_find_ptr_lc(EG(class_table), ZSTR_VAL(classes[i]->name),
+                                                    ZSTR_LEN(classes[i]->name)) != classes[i]) {
             missing = oxphp_class_missing_here(classes[i], &seen);
         }
     }

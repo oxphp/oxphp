@@ -8709,11 +8709,31 @@ static void oxphp_zend_interrupt_handler(zend_execute_data *execute_data)
      * resolving it threw yet found it valid, and the frame then runs with the
      * exception pending (8.4.27, 8.5.12). The scope-callable check raises the
      * interrupt when it throws, so such a frame meets it before its first opcode
-     * (execute_ex()) and unwinds from there. zend_call_function() also calls this
-     * with the frame of an internal function, which keeps no opline. */
+     * (execute_ex()) and unwinds from there. Only a frame that has not started:
+     * the VM also checks the interrupt as it jumps to a catch with the exception
+     * still pending, and unwinding from that catch would skip it. A frame starts
+     * at most num_args opcodes in, past the RECVs it skips
+     * (i_init_func_execute_data()). zend_call_function() also calls this with the
+     * frame of an internal function, which keeps no opline. */
     if (EG(exception) && execute_data && execute_data->func
             && ZEND_USER_CODE(execute_data->func->common.type)) {
-        zend_rethrow_exception(execute_data);
+        zend_op_array *op_array = &execute_data->func->op_array;
+        if (op_array->fn_flags & ZEND_ACC_CALL_VIA_TRAMPOLINE) {
+            if (execute_data->opline == op_array->opcodes) {
+                /* ZEND_CALL_TRAMPOLINE does not run on a frame unwound here: release what
+                 * it would, and clear what zend_free_trampoline() clears to hand
+                 * EG(trampoline) back. A trampoline allocated because EG(trampoline) was
+                 * taken stays allocated: the frame still unwinds through it. */
+                zend_vm_stack_free_args(execute_data);
+                zend_string_release_ex(op_array->function_name, 0);
+                op_array->function_name = NULL;
+                op_array->attributes = NULL;
+                zend_rethrow_exception(execute_data);
+            }
+        } else if (execute_data->opline >= op_array->opcodes
+                && execute_data->opline <= op_array->opcodes + op_array->num_args) {
+            zend_rethrow_exception(execute_data);
+        }
     }
 
     /* Path B: per-fiber async cancellation. A timed-out awaiter sets the

@@ -184,6 +184,23 @@ class AsyncDeclRunTimeMaker
         }
     }
 
+    // A catch in the frame making the call gets the refusal: the VM jumps to it
+    // with the Error still pending.
+    public static function caughtWhereItIsCalled(): object
+    {
+        \set_error_handler(static fn (): bool => true, E_DEPRECATED);
+        try {
+            $made = \call_user_func(\str_rot13(\array_rand(['frys::znxr' => true])));
+        } catch (\Error $e) {
+            $made = $e;
+        }
+        \restore_error_handler();
+        if ($made instanceof \Error) {
+            throw new \RuntimeException('caught where it is called', 0, $made);
+        }
+        return $made;
+    }
+
     public static function destroyString(object $slot): void
     {
         \set_error_handler(static fn (): bool => true, E_DEPRECATED);
@@ -423,6 +440,21 @@ final class AsyncDeclRunTimeNamedChild extends AsyncDeclPreScopeMiddle
         }
     }
 
+    public static function caughtWhereItIsCalled(): object
+    {
+        \set_error_handler(static fn (): bool => true, E_DEPRECATED);
+        try {
+            $made = \call_user_func([AsyncDeclPreScopeBase::class, \str_rot13(\array_rand(['frys::znxr' => true]))]);
+        } catch (\Error $e) {
+            $made = $e;
+        }
+        \restore_error_handler();
+        if ($made instanceof \Error) {
+            throw new \RuntimeException('caught where it is called', 0, $made);
+        }
+        return $made;
+    }
+
     // The frame pushed with the Error pending unwinds before its first statement.
     public static function startedThroughFilterVar(): object
     {
@@ -437,6 +469,47 @@ final class AsyncDeclRunTimeNamedChild extends AsyncDeclPreScopeMiddle
         } finally {
             \restore_error_handler();
         }
+    }
+}
+
+// A method the named class lacks is called through its __callStatic(), and
+// filter_var() pushes the frame that would call it. That frame unwinds before
+// __callStatic() starts, and what it holds is released: memory stays flat over
+// repeated refusals.
+final class AsyncDeclRunTimeMagicChild extends AsyncDeclPreScopeMagic
+{
+    public static function helper(): int
+    {
+        return asyncdecl_run_time_helper(1);
+    }
+
+    public static function factory(): object
+    {
+        \set_error_handler(static fn (): bool => true, E_DEPRECATED);
+        $refused = 0;
+        $before = 0;
+        for ($i = 0; $i <= 100; $i++) {
+            if ($i === 1) {
+                $before = \memory_get_usage();
+            }
+            try {
+                \filter_var('x', FILTER_CALLBACK, ['options' => [
+                    AsyncDeclPreScopeMagic::class,
+                    \str_rot13(\array_rand(['frys::nofrag' => true])) . $i,
+                ]]);
+            } catch (\Error) {
+                $refused++;
+            }
+        }
+        // Read before `new`, which builds the exception and its trace before its arguments.
+        $grew = \memory_get_usage() - $before;
+        \restore_error_handler();
+        throw new \RuntimeException(\sprintf(
+            'refused %d, __callStatic() ran %d, grew %d',
+            $refused,
+            AsyncDeclPreScopeMagic::$calls,
+            $grew,
+        ));
     }
 }
 
@@ -468,6 +541,10 @@ $pools = [
     'a closure bound elsewhere' => [[AsyncDeclRunTimeMaker::class, 'selfOfAClosureBoundElsewhere'], [$invalid, $refused]],
     'array_map() in a closure bound elsewhere' => [[AsyncDeclRunTimeMaker::class, 'throughArrayMapInAClosureBoundElsewhere'], [$refused]],
     'error_reporting(0)' => [[AsyncDeclRunTimeMaker::class, 'underErrorReportingZero'], [$invalid, $refused]],
+    'a catch around the call' => [
+        [AsyncDeclRunTimeMaker::class, 'caughtWhereItIsCalled'],
+        [[\RuntimeException::class, 'caught where it is called'], $invalid, $refused],
+    ],
 ];
 foreach ($pools as $what => [$factory, $thrown]) {
     $pool = new \OxPHP\Shared\Pool(factory: $factory, destroy: null, maxSize: 1);
@@ -603,5 +680,16 @@ $pool = new \OxPHP\Shared\Pool(
     maxSize: 1,
 );
 $t->assertSame('that array as a stream notifier: in a task', asyncdecl_run_time_thrown_in_task($pool), [$namedRefused]);
+
+$pool = new \OxPHP\Shared\Pool(factory: [AsyncDeclRunTimeNamedChild::class, 'caughtWhereItIsCalled'], destroy: null, maxSize: 1);
+$t->assertSame('that array, with a catch around the call: in a task', asyncdecl_run_time_thrown_in_task($pool), [
+    [\RuntimeException::class, 'caught where it is called'],
+    $namedRefused,
+]);
+
+$pool = new \OxPHP\Shared\Pool(factory: [AsyncDeclRunTimeMagicChild::class, 'factory'], destroy: null, maxSize: 1);
+$t->assertSame('that array reaching __callStatic() through filter_var(): in a task', asyncdecl_run_time_thrown_in_task($pool), [
+    [\RuntimeException::class, 'refused 101, __callStatic() ran 0, grew 0'],
+]);
 
 $t->done();
