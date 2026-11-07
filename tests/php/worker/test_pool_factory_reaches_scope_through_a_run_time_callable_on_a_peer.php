@@ -9,8 +9,8 @@ require_once __DIR__ . '/../test_helper.php';
 // includes, and reaches a method calling a function of that file only through
 // a callable read from a global constant. On the other worker thread, which
 // never included the file, the call throws an Error naming the function and its
-// call site, where it used to take the whole server down; call_user_func(), which
-// is compiled to an opcode, throws a TypeError on top of it.
+// call site; call_user_func(), which is compiled to an opcode, throws a TypeError
+// on top of it.
 //
 // The other thread is reached with a request to this server while this one
 // holds its own worker reading the response; the profile runs two workers.

@@ -12,9 +12,9 @@ function asyncdecl_run_time_helper(int $base = 0): int
 // A callable naming its class as self, static or parent, built while the code
 // runs, cannot be found by reading the callback before it is called. It is
 // checked when PHP resolves it: on a thread that lacks that class, the class is
-// checked whole and the call throws an Error naming what is missing, where it
-// used to take the whole server down. A call_user_func() compiled to an opcode
-// throws a TypeError on top of that Error, as it does for a handler that throws.
+// checked whole and the call throws an Error naming what is missing. A
+// call_user_func() compiled to an opcode throws a TypeError on top of that Error,
+// as it does for a handler that throws.
 // str_rot13() keeps the name out of the file's literals, so the check made before
 // the call has nothing to find, and array_rand(), which OPcache's optimizer cannot
 // evaluate, keeps it out of the compiled code as well.
@@ -104,8 +104,8 @@ class AsyncDeclRunTimeMaker
         }
     }
 
-    // Built-in functions that keep the callable and call it by name later, rather
-    // than taking it as a callable argument.
+    // filter_var() checks the callable with deprecations suppressed, so PHP resolves
+    // it for the check that counts when it calls it by name.
     public static function throughFilterVar(): object
     {
         \set_error_handler(static fn (): bool => true, E_DEPRECATED);
@@ -116,6 +116,20 @@ class AsyncDeclRunTimeMaker
         }
     }
 
+    // filter_var() calls call_user_func(), which resolves the callable as it takes
+    // its arguments, so the Error is pending when control is back in filter_var().
+    public static function throughCallUserFuncInFilterVar(): object
+    {
+        \set_error_handler(static fn (): bool => true, E_DEPRECATED);
+        try {
+            return \filter_var(\str_rot13(\array_rand(['fgngvp::znxr' => true])), FILTER_CALLBACK, ['options' => 'call_user_func']);
+        } finally {
+            \restore_error_handler();
+        }
+    }
+
+    // PHP 8.4 keeps the callable and resolves it at the first notification; 8.5
+    // resolves it in stream_context_create().
     public static function throughStreamNotifier(): object
     {
         \set_error_handler(static fn (): bool => true, E_DEPRECATED);
@@ -335,6 +349,110 @@ final class AsyncDeclRunTimeByName
     }
 }
 
+// An array naming a class and then self:: or parent:: as its method runs a method
+// of that class, with the called class of the code making the call. The classes
+// it names are preloaded, so only that called class is missing on another thread.
+$namedHelperLine = __LINE__ + 5;
+final class AsyncDeclRunTimeNamedChild extends AsyncDeclPreScopeMiddle
+{
+    public static function helper(): int
+    {
+        return asyncdecl_run_time_helper(1);
+    }
+
+    public static function pool(string $class, string $method): \OxPHP\Shared\Pool
+    {
+        $rot13 = \str_rot13($method);
+        return new \OxPHP\Shared\Pool(factory: static function () use ($class, $rot13): object {
+            \set_error_handler(static fn (): bool => true, E_DEPRECATED);
+            try {
+                return \call_user_func([$class, \str_rot13($rot13)]);
+            } finally {
+                \restore_error_handler();
+            }
+        }, destroy: null, maxSize: 1);
+    }
+
+    public static function throughArrayMap(): object
+    {
+        \set_error_handler(static fn (): bool => true, E_DEPRECATED);
+        try {
+            return \array_map([AsyncDeclPreScopeBase::class, \str_rot13(\array_rand(['frys::znxr' => true]))], [1])[0];
+        } finally {
+            \restore_error_handler();
+        }
+    }
+
+    public static function throughForwardStaticCall(): object
+    {
+        \set_error_handler(static fn (): bool => true, E_DEPRECATED);
+        try {
+            return \forward_static_call([AsyncDeclPreScopeBase::class, \str_rot13(\array_rand(['frys::znxr' => true]))]);
+        } finally {
+            \restore_error_handler();
+        }
+    }
+
+    // filter_var() calls the callable by name, and PHP reports this form as valid,
+    // so its frame is pushed with the Error pending.
+    public static function throughFilterVar(): object
+    {
+        \set_error_handler(static fn (): bool => true, E_DEPRECATED);
+        try {
+            return \filter_var('x', FILTER_CALLBACK, ['options' => [
+                AsyncDeclPreScopeBase::class,
+                \str_rot13(\array_rand(['frys::znxr' => true])),
+            ]]);
+        } finally {
+            \restore_error_handler();
+        }
+    }
+
+    public static function throughStreamNotifier(): object
+    {
+        \set_error_handler(static fn (): bool => true, E_DEPRECATED);
+        try {
+            $context = \stream_context_create(params: ['notification' => [
+                AsyncDeclPreScopeBase::class,
+                \str_rot13(\array_rand(['frys::znxr' => true])),
+            ]]);
+            \file_get_contents('http://127.0.0.1:9090/health', false, $context);
+            return new \stdClass();
+        } finally {
+            \restore_error_handler();
+        }
+    }
+
+    // The frame pushed with the Error pending unwinds before its first statement.
+    public static function startedThroughFilterVar(): object
+    {
+        \set_error_handler(static fn (): bool => true, E_DEPRECATED);
+        try {
+            return \filter_var('x', FILTER_CALLBACK, ['options' => [
+                AsyncDeclPreScopeBase::class,
+                \str_rot13(\array_rand(['frys::znexFgnegrq' => true])),
+            ]]);
+        } catch (\Error $e) {
+            throw new \RuntimeException('started: ' . \var_export(AsyncDeclPreScopeBase::$started, true), 0, $e);
+        } finally {
+            \restore_error_handler();
+        }
+    }
+}
+
+final class AsyncDeclRunTimeNamedClean extends AsyncDeclPreScopeMiddle
+{
+    public static function factory(): object
+    {
+        \set_error_handler(static fn (): bool => true, E_DEPRECATED);
+        try {
+            return \call_user_func([AsyncDeclPreScopeBase::class, \str_rot13(\array_rand(['frys::znxr' => true]))]);
+        } finally {
+            \restore_error_handler();
+        }
+    }
+}
+
 $refused = asyncdecl_refused('asyncdecl_run_time_helper', __FILE__, $makeLine);
 $invalid = [\TypeError::class, 'call_user_func(): Argument #1 ($callback) must be a valid callback, (null)'];
 $pools = [
@@ -345,6 +463,7 @@ $pools = [
     'array_map()' => [[AsyncDeclRunTimeMaker::class, 'throughArrayMap'], [$refused]],
     'forward_static_call()' => [[AsyncDeclRunTimeMaker::class, 'throughForwardStaticCall'], [$refused]],
     'filter_var()' => [[AsyncDeclRunTimeMaker::class, 'throughFilterVar'], [$refused]],
+    'filter_var() calling call_user_func()' => [[AsyncDeclRunTimeMaker::class, 'throughCallUserFuncInFilterVar'], [$refused]],
     'a stream notifier' => [[AsyncDeclRunTimeMaker::class, 'throughStreamNotifier'], [$refused]],
     'a closure bound elsewhere' => [[AsyncDeclRunTimeMaker::class, 'selfOfAClosureBoundElsewhere'], [$invalid, $refused]],
     'array_map() in a closure bound elsewhere' => [[AsyncDeclRunTimeMaker::class, 'throughArrayMapInAClosureBoundElsewhere'], [$refused]],
@@ -420,5 +539,69 @@ foreach (['dynamicCall', 'dynamicClass'] as $method) {
     $pool = new \OxPHP\Shared\Pool(factory: [AsyncDeclRunTimeByName::class, $method], destroy: null, maxSize: 1);
     $t->assertSame("$method: in a task", asyncdecl_acquire_in_task($pool), [\Error::class, 'Class "static" not found']);
 }
+
+$namedRefused = asyncdecl_refused('asyncdecl_run_time_helper', __FILE__, $namedHelperLine);
+$named = [
+    "['Base', 'self::make']" => AsyncDeclRunTimeNamedChild::pool(AsyncDeclPreScopeBase::class, 'self::make'),
+    "['Middle', 'parent::make']" => AsyncDeclRunTimeNamedChild::pool(AsyncDeclPreScopeMiddle::class, 'parent::make'),
+    "['Base', 'SELF::make']" => AsyncDeclRunTimeNamedChild::pool(AsyncDeclPreScopeBase::class, 'SELF::make'),
+    "['Middle', 'Parent::make']" => AsyncDeclRunTimeNamedChild::pool(AsyncDeclPreScopeMiddle::class, 'Parent::make'),
+    'that array through array_map()' => new \OxPHP\Shared\Pool(
+        factory: [AsyncDeclRunTimeNamedChild::class, 'throughArrayMap'],
+        destroy: null,
+        maxSize: 1,
+    ),
+    'that array through forward_static_call()' => new \OxPHP\Shared\Pool(
+        factory: [AsyncDeclRunTimeNamedChild::class, 'throughForwardStaticCall'],
+        destroy: null,
+        maxSize: 1,
+    ),
+    'that array through filter_var()' => new \OxPHP\Shared\Pool(
+        factory: [AsyncDeclRunTimeNamedChild::class, 'throughFilterVar'],
+        destroy: null,
+        maxSize: 1,
+    ),
+];
+foreach ($named as $what => $pool) {
+    $t->assertSame("$what: in a task", asyncdecl_run_time_thrown_in_task($pool), [$namedRefused]);
+    $h = $pool->acquire();
+    $t->assertSame("$what: the called class is the caller's on the worker thread", $h->get()->v, 2);
+    $h->release();
+}
+
+// A class named before the :: resolves by that name, so the called class does not
+// come from the code making the call, and nothing is missing.
+$t->assertSame(
+    "['Base', 'Base::make']: runs in a task",
+    asyncdecl_acquire_in_task(AsyncDeclRunTimeNamedChild::pool(AsyncDeclPreScopeBase::class, AsyncDeclPreScopeBase::class . '::make')),
+    ['returned', \stdClass::class],
+);
+// static:: stands for the caller's class, which the class named first must extend,
+// so PHP itself refuses the method of a parent.
+$t->assertSame(
+    "['Base', 'static::make']: in a task",
+    asyncdecl_run_time_thrown_in_task(AsyncDeclRunTimeNamedChild::pool(AsyncDeclPreScopeBase::class, 'static::make')),
+    [[\TypeError::class, 'call_user_func(): Argument #1 ($callback) must be a valid callback, class '
+        . AsyncDeclPreScopeBase::class . ' is not a subclass of ' . AsyncDeclRunTimeNamedChild::class]],
+);
+$pool = new \OxPHP\Shared\Pool(factory: [AsyncDeclRunTimeNamedClean::class, 'factory'], destroy: null, maxSize: 1);
+$t->assertSame('that array in a class with nothing missing runs in a task', asyncdecl_acquire_in_task($pool), ['returned', \stdClass::class]);
+
+$pool = new \OxPHP\Shared\Pool(
+    factory: [AsyncDeclRunTimeNamedChild::class, 'startedThroughFilterVar'],
+    destroy: null,
+    maxSize: 1,
+);
+$t->assertSame('that array through filter_var(): the method does not start', asyncdecl_run_time_thrown_in_task($pool), [
+    [\RuntimeException::class, 'started: false'],
+    $namedRefused,
+]);
+
+$pool = new \OxPHP\Shared\Pool(
+    factory: [AsyncDeclRunTimeNamedChild::class, 'throughStreamNotifier'],
+    destroy: null,
+    maxSize: 1,
+);
+$t->assertSame('that array as a stream notifier: in a task', asyncdecl_run_time_thrown_in_task($pool), [$namedRefused]);
 
 $t->done();

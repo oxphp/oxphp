@@ -8705,6 +8705,17 @@ static void oxphp_zend_interrupt_handler(zend_execute_data *execute_data)
      * that reaches the handler is an answer, whoever raised it. */
     oxphp_bridge_tick();
 
+    /* zend_call_function() pushes the frame of a callable it resolves itself when
+     * resolving it threw yet found it valid, and the frame then runs with the
+     * exception pending (8.4.27, 8.5.12). The scope-callable check raises the
+     * interrupt when it throws, so such a frame meets it before its first opcode
+     * (execute_ex()) and unwinds from there. zend_call_function() also calls this
+     * with the frame of an internal function, which keeps no opline. */
+    if (EG(exception) && execute_data && execute_data->func
+            && ZEND_USER_CODE(execute_data->func->common.type)) {
+        zend_rethrow_exception(execute_data);
+    }
+
     /* Path B: per-fiber async cancellation. A timed-out awaiter sets the
      * running task fiber's shared cancel cell and kicks this worker thread's
      * vm_interrupt cross-thread (the scheduler loop can't reach a CPU-bound

@@ -282,3 +282,30 @@ class AsyncDeclPreForwarder
         return (object) ['v' => 0];
     }
 }
+
+// A method reaching the called class through static::, on classes every thread
+// has, for a subclass a thread lacks.
+class AsyncDeclPreScopeBase
+{
+    public static bool $started = false;
+
+    public static function make(): object
+    {
+        return (object) ['v' => static::helper()];
+    }
+
+    public static function helper(): int
+    {
+        return 1;
+    }
+
+    public static function markStarted(): object
+    {
+        self::$started = true;
+        return new \stdClass();
+    }
+}
+
+class AsyncDeclPreScopeMiddle extends AsyncDeclPreScopeBase
+{
+}
