@@ -2573,9 +2573,9 @@ int oxphp_pool_body_invoke(void *body_callable_zv,
 void oxphp_pool_slot_to_user(void *slot_zv_heap, void *user_out_zv);
 void oxphp_pool_slot_free(void *slot_zv_heap);
 
-/* Refuses a callable with self, static or parent as its class, as PHP resolves
- * it, when this thread lacks code of that class. From MINIT: observers cannot be
- * added once threads run. */
+/* Refuses a callable resolved through self, static or parent, as PHP resolves it,
+ * when this thread lacks code of the calling class. From MINIT: observers cannot
+ * be added once threads run. */
 void oxphp_scope_callable_check_register(void);
 
 /* $destroy($resource) + slot release. See oxphp_bridge.c for

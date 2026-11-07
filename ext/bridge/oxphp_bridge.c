@@ -4,6 +4,7 @@
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
+#include <strings.h>
 #include <stdlib.h>
 #include <time.h>
 #include <inttypes.h>
@@ -5710,9 +5711,9 @@ static zend_string *oxphp_call_missing_here(const zend_function *fn, zend_object
  * a built-in object that holds others (ArrayObject, a Generator). A callback whose code
  * oxphp_op_array_in_request_memory() finds in request memory, where closures
  * made from one declaration share its run-time cache too, does not run on
- * another thread (oxphp_pool_prepare_elsewhere). A callable with self, static or
- * parent as its class that the code makes at run time is not found here either:
- * it is checked at the call, as PHP resolves it (oxphp_scope_callable_observer()). */
+ * another thread (oxphp_pool_prepare_elsewhere). A callable resolved through self,
+ * static or parent that the code makes at run time is not found here either: it is
+ * checked at the call, as PHP resolves it (oxphp_scope_callable_observer()). */
 static zend_string *oxphp_pool_callable_missing_here(const zend_fcall_info_cache *fcc,
                                                      bool captures) {
     const zend_function *fn = fcc->function_handler;
@@ -5731,14 +5732,39 @@ static zend_string *oxphp_pool_callable_missing_here(const zend_fcall_info_cache
     return missing;
 }
 
-/* === A callable with self, static or parent as its class, as PHP resolves it === */
+/* === A callable resolved through self, static or parent, as PHP resolves it === */
 
 #include "Zend/zend_observer.h"
 
+/* Whether a deprecation is the one PHP raises for such a callable (8.4.27, 8.5.12).
+ * In ["Base", "self::make"] the class of the calling frame becomes the called class,
+ * and PHP deprecates the array rather than self. "static::" is left out because the
+ * class named first must then extend the calling class, and no class this thread has
+ * extends one it lacks; "Base::" because a named class does not come from the frame.
+ * A class name holds no quote, so the first separator ends it. */
+static bool oxphp_message_is_scope_callable(const zend_string *message) {
+    if (zend_string_equals_literal(message, "Use of \"static\" in callables is deprecated")
+            || zend_string_equals_literal(message, "Use of \"self\" in callables is deprecated")
+            || zend_string_equals_literal(message, "Use of \"parent\" in callables is deprecated")) {
+        return true;
+    }
+    if (!zend_string_starts_with_literal(message, "Callables of the form [\"")) {
+        return false;
+    }
+    const char *method = strstr(ZSTR_VAL(message), "\", \"");
+    if (!method) {
+        return false;
+    }
+    method += strlen("\", \"");
+    return strncasecmp(method, "self::", strlen("self::")) == 0
+        || strncasecmp(method, "parent::", strlen("parent::")) == 0;
+}
+
 /* PHP resolves such a callable from the class of the nearest PHP frame, whether
- * this thread has loaded that class or not, and deprecates it just before
- * (zend_is_callable_check_class(), 8.4.27 and 8.5.12). So a callable built at
- * run time, which no reading of a callback before its call finds, is seen here.
+ * this thread has loaded that class or not, and deprecates it as it does
+ * (zend_is_callable_check_class(), zend_is_callable_check_func()). So a callable
+ * built at run time, which no reading of a callback before its call finds, is seen
+ * here.
  * Observers run before any error handler, whatever error_reporting says
  * (zend_error_zstr_at()), but on 8.5 a recorded error that is not fatal reaches
  * them only when replayed. OPcache records for the whole compile of a file, where
@@ -5752,15 +5778,20 @@ static zend_string *oxphp_pool_callable_missing_here(const zend_fcall_info_cache
  * An exception pending when zend_is_callable_check_class() returns makes the
  * callable invalid (GH-21699), so the method does not start. ZEND_INIT_USER_CALL,
  * what call_user_func() compiles to, then throws a TypeError of its own with this
- * Error as its previous exception, as it does for an error handler that throws. */
+ * Error as its previous exception, as it does for an error handler that throws.
+ *
+ * PHP deprecates the array form later, in zend_is_callable_check_func(), and still
+ * reports it valid. Callers with a resolved callable see the exception first, but
+ * zend_call_function() resolving one itself, behind call_user_function(), pushes the
+ * frame anyway. A frame running with an exception pending is not safe even when it
+ * calls nothing missing: on 8.4 a `new` there unwinds from a stale throw position and
+ * can end the process. So the throw raises the interrupt, and the interrupt handler
+ * sends that frame to this Error before its first opcode. */
 static void oxphp_scope_callable_observer(int type, zend_string *file, uint32_t line,
                                           zend_string *message) {
     (void) file;
     (void) line;
-    if (type != E_DEPRECATED
-            || !(zend_string_equals_literal(message, "Use of \"static\" in callables is deprecated")
-              || zend_string_equals_literal(message, "Use of \"self\" in callables is deprecated")
-              || zend_string_equals_literal(message, "Use of \"parent\" in callables is deprecated"))) {
+    if (type != E_DEPRECATED || !oxphp_message_is_scope_callable(message)) {
         return;
     }
     zend_execute_data *frame = EG(current_execute_data);
@@ -5783,6 +5814,7 @@ static void oxphp_scope_callable_observer(int type, zend_string *file, uint32_t 
     if (missing) {
         zend_throw_error(NULL, "%s", ZSTR_VAL(missing));
         zend_string_release_ex(missing, 0);
+        zend_atomic_bool_store_ex(&EG(vm_interrupt), true);
     }
 }
 
