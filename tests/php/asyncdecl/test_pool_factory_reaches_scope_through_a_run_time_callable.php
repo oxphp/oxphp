@@ -425,6 +425,21 @@ final class AsyncDeclRunTimeNamedChild extends AsyncDeclPreScopeMiddle
         }
     }
 
+    // The frame unwinds at the method's first opcode, which builds a string that
+    // unwinding releases.
+    public static function quotedThroughFilterVar(): object
+    {
+        \set_error_handler(static fn (): bool => true, E_DEPRECATED);
+        try {
+            return \filter_var('x', FILTER_CALLBACK, ['options' => [
+                AsyncDeclPreScopeBase::class,
+                \str_rot13(\array_rand(['frys::dhbgr' => true])),
+            ]]);
+        } finally {
+            \restore_error_handler();
+        }
+    }
+
     public static function throughStreamNotifier(): object
     {
         \set_error_handler(static fn (): bool => true, E_DEPRECATED);
@@ -673,6 +688,16 @@ $t->assertSame('that array through filter_var(): the method does not start', asy
     [\RuntimeException::class, 'started: false'],
     $namedRefused,
 ]);
+
+$pool = new \OxPHP\Shared\Pool(
+    factory: [AsyncDeclRunTimeNamedChild::class, 'quotedThroughFilterVar'],
+    destroy: null,
+    maxSize: 1,
+);
+$t->assertSame('that array through filter_var(), the method starting with a string: in a task', asyncdecl_run_time_thrown_in_task($pool), [$namedRefused]);
+$h = $pool->acquire();
+$t->assertSame('that array through filter_var(), the method starting with a string: on the worker thread the factory runs', $h->get()->v, '<x>');
+$h->release();
 
 $pool = new \OxPHP\Shared\Pool(
     factory: [AsyncDeclRunTimeNamedChild::class, 'throughStreamNotifier'],

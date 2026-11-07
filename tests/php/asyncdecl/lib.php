@@ -304,6 +304,13 @@ class AsyncDeclPreScopeBase
         self::$started = true;
         return new \stdClass();
     }
+
+    // Its first opcode is a ROPE_INIT: an untyped parameter starts the frame past
+    // the RECV, and the interpolation comes first.
+    public static function quote($v): object
+    {
+        return (object) ['v' => "<{$v}>"];
+    }
 }
 
 class AsyncDeclPreScopeMiddle extends AsyncDeclPreScopeBase

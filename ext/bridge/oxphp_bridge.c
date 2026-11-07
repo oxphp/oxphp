@@ -5781,12 +5781,13 @@ static bool oxphp_message_is_scope_callable(const zend_string *message) {
  * Error as its previous exception, as it does for an error handler that throws.
  *
  * PHP deprecates the array form later, in zend_is_callable_check_func(), and still
- * reports it valid. Callers with a resolved callable see the exception first, but
- * zend_call_function() resolving one itself, behind call_user_function(), pushes the
- * frame anyway. A frame running with an exception pending is not safe even when it
- * calls nothing missing: on 8.4 a `new` there unwinds from a stale throw position and
- * can end the process. So the throw raises the interrupt, and the interrupt handler
- * sends that frame to this Error before its first opcode. */
+ * reports it valid. Callers with a resolved callable see the exception first, though
+ * one that keeps the callable, such as ob_start(), calls it later with nothing here
+ * to stop it. zend_call_function() resolving one itself, behind call_user_function(),
+ * pushes the frame anyway. A frame running with an exception pending is not safe
+ * even when it calls nothing missing: on 8.4 a `new` there unwinds from a stale
+ * throw position and can end the process. So the throw raises the interrupt, and
+ * the interrupt handler sends that frame to this Error before its first opcode. */
 static void oxphp_scope_callable_observer(int type, zend_string *file, uint32_t line,
                                           zend_string *message) {
     (void) file;
