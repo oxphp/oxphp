@@ -8732,6 +8732,14 @@ static void oxphp_zend_interrupt_handler(zend_execute_data *execute_data)
             }
         } else if (execute_data->opline >= op_array->opcodes
                 && execute_data->opline <= op_array->opcodes + op_array->num_args) {
+            /* A rope's live range starts at the ROPE_INIT that makes it, unlike any other
+             * (zend_calc_live_ranges(), 8.4.27, 8.5.12), so unwinding from that opcode
+             * releases a first string it has not written yet. An interned one is never
+             * freed. */
+            if (execute_data->opline->opcode == ZEND_ROPE_INIT) {
+                *(zend_string **) ZEND_CALL_VAR(execute_data, execute_data->opline->result.var) =
+                    ZSTR_EMPTY_ALLOC();
+            }
             zend_rethrow_exception(execute_data);
         }
     }
