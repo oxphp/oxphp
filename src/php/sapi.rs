@@ -1560,8 +1560,9 @@ pub fn build_sapi_module() -> sapi_module_struct {
 /// remain valid for the process lifetime. `executable_location` is the path
 /// PHP resolves `PHP_BINARY` from during module startup (null leaves it
 /// `''`); it must stay valid for the process lifetime too, since `sapi_module`
-/// keeps it. Unlike the web module this does NOT install the bridge
-/// ub_write/flush trampolines — CLI output bypasses the per-request buffer.
+/// keeps it. Output bypasses the web module's per-request buffer: the bridge's
+/// CLI ub_write writes it to fd 1 and, when a write fails anywhere but on an
+/// async pool thread, handles the failure as php-cli does.
 pub fn build_cli_sapi_module(
     ini_entries: *const c_char,
     executable_location: *mut c_char,
@@ -1576,7 +1577,7 @@ pub fn build_cli_sapi_module(
         activate: Some(oxphp_activate),
         deactivate: Some(oxphp_deactivate),
 
-        ub_write: Some(cli_ub_write),
+        ub_write: Some(bindings::oxphp_bridge_cli_ub_write),
         flush: Some(cli_flush),
         get_stat: None,
         getenv: None,
@@ -1660,16 +1661,6 @@ unsafe fn write_all_fd(fd: c_int, buf: &[u8]) -> usize {
         }
     }
     written
-}
-
-/// Write script output straight to stdout (fd 1). `write(2)` is unbuffered,
-/// so `implicit_flush` semantics hold without an explicit flush.
-unsafe extern "C" fn cli_ub_write(str: *const c_char, str_length: usize) -> usize {
-    if str.is_null() || str_length == 0 {
-        return 0;
-    }
-    let buf = std::slice::from_raw_parts(str as *const u8, str_length);
-    write_all_fd(1, buf)
 }
 
 /// No-op: stdout writes via `write(2)` are not buffered at the libc level.

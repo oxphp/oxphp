@@ -308,6 +308,52 @@ for case in \
 		&& ok "exit code after shutdown: $want for $code" || bad "exit code after shutdown, want $want (got '$out' for $code)"
 done
 
+# 8r. A write to standard output that fails because its reader has gone
+#     (`oxphp run x.php | head -1`) ends the script as under php: exit code 255,
+#     and output stays off for the rest of the request, so a shutdown function's
+#     echo is dropped rather than ending it too. With ignore_user_abort(true) the
+#     script goes on and connection_status() is 1. Each case runs under php and
+#     under oxphp in the same image, as a file, as `-r` code and on standard
+#     input, and prints "<code>:<stderr>;" for each of the six runs.
+broken_stdout() {
+	docker run --rm "$IMAGE" sh -c '
+		printf "<?php %s" "$1" > /tmp/p.php
+		one() {
+			( "$@" 2>/tmp/err; echo $? >/tmp/code ) | true
+			printf "%s:%s;" "$(cat /tmp/code)" "$(tr "\n" " " </tmp/err)"
+		}
+		one php /tmp/p.php
+		one php -r "$1"
+		one php </tmp/p.php
+		one oxphp run /tmp/p.php
+		one oxphp run -r "$1"
+		one sh -c "OXPHP_RUN_PID=\$\$ oxphp; exit \$?" </tmp/p.php' sh "$1"
+}
+late='register_shutdown_function(function () { echo "late\n"; fwrite(STDERR, "shutdown ran\n"); }); usleep(300000); echo "x\n";'
+for case in \
+	"255:shutdown ran ;|$late fwrite(STDERR, \"after-echo\\n\");" \
+	"255:after-echo cs=1 shutdown ran ;|ignore_user_abort(true); $late fwrite(STDERR, \"after-echo cs=\" . connection_status() . \"\\n\");"; do
+	want="${case%%|*}"
+	code="${case#*|}"
+	out="$(broken_stdout "$code")"
+	[ "$out" = "$want$want$want$want$want$want" ] \
+		&& ok "failed stdout write: '$want' under php and oxphp" || bad "failed stdout write, want '$want' x6 (got '$out' for $code)"
+done
+
+# A pool thread's failed write ends neither its task nor the script, and the
+# thread's next task finds the connection normal: the thread's one request lasts
+# as long as the thread. Each task returns its connection_status().
+out="$(docker run --rm -e ASYNC_WORKERS=1 "$IMAGE" sh -c '
+	printf "<?php %s" "$1" > /tmp/p.php
+	( oxphp run /tmp/p.php 2>/tmp/err; echo $? >/tmp/code ) | true
+	printf "%s:%s" "$(cat /tmp/code)" "$(tr "\n" " " </tmp/err)"' sh \
+	'usleep(300000);
+	$a = oxphp_async_await(oxphp_async(static function (): int { echo "a\n"; return connection_status(); }), 5.0);
+	$b = oxphp_async_await(oxphp_async(static function (): int { return connection_status(); }), 5.0);
+	fwrite(STDERR, "tasks=$a,$b\n");')"
+[ "$out" = "0:tasks=0,0 " ] \
+	&& ok "failed stdout write on a pool thread: task and script go on" || bad "pool thread failed write (got '$out')"
+
 # 9. regression: HTTP serve role still boots and answers, and still runs a
 #    script in the script's own directory, as PHP-FPM does.
 name="oxphp-serve-smoke-$$"

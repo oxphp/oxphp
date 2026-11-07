@@ -155,7 +155,7 @@ The `run` role applies these CLI-oriented defaults. As under `php`, `php.ini` an
 | Code | Meaning |
 |---|---|
 | script's own | `exit($code)` / `die($code)` — in the script, a shutdown function or a destructor, as under `php` — or `0` on a clean finish. |
-| `255` | Fatal error, uncaught exception, or parse error — in the script, a shutdown function or a destructor. |
+| `255` | Fatal error, uncaught exception, or parse error — in the script, a shutdown function or a destructor. Also output that cannot be written — what `echo`, `print`, `var_dump()` or an output buffer sends — as when the output is piped into `head -1` and `head` has exited: the script stops at that write, as under `php`, and what it prints after it, in shutdown functions too, is dropped. After `ignore_user_abort(true)` it carries on instead, and `connection_status()` returns `1`. A failed `fwrite(STDOUT, …)` is not output in this sense: it returns `false` with a notice, and that notice stops the script only when `display_errors` shows errors on standard output, where it fails in turn. Output an `oxphp_async()` task prints on a pool thread is only dropped: the task and the script go on, and the exit code does not change. |
 | `1` | The script path could not be opened (`oxphp: Could not open input file: <path>`). |
 | `2` | An invalid `-d` argument. |
 | `137` | PHP's hard memory limit, on PHP 8.4.27 / 8.5.12 and later: an allocation past the hard limit PHP sets above `memory_limit` that PHP cannot refuse ends the process, and stderr has a `Hard memory limit of … bytes exhausted` line — see [Memory limits](docker.md#memory-limits). A container the kernel kills for running out of memory exits with `137` too, without that line. |
