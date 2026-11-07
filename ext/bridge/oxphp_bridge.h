@@ -966,7 +966,9 @@ void oxphp_bridge_set_cli_args(int argc, char **argv);
 void oxphp_bridge_cli_ini_defaults(void *configuration_hash);
 
 /** Return EG(exit_status) — the script's exit code (set by exit()/die(),
- *  0 on normal completion). Read after php_execute_script(). */
+ *  255 after a fatal error, 0 on normal completion). Read it after
+ *  php_request_shutdown(), as php-cli does: shutdown functions and destructors
+ *  run there and can still set it. */
 int oxphp_bridge_get_exit_status(void);
 
 /** Compile + execute a PHP snippet (zend_try-guarded). Used to define the CLI
