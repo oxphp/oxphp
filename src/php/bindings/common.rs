@@ -455,4 +455,5 @@ extern "C" {
     pub fn oxphp_bridge_cli_open_script(file_handle: *mut c_void, path: *const c_char) -> c_int;
     pub fn oxphp_bridge_cli_open_stdin(file_handle: *mut c_void) -> c_int;
     pub fn oxphp_bridge_cli_eval_code(code: *const c_char);
+    pub fn oxphp_bridge_cli_ub_write(str: *const c_char, str_length: usize) -> usize;
 }

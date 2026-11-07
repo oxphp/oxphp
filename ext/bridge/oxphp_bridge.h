@@ -1010,6 +1010,12 @@ int oxphp_bridge_cli_open_stdin(void *file_handle);
  *  a request. */
 void oxphp_bridge_cli_eval_code(const char *code);
 
+/** The CLI module's ub_write: writes to fd 1, and returns the bytes written.
+ *  When a write fails, the request on this thread is handled as under php-cli:
+ *  exit status 255, connection aborted, output off, and a bailout unless
+ *  ignore_user_abort is on. On an async pool thread the output is only lost. */
+size_t oxphp_bridge_cli_ub_write(const char *str, size_t str_length);
+
 /* ── Zval lifecycle ── */
 
 /** Destroy a zval (decrement refcount, free if needed). */

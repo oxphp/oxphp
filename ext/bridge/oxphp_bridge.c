@@ -1957,6 +1957,46 @@ void oxphp_bridge_cli_eval_code(const char *code) {
     } zend_end_try();
 }
 
+#include "main/php_main.h"  /* php_handle_aborted_connection() */
+
+/* A failed write is handled as php-cli's ub_write handles it (sapi_cli_ub_write,
+ * PHP 8.4.27 and 8.5.12): exit status 255, then php_handle_aborted_connection(),
+ * which marks the connection aborted, turns output off for the rest of the
+ * request and bails out unless ignore_user_abort is on. In C so that the
+ * bailout has no Rust frame of this write to cross.
+ *
+ * Not on an async pool thread: there the bailout would fail the task with a
+ * fatal error, which oxphp_async_await() hands the script as an exception, and
+ * the aborted state would carry over to the thread's later tasks, because its
+ * one request lasts as long as the thread. */
+size_t oxphp_bridge_cli_ub_write(const char *str, size_t str_length) {
+    size_t written = 0;
+    while (written < str_length) {
+        ssize_t n = write(STDOUT_FILENO, str + written, str_length - written);
+        if (n > 0) {
+            written += (size_t)n;
+            continue;
+        }
+        if (n == 0) {
+            break;
+        }
+        if (errno == EINTR) {
+            continue;
+        }
+        if (errno == EAGAIN) {
+            struct pollfd pfd = { .fd = STDOUT_FILENO, .events = POLLOUT };
+            poll(&pfd, 1, -1);
+            continue;
+        }
+        if (!ctx.is_async_worker) {
+            EG(exit_status) = 255;
+            php_handle_aborted_connection();
+        }
+        break;
+    }
+    return written;
+}
+
 /* ── SAPI response code ── */
 
 int oxphp_bridge_get_response_code(void) {
