@@ -15,8 +15,9 @@ use OxPHP\Shared\Pool;
 // - a method such a class declares with a `static` is refused;
 // - one with none runs with a run-time cache of its own for the call;
 // - a callback reaching such a class through self::, static::, parent::,
-//   forward_static_call() or __callStatic() is refused, whichever function the
-//   call runs first.
+//   forward_static_call() or __callStatic(), or running eval() or include,
+//   whose code takes the class of the frame that runs it, is refused, whichever
+//   function the call runs first.
 $t = new TestCase('test_pool_callback_reaching_a_class_linked_in_request_memory_on_another_thread', 'asyncdecl');
 
 /** The `v` of a slot acquire() returns on this thread. */
@@ -89,6 +90,10 @@ $runs = [
     '__callStatic() of a class in shared memory, by name' => [[AsyncDeclLinkedInSharedMemory::class, 'nope'], 1],
     '__callStatic() of a class in shared memory, as a closure' => [AsyncDeclLinkedInSharedMemory::nope(...), 1],
     'forward_static_call() of a preloaded class, by name' => [[AsyncDeclPreForwarder::class, 'forwarded'], 0],
+    // eval() has the classes self and static stand for checked, as self:: does;
+    // with neither, nothing is.
+    'eval() of a class in shared memory, by name' => [[AsyncDeclLinkedInSharedMemory::class, 'viaEval'], 1],
+    'eval() in a closure with no class' => [static fn (): object => (object) ['v' => eval('return 2;')], 2],
     // Inherited from a parent in shared memory, the method is the parent's, with
     // what each thread has of its own, whichever class links it.
     'a static method inherited from a parent in shared memory, by name'
@@ -137,6 +142,10 @@ $reaching = [
     'parent::make() of a parent in request memory' => [[AsyncDeclLinkedMaker::class, 'viaParent'], AsyncDeclLinkedMaker::class, 4],
     'new static' => [[AsyncDeclLinkedMaker::class, 'viaNewStatic'], AsyncDeclLinkedMaker::class, 7],
     'self::$n' => [[AsyncDeclLinkedMaker::class, 'viaSelfProperty'], AsyncDeclLinkedMaker::class, 1],
+    // A task that ran it would count from this thread's 1, and this thread on
+    // from the task's.
+    'self::$n in code eval() runs' => [[AsyncDeclLinkedMaker::class, 'viaEval'], AsyncDeclLinkedMaker::class, 2],
+    'self::$n in a file it includes' => [[AsyncDeclLinkedMaker::class, 'viaInclude'], AsyncDeclLinkedMaker::class, 3],
     'static::LIMIT' => [[AsyncDeclLinkedMaker::class, 'viaStaticConstant'], AsyncDeclLinkedMaker::class, 5],
     'a closure the class declares, self::helper()' => [AsyncDeclLinkedMaker::declaredClosure(), AsyncDeclLinkedMaker::class, 3],
     '__callStatic(), by name' => [[AsyncDeclLinkedMagic::class, 'nope'], AsyncDeclLinkedMagic::class, 1],
@@ -145,6 +154,8 @@ $reaching = [
         => [[AsyncDeclLinkedShmChild::class, 'viaStatic'], AsyncDeclLinkedShmChild::class, 1],
     'static::helper() from a parent in shared memory, as a closure'
         => [AsyncDeclLinkedShmChild::viaStatic(...), AsyncDeclLinkedShmChild::class, 2],
+    'static::helper() in code eval() runs in a parent in shared memory, by name'
+        => [[AsyncDeclLinkedShmChild::class, 'viaEvalStatic'], AsyncDeclLinkedShmChild::class, 3],
     "the parent's __callStatic(), by name" => [[AsyncDeclLinkedShmChild::class, 'nope'], AsyncDeclLinkedShmChild::class, 2],
     "the parent's __callStatic(), as a closure" => [AsyncDeclLinkedShmChild::nope(...), AsyncDeclLinkedShmChild::class, 2],
     'self::helper() of an anonymous class'

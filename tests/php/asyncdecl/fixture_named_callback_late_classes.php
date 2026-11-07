@@ -15,6 +15,8 @@ class AsyncDeclLinkedMaker extends AsyncDeclLinkedEvalParent
 
     public static int $n = 0;
 
+    public static string $s = '';
+
     public int $v = 7;
 
     public static function appended(): object
@@ -101,6 +103,21 @@ class AsyncDeclLinkedMaker extends AsyncDeclLinkedEvalParent
         return (object) ['v' => static::LIMIT];
     }
 
+    public static function viaEval(): object
+    {
+        return (object) ['v' => eval('return ++self::$n;')];
+    }
+
+    public static function viaInclude(): object
+    {
+        return (object) ['v' => include __DIR__ . '/fixture_include_counts_self.php'];
+    }
+
+    public static function appendsViaEval(): object
+    {
+        return (object) ['v' => \strlen(eval('return self::$s .= str_repeat("x", 5000);'))];
+    }
+
     public static function declaredClosure(): \Closure
     {
         return static fn (): object => (object) ['v' => self::helper()];
@@ -138,6 +155,11 @@ class AsyncDeclLinkedShmBase
     public static function viaStatic(): object
     {
         return (object) ['v' => static::helper()];
+    }
+
+    public static function viaEvalStatic(): object
+    {
+        return (object) ['v' => eval('return static::helper();')];
     }
 
     public static function inheritedCounted(): object
@@ -196,6 +218,11 @@ class AsyncDeclLinkedInSharedMemory
     public static function viaStaticConstant(): object
     {
         return (object) ['v' => static::LIMIT];
+    }
+
+    public static function viaEval(): object
+    {
+        return (object) ['v' => eval('return self::helper();')];
     }
 
     public static function __callStatic(string $name, array $args): object
