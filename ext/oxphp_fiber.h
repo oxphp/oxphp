@@ -722,6 +722,23 @@ typedef struct _oxphp_fiber_scheduler {
     uint32_t session_waiters;
     uint64_t session_wait_next;
 
+    /* The first request this loop started, while no other may be admitted beside
+     * it: until it ends, or OXPHP_FIRST_REQUEST_ALONE_NS after the tick first
+     * finds it waiting. NULL after that, and throughout where no runtime hook is
+     * installed.
+     *
+     * That request is the one that builds what the application keeps for the
+     * worker's life, a lazily built container for one. A hooked socket wait inside
+     * the build would otherwise hand the worker to the next request, and that
+     * request would find the build half done. Only under runtime hooks: without
+     * them a request suspends only at a point the application called on
+     * purpose. */
+    oxphp_request_fiber *first_alone;
+    /* When first_alone stops holding the others back; 0 until it first waits. */
+    uint64_t first_alone_until_ns;
+    /* Whether this loop has started a request yet. */
+    bool first_started;
+
     /* Shared handler closure (passed to all fibers) */
     zend_fcall_info *shared_fci;
     zend_fcall_info_cache *shared_fcc;

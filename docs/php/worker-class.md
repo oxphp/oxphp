@@ -72,6 +72,8 @@ if ($worker->requestCount() === 1) {
 }
 ```
 
+The count goes up as a request starts, so if `bootstrap()` can suspend (`oxphp_sleep()`, or any hooked wait under `RUNTIME_HOOKS`), a request let in during the wait sees `2`, skips the call and finds whatever has been built so far. With runtime hooks on, a worker [runs its first request alone](../operations/configuration.md#hooked-waits-and-shared-application-state) until it ends or 250 ms after it first waits. Anything that can take longer belongs in the worker script before `oxphp_worker()`.
+
 ### scheduleExit
 
 Application-driven worker recycling. The current request completes normally; the loop checks `isExitScheduled()` afterwards and breaks out. The supervisor brings a fresh worker up in its place, re-running the outer scope of the worker file — on the pool's next scan for a static pool, and on a dynamic one only while the pool is at or below its minimum; see [Recycling](../features/worker-mode.md#recycling).

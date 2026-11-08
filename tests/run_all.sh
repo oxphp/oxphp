@@ -228,6 +228,21 @@ if [[ " ${profiles[*]} " == *" workertimer "* ]] && [ -z "$FILTER_SUITE" ] && [ 
     fi
 fi
 
+# Which requests a worker lets in beside its first one can only be seen on a
+# worker that has served nothing, so this one drives the hooks profile from
+# outside, recreating it for each scenario, after its suite has finished.
+if [[ " ${profiles[*]} " == *" hooks "* ]] && [ -z "$FILTER_SUITE" ] && [ -z "$FILTER_TEST" ]; then
+    check=verify_first_request_runs_alone
+    log_info "━━━ Standalone: ${check#verify_} ━━━"
+    emitted_before=$(wc -l < "$JSONL_FILE")
+    "${SCRIPT_DIR}/scripts/${check}.sh" --jsonl >> "$JSONL_FILE" || true
+    if [ "$(wc -l < "$JSONL_FILE")" -eq "$emitted_before" ]; then
+        log_error "${check}.sh produced no results — recording as a failure"
+        printf '{"test": "%s produced results", "group": "hooks", "pass": false, "assertions": [], "error": "%s.sh emitted nothing", "meta": {}, "profile": "hooks"}\n' \
+            "$check" "$check" >> "$JSONL_FILE"
+    fi
+fi
+
 END_TIME=$(date +%s)
 DURATION=$((END_TIME - START_TIME))
 
