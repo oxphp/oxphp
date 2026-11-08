@@ -2179,41 +2179,6 @@ void oxphp_bridge_profiler_unpark(const oxphp_prof_parked_t *src);
  * thread is holding rather than zero. */
 int64_t oxphp_bridge_get_memory_usage_bytes(void);
 
-/* ─── Profiler observer filters ─────────────────
- *
- * Per-zend_function attribute resolution for the four filter
- * attributes #[Profile], #[Exclude], #[Sample(rate)],
- * #[Tag(key, value)]. Rust registers a resolver callback at plugin
- * init; observer init calls it once per function the first time the
- * function is observed; the resulting spec_id + decision quad is
- * cached per-thread for hot-path lookup in begin/end.
- *
- * spec_id = 0 means "no filter, default behaviour" — the fast path
- * for functions without any profiler attribute. */
-
-/* Resolver callback type. Implemented in src/profiling/filter.rs.
- * Receives the function id, its class-scope and own attribute name
- * lists, and an opaque ctx pointer used by the arg-reader helpers
- * below. Populates the four out_* params with the decision values
- * the C hot path needs without re-entering Rust. Returns spec_id
- * (0 if no filter applies after composition). */
-typedef uint32_t (*oxphp_profiler_resolve_filter_fn_t)(
-    uintptr_t fn_id,
-    const char *const *class_attr_names,
-    uint32_t class_attr_count,
-    const char *const *fn_attr_names,
-    uint32_t fn_attr_count,
-    void *attr_resolver_ctx,
-    uint8_t *out_excluded,
-    uint8_t *out_force_profile,
-    uint8_t *out_has_sample,
-    float   *out_sample_rate);
-
-/* Register the resolver. Called by Rust at plugin init, BEFORE
- * the first observer begin fires. Setting NULL clears the resolver
- * (default — observer init won't try to resolve filters). */
-void oxphp_bridge_set_filter_resolver(oxphp_profiler_resolve_filter_fn_t resolver);
-
 /* Attribute resolver context — stack-allocated by an observer init
  * and passed opaquely (as `void *`) into the resolver/resolve
  * callback, then back into the read_attr_arg_* helpers below. Defined
@@ -2227,31 +2192,6 @@ typedef struct {
     struct _zend_array       *fn_attrs;    /* func->common.attributes — may be NULL */
     struct _zend_array       *class_attrs; /* scope ? scope->attributes : NULL */
 } ox_attr_resolver_ctx_t;
-
-/* Helper exposed back to Rust during a resolver call. Reads the
- * `attr_idx`-th occurrence of attribute `attr_name` and returns its
- * `arg_idx`-th constructor arg as a UTF-8 string. NUL-terminates;
- * returns the bytes written (capped at out_cap-1). Returns 0 when
- * the attribute / arg / type doesn't match. `is_class_scope`
- * selects between function and class attributes on the resolver
- * context. */
-size_t oxphp_bridge_read_attr_arg_str(
-    void *attr_resolver_ctx,
-    int is_class_scope,
-    const char *attr_name,
-    uint32_t attr_idx,
-    uint32_t arg_idx,
-    char *out, size_t out_cap);
-
-/* Same shape, returns a double via `*out`. Returns 1 on success,
- * 0 on absence / type mismatch. Integer args are widened to double. */
-int oxphp_bridge_read_attr_arg_double(
-    void *attr_resolver_ctx,
-    int is_class_scope,
-    const char *attr_name,
-    uint32_t attr_idx,
-    uint32_t arg_idx,
-    double *out);
 
 /* Read the parameter name of the `arg_idx`-th constructor argument
  * (the `name:` in `#[Attr(name: value)]`) as a UTF-8 string. NUL-
@@ -2290,14 +2230,6 @@ int oxphp_bridge_read_attr_arg_variant(
     double *out_double,
     int *out_bool,
     char *out, size_t out_cap);
-
-/* Diagnostic: read the cached spec_id for a function. Returns 255
- * if not yet cached. Used by tests. */
-uint32_t oxphp_bridge_get_filter_spec_id_cached(uintptr_t fn_id);
-
-/* Diagnostic: clear the per-thread filter cache. Used between
- * integration tests when the same Zend function should be re-resolved. */
-void oxphp_bridge_clear_filter_cache(void);
 
 /* Set the per-request span cap. Process-wide, set once at plugin
  * init from ProfilerConfig.max_spans. 0 means "unlimited". A request

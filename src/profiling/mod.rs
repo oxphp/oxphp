@@ -4,7 +4,6 @@
 
 pub mod decorators;
 pub mod export;
-pub mod filter;
 pub mod flush;
 
 pub use flush::{
@@ -112,10 +111,6 @@ pub struct PendingSpan {
     pub parent_span_id: Arc<str>,
     pub name: Arc<str>,
     pub start_ns: u64,
-    /// `Arc<str>` key/value pairs so that observer-attached static
-    /// tags (shared via `FilterSpec.tags: Arc<[...]>`) can be
-    /// appended with only refcount bumps, no per-pair String
-    /// allocation on the BEGIN hot path.
     pub attributes: Vec<(Arc<str>, Arc<str>)>,
     pub events: Vec<SpanEvent>,
     /// 0 = Unset, 1 = Ok, 2 = Error.
@@ -595,29 +590,6 @@ impl ProfilingContext {
                     // returned.
                     if self.seq_to_local.len() > 4096 {
                         self.seq_to_local.drain(..2048);
-                    }
-
-                    // spec_id arrives in reserved2. Non-zero
-                    // means the function carries one of #[Profile] /
-                    // #[Exclude] / #[Sample] / #[Tag] (Excluded
-                    // variants short-circuit in C, so any spec_id
-                    // reaching here implies a non-excluded match).
-                    // Look up tags and append them to the freshly
-                    // pushed span.
-                    let spec_id = ev.reserved2 as u32;
-                    if spec_id != 0 {
-                        if let Some(spec) = filter::get_spec(spec_id) {
-                            if !spec.tags.is_empty() {
-                                if let Some(span) = self.get_mut(local_id) {
-                                    // `spec.tags` is an `Arc<[...]>` of
-                                    // `(Arc<str>, Arc<str>)` pairs. Each
-                                    // clone is two atomic refcount bumps
-                                    // — no String allocation on the hot
-                                    // path.
-                                    span.attributes.extend(spec.tags.iter().cloned());
-                                }
-                            }
-                        }
                     }
                 }
                 flush::SPAN_EVENT_KIND_END => {

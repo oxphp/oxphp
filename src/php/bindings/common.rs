@@ -233,42 +233,6 @@ extern "C" {
     pub fn oxphp_bridge_is_profiling_paused() -> u8;
     pub fn oxphp_bridge_get_memory_usage_bytes() -> i64;
 
-    // ─── Filter cache ──────────────────
-    // Defined in ext/bridge/oxphp_bridge.c. Rust safe wrappers and
-    // the resolver impl live in src/profiling/filter.rs.
-    pub fn oxphp_bridge_set_filter_resolver(
-        resolver: Option<
-            unsafe extern "C" fn(
-                fn_id: usize,
-                class_attr_names: *const *const c_char,
-                class_attr_count: u32,
-                fn_attr_names: *const *const c_char,
-                fn_attr_count: u32,
-                attr_resolver_ctx: *mut c_void,
-                out_excluded: *mut u8,
-                out_force_profile: *mut u8,
-                out_has_sample: *mut u8,
-                out_sample_rate: *mut f32,
-            ) -> u32,
-        >,
-    );
-    pub fn oxphp_bridge_read_attr_arg_str(
-        ctx: *mut c_void,
-        is_class_scope: i32,
-        attr_name: *const c_char,
-        attr_idx: u32,
-        arg_idx: u32,
-        out: *mut c_char,
-        out_cap: usize,
-    ) -> usize;
-    pub fn oxphp_bridge_read_attr_arg_double(
-        ctx: *mut c_void,
-        is_class_scope: i32,
-        attr_name: *const c_char,
-        attr_idx: u32,
-        arg_idx: u32,
-        out: *mut f64,
-    ) -> i32;
     /// Parameter name of the `arg_idx`-th constructor argument (the
     /// `name:` in `#[Attr(name: value)]`), copied into `out`
     /// (NUL-terminated, truncated to `out_cap`). Returns the bytes
@@ -305,8 +269,6 @@ extern "C" {
         out: *mut c_char,
         out_cap: usize,
     ) -> i32;
-    pub fn oxphp_bridge_get_filter_spec_id_cached(fn_id: usize) -> u32;
-    pub fn oxphp_bridge_clear_filter_cache();
 
     /// Process-wide span cap for the profiler observer. 0 = unlimited.
     /// Set once at plugin init from `ProfilerConfig.max_spans`.

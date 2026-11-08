@@ -5,12 +5,6 @@
 //! plug into the existing `Decorator` infrastructure used by APM —
 //! same registration path as `OxPHP\Apm\Trace`.
 //!
-//! Split:
-//!   - Decorator-based (this file): `Mark`, `SlowThreshold`,
-//!     `MemoryThreshold`.
-//!   - Observer-filter:             `Profile`, `Exclude`, `Sample`,
-//!     `Tag` — must run in the C observer hot path.
-//!
 //! ## Per-attribute parameters
 //!
 //! Each decorator is a factory: the registered instance carries the

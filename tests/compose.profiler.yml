@@ -45,8 +45,8 @@ services:
       # Low enough that a test can reach it in a fraction of a second
       # (test_truncated_over_cap), high enough that every other test in
       # this profile stays far under it. Measured across a full suite
-      # run, the busiest profiled request is test_attr_sample at 48
-      # spans, then test_truncated_deep_stack at 45 — a probe's span
+      # run, the busiest profiled request is test_truncated_deep_stack
+      # at 45 spans — a probe's span
       # count runs well above its own call count because the TestCase
       # assertion helpers are observed too. Tenfold margin, so nothing
       # else in the suite is truncated by this.

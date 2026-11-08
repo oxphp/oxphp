@@ -2350,54 +2350,6 @@ namespace OxPHP\Profile {
 namespace OxPHP\Profile {
 
     /**
-     * Explicitly include a function / method / class in profile capture.
-     *
-     * Interacts with {@see Exclude} and the profile filter: when both are
-     * reachable, the most-specific attribute wins (method > class > file).
-     */
-    #[\Attribute(\Attribute::TARGET_FUNCTION | \Attribute::TARGET_METHOD | \Attribute::TARGET_CLASS)]
-    final class Profile
-    {
-        public function __construct() {}
-    }
-
-    /**
-     * Exclude a function / method / class from profile capture.
-     *
-     * Useful for hot-path helpers that would otherwise dominate the flame
-     * graph without adding signal.
-     */
-    #[\Attribute(\Attribute::TARGET_FUNCTION | \Attribute::TARGET_METHOD | \Attribute::TARGET_CLASS)]
-    final class Exclude
-    {
-        public function __construct() {}
-    }
-
-    /**
-     * Capture this function / method only at the given sampling rate.
-     *
-     * @param float $rate Value in [0.0, 1.0]; e.g. 0.1 = 10 % of calls.
-     */
-    #[\Attribute(\Attribute::TARGET_FUNCTION | \Attribute::TARGET_METHOD)]
-    final class Sample
-    {
-        public function __construct(public readonly float $rate) {}
-    }
-
-    /**
-     * Attach a static key/value tag to every span produced by the
-     * decorated target. Repeatable — multiple `#[Tag]` accumulate.
-     */
-    #[\Attribute(\Attribute::TARGET_FUNCTION | \Attribute::TARGET_METHOD | \Attribute::TARGET_CLASS | \Attribute::IS_REPEATABLE)]
-    final class Tag
-    {
-        public function __construct(
-            public readonly string $key,
-            public readonly string $value,
-        ) {}
-    }
-
-    /**
      * Add a marker event at the entry of the decorated target.
      *
      * @param string|null $label Mark label (null ⇒ derive from target name).
