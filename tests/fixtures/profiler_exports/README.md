@@ -10,8 +10,7 @@ to detect unintended wire-format changes during refactors.
 | File | Source | Compare |
 |------|--------|---------|
 | `tiny.collapsed`           | `export_collapsed(tree)` | byte-equal |
-| `tiny.xhprof.json`         | `export_xhprof(tree, Raw, None)` | semantic JSON-equal |
-| `tiny.xhprof.xhgui.json`   | `export_xhprof(tree, Xhgui, Some(meta))` | semantic JSON-equal |
+| `tiny.xhprof.json`         | `export_xhprof(tree)` | semantic JSON-equal |
 
 ## Regenerating
 

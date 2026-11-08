@@ -11,7 +11,7 @@ use parking_lot::Mutex;
 use tokio::fs::{self, OpenOptions};
 use tokio::io::AsyncWriteExt;
 
-use crate::profiling::export::{export_collapsed, export_xhprof, XhprofMode};
+use crate::profiling::export::{export_collapsed, export_xhprof};
 use crate::profiling::SpanTree;
 
 use super::RunMeta;
@@ -39,6 +39,14 @@ impl OutputFormat {
         match self {
             Self::Xhprof => "xhprof.json",
             Self::Collapsed => "collapsed",
+        }
+    }
+
+    /// Serialize `tree` in this format.
+    pub fn render(self, tree: &SpanTree) -> Vec<u8> {
+        match self {
+            Self::Xhprof => export_xhprof(tree),
+            Self::Collapsed => export_collapsed(tree),
         }
     }
 }
@@ -157,7 +165,6 @@ impl DiskWriter {
         meta: &RunMeta,
         tree: &Arc<SpanTree>,
         formats: &[OutputFormat],
-        xhgui_envelope: bool,
     ) -> bool {
         if !run_id_is_safe(&meta.run_id) {
             tracing::error!(
@@ -192,7 +199,7 @@ impl DiskWriter {
         // on success; collect those for the index entry.
         let mut tasks = Vec::with_capacity(formats.len());
         for &fmt in formats {
-            let bytes = render(tree, meta, fmt, xhgui_envelope);
+            let bytes = fmt.render(tree);
             let path = self
                 .output_dir
                 .join(format!("{}.{}", meta.run_id, fmt.extension()));
@@ -237,25 +244,6 @@ impl DiskWriter {
             );
         }
         true
-    }
-}
-
-fn render(tree: &SpanTree, meta: &RunMeta, fmt: OutputFormat, xhgui_envelope: bool) -> Vec<u8> {
-    match fmt {
-        OutputFormat::Xhprof => {
-            let mode = if xhgui_envelope {
-                XhprofMode::Xhgui
-            } else {
-                XhprofMode::Raw
-            };
-            let xhgui = if xhgui_envelope {
-                Some(meta.to_xhgui_meta())
-            } else {
-                None
-            };
-            export_xhprof(tree, mode, xhgui)
-        }
-        OutputFormat::Collapsed => export_collapsed(tree),
     }
 }
 
@@ -313,6 +301,17 @@ mod tests {
         assert!(!run_id_is_safe("../etc/passwd"));
         assert!(!run_id_is_safe("a/b"));
         assert!(!run_id_is_safe("a.b"));
+    }
+
+    #[test]
+    fn xhprof_answers_to_its_file_extension_too() {
+        for name in ["xhprof", "xhprof.json"] {
+            assert_eq!(
+                OutputFormat::from_str_opt(name),
+                Some(OutputFormat::Xhprof),
+                "{name}"
+            );
+        }
     }
 
     #[test]

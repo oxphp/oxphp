@@ -151,7 +151,7 @@ impl ProfilerRouter {
         };
         let ct = content_type_for_format(fmt);
         if let Some(tree) = self.storage.cache.get(run_id) {
-            let bytes = export_for(fmt, &tree);
+            let bytes = fmt.render(&tree);
             return Response::builder()
                 .status(StatusCode::OK)
                 .header(http::header::CONTENT_TYPE, ct)
@@ -265,18 +265,6 @@ fn content_type_for_format(fmt: super::storage::disk::OutputFormat) -> &'static 
     match fmt {
         OutputFormat::Xhprof => "application/json",
         OutputFormat::Collapsed => "text/plain; charset=utf-8",
-    }
-}
-
-fn export_for(
-    fmt: super::storage::disk::OutputFormat,
-    tree: &std::sync::Arc<crate::profiling::SpanTree>,
-) -> Vec<u8> {
-    use super::storage::disk::OutputFormat;
-    use crate::profiling::export::*;
-    match fmt {
-        OutputFormat::Xhprof => export_xhprof(tree, XhprofMode::Raw, None),
-        OutputFormat::Collapsed => export_collapsed(tree),
     }
 }
 

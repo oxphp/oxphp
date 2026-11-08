@@ -1,6 +1,6 @@
 //! Profile exporters.
 //!
-//! Each exporter is a free function `fn(&SpanTree, opts) -> Vec<u8>`
+//! Each exporter is a free function `fn(&SpanTree) -> Vec<u8>`
 //! with no I/O. Storage orchestrates them by calling each
 //! exporter and writing the bytes to disk / pushing over HTTP.
 
@@ -8,9 +8,7 @@ pub mod collapsed;
 pub mod xhprof;
 
 pub use collapsed::export_collapsed;
-pub use xhprof::{
-    export_xhprof, export_xhprof_buggregator, BuggregatorMeta, XhguiMeta, XhprofMode,
-};
+pub use xhprof::export_xhprof;
 
 use crate::profiling::{FinishedSpan, SpanTree};
 use std::collections::HashMap;

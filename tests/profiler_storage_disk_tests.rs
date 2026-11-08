@@ -71,7 +71,7 @@ async fn writes_every_format() {
     let tree = fixture_tree();
     let meta = fixture_meta("run-abc");
     let formats = [OutputFormat::Collapsed, OutputFormat::Xhprof];
-    let ok = writer.write_run(&meta, &tree, &formats, false).await;
+    let ok = writer.write_run(&meta, &tree, &formats).await;
     assert!(ok);
     for ext in &["collapsed", "xhprof.json"] {
         let p = dir.path().join(format!("run-abc.{ext}"));
@@ -94,10 +94,10 @@ async fn rate_limit_drops_excess() {
     let m1 = fixture_meta("run-1");
     let m2 = fixture_meta("run-2");
     let ok1 = writer
-        .write_run(&m1, &tree, &[OutputFormat::Collapsed], false)
+        .write_run(&m1, &tree, &[OutputFormat::Collapsed])
         .await;
     let ok2 = writer
-        .write_run(&m2, &tree, &[OutputFormat::Collapsed], false)
+        .write_run(&m2, &tree, &[OutputFormat::Collapsed])
         .await;
     assert!(ok1, "first write succeeds");
     assert!(!ok2, "second write rate-limited");
@@ -118,28 +118,9 @@ async fn rejects_unsafe_run_id() {
     let mut meta = fixture_meta("safe");
     meta.run_id = "../etc/passwd".into();
     let ok = writer
-        .write_run(&meta, &tree, &[OutputFormat::Collapsed], false)
+        .write_run(&meta, &tree, &[OutputFormat::Collapsed])
         .await;
     assert!(!ok, "unsafe run_id rejected");
     // The writer must not have created any traversal-escape file.
     assert!(!dir.path().join("../etc/passwd.collapsed").exists());
-}
-
-#[tokio::test]
-async fn xhgui_envelope_renders_meta_field() {
-    let dir = TempDir::new().unwrap();
-    let writer = DiskWriter::new(
-        dir.path().to_path_buf(),
-        100.0,
-        100.0,
-        StorageMetrics::new(),
-    );
-    let tree = fixture_tree();
-    let meta = fixture_meta("run-xhgui");
-    writer
-        .write_run(&meta, &tree, &[OutputFormat::Xhprof], true)
-        .await;
-    let body = std::fs::read_to_string(dir.path().join("run-xhgui.xhprof.json")).unwrap();
-    assert!(body.contains("\"meta\""), "xhgui envelope present");
-    assert!(body.contains("\"profile\""));
 }

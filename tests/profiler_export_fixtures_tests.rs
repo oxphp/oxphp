@@ -18,7 +18,7 @@
 
 use std::path::PathBuf;
 
-use oxphp::profiling::export::{export_collapsed, export_xhprof, XhguiMeta, XhprofMode};
+use oxphp::profiling::export::{export_collapsed, export_xhprof};
 use oxphp::profiling::{FinishedSpan, ProfilingMode, SpanTree};
 
 /// Build the deterministic fixture tree.
@@ -95,16 +95,6 @@ fn make_fixture_tree() -> SpanTree {
     }
 }
 
-fn fixture_meta() -> XhguiMeta {
-    XhguiMeta {
-        url: "/fixture".into(),
-        request_method: "GET".into(),
-        request_ts: 1_700_000_000,
-        request_ts_micro: 1_700_000_000.0,
-        ..Default::default()
-    }
-}
-
 fn fixture_path(name: &str) -> PathBuf {
     let mut p = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     p.push("tests/fixtures/profiler_exports");
@@ -132,23 +122,13 @@ fn collapsed_wall_matches_fixture() {
 }
 
 #[test]
-fn xhprof_raw_matches_fixture() {
+fn xhprof_matches_fixture() {
     let tree = make_fixture_tree();
-    let out = export_xhprof(&tree, XhprofMode::Raw, None);
+    let out = export_xhprof(&tree);
     let expected = read_fixture("tiny.xhprof.json");
     let actual_v: serde_json::Value = serde_json::from_slice(&out).unwrap();
     let expected_v: serde_json::Value = serde_json::from_slice(&expected).unwrap();
-    assert_eq!(actual_v, expected_v, "xhprof Raw drifted from fixture");
-}
-
-#[test]
-fn xhprof_xhgui_matches_fixture() {
-    let tree = make_fixture_tree();
-    let out = export_xhprof(&tree, XhprofMode::Xhgui, Some(fixture_meta()));
-    let expected = read_fixture("tiny.xhprof.xhgui.json");
-    let actual_v: serde_json::Value = serde_json::from_slice(&out).unwrap();
-    let expected_v: serde_json::Value = serde_json::from_slice(&expected).unwrap();
-    assert_eq!(actual_v, expected_v, "xhprof Xhgui drifted from fixture");
+    assert_eq!(actual_v, expected_v, "xhprof output drifted from fixture");
 }
 
 // ── Regenerate helper ──────────────────────────────────────────
@@ -173,12 +153,5 @@ fn regenerate_fixtures() {
         println!("wrote {} ({} bytes)", path.display(), bytes.len());
     };
     write("tiny.collapsed", export_collapsed(&tree));
-    write(
-        "tiny.xhprof.json",
-        export_xhprof(&tree, XhprofMode::Raw, None),
-    );
-    write(
-        "tiny.xhprof.xhgui.json",
-        export_xhprof(&tree, XhprofMode::Xhgui, Some(fixture_meta())),
-    );
+    write("tiny.xhprof.json", export_xhprof(&tree));
 }
