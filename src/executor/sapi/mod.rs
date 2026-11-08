@@ -60,6 +60,13 @@ fn php_startup() {
     unsafe {
         bindings::oxphp_script_guard_install();
     }
+
+    // 6. The limit request parsing shares with PHP.
+    // SAFETY: this is the thread that ran `php_module_startup()`, which returned
+    // success above.
+    unsafe {
+        sapi::read_max_input_vars();
+    }
 }
 
 /// Build the spawn strategy once based on `WORKER_MODE_ENABLED`.

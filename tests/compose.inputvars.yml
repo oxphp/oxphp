@@ -1,0 +1,31 @@
+# max_input_vars set away from PHP's default, for the limits of the request
+# object API that follow it. A profile of its own because the setting applies to
+# $_GET, $_POST and $_COOKIE of every test that would share it.
+#
+# Standalone usage:
+#   docker compose -f compose.yml -f compose.inputvars.yml up
+services:
+  oxphp-inputvars:
+    build:
+      context: ..
+      dockerfile: docker/dev/Dockerfile
+      args:
+        PHP_VERSION:
+        BASE_IMAGE:
+    ports:
+      - "80"
+    networks: [test-net]
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    environment:
+      LOG_LEVEL: error
+      INTERNAL_ADDR: 0.0.0.0:9090
+    volumes:
+      - ../www:/var/www/html
+      - ./php:/var/www/html/public/tests
+      - ./inputvars.ini:/usr/local/etc/php/conf.d/zz-inputvars.ini:ro

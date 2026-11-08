@@ -1,0 +1,4 @@
+# profile: inputvars
+# description: Request object API limits follow max_input_vars
+
+inputvars/test_limit_follows_max_input_vars | GET | -G --data "$(printf 'k%d=1&' {1..1300})" -H "Cookie: $(printf 'c%d=1; ' {1..1300})" | |

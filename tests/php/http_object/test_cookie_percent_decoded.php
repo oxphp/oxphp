@@ -40,8 +40,28 @@ $t->assertKeyExists(
     '%D0%BA%D0%BB%D1%8E%D1%87'
 );
 
+// === A pair with no name is not a cookie ===
+$t->assertKeyMissing('$_COOKIE drops a pair with no name', $_COOKIE, '');
+$t->assertKeyMissing('cookies() drops a pair with no name', $all, '');
+$t->assertNull("cookie('') finds nothing", $req->cookie(''));
+
+// === A name with no "=" is a cookie with an empty value ===
+$t->assertSame('$_COOKIE[flag] is ""', $_COOKIE['flag'] ?? null, '');
+$t->assertSame('cookie(flag) is "" not null', $req->cookie('flag'), '');
+$t->assertSame('cookies()[flag] is ""', $all['flag'] ?? null, '');
+
+// === Only the name loses its leading spaces; the value is kept whole ===
+$t->assertSame('$_COOKIE[trail] keeps the trailing space', $_COOKIE['trail'] ?? null, '1 ');
+$t->assertSame('cookie(trail) keeps the trailing space', $req->cookie('trail'), '1 ');
+$t->assertSame('cookies()[trail] keeps the trailing space', $all['trail'] ?? null, '1 ');
+
+// === Of two cookies with one name, the first is the more specific path ===
+$t->assertSame('$_COOKIE[sid] is the first of two', $_COOKIE['sid'] ?? null, 'app');
+$t->assertSame('cookie(sid) is the first of two', $req->cookie('sid'), 'app');
+$t->assertSame('cookies()[sid] is the first of two', $all['sid'] ?? null, 'app');
+
 // === Parity ===
-foreach (['name', 'plus', 'space', '%D0%BA%D0%BB%D1%8E%D1%87'] as $k) {
+foreach (['name', 'plus', 'space', '%D0%BA%D0%BB%D1%8E%D1%87', 'flag', 'trail', 'sid'] as $k) {
     $t->assertSame("cookie('$k') === \$_COOKIE['$k']", $req->cookie($k), $_COOKIE[$k] ?? null);
     $t->assertSame("cookies()['$k'] === \$_COOKIE['$k']", $all[$k] ?? null, $_COOKIE[$k] ?? null);
 }

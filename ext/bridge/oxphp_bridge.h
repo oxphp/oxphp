@@ -1081,6 +1081,12 @@ void oxphp_bridge_set_superglobals_enabled(bool enabled);
 /** Check if superglobals are enabled. */
 bool oxphp_bridge_get_superglobals_enabled(void);
 
+/* ─── Input Limits ────────────────────────────────────────── */
+
+/** PHP's max_input_vars as the engine parsed it. Call after php_module_startup(),
+ *  on the thread that ran it. */
+size_t oxphp_bridge_max_input_vars(void);
+
 /* ─── Runtime Hooks Reporting ─────────────────────────────── */
 
 /** Capacity of the published string, terminator included. Public so the one

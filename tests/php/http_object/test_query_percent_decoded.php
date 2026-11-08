@@ -42,10 +42,20 @@ $t->assertKeyExists('query() array keeps "a.b"', $all, 'a.b');
 // === Parity on names that survive PHP's key mangling ===
 // Restricted on purpose: for a mangled name the two APIs are expected to
 // differ, so a blanket comparison would assert the wrong thing.
-foreach (['name', 'plus', 'space', 'amp', 'ключ'] as $k) {
+foreach (['name', 'plus', 'space', 'amp', 'ключ', 'dup'] as $k) {
     $t->assertSame("query('$k') === \$_GET['$k']", $req->query($k), $_GET[$k] ?? null);
     $t->assertSame("query()['$k'] === \$_GET['$k']", $all[$k] ?? null, $_GET[$k] ?? null);
 }
+
+// === A repeated name reads as its last occurrence, in both forms ===
+$t->assertSame('$_GET[dup] is the last of two', $_GET['dup'] ?? null, '2');
+$t->assertSame('query(dup) is the last of two', $req->query('dup'), '2');
+$t->assertSame('query()[dup] is the last of two', $all['dup'] ?? null, '2');
+
+// === A pair with no name is not registered ===
+$t->assertKeyMissing('$_GET has no empty name', $_GET, '');
+$t->assertKeyMissing('query() has no empty name', $all, '');
+$t->assertNull("query('') finds nothing", $req->query(''));
 
 // === Metadata ===
 $t->meta('query_string', $req->queryString());
