@@ -152,6 +152,7 @@ pub fn run(opts: RunOptions) -> i32 {
             return 1;
         }
         sapi::install_error_cb();
+        crate::php::opcache_restart::install();
 
         // Bridge TLS for this (main) thread so SG()/EG() resolve correctly
         // from liboxphp_bridge.so, then mark it as worker 0.

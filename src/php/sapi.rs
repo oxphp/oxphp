@@ -3242,6 +3242,9 @@ fn worker_recv_blocking() -> WorkerWait {
 /// with WORKER_RX set.
 unsafe extern "C" fn worker_wait_callback() -> std::os::raw::c_int {
     loop {
+        if retire_for_opcache_restart() {
+            return 1;
+        }
         match worker_recv_blocking() {
             WorkerWait::Request(req) => match req.take_from_queue() {
                 Pickup::Run => {
@@ -3253,10 +3256,37 @@ unsafe extern "C" fn worker_wait_callback() -> std::os::raw::c_int {
                 Pickup::Cancelled { expired } => answer_departed_client(req, expired),
                 Pickup::Abandoned => {}
             },
-            WorkerWait::Woken => return 1,
+            WorkerWait::Woken => {
+                retire_for_opcache_restart();
+                return 1;
+            }
             WorkerWait::Shutdown => return -1, // channel closed or retired = shutdown
         }
     }
+}
+
+/// Schedule this worker's exit when an OPcache restart needs its request
+/// gone, and say whether it did. Called only with no request in flight; the
+/// serve loop takes the exit after the wake branch, and the pool replaces the
+/// worker. Not during the drain, for the reason the serve loop retires no
+/// worker then.
+fn retire_for_opcache_restart() -> bool {
+    let Some(why) = crate::php::opcache_restart::retire_reason() else {
+        return false;
+    };
+    // SAFETY: on a worker thread inside its serve loop, whose bridge context
+    // these read and write.
+    unsafe {
+        if bindings::oxphp_bridge_is_draining() {
+            return false;
+        }
+        tracing::info!(
+            worker = bindings::oxphp_bridge_get_worker_id(),
+            "Worker retiring: {why}"
+        );
+        bindings::oxphp_bridge_schedule_exit();
+    }
+    true
 }
 
 /// Worker idle callback — called from the C serve loop after
@@ -4110,8 +4140,9 @@ pub fn get_global_async_tx(
     GLOBAL_ASYNC_TX.get()
 }
 
-/// Pool threads that may still run task code: set when the pool starts, and
-/// each thread counts itself out once (see `async_pool_thread_stopped`).
+/// Pool threads that may still run task code: set when the pool starts, each
+/// thread counts itself out once (see `async_pool_thread_stopped`), and a
+/// thread that retires counts its replacement in first.
 static ASYNC_POOL_RUNNING: AtomicUsize = AtomicUsize::new(0);
 
 /// Becomes `true` when the last pool thread counts itself out. From then on no
@@ -4136,6 +4167,12 @@ pub fn async_pool_thread_stopped() {
     if last {
         ASYNC_POOL_STOPPED.send_replace(true);
     }
+}
+
+/// Count in the thread that is to replace the calling pool thread, before the
+/// calling thread counts itself out.
+pub fn async_pool_thread_replacing() {
+    ASYNC_POOL_RUNNING.fetch_add(1, Ordering::AcqRel);
 }
 
 /// Whether every pool thread has counted itself out.
@@ -4368,6 +4405,11 @@ pub unsafe extern "C" fn async_dispatch_callback(
         serialized_args: ser_buf,
         serialized_args_len: ser_len,
         code_in_request_memory: cleanup.code_in_request_memory,
+        opcache_hold: if cleanup.code_in_request_memory {
+            None
+        } else {
+            crate::php::opcache_restart::task_hold()
+        },
         cancelled: cancelled.clone(),
         result_tx,
     };

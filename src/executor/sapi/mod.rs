@@ -52,6 +52,7 @@ fn php_startup() {
     unsafe {
         sapi::install_error_cb();
     }
+    crate::php::opcache_restart::install();
 
     // 5. open_basedir for the primary script, which is handed to PHP already
     // open. After php_module_startup, so that it sits in front of OPcache's

@@ -724,6 +724,9 @@ impl PoolInner {
             }
             *state.users.entry(me).or_insert(0) += 1;
         }
+        // A call that runs code here runs it from OPcache's shared memory or
+        // built in: one into code in request memory is refused elsewhere.
+        crate::php::opcache_restart::adopt();
         CALLED_HERE.with(|list| {
             let mut list = list.borrow_mut();
             list.retain(|w| w.strong_count() > 0);

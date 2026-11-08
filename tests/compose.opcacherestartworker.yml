@@ -1,0 +1,47 @@
+# OPcache restarts in worker mode: a worker opens its PHP request once, so a
+# restart opcache_reset() schedules runs only after every worker that opened
+# with the cache has been replaced, and a worker that opened while the restart
+# waited is replaced again once it has run.
+#
+# A profile of its own because every block resets OPcache and recycles every
+# worker of the server.
+#
+# opcacherestart.ini lowers opcache.force_restart_timeout to 2 s.
+#
+# Standalone usage:
+#   docker compose -f compose.yml -f compose.opcacherestartworker.yml up
+services:
+  oxphp-opcacherestartworker:
+    build:
+      context: ..
+      dockerfile: docker/dev/Dockerfile
+      args:
+        PHP_VERSION:
+        BASE_IMAGE:
+    ports:
+      - "80"
+    networks: [test-net]
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    environment:
+      # info: the recycle and restart lines the suite asserts are written at
+      # info.
+      LOG_LEVEL: info
+      INTERNAL_ADDR: 0.0.0.0:9090
+      WORKER_MODE_ENABLED: "true"
+      ENTRY_FILE: /var/www/html/worker/worker_entry.php
+      # Two workers: the test request holds one while it asks the other.
+      PHP_WORKERS: "2"
+      # A request sent while a worker is being replaced waits for the
+      # replacement to boot; the 1 s default would refuse it.
+      QUEUE_WAIT_TIMEOUT_MS: "10000"
+    volumes:
+      - ../www:/var/www/html
+      - ./php:/var/www/html/public/tests
+      - ./fixtures/worker:/var/www/html/worker
+      - ./opcacherestart.ini:/usr/local/etc/php/conf.d/zz-opcacherestart.ini:ro

@@ -145,6 +145,10 @@ extern "C" {
     pub fn php_request_startup() -> zend_result;
     pub fn php_request_shutdown(dummy: *mut c_void);
 
+    /// The current value of an INI entry as a `zend_long`; 0 when there is no
+    /// such entry. `name_length` excludes the terminator.
+    pub fn zend_ini_long(name: *const c_char, name_length: usize, orig: c_int) -> i64;
+
     // Script execution
     pub fn php_execute_script(primary_file: *mut zend_file_handle) -> zend_result;
 

@@ -1,7 +1,7 @@
 use crate::async_types::AsyncTask;
 use crate::metrics::Metrics;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 /// Dedicated worker pool for async promise task execution.
 /// Separate from the HTTP worker pool to prevent deadlocks.
@@ -10,7 +10,9 @@ pub struct AsyncWorkerPool {
     // Only read in #[cfg(feature = "php")] start() — suppress dead_code on non-php builds.
     #[allow(dead_code)]
     task_rx: crossbeam_channel::Receiver<AsyncTask>,
-    workers: Vec<std::thread::JoinHandle<()>>,
+    /// The running threads. A thread that retires pushes its replacement's
+    /// handle here before it exits.
+    workers: Arc<Mutex<Vec<std::thread::JoinHandle<()>>>>,
     shutdown: Arc<AtomicBool>,
     worker_count: usize,
     #[allow(dead_code)]
@@ -36,7 +38,7 @@ impl AsyncWorkerPool {
         Some(Self {
             task_tx,
             task_rx,
-            workers: Vec::with_capacity(worker_count),
+            workers: Arc::new(Mutex::new(Vec::with_capacity(worker_count))),
             shutdown: Arc::new(AtomicBool::new(false)),
             worker_count,
             metrics,
@@ -59,35 +61,16 @@ impl AsyncWorkerPool {
     pub fn start(&mut self) {
         crate::php::sapi::set_async_pool_threads(self.worker_count);
         for id in 0..self.worker_count {
-            let rx = self.task_rx.clone();
-            let shutdown = self.shutdown.clone();
-            let metrics = self.metrics.clone();
-
-            let handle = std::thread::Builder::new()
-                .name(format!("async-worker-{id}"))
-                .spawn(move || {
-                    let interrupt = Arc::new(crate::php::worker_registry::InterruptTarget::new());
-                    // The thread keeps a single request open until it exits,
-                    // and nothing replaces a pool thread that is gone, so a
-                    // panic that unwinds it ends the process.
-                    let abort_on_panic = crate::executor::AbortOnUnwind("in the async pool");
-                    async_worker_thread(id, rx, shutdown, metrics, &interrupt);
-                    drop(abort_on_panic);
-                    // An awaiter — an HTTP worker, or another pool thread for a
-                    // nested task — can outlive this thread, still hold a task
-                    // it ran and kick it; withdraw the address and wait those
-                    // kicks out before the memory it names is freed. Without
-                    // the release, a PHP thread spawned after this one is
-                    // joined can be handed its recycled id, and TSRM then frees
-                    // these resources from that thread — which crashes the
-                    // process from PHP 8.6 on, where the allocator's globals
-                    // are native thread-local storage.
-                    interrupt.retire();
-                    crate::executor::sapi::release_php_thread();
-                })
-                .unwrap_or_else(|e| panic!("Failed to spawn async worker {id}: {e}"));
-
-            self.workers.push(handle);
+            let thread = PoolThread {
+                id,
+                rx: self.task_rx.clone(),
+                shutdown: self.shutdown.clone(),
+                metrics: self.metrics.clone(),
+                workers: Arc::clone(&self.workers),
+            };
+            if let Err(e) = spawn_pool_thread(thread) {
+                panic!("Failed to spawn async worker {id}: {e}");
+            }
         }
         tracing::info!(workers = self.worker_count, "Async worker pool started");
     }
@@ -95,7 +78,17 @@ impl AsyncWorkerPool {
     /// Signal all workers to shut down and join threads.
     pub fn shutdown(&mut self) {
         self.shutdown.store(true, Ordering::Relaxed);
-        for handle in self.workers.drain(..) {
+        // Until the list is empty: a thread that retires adds its
+        // replacement before it exits, so joining it is what makes the
+        // replacement's handle visible here. The lock is not held across the
+        // join, which would keep a retiring thread from adding it.
+        loop {
+            let next = self
+                .workers
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .pop();
+            let Some(handle) = next else { break };
             let _ = handle.join();
         }
         tracing::info!("Async worker pool shut down");
@@ -109,10 +102,82 @@ impl AsyncWorkerPool {
 
 impl Drop for AsyncWorkerPool {
     fn drop(&mut self) {
-        if !self.workers.is_empty() {
+        let running = !self
+            .workers
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_empty();
+        if running {
             self.shutdown();
         }
     }
+}
+
+/// What a pool thread runs with; a thread that retires hands it to its
+/// replacement.
+#[cfg(feature = "php")]
+struct PoolThread {
+    id: usize,
+    rx: crossbeam_channel::Receiver<AsyncTask>,
+    shutdown: Arc<AtomicBool>,
+    metrics: Option<Arc<Metrics>>,
+    workers: Arc<Mutex<Vec<std::thread::JoinHandle<()>>>>,
+}
+
+/// Spawn a pool thread and add its handle to the pool's list.
+#[cfg(feature = "php")]
+fn spawn_pool_thread(thread: PoolThread) -> std::io::Result<()> {
+    let workers = Arc::clone(&thread.workers);
+    let handle = std::thread::Builder::new()
+        .name(format!("async-worker-{}", thread.id))
+        .spawn(move || {
+            let interrupt = Arc::new(crate::php::worker_registry::InterruptTarget::new());
+            // The thread keeps a single request open until it exits, and a pool
+            // thread is replaced only when it retires, so a panic that unwinds
+            // it ends the process.
+            let abort_on_panic = crate::executor::AbortOnUnwind("in the async pool");
+            let replace = async_worker_thread(
+                thread.id,
+                thread.rx.clone(),
+                thread.shutdown.clone(),
+                thread.metrics.clone(),
+                &interrupt,
+            );
+            drop(abort_on_panic);
+            // An awaiter — an HTTP worker, or another pool thread for a
+            // nested task — can outlive this thread, still hold a task
+            // it ran and kick it; withdraw the address and wait those
+            // kicks out before the memory it names is freed. Without
+            // the release, a PHP thread spawned after this one is
+            // joined can be handed its recycled id, and TSRM then frees
+            // these resources from that thread — which crashes the
+            // process from PHP 8.6 on, where the allocator's globals
+            // are native thread-local storage.
+            interrupt.retire();
+            crate::executor::sapi::release_php_thread();
+            if replace {
+                let id = thread.id;
+                if let Err(e) = spawn_pool_thread(thread) {
+                    tracing::error!(worker = id, error = %e, "could not replace a retired async worker thread");
+                    // It was counted in when this thread retired.
+                    crate::php::sapi::async_pool_thread_stopped();
+                }
+            }
+        })?;
+    // A thread that retired has ended; until joined it keeps its stack.
+    let ended: Vec<_> = {
+        let mut workers = workers.lock().unwrap_or_else(PoisonError::into_inner);
+        let (ended, running) = std::mem::take(&mut *workers)
+            .into_iter()
+            .partition(|h: &std::thread::JoinHandle<()>| h.is_finished());
+        *workers = running;
+        workers.push(handle);
+        ended
+    };
+    for h in ended {
+        let _ = h.join();
+    }
+    Ok(())
 }
 
 /// A task fiber currently in flight (suspended at an await/sleep or completing)
@@ -127,6 +192,9 @@ struct InFlight {
     /// here so the allocation (and the fiber's borrowed pointer into its
     /// `cancelled` cell) stays alive until the fiber is released and drained.
     cancelled: Arc<crate::async_types::CancelShared>,
+    /// Holds OPcache restarts back until the fiber, which runs the task's code
+    /// from the shared memory, is released.
+    _opcache_hold: Option<crate::php::opcache_restart::Hold>,
 }
 
 /// Returns the in-flight permit a dequeued task holds (reserved at dispatch) on
@@ -153,7 +221,8 @@ impl Drop for WorkerPermitGuard {
 ///
 /// Each worker initialises TSRM, performs a single `php_request_startup()`,
 /// then loops: recv task → reset state → execute closure → deep-copy result → send → free args.
-/// On exit (shutdown or channel disconnect), calls `php_request_shutdown()`.
+/// On exit (shutdown, channel disconnect, or retirement), calls `php_request_shutdown()`.
+/// Returns true when the thread retired and is to be replaced.
 #[cfg(feature = "php")]
 fn async_worker_thread(
     id: usize,
@@ -161,7 +230,7 @@ fn async_worker_thread(
     shutdown: Arc<AtomicBool>,
     metrics: Option<Arc<Metrics>>,
     interrupt: &Arc<crate::php::worker_registry::InterruptTarget>,
-) {
+) -> bool {
     use crate::async_types::AsyncResult;
     use crate::bridge::ffi;
     use crate::php::{bindings, sapi};
@@ -202,7 +271,7 @@ fn async_worker_thread(
         tracing::error!(id, "php_request_startup() failed in async worker");
         // No RSHUTDOWN runs to count this thread out, and it runs no task.
         sapi::async_pool_thread_stopped();
-        return;
+        return false;
     }
     // The guard in the spawn closure is not enough: a panic unwinds this frame
     // first, and `_php_thread` would tell plugins the thread is stopping while
@@ -275,9 +344,25 @@ fn async_worker_thread(
     // A task the idle wait below took off the queue, to be run on the next
     // turn of the loop.
     let mut carried: Option<AsyncTask> = None;
+    let mut replace = false;
 
     loop {
         let shutting_down = shutdown.load(Ordering::Relaxed);
+
+        // Only with nothing in hand: the thread's request closes on the way
+        // out, and a task fiber or a drain still pending belongs to it.
+        if !shutting_down
+            && carried.is_none()
+            && in_flight.is_empty()
+            && held.is_empty()
+            && !sapi::deferred_drains_pending()
+        {
+            if let Some(why) = crate::php::opcache_restart::retire_reason() {
+                tracing::info!(worker = %thread_name, "Async worker thread retiring: {why}");
+                replace = true;
+                break;
+            }
+        }
 
         // Exit only once every in-flight fiber is drained. On shutdown we stop
         // accepting new work but keep ticking and cancelling suspended fibers so
@@ -475,6 +560,12 @@ fn async_worker_thread(
                 let cancel_cell = &task.cancelled.cancelled as *const std::sync::atomic::AtomicBool
                     as *mut c_void;
 
+                // The task's hold ends with the task; what its code leaves in
+                // this thread's request does not.
+                if task.opcache_hold.is_some() {
+                    crate::php::opcache_restart::adopt();
+                }
+
                 // Spawn the task into a scheduler fiber. The closure is
                 // reconstructed and run to its first suspend or completion
                 // inside the call; args / static_vars / op_array are consumed
@@ -523,6 +614,7 @@ fn async_worker_thread(
                     InFlight {
                         result_tx: task.result_tx,
                         cancelled: task.cancelled.clone(),
+                        _opcache_hold: task.opcache_hold,
                     },
                 );
                 // The InFlight entry now owns the permit; drain releases it.
@@ -656,6 +748,11 @@ fn async_worker_thread(
             entry
         })
         .collect();
+    if replace {
+        // Before the close, which counts this thread out: the count must not
+        // reach zero for a pool that keeps running.
+        sapi::async_pool_thread_replacing();
+    }
     unsafe { crate::php::thread::close_request() };
     drop(held);
     drop(request_open);
@@ -665,6 +762,7 @@ fn async_worker_thread(
         tasks_executed,
         "Async worker thread exiting"
     );
+    replace
 }
 
 /// Drain every task fiber that has completed: serialize its result, send it to

@@ -565,6 +565,7 @@ impl Supervisor {
             }
             let _ = self.report_admission_stall(&mut stall);
             let _ = self.report_shedding(&mut shed);
+            crate::php::opcache_restart::report_waiting();
         }
     }
 
