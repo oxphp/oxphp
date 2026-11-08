@@ -3241,6 +3241,7 @@ fn worker_recv_blocking() -> WorkerWait {
 /// Called from C code via function pointer. Must only be called from a worker thread
 /// with WORKER_RX set.
 unsafe extern "C" fn worker_wait_callback() -> std::os::raw::c_int {
+    crate::php::opcache_restart::thread_ready(crate::php::opcache_restart::ThreadKind::Worker);
     loop {
         if retire_for_opcache_restart() {
             return 1;
@@ -3663,13 +3664,25 @@ fn try_recv_inner() -> TryRecvResult {
 
 /// Non-blocking try-recv callback for the fiber scheduler.
 /// Returns: 0 = request ready (stored in PENDING_REQUEST),
-///          1 = channel empty (no request available),
+///          1 = no request to take now (channel empty, or left for the other workers),
 ///         -1 = channel disconnected (shutdown).
 ///
 /// # Safety
 /// Called from C code via function pointer. Must only be called from a worker thread
 /// with WORKER_RX set.
 unsafe extern "C" fn worker_try_recv_callback() -> c_int {
+    // Left on the queue for the other workers. Not during the server's drain,
+    // when no worker retires and going without work would gain nothing.
+    // SAFETY: on a worker thread inside its serve loop, whose bridge context
+    // this reads.
+    let draining = unsafe { bindings::oxphp_bridge_is_draining() };
+    if !draining
+        && crate::php::opcache_restart::stop_taking_work(
+            crate::php::opcache_restart::ThreadKind::Worker,
+        )
+    {
+        return 1;
+    }
     match try_recv_inner() {
         TryRecvResult::Ready => 0,
         TryRecvResult::Empty => 1,

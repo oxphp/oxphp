@@ -346,6 +346,8 @@ fn async_worker_thread(
     let mut carried: Option<AsyncTask> = None;
     let mut replace = false;
 
+    crate::php::opcache_restart::thread_ready(crate::php::opcache_restart::ThreadKind::AsyncPool);
+
     loop {
         let shutting_down = shutdown.load(Ordering::Relaxed);
 
@@ -399,6 +401,13 @@ fn async_worker_thread(
             }
         }
 
+        // Tasks left on the queue here are taken by the other threads, or by
+        // this one once its wait for an OPcache restart ends.
+        let stop_taking = !shutting_down
+            && crate::php::opcache_restart::stop_taking_work(
+                crate::php::opcache_restart::ThreadKind::AsyncPool,
+            );
+
         // Block for new work only when idle; when fibers are in flight, poll
         // non-blocking so we keep driving them to completion.
         let maybe_task = if let Some(task) = carried.take() {
@@ -406,7 +415,7 @@ fn async_worker_thread(
             // shutdown was signalled in between: dropping it here would close
             // its result channel and answer an awaiter that is still waiting.
             Some(task)
-        } else if shutting_down {
+        } else if shutting_down || stop_taking {
             None
         } else if in_flight.is_empty() && !sapi::deferred_drains_pending() {
             match rx.recv_timeout(std::time::Duration::from_millis(200)) {
@@ -684,7 +693,8 @@ fn async_worker_thread(
         // reports parked descriptors it spends the same interval waiting on
         // them and returns non-zero, and this wait is skipped — the wait
         // already happened, and it ended the moment the peer replied.
-        if !progressed && (!in_flight.is_empty() || sapi::deferred_drains_pending()) {
+        if !progressed && (!in_flight.is_empty() || sapi::deferred_drains_pending() || stop_taking)
+        {
             let wait = if shutting_down {
                 BACKOFF_SHUTDOWN
             } else {
@@ -708,9 +718,9 @@ fn async_worker_thread(
             let waited_on_descriptors =
                 unsafe { ffi::oxphp_bridge_async_io_backoff(wait.as_nanos() as u64) } != 0;
             if !waited_on_descriptors {
-                if shutting_down {
-                    // No new work is accepted during the drain, so there is
-                    // nothing to wait on the queue for.
+                if shutting_down || stop_taking {
+                    // No new work is accepted now, so there is nothing to wait
+                    // on the queue for.
                     std::thread::sleep(wait);
                 } else {
                     // Wait on the queue rather than sleeping blind: a worker

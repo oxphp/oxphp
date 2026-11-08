@@ -19,7 +19,9 @@
 //! A thread whose one request lasts as long as the thread (a worker, an
 //! `oxphp_async()` pool thread) would hold a restart for ever, or run without
 //! the cache for ever; it retires at its next idle moment instead and is
-//! replaced (see [`retire_reason`]).
+//! replaced (see [`retire_reason`]). A load that never leaves it such a moment
+//! is why it stops taking new work to reach one, in turn with the other
+//! threads of its kind and for a bounded time (see [`stop_taking_work`]).
 //!
 //! The module stays inert when OPcache has no lock file this process can find
 //! (OPcache off, file cache only, not Linux): every request then starts as it
@@ -32,6 +34,51 @@ use std::cell::Cell;
 use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
 use std::sync::{Mutex, OnceLock, PoisonError, RwLock};
 use std::time::Instant;
+
+/// How long a thread due for replacement goes without taking new work to reach
+/// a moment with none in flight. Bounded because what it still runs can be
+/// waiting for work only it would take: a task awaiting a nested task, a request
+/// calling this server.
+const DRAIN_WINDOW_MS: u64 = 5_000;
+
+/// The threads a drain is rationed among, one of each kind at a time.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ThreadKind {
+    Worker = 0,
+    AsyncPool = 1,
+}
+
+impl ThreadKind {
+    fn name(self) -> &'static str {
+        match self {
+            ThreadKind::Worker => "Worker",
+            ThreadKind::AsyncPool => "Async worker thread",
+        }
+    }
+
+    fn work(self) -> &'static str {
+        match self {
+            ThreadKind::Worker => "requests",
+            ThreadKind::AsyncPool => "tasks",
+        }
+    }
+}
+
+/// Where a thread stands in going without new work.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Drain {
+    Accepting,
+    /// It takes nothing new until `until_ms`, in [`now_ms`].
+    Draining {
+        until_ms: u64,
+    },
+    /// Its turn ran out with work still in flight, during the restart counted
+    /// by `scheduled`. Only its idle moment replaces it now: another turn would
+    /// cost the same capacity for a request that has already outlasted one.
+    GaveUp {
+        scheduled: u64,
+    },
+}
 
 /// Restart bookkeeping shared by every PHP thread of the process.
 ///
@@ -55,6 +102,10 @@ pub(crate) struct Coordinator {
     /// Request startups take it shared; the startup that runs a restart takes
     /// it exclusively, so no other startup runs during the restart.
     window: RwLock<()>,
+    /// By [`ThreadKind`], the [`now_ms`] until which a thread of that kind has
+    /// the turn to go without new work; past it, the turn is free. It expires
+    /// by itself because the thread holding it can end without a replacement.
+    drain_until_ms: [AtomicU64; 2],
 }
 
 /// What a request was opened with, kept for as long as it is open.
@@ -120,6 +171,7 @@ impl Coordinator {
             holders: AtomicU64::new(0),
             uncached: AtomicU64::new(0),
             window: RwLock::new(()),
+            drain_until_ms: [AtomicU64::new(0), AtomicU64::new(0)],
         }
     }
 
@@ -309,6 +361,57 @@ impl Coordinator {
         (self.converted(opened) || self.holders.load(SeqCst) == 0).then_some(Retire::Uncached)
     }
 
+    /// Where a thread of `kind`, standing at `drain`, stands now; `due` when it
+    /// is to be replaced at its next idle moment.
+    fn next_drain(&self, kind: ThreadKind, drain: Drain, due: bool, now_ms: u64) -> Drain {
+        let turn = &self.drain_until_ms[kind as usize];
+        let scheduled = self.scheduled.load(SeqCst);
+        // Only the turn this thread took: the replacement of another thread
+        // can have freed it, and someone else can hold it by now.
+        let give_back = |until_ms: u64| {
+            let _ = turn.compare_exchange(until_ms, 0, SeqCst, SeqCst);
+        };
+        if !due {
+            return match drain {
+                Drain::Draining { until_ms } => {
+                    give_back(until_ms);
+                    Drain::Accepting
+                }
+                other => other,
+            };
+        }
+        match drain {
+            Drain::Draining { until_ms } if now_ms < until_ms => drain,
+            Drain::Draining { until_ms } => {
+                give_back(until_ms);
+                Drain::GaveUp { scheduled }
+            }
+            Drain::GaveUp { scheduled: gave_up } if gave_up == scheduled => drain,
+            Drain::Accepting | Drain::GaveUp { .. } => {
+                let current = turn.load(SeqCst);
+                let until_ms = now_ms + DRAIN_WINDOW_MS;
+                if current <= now_ms
+                    && turn
+                        .compare_exchange(current, until_ms, SeqCst, SeqCst)
+                        .is_ok()
+                {
+                    Drain::Draining { until_ms }
+                } else {
+                    Drain::Accepting
+                }
+            }
+        }
+    }
+
+    /// A thread of `kind` is about to take work, which ends the turn in progress:
+    /// a retiring thread leaves it held until its replacement gets here, so that
+    /// the next thread does not stop taking work while that one still boots. A
+    /// thread started for any other reason ends it too, and two can then go
+    /// without new work at once for what is left of a window.
+    fn thread_ready(&self, kind: ThreadKind) {
+        self.drain_until_ms[kind as usize].store(0, SeqCst);
+    }
+
     /// A restart OPcache asked for and that has not run after `timeout_ms`;
     /// once per restart. `timeout_ms == 0` never reports.
     pub(crate) fn overdue(&self, now_ms: u64, timeout_ms: u64) -> Option<Overdue> {
@@ -379,6 +482,13 @@ thread_local! {
     /// Restarts OPcache scheduled on this thread that no closed request has
     /// published yet.
     static SCHEDULED_HERE: Cell<u64> = const { Cell::new(0) };
+    /// See [`stop_taking_work`].
+    static DRAIN: Cell<Drain> = const { Cell::new(Drain::Accepting) };
+    /// When this thread, running without the cache, last took code from it. See
+    /// [`goes_without_work`].
+    static ADOPTED_MS: Cell<u64> = const { Cell::new(0) };
+    /// See [`thread_ready`].
+    static READY: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Wakers of the worker threads waiting for work, so that one whose request
@@ -506,15 +616,85 @@ pub(crate) fn adopt() {
     OPENED.with(|o| {
         if let Some(opened) = o.get() {
             o.set(Some(COORDINATOR.adopt(opened)));
+            if !opened.cached {
+                ADOPTED_MS.with(|a| a.set(now_ms()));
+            }
         }
     });
 }
 
-/// Why the calling thread, whose request lasts as long as the thread, should
-/// be replaced now; called only at a moment it runs nothing.
+/// Why the calling thread, whose request lasts as long as the thread, is to be
+/// replaced at its next moment with nothing in flight.
 pub(crate) fn retire_reason() -> Option<Retire> {
     let opened = OPENED.with(Cell::get)?;
     COORDINATOR.retire(opened, SCHEDULED_HERE.with(Cell::get) > 0)
+}
+
+/// Whether a thread due for replacement because of `why` should go without new
+/// work to reach it. A thread running without the cache that holds the restart
+/// because it took code from the cache (`adopted_ms`) does so only once
+/// [`DRAIN_WINDOW_MS`] have passed without more: while such code keeps coming,
+/// its replacement would hold the restart again, and each thread would be
+/// replaced in turn for as long as it comes.
+fn goes_without_work(why: Retire, cached: bool, adopted_ms: u64, now_ms: u64) -> bool {
+    why != Retire::Holding || cached || now_ms >= adopted_ms + DRAIN_WINDOW_MS
+}
+
+/// Whether the calling thread of `kind` should leave new work on the queue this
+/// turn of its loop, so that what it runs ends and [`retire_reason`] can take
+/// effect. Called on every turn.
+///
+/// Threads of a kind go without new work in turn while the others carry the
+/// load, each for [`DRAIN_WINDOW_MS`] at most, and one that what it runs has
+/// outlasted that does not try again for that restart.
+pub(crate) fn stop_taking_work(kind: ThreadKind) -> bool {
+    let why = retire_reason();
+    let before = DRAIN.with(Cell::get);
+    if why.is_none() && !matches!(before, Drain::Draining { .. }) {
+        return false;
+    }
+    let now = now_ms();
+    let due = why.is_some_and(|why| {
+        let cached = OPENED.with(Cell::get).is_some_and(|o| o.cached);
+        goes_without_work(why, cached, ADOPTED_MS.with(Cell::get), now)
+    });
+    let after = COORDINATOR.next_drain(kind, before, due, now);
+    DRAIN.with(|d| d.set(after));
+    let thread = std::thread::current();
+    let worker = thread.name().unwrap_or("?");
+    match (before, after) {
+        (Drain::Draining { .. }, Drain::Draining { .. }) => {}
+        (_, Drain::Draining { .. }) => tracing::info!(
+            worker,
+            "{} taking no new {} for up to {} s, so that it reaches a moment with \
+             none in flight: an OPcache restart needs it replaced",
+            kind.name(),
+            kind.work(),
+            DRAIN_WINDOW_MS / 1000
+        ),
+        (Drain::Draining { .. }, _) => tracing::info!(
+            worker,
+            "{} taking {} again: {}",
+            kind.name(),
+            kind.work(),
+            if due {
+                "what it runs has outlasted the wait, so it is replaced at its next \
+                 moment with none in flight"
+            } else {
+                "going without them no longer helps an OPcache restart"
+            }
+        ),
+        _ => {}
+    }
+    matches!(after, Drain::Draining { .. })
+}
+
+/// The calling thread of `kind` is about to take work for the first time. Called
+/// on every entry to its wait, and acts once.
+pub(crate) fn thread_ready(kind: ThreadKind) {
+    if !READY.with(|r| r.replace(true)) {
+        COORDINATOR.thread_ready(kind);
+    }
 }
 
 /// Log a warning, once per restart, when a restart has waited longer than
@@ -1219,5 +1399,168 @@ mod tests {
         assert!(!is_lock_file("/memfd:opcache_jit (deleted)"));
         assert!(!is_lock_file("/dev/null"));
         assert!(!is_lock_file("/tmp/#12345 (deleted)"));
+    }
+
+    const W: ThreadKind = ThreadKind::Worker;
+
+    fn draining_from(now_ms: u64) -> Drain {
+        Drain::Draining {
+            until_ms: now_ms + DRAIN_WINDOW_MS,
+        }
+    }
+
+    #[test]
+    fn a_thread_that_is_not_due_keeps_taking_work() {
+        let c = coordinator();
+        assert_eq!(
+            c.next_drain(W, Drain::Accepting, false, 100),
+            Drain::Accepting
+        );
+        assert_eq!(c.drain_until_ms[W as usize].load(SeqCst), 0);
+    }
+
+    #[test]
+    fn one_thread_of_a_kind_goes_without_work_at_a_time() {
+        let c = coordinator();
+        c.publish(1);
+        assert_eq!(
+            c.next_drain(W, Drain::Accepting, true, 100),
+            draining_from(100)
+        );
+        assert_eq!(
+            c.next_drain(W, Drain::Accepting, true, 200),
+            Drain::Accepting
+        );
+        assert_eq!(
+            c.next_drain(ThreadKind::AsyncPool, Drain::Accepting, true, 200),
+            draining_from(200),
+            "the other kind has a turn of its own"
+        );
+    }
+
+    #[test]
+    fn a_turn_ends_with_its_window_and_the_next_thread_takes_it() {
+        let c = coordinator();
+        c.publish(1);
+        let first = c.next_drain(W, Drain::Accepting, true, 100);
+        assert_eq!(
+            c.next_drain(W, first, true, 100 + DRAIN_WINDOW_MS - 1),
+            first
+        );
+        assert_eq!(
+            c.next_drain(W, first, true, 100 + DRAIN_WINDOW_MS),
+            Drain::GaveUp { scheduled: 1 }
+        );
+        assert_eq!(
+            c.next_drain(W, Drain::Accepting, true, 100 + DRAIN_WINDOW_MS),
+            draining_from(100 + DRAIN_WINDOW_MS)
+        );
+    }
+
+    #[test]
+    fn a_thread_that_gave_up_gets_no_second_turn_for_that_restart() {
+        let c = coordinator();
+        c.publish(1);
+        let gave_up = Drain::GaveUp { scheduled: 1 };
+        assert_eq!(c.next_drain(W, gave_up, true, 100_000), gave_up);
+        assert_eq!(
+            c.next_drain(W, gave_up, false, 100_000),
+            gave_up,
+            "not being due for a moment is not a new restart"
+        );
+        assert_eq!(c.drain_until_ms[W as usize].load(SeqCst), 0);
+    }
+
+    #[test]
+    fn the_next_restart_gives_a_new_turn() {
+        let c = coordinator();
+        c.publish(2);
+        assert_eq!(
+            c.next_drain(W, Drain::GaveUp { scheduled: 1 }, true, 100),
+            draining_from(100)
+        );
+    }
+
+    #[test]
+    fn a_thread_no_longer_due_gives_back_its_turn() {
+        let c = coordinator();
+        c.publish(1);
+        let first = c.next_drain(W, Drain::Accepting, true, 100);
+        assert_eq!(c.next_drain(W, first, false, 200), Drain::Accepting);
+        assert_eq!(
+            c.next_drain(W, Drain::Accepting, true, 200),
+            draining_from(200)
+        );
+    }
+
+    #[test]
+    fn a_thread_gives_back_only_its_own_turn() {
+        let c = coordinator();
+        c.publish(1);
+        let first = c.next_drain(W, Drain::Accepting, true, 100);
+        c.thread_ready(W);
+        let second = c.next_drain(W, Drain::Accepting, true, 200);
+        assert_eq!(second, draining_from(200));
+        assert_eq!(c.next_drain(W, first, false, 300), Drain::Accepting);
+        assert_eq!(
+            c.next_drain(W, Drain::Accepting, true, 300),
+            Drain::Accepting,
+            "the second thread still has the turn"
+        );
+    }
+
+    #[test]
+    fn a_replacement_passes_the_turn_on_before_its_window_ends() {
+        let c = coordinator();
+        c.publish(1);
+        let _retiring = c.next_drain(W, Drain::Accepting, true, 100);
+        assert_eq!(
+            c.next_drain(W, Drain::Accepting, true, 200),
+            Drain::Accepting
+        );
+        c.thread_ready(W);
+        assert_eq!(
+            c.next_drain(W, Drain::Accepting, true, 200),
+            draining_from(200)
+        );
+    }
+
+    #[test]
+    fn a_turn_nobody_gives_back_expires() {
+        let c = coordinator();
+        c.publish(1);
+        let _gone = c.next_drain(W, Drain::Accepting, true, 100);
+        assert_eq!(
+            c.next_drain(W, Drain::Accepting, true, 100 + DRAIN_WINDOW_MS),
+            draining_from(100 + DRAIN_WINDOW_MS)
+        );
+    }
+
+    #[test]
+    fn a_thread_that_keeps_taking_code_from_the_cache_keeps_taking_work() {
+        let adopted = 1_000;
+        assert!(!goes_without_work(
+            Retire::Holding,
+            false,
+            adopted,
+            adopted + DRAIN_WINDOW_MS - 1
+        ));
+        assert!(
+            goes_without_work(Retire::Holding, false, adopted, adopted + DRAIN_WINDOW_MS),
+            "such code has stopped coming, and the replacement will not hold the restart"
+        );
+    }
+
+    #[test]
+    fn only_a_thread_without_the_cache_waits_for_code_from_it_to_stop() {
+        let now = 1_000;
+        assert!(
+            goes_without_work(Retire::Holding, true, now, now),
+            "its replacement runs without the cache"
+        );
+        assert!(
+            goes_without_work(Retire::Uncached, false, now, now),
+            "the restart it waited for has run, or nothing else holds it"
+        );
     }
 }

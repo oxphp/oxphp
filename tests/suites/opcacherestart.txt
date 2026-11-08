@@ -26,3 +26,19 @@ log ~OPcache restart still waiting
 opcacherestart/test_task_declares_a_function_while_a_restart_waits
 opcacherestart/test_thread_and_request_without_the_cache_hold_restarts
 opcacherestart/test_restart_runs_after_the_request_opened_while_it_waited
+
+# Under a steady load of tasks that park, a pool thread never has a moment with
+# no task, so it stops taking new ones to reach one.
+opcacherestart/test_load_then_reset_under_task_load
+log ~Async worker thread taking no new tasks
+log ~Async worker thread retiring: an OPcache restart is waiting for it
+log ~OPcache restart done
+log ~retiring: it opened while an OPcache restart was pending
+opcacherestart/test_restart_ran_under_task_load
+
+# One thread at a time waits, and for a bounded time: a task that outlasts the
+# wait stops neither the pool nor the thread it runs on.
+opcacherestart/test_long_task_does_not_stop_the_pool
+log ~Async worker thread taking no new tasks
+log ~Async worker thread taking tasks again
+opcacherestart/test_restart_runs_after_the_long_tasks
