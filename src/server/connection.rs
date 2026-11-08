@@ -68,8 +68,10 @@ fn is_query_method(method: &Method) -> bool {
 /// compared without regard to case; ports are compared as written. HTTP/1.x
 /// has no such rule, and its `Host` is not looked at.
 ///
-/// A refused request gets a `400` with the body this returns.
-fn host_from_authority(parts: &mut http::request::Parts) -> Result<(), &'static [u8]> {
+/// `Err` holds the status and body of the refusal.
+fn host_from_authority(
+    parts: &mut http::request::Parts,
+) -> Result<(), (StatusCode, &'static [u8])> {
     let Some(authority) = parts.uri.authority() else {
         return Ok(());
     };
@@ -77,7 +79,10 @@ fn host_from_authority(parts: &mut http::request::Parts) -> Result<(), &'static 
         return Ok(());
     }
     if authority.host().is_empty() {
-        return Err(b"400 Bad Request: empty host in the request target");
+        return Err((
+            StatusCode::BAD_REQUEST,
+            b"400 Bad Request: empty host in the request target",
+        ));
     }
     let authority = authority.as_str();
     let host = authority
@@ -90,11 +95,21 @@ fn host_from_authority(parts: &mut http::request::Parts) -> Result<(), &'static 
             .iter()
             .any(|line| !line.as_bytes().eq_ignore_ascii_case(host.as_bytes()))
     {
-        return Err(b"400 Bad Request: Host does not match the host and port in :authority");
+        return Err((
+            StatusCode::BAD_REQUEST,
+            b"400 Bad Request: Host does not match the host and port in :authority",
+        ));
     }
     // An authority is printable ASCII, which a field value always accepts.
     if let Ok(value) = header::HeaderValue::from_str(host) {
-        parts.headers.insert(header::HOST, value);
+        // `insert` panics when the map has to grow and cannot, even with `Host`
+        // in it (http 1.4).
+        if parts.headers.try_insert(header::HOST, value).is_err() {
+            return Err((
+                StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+                b"431 Request Header Fields Too Large: too many header fields",
+            ));
+        }
     }
     Ok(())
 }
@@ -715,10 +730,10 @@ async fn dispatch_request(
     coding: Option<compression::Coding>,
 ) -> Result<(Response<ResponseBody>, usize, PhpExecData), crate::types::BoxError> {
     // Before routing, so a static file is refused the same as a script.
-    if let Err(reason) = host_from_authority(&mut parts) {
+    if let Err((status, reason)) = host_from_authority(&mut parts) {
         return Ok((
             Response::builder()
-                .status(StatusCode::BAD_REQUEST)
+                .status(status)
                 .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
                 .body(full_body(Bytes::from_static(reason)))?,
             0,
@@ -1135,6 +1150,32 @@ mod tests {
 
     use crate::events::EventHandler;
     use crate::handlers::request_id::RequestIdGenerator;
+
+    #[test]
+    fn host_from_authority_refuses_a_request_whose_header_map_is_full() {
+        let (mut parts, ()) = Request::builder()
+            .version(http::Version::HTTP_2)
+            .uri("https://example.com/")
+            .body(())
+            .unwrap()
+            .into_parts();
+        for i in 0.. {
+            let name = header::HeaderName::from_bytes(format!("x{i}").as_bytes()).unwrap();
+            let value = header::HeaderValue::from_static("");
+            if parts.headers.try_append(name, value).is_err() {
+                break;
+            }
+        }
+        assert_eq!(parts.headers.keys_len(), parts.headers.capacity());
+
+        assert_eq!(
+            host_from_authority(&mut parts),
+            Err((
+                StatusCode::REQUEST_HEADER_FIELDS_TOO_LARGE,
+                b"431 Request Header Fields Too Large: too many header fields".as_slice()
+            ))
+        );
+    }
 
     /// Builds the pieces `await_queued` needs, with `deadline` measured from
     /// now. The pickup reading is taken here rather than passed in, so a test

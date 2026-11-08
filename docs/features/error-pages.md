@@ -57,6 +57,7 @@ OxPHP swaps the body of every 4xx or 5xx that reaches the response pipeline. The
 | `404.html` | Not Found | No matching file or route; a blocked dotfile (`.env`, `.git/`); a direct `.php` request in Framework mode; the default `PHP_DENY_PATHS` fallback |
 | `413.html` | Payload Too Large | The request body exceeds the maximum size |
 | `416.html` | Range Not Satisfiable | An unsatisfiable `Range` header on a static file (`Content-Range` is preserved) |
+| `431.html` | Request Header Fields Too Large | An HTTP/2 request carrying so many distinct header names that there is no room left for the `Host` its `:authority` names. The HTTP/2 layer refuses a request with more names still on its own, with a `431` that has no body and gets no page |
 | `500.html` | Internal Server Error | An uncaught or fatal PHP error |
 | `501.html` | Not Implemented | A `CONNECT` request, which asks for a tunnel: OxPHP is not a proxy and opens none. One the `400` row above covers gets that `400` instead |
 | `503.html` | Service Unavailable | Graceful draining during shutdown; a PHP response that does not stream, has outgrown `RESPONSE_BUFFER_BYTES` and could not be written to a spool file — `RESPONSE_SPOOL_MAX_BYTES` reached, `TMPDIR` not writable, or the disk full — see [Response Buffering](../operations/configuration.md#response-buffering) (`Retry-After` is preserved) |
