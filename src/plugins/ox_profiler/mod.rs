@@ -390,20 +390,6 @@ impl Plugin for ProfilerPlugin {
         // PHP code can call them whether or not the profiler is enabled.
         php_sdk::register_functions(ctx, self.enabled)?;
 
-        // Wire the C bridge to the Rust filter resolver.
-        // Once set, observer init calls into Rust whenever a function
-        // carries any OxPHP\Profile\* attribute. Filter spec is then
-        // cached per-(fn, thread) for hot-path consultation in
-        // begin/end. Registered unconditionally (filter behaviour
-        // only activates when the user actually applies one of the
-        // four filter attributes).
-        #[cfg(feature = "php")]
-        unsafe {
-            crate::php::bindings::oxphp_bridge_set_filter_resolver(Some(
-                crate::profiling::filter::oxphp_profiler_resolve_filter,
-            ));
-        }
-
         // ── Test-only decorator (feature `decorator-test`) ──
         // Registered before the enabled-guard so it is independent of profiler
         // config: a repeatable, ALL-target decorator whose per-occurrence label
@@ -601,18 +587,11 @@ impl Plugin for ProfilerPlugin {
             http_spawn_sem: std::sync::Arc::new(tokio::sync::Semaphore::new(HTTP_SPAWN_LIMIT)),
         });
 
-        // Register the seven OxPHP\Profile\* PHP attributes from spec §6:
-        //   - Decorator-based (affect already-created spans):
-        //     Mark, SlowThreshold, MemoryThreshold
-        //   - Observer-filter (affect span creation):
-        //     Profile, Exclude, Sample, Tag
+        // Decorator attributes; they act on spans that already exist.
         {
-            use crate::plugin::builders::attribute::{
-                ATTR_TARGET_CLASS, ATTR_TARGET_FUNCTION, ATTR_TARGET_METHOD,
-            };
+            use crate::plugin::builders::attribute::{ATTR_TARGET_FUNCTION, ATTR_TARGET_METHOD};
             use crate::plugin::types::{PhpType, PhpValue};
 
-            // ── Decorators ─────────────────────────────────
             ctx.register_attribute("OxPHP\\Profile\\Mark")
                 .target(ATTR_TARGET_FUNCTION | ATTR_TARGET_METHOD)
                 .optional_param(
@@ -630,27 +609,6 @@ impl Plugin for ProfilerPlugin {
             ctx.register_attribute("OxPHP\\Profile\\MemoryThreshold")
                 .target(ATTR_TARGET_FUNCTION | ATTR_TARGET_METHOD)
                 .param("kb", PhpType::Int)
-                .build()?;
-
-            // ── Observer-filter attributes ─────────────────
-            ctx.register_attribute("OxPHP\\Profile\\Profile")
-                .target(ATTR_TARGET_FUNCTION | ATTR_TARGET_METHOD | ATTR_TARGET_CLASS)
-                .build()?;
-
-            ctx.register_attribute("OxPHP\\Profile\\Exclude")
-                .target(ATTR_TARGET_FUNCTION | ATTR_TARGET_METHOD | ATTR_TARGET_CLASS)
-                .build()?;
-
-            ctx.register_attribute("OxPHP\\Profile\\Sample")
-                .target(ATTR_TARGET_FUNCTION | ATTR_TARGET_METHOD)
-                .param("rate", PhpType::Float)
-                .build()?;
-
-            ctx.register_attribute("OxPHP\\Profile\\Tag")
-                .target(ATTR_TARGET_FUNCTION | ATTR_TARGET_METHOD | ATTR_TARGET_CLASS)
-                .repeatable() // multiple #[Tag] on one target accumulate
-                .param("key", PhpType::String)
-                .param("value", PhpType::String)
                 .build()?;
         }
         ctx.register_decorator(crate::profiling::decorators::MarkDecorator { label: None });

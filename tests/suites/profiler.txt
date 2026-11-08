@@ -10,11 +10,7 @@ profiler/test_metric
 profiler/test_decorator_mark
 profiler/test_decorator_slow_threshold
 profiler/test_decorator_memory_threshold
-profiler/test_attr_profile
-profiler/test_attr_exclude
-profiler/test_attr_sample
-profiler/test_attr_tag
-profiler/test_attr_composition
+profiler/test_removed_attributes_are_inert
 profiler/test_storage_files_present
 profiler/test_internal_routes
 profiler/test_truncated_under_cap

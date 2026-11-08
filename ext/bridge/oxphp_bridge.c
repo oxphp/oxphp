@@ -6484,7 +6484,6 @@ static __thread struct {
 
     uint64_t next_seq;          /* incremented on every BEGIN */
 
-    uint32_t force_profile_fn_count; /* mirrors count of force_profile=1 entries in g_filter_cache; reset only by clear_filter_cache() */
     uint8_t  capture_mem;
     uint8_t  capture_cpu;
 
@@ -6497,12 +6496,10 @@ static __thread struct {
 
     /* Parallel to open_stack: records the zend_function* whose BEGIN
      * actually pushed the entry. The end callback compares this
-     * against execute_data->func and only pops when they match —
-     * correctness guard for mixed-capture runs (ApmOnly with
-     * force_profile fns, PROFILE_ALL + stop/start, sample misses,
-     * max_spans cap) where begin decides not to push but end still
-     * fires for the same function. Without the check, end would
-     * unbalance a span that belongs to a different (outer) function. */
+     * against execute_data->func and only pops when they match: end
+     * fires for every frame, including one whose begin ran while
+     * capture was off. Without the check, end would unbalance a span
+     * that belongs to a different (outer) function. */
     uintptr_t open_fn_stack[OXPHP_PROF_OPEN_STACK_MAX];
 
     /* Per-flush string arena. Reset whenever buf_len returns to 0. */
@@ -6578,7 +6575,6 @@ void oxphp_bridge_set_profiling_mode(uint8_t mode) {
         g_prof.spans_truncated = 0;
         g_prof.next_seq = 0;
         g_prof.paused = 0;          /* Fresh request starts unpaused */
-        /* force_profile_fn_count intentionally preserved: mirrors g_filter_cache, not per-request */
         oxphp_prof_was_active = 0;
     }
 }
@@ -6615,14 +6611,10 @@ void oxphp_bridge_profiler_park(oxphp_prof_parked_t *dst) {
     /* What stays behind is what a thread serving nobody looks like — the same
      * fields the OFF branch of set_profiling_mode clears, for the same reason.
      * Mode included: a request admitted into this window that was never asked
-     * for must not find the observer recording the whole of it on its behalf.
-     * Whole of it, not all of it — OFF is the mode gate and not the only one,
-     * and a function the filter cache marks force_profile keeps being recorded
-     * here exactly as it is between two ordinary requests.
+     * for must not find the observer recording it on its behalf.
      *
-     * force_profile_fn_count, capture_mem and capture_cpu are deliberately not
-     * touched. The first mirrors g_filter_cache and the other two are copies of
-     * process-wide defaults; none of the three describes a request. */
+     * capture_mem and capture_cpu are deliberately not touched: they are copies
+     * of process-wide defaults and do not describe a request. */
     g_prof.mode                = OXPHP_PROFILING_MODE_OFF;
     g_prof.paused              = 0;
     g_prof.open_depth          = 0;
@@ -6641,14 +6633,7 @@ void oxphp_bridge_profiler_unpark(const oxphp_prof_parked_t *src) {
      * drained it. What it is instead is emptied: nothing standing here can
      * belong to the request being resumed (its own events left at park), and
      * the next flush runs with that request's span stack installed, so a
-     * leftover would arrive there as one of its calls.
-     *
-     * There is a producer for such a leftover. Mode OFF silences the observer
-     * only while force_profile_fn_count is zero: a function the filter cache
-     * marks force_profile is recorded on this thread whatever the mode says
-     * (see the gate in oxphp_profiler_begin), and that cache is thread-wide and
-     * outlives every request. A call to one inside the park window therefore
-     * leaves events here, and they belong to whatever was running then. */
+     * leftover would arrive there as one of its calls. */
     g_prof.buf_len             = 0;
     g_prof.name_arena_used     = 0;
 
@@ -6700,135 +6685,11 @@ int64_t oxphp_bridge_get_memory_usage_bytes(void) {
     return (int64_t)zend_memory_usage(0);
 }
 
-/* ============================================================ *
- * Profiler filter cache                                        *
- * ============================================================ */
-
-#define OXPHP_PROF_FILTER_CACHE_INIT_CAP   256
-#define OXPHP_PROF_FILTER_CACHE_MAX_CAP   4096
-
-/* Per-thread cache entry. Holds spec_id (Rust handle) + the four
- * hot-path decision values mirrored from the spec, so begin/end
- * never re-enter Rust to ask "should I create this span?". */
-typedef struct {
-    uintptr_t fn_id;          /* 0 = empty slot (zend_function* never NULL) */
-    uint32_t  spec_id;        /* 0 = no filter (cached fast path) */
-    uint8_t   excluded;       /* 1 = skip span creation */
-    uint8_t   force_profile;  /* 1 = create even when mode != PROFILE_ALL */
-    uint8_t   has_sample;     /* 1 = sample_rate is set */
-    uint8_t   reserved;       /* keep zero — alignment */
-    float     sample_rate;    /* only meaningful when has_sample == 1 */
-} ox_filter_cache_entry_t;
-
-static __thread struct {
-    ox_filter_cache_entry_t *entries;
-    uint32_t                  cap;        /* power-of-two */
-    uint32_t                  size;       /* number of non-empty slots */
-} g_filter_cache;
-
-/* Resolver function pointer set by Rust at init. NULL = no
- * filtering (observer creates spans for all functions). */
-static oxphp_profiler_resolve_filter_fn_t g_filter_resolver = NULL;
-
-void oxphp_bridge_set_filter_resolver(oxphp_profiler_resolve_filter_fn_t resolver) {
-    g_filter_resolver = resolver;
-}
-
-/* fxhash-style mix to (uintptr_t)func → bucket index. cap is
- * power-of-two so & cap-1 == mod cap. */
-static uint32_t oxphp_filter_cache_hash(uintptr_t fn_id, uint32_t cap) {
-    uint64_t h = (uint64_t)fn_id;
-    h ^= h >> 33;
-    h *= 0xff51afd7ed558ccdULL;
-    h ^= h >> 33;
-    return (uint32_t)(h & ((uint64_t)cap - 1));
-}
-
-static int oxphp_filter_cache_grow(void) {
-    uint32_t new_cap = (g_filter_cache.cap == 0)
-                       ? OXPHP_PROF_FILTER_CACHE_INIT_CAP
-                       : g_filter_cache.cap * 2;
-    if (new_cap > OXPHP_PROF_FILTER_CACHE_MAX_CAP) {
-        return 0;  /* abort grow; observer init falls back to re-resolve */
-    }
-    ox_filter_cache_entry_t *new_entries =
-        calloc(new_cap, sizeof(ox_filter_cache_entry_t));
-    if (!new_entries) return 0;
-
-    uint32_t mask = new_cap - 1;
-    for (uint32_t i = 0; i < g_filter_cache.cap; i++) {
-        if (g_filter_cache.entries[i].fn_id == 0) continue;
-        uint32_t h = oxphp_filter_cache_hash(g_filter_cache.entries[i].fn_id, new_cap);
-        while (new_entries[h].fn_id != 0) h = (h + 1) & mask;
-        new_entries[h] = g_filter_cache.entries[i];
-    }
-
-    free(g_filter_cache.entries);
-    g_filter_cache.entries = new_entries;
-    g_filter_cache.cap = new_cap;
-    return 1;
-}
-
-/* Look up an existing entry. Returns NULL on miss. */
-static ox_filter_cache_entry_t *oxphp_filter_cache_lookup(uintptr_t fn_id) {
-    if (g_filter_cache.cap == 0) return NULL;
-    uint32_t mask = g_filter_cache.cap - 1;
-    uint32_t h = oxphp_filter_cache_hash(fn_id, g_filter_cache.cap);
-    while (g_filter_cache.entries[h].fn_id != 0) {
-        if (g_filter_cache.entries[h].fn_id == fn_id) {
-            return &g_filter_cache.entries[h];
-        }
-        h = (h + 1) & mask;
-    }
-    return NULL;
-}
-
-/* Insert / overwrite an entry. Grows if load > 0.75. Silently no-ops
- * past max cap (the function will just be re-resolved every time). */
-static void oxphp_filter_cache_put(const ox_filter_cache_entry_t *entry) {
-    if (g_filter_cache.cap == 0) {
-        if (!oxphp_filter_cache_grow()) return;
-    }
-    if (g_filter_cache.size * 4 >= g_filter_cache.cap * 3) {
-        if (!oxphp_filter_cache_grow()) return;
-    }
-    uint32_t mask = g_filter_cache.cap - 1;
-    uint32_t h = oxphp_filter_cache_hash(entry->fn_id, g_filter_cache.cap);
-    while (g_filter_cache.entries[h].fn_id != 0
-           && g_filter_cache.entries[h].fn_id != entry->fn_id) {
-        h = (h + 1) & mask;
-    }
-    uint8_t prev_force = (g_filter_cache.entries[h].fn_id == entry->fn_id)
-                         ? g_filter_cache.entries[h].force_profile
-                         : 0;
-    if (g_filter_cache.entries[h].fn_id == 0) g_filter_cache.size++;
-    g_filter_cache.entries[h] = *entry;
-    if (entry->force_profile && !prev_force) {
-        g_prof.force_profile_fn_count++;
-    } else if (!entry->force_profile && prev_force) {
-        if (g_prof.force_profile_fn_count > 0) g_prof.force_profile_fn_count--;
-    }
-}
-
-uint32_t oxphp_bridge_get_filter_spec_id_cached(uintptr_t fn_id) {
-    ox_filter_cache_entry_t *e = oxphp_filter_cache_lookup(fn_id);
-    return e ? e->spec_id : 255;
-}
-
-void oxphp_bridge_clear_filter_cache(void) {
-    free(g_filter_cache.entries);
-    g_filter_cache.entries = NULL;
-    g_filter_cache.cap = 0;
-    g_filter_cache.size = 0;
-    g_prof.force_profile_fn_count = 0;
-}
-
 /* `ox_attr_resolver_ctx_t` is declared in oxphp_bridge.h so the SAPI
- * translation unit can build it for the decorator resolve path too. */
+ * translation unit can build it for the decorator resolve path. */
 
 /* Look up the `idx`-th attribute named `attr_name` in `attrs`.
- * Repeated attributes (e.g. multiple #[Tag(...)] on one function)
- * are addressed via idx (idx=0 = first occurrence). */
+ * Repeated attributes are addressed via idx (idx=0 = first occurrence). */
 static zend_attribute *
 oxphp_lookup_nth_attribute(HashTable *attrs, const char *attr_name, uint32_t idx) {
     if (!attrs) return NULL;
@@ -6841,64 +6702,6 @@ oxphp_lookup_nth_attribute(HashTable *attrs, const char *attr_name, uint32_t idx
         }
     } ZEND_HASH_FOREACH_END();
     return NULL;
-}
-
-size_t oxphp_bridge_read_attr_arg_str(
-    void *attr_resolver_ctx,
-    int is_class_scope,
-    const char *attr_name,
-    uint32_t attr_idx,
-    uint32_t arg_idx,
-    char *out, size_t out_cap)
-{
-    ox_attr_resolver_ctx_t *ctx = (ox_attr_resolver_ctx_t *)attr_resolver_ctx;
-    HashTable *attrs = is_class_scope ? ctx->class_attrs : ctx->fn_attrs;
-    zend_attribute *attr = oxphp_lookup_nth_attribute(attrs, attr_name, attr_idx);
-    if (!attr || arg_idx >= attr->argc || out_cap == 0) return 0;
-
-    zval val;
-    if (zend_get_attribute_value(&val, attr, arg_idx, ctx->scope) != SUCCESS) {
-        return 0;
-    }
-    size_t written = 0;
-    if (Z_TYPE(val) == IS_STRING) {
-        size_t src_len = Z_STRLEN(val);
-        size_t copy = src_len < out_cap - 1 ? src_len : out_cap - 1;
-        memcpy(out, Z_STRVAL(val), copy);
-        out[copy] = '\0';
-        written = copy;
-    }
-    zval_ptr_dtor(&val);
-    return written;
-}
-
-int oxphp_bridge_read_attr_arg_double(
-    void *attr_resolver_ctx,
-    int is_class_scope,
-    const char *attr_name,
-    uint32_t attr_idx,
-    uint32_t arg_idx,
-    double *out)
-{
-    ox_attr_resolver_ctx_t *ctx = (ox_attr_resolver_ctx_t *)attr_resolver_ctx;
-    HashTable *attrs = is_class_scope ? ctx->class_attrs : ctx->fn_attrs;
-    zend_attribute *attr = oxphp_lookup_nth_attribute(attrs, attr_name, attr_idx);
-    if (!attr || arg_idx >= attr->argc) return 0;
-
-    zval val;
-    if (zend_get_attribute_value(&val, attr, arg_idx, ctx->scope) != SUCCESS) {
-        return 0;
-    }
-    int ok = 0;
-    if (Z_TYPE(val) == IS_DOUBLE) {
-        *out = Z_DVAL(val);
-        ok = 1;
-    } else if (Z_TYPE(val) == IS_LONG) {
-        *out = (double)Z_LVAL(val);
-        ok = 1;
-    }
-    zval_ptr_dtor(&val);
-    return ok;
 }
 
 size_t oxphp_bridge_read_attr_arg_name(
@@ -7079,47 +6882,11 @@ static inline uint64_t oxphp_prof_clock_cpu_ns(void) {
     return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
 }
 
-/* Forward declaration — implemented in Rust (src/profiling/filter.rs)
- * as #[no_mangle] pub extern "C". Weak for the same reason as
- * oxphp_profiler_flush_span_events above. When the bridge is loaded
- * by a bare `php` CLI, g_prof.mode stays OFF and oxphp_profiler_begin
- * returns before the sample-hit branch is reached. */
-extern uint8_t oxphp_profiler_sample_hit(float rate) __attribute__((weak));
-
 static void oxphp_profiler_begin(zend_execute_data *execute_data) {
-    /* Paused short-circuit applies regardless of filter spec. */
     if (UNEXPECTED(g_prof.paused)) return;
+    if (g_prof.mode != OXPHP_PROFILING_MODE_PROFILE_ALL) return;
 
-    /* Mode-first gate: skip the filter cache lookup entirely when
-     * mode=OFF and no force_profile attribute has been resolved on
-     * this thread. This is the common production path. */
-    if (g_prof.mode != OXPHP_PROFILING_MODE_PROFILE_ALL
-        && g_prof.force_profile_fn_count == 0) {
-        return;
-    }
-
-    /* Consult the per-fn filter spec cached at observer init. */
     uintptr_t fn_id = (uintptr_t)execute_data->func;
-    ox_filter_cache_entry_t *filter = oxphp_filter_cache_lookup(fn_id);
-
-    /* Decision tree (per spec §6 composition rules):
-     * 1. Excluded — never create a span.
-     * 2. !PROFILE_ALL && !force_profile — default mode-only check
-     *    rejects.
-     * 3. has_sample — roll PRNG; skip if uniform > rate. */
-    if (filter != NULL && filter->excluded) return;
-
-    if (g_prof.mode != OXPHP_PROFILING_MODE_PROFILE_ALL) {
-        if (filter == NULL || !filter->force_profile) return;
-    }
-
-    if (filter != NULL && filter->has_sample) {
-        /* Weak-linked — NULL under a bare `php` CLI dlopen. The
-         * mode-first gate above already prevents this branch in
-         * that case, but guard anyway for defense in depth. */
-        if (oxphp_profiler_sample_hit == NULL) return;
-        if (!oxphp_profiler_sample_hit(filter->sample_rate)) return;
-    }
 
     /* Per-request span cap. next_seq grows monotonically under
      * mode != OFF; once the cap is reached we stop emitting new
@@ -7163,9 +6930,7 @@ static void oxphp_profiler_begin(zend_execute_data *execute_data) {
     ev->mem         = g_prof.capture_mem ? (int64_t)zend_memory_usage(0) : 0;
     ev->mem_peak    = g_prof.capture_mem ? (int64_t)zend_memory_peak_usage(0) : 0;
     ev->name_ptr    = arena_name;
-    /* Pass spec_id to Rust so apply_events can attach tags after
-     * pushing the BEGIN event. spec_id 0 = no tag work. */
-    ev->reserved2   = filter != NULL ? (uint64_t)filter->spec_id : 0;
+    ev->reserved2   = 0;
 
     /* Mirror open-span stack for the heap hook. seq tags are
      * 64-bit but we only keep the low 32 bits in the mirror — heap
@@ -7198,9 +6963,9 @@ static void oxphp_profiler_end(zend_execute_data *execute_data, zval *retval) {
 
     if (g_prof.open_depth == 0) return;
 
-    /* Correctness guard: if the begin for THIS function was skipped
-     * (paused, sample miss, force_profile-only with fn not in filter),
-     * open_fn_stack top belongs to an outer span — popping would
+    /* Correctness guard: if the begin for THIS function did not push
+     * (capture was off when it ran), open_fn_stack top belongs to an
+     * outer span — popping would
      * unbalance it. Skip silently.
      *
      * The check uses execute_data->func which is the same pointer the
@@ -7265,74 +7030,6 @@ oxphp_profiler_observer_init(zend_execute_data *execute_data) {
     if (execute_data->func->common.type != ZEND_USER_FUNCTION) {
         /* The profiler records userland frames only. */
         return (zend_observer_fcall_handlers){NULL, NULL};
-    }
-
-    /* Resolve filter spec for this function on first observation,
-     * cache the result per (fn, thread). spec_id 0 is "no filter,
-     * default behaviour" — still cached so subsequent inits skip
-     * the resolve work. */
-    uintptr_t fn_id = (uintptr_t)execute_data->func;
-    if (g_filter_resolver != NULL && oxphp_filter_cache_lookup(fn_id) == NULL) {
-        const char *fn_attr_names[64];
-        uint32_t fn_attr_count = 0;
-        HashTable *fn_attrs = execute_data->func->common.attributes;
-        if (fn_attrs) {
-            zend_attribute *a;
-            ZEND_HASH_FOREACH_PTR(fn_attrs, a) {
-                if (a && a->name && fn_attr_count < 64) {
-                    fn_attr_names[fn_attr_count++] = ZSTR_VAL(a->name);
-                }
-            } ZEND_HASH_FOREACH_END();
-        }
-
-        const char *class_attr_names[64];
-        uint32_t class_attr_count = 0;
-        HashTable *class_attrs = execute_data->func->common.scope
-                                 ? execute_data->func->common.scope->attributes
-                                 : NULL;
-        if (class_attrs) {
-            zend_attribute *a;
-            ZEND_HASH_FOREACH_PTR(class_attrs, a) {
-                if (a && a->name && class_attr_count < 64) {
-                    class_attr_names[class_attr_count++] = ZSTR_VAL(a->name);
-                }
-            } ZEND_HASH_FOREACH_END();
-        }
-
-        /* Pre-filter: skip the Rust call when no attribute begins
-         * with "OxPHP\Profile\" — the fast path for ~100% of fns
-         * in a typical app. The cache still stores spec_id 0 so we
-         * don't repeat this work. */
-        int has_profile_attr = 0;
-        for (uint32_t i = 0; i < fn_attr_count && !has_profile_attr; i++) {
-            if (strncmp(fn_attr_names[i], "OxPHP\\Profile\\", 14) == 0) has_profile_attr = 1;
-        }
-        for (uint32_t i = 0; i < class_attr_count && !has_profile_attr; i++) {
-            if (strncmp(class_attr_names[i], "OxPHP\\Profile\\", 14) == 0) has_profile_attr = 1;
-        }
-
-        ox_filter_cache_entry_t entry = {0};
-        entry.fn_id = fn_id;
-
-        if (has_profile_attr) {
-            ox_attr_resolver_ctx_t actx = {
-                .scope       = execute_data->func->common.scope,
-                .fn_attrs    = fn_attrs,
-                .class_attrs = class_attrs,
-            };
-            entry.spec_id = g_filter_resolver(
-                fn_id,
-                class_attr_count > 0 ? class_attr_names : NULL,
-                class_attr_count,
-                fn_attr_count > 0 ? fn_attr_names : NULL,
-                fn_attr_count,
-                &actx,
-                &entry.excluded,
-                &entry.force_profile,
-                &entry.has_sample,
-                &entry.sample_rate);
-        }
-        oxphp_filter_cache_put(&entry);
     }
 
     return (zend_observer_fcall_handlers){

@@ -60,11 +60,6 @@ lru = "0.18"
 # (tokio etc.); listed explicitly to make the direct dep visible.
 smallvec = "1"
 
-# Lock-free Arc swap — used by the profiler filter registry to
-# replace a global Mutex on the BEGIN-event hot path with a
-# copy-on-write snapshot that readers load with a single atomic.
-arc-swap = "1"
-
 # pprof.proto encoding for the profiler exporter. Generated via
 # prost-build at compile time from proto/pprof.proto.
 prost = "0.13"
