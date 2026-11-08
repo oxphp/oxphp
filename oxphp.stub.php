@@ -513,6 +513,10 @@ namespace OxPHP\Http {
          * Names stay flat, as the client sent them: ?a[]=1 is the parameter
          * named "a[]", not an array. Read $_GET for array parameters.
          *
+         * A repeated name holds its last value: ?a=1&a=2 reads as "2", as
+         * $_GET['a'] does. Parsing stops after max_input_vars pairs, the limit
+         * PHP applies to $_GET.
+         *
          * @param string|null $key Specific key, or null for all params
          * @param mixed $default Returned when key is absent
          * @return mixed Array of all params, or single value, or $default
@@ -567,6 +571,8 @@ namespace OxPHP\Http {
          * X-Forwarded-For), the full string is returned:
          * "text/html,application/xhtml+xml,application/xml;q=0.9"
          *
+         * A header sent with an empty value returns "", not $default.
+         *
          * @param string $name Header name
          * @param string|null $default Returned when header is absent
          * @return string|null Header value or $default
@@ -590,7 +596,14 @@ namespace OxPHP\Http {
          */
         public function cookie(string $name, ?string $default = null): ?string;
 
-        /** All cookies as name => value array. */
+        /**
+         * All cookies as name => value array.
+         *
+         * Of two cookies with one name the first is kept, as $_COOKIE does
+         * for a name without brackets.
+         * Parsing stops after max_input_vars cookies, the limit PHP applies
+         * to $_COOKIE.
+         */
         public function cookies(): array;
 
         // ── Raw Body (php://input replacement) ──

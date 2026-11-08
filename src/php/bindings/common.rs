@@ -345,6 +345,11 @@ extern "C" {
     pub fn oxphp_bridge_set_superglobals_enabled(enabled: bool);
     pub fn oxphp_bridge_get_superglobals_enabled() -> bool;
 
+    // ─── Input limits ───────────────────────────────────
+    /// PHP's `max_input_vars` as the engine parsed it. Call after
+    /// `php_module_startup()`, on the thread that ran it.
+    pub fn oxphp_bridge_max_input_vars() -> usize;
+
     // ─── HTTP Request data accessors ─────────────────────
     #[allow(clippy::too_many_arguments)]
     pub fn oxphp_bridge_set_request_accessors(

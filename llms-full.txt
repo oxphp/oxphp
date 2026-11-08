@@ -12446,7 +12446,7 @@ Access query string parameters.
 | `$request->query('page')` | The value of `page`, or `null` if absent |
 | `$request->query('page', 1)` | The value of `page`, or `1` if absent |
 
-> **Names stay flat.** Bracket notation is not expanded into nested arrays: `?tags[]=php&tags[]=async` yields a flat entry named `tags[]` rather than a `tags` array, and a repeated name resolves to its first occurrence through `query('name')` while `query()` keeps the last. Use `$_GET` for array parameters.
+> **Names stay flat.** Bracket notation is not expanded into nested arrays: `?tags[]=php&tags[]=async` yields a flat entry named `tags[]` rather than a `tags` array. Use `$_GET` for array parameters. A repeated name holds its last value, in `query('name')` and `query()` alike: `?a=1&a=2` reads as `'2'`, as `$_GET['a']` does.
 
 ```php
 // Request: GET /search?q=oxphp&tags[]=php&tags[]=async
@@ -12454,7 +12454,7 @@ $q    = $request->query('q');      // "oxphp"
 $tags = $_GET['tags'];             // ["php", "async"]
 ```
 
-Found values are always strings. `$default` is returned as-is when the key is absent. A parameter sent without a value (`?flag`) and one sent empty (`?flag=`) both read as `''` — only an absent parameter gives `null`.
+Found values are always strings. `$default` is returned as-is when the key is absent. A parameter sent without a value (`?flag`) and one sent empty (`?flag=`) both read as `''`, not `null`. A pair with no name (`?=x`) is left out, as it is of `$_GET`.
 
 #### Decoding
 
@@ -12478,7 +12478,7 @@ $request->query('a.b');  // "1"
 
 A name is also kept whole where PHP would cut it — PHP handles superglobal names as C strings, so `?a%00b=1` becomes `$_GET['a']` while `query()` keeps `a\0b`. Do not read that as a reason to validate through one API and read through the other: the truncation lets one parameter land on another's key, so `?a=1&a%00x=2` gives `$_GET['a'] === '2'` where `query('a') === '1'`, and the two disagree on the value rather than merely on the set of names.
 
-At most 1000 parameters are parsed. PHP applies its own limit, `max_input_vars`, which defaults to the same 1000 but is configurable — raise it and `$_GET` will hold parameters past the point where `query()` stops.
+At most `max_input_vars` pairs are parsed, the limit PHP applies to `$_GET`. Each repeat of a name counts, and so does a pair with no name. PHP raises a warning when it stops building `$_GET` at the limit. Where it does not build `$_GET`, as with `SUPERGLOBALS_ENABLED=false`, nothing warns, and `query()` holds the pairs up to the limit without saying that more were sent.
 
 ---
 
@@ -12535,7 +12535,7 @@ $data = $request->payload();        // ["name" => "Alice", "role" => "admin"]
 $request->header(string $name, ?string $default = null): ?string
 ```
 
-Returns the raw header value. Header names are case-insensitive. A list such as `Accept` or `X-Forwarded-For` comes back as one string — parsing it is your responsibility — and a header sent as several lines with the same name comes back as one string too, its lines joined the way [`$_SERVER` joins them](superglobals.md#http-request-headers).
+Returns the raw header value. Header names are case-insensitive. A list such as `Accept` or `X-Forwarded-For` comes back as one string — parsing it is your responsibility — and a header sent as several lines with the same name comes back as one string too, its lines joined the way [`$_SERVER` joins them](superglobals.md#http-request-headers). A header sent with an empty value (`X-Foo:`) reads as `''`, not `$default`.
 
 The name is matched as sent, without the `HTTP_` mapping of `$_SERVER`: `header('X_Api_Key')` does not return an `X-Api-Key` header. This is also how to read a header whose name contains `_` or `.`, which [`$_SERVER` leaves out](superglobals.md#http-request-headers); `headers()` lists those too.
 
@@ -12572,13 +12572,15 @@ $all = $request->headers();
 $request->cookie(string $name, ?string $default = null): ?string
 ```
 
-Returns the value of a single cookie, or `$default` if the cookie is not present. A cookie sent empty (`Cookie: a=`) reads as `''`; only an absent cookie gives `$default`.
+Returns the value of a single cookie, or `$default` if the cookie is not present. A cookie sent empty (`Cookie: a=`) reads as `''`, not `$default`.
 
 ```php
 $request->cookies(): array
 ```
 
 Returns all cookies as an associative array of name-value pairs.
+
+The `Cookie` header is split the way PHP splits it for `$_COOKIE`. A pair with no name (`=x`) is ignored, a name with no `=` is a cookie with an empty value, and whitespace is trimmed only from the start of a name, so `Cookie: a=1 ; b=2` gives `a` the value `'1 '`. Of two cookies with one name the first is kept, in `cookie()` and `cookies()` alike. Browsers list the cookie with the longer path first, and `$_COOKIE` keeps the first as well for a name without brackets. At most `max_input_vars` cookies are parsed, the limit PHP applies to `$_COOKIE`, and a pair with no name does not count toward it.
 
 #### Decoding
 

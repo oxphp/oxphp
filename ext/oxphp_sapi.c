@@ -294,7 +294,9 @@ ZEND_METHOD(OxPHP_Http_Request, header) {
 
     size_t len = 0;
     const char *val = oxphp_req_header(ZSTR_VAL(name), ZSTR_LEN(name), &len);
-    if (val && len > 0) {
+    /* An empty field value ("X-Foo:") is "", so this tests the pointer and not
+     * the length. */
+    if (val) {
         RETURN_STRINGL(val, len);
     }
     if (def) {
@@ -358,11 +360,21 @@ ZEND_METHOD(OxPHP_Http_Request, cookie) {
 }
 /* }}} */
 
+/* For a name without brackets $_COOKIE keeps the first of two cookies, the one
+ * a browser sends for the more specific path (PHP 8.4.27, 8.5.12). */
+static void cookies_visitor(const char *key, size_t klen,
+                            const char *val, size_t vlen, void *user_data) {
+    zval *arr = (zval *)user_data;
+    if (!zend_symtable_str_exists(Z_ARRVAL_P(arr), key, klen)) {
+        add_assoc_stringl_ex(arr, key, klen, val, vlen);
+    }
+}
+
 /* {{{ OxPHP\Http\Request::cookies(): array */
 ZEND_METHOD(OxPHP_Http_Request, cookies) {
     ZEND_PARSE_PARAMETERS_NONE();
     array_init(return_value);
-    oxphp_req_cookies_all(headers_visitor, return_value);  /* reuse visitor */
+    oxphp_req_cookies_all(cookies_visitor, return_value);
 }
 /* }}} */
 

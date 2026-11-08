@@ -1222,6 +1222,7 @@ oxphp_storage_clone_fn_t  oxphp_bridge_get_storage_clone(void)  { return storage
  * ═══════════════════════════════════════════════════════════ */
 
 #include "php.h"
+#include "php_globals.h"
 #include "SAPI.h"
 #include "Zend/zend_API.h"
 #include "Zend/zend_hash.h"
@@ -1823,6 +1824,15 @@ void oxphp_bridge_tsrm_update(void) {
 #ifdef ZTS
     TSRMLS_CACHE_UPDATE();
 #endif
+}
+
+/* ── Input limits ── */
+
+size_t oxphp_bridge_max_input_vars(void) {
+    /* PG() and not zend_ini_long(): that one reads the setting with strtol, so it
+     * would take "5K" for 5 where the engine's own limit is 5120
+     * (PHP 8.4.27, 8.5.12). */
+    return (size_t)PG(max_input_vars);
 }
 
 /* ── SAPI request_info ── */

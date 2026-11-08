@@ -16,7 +16,7 @@ use crate::metrics::{WorkerMetrics, WorkerStats};
 use crate::php::bindings::{self, *};
 use crate::php::request_buffers::{reset_string, take_output, PackedPairs, RawPairs, ReusedCStr};
 use crate::php::request_decode::{
-    header_field_value, parse_query_pairs, url_decode_into, value_ptr,
+    header_field_value, parse_cookie_pairs, parse_query_pairs, value_ptr,
 };
 use crate::php::response_spool::{self, Spool, Spooled};
 use crate::php::stream_wait::{NoRoom, StreamSender};
@@ -444,7 +444,7 @@ pub(crate) struct RequestData {
     /// Decoded up front rather than sliced out of `query_string_raw` on
     /// demand: the accessor callbacks hand a borrowed pointer back to C, so
     /// the decoded bytes need an owner that lives as long as the request.
-    /// `parse_query_pairs` caps how far that can go.
+    /// `max_input_vars` limits how far that can go.
     query_parsed: PackedPairs,
 }
 
@@ -1259,8 +1259,9 @@ fn fill_request_data(req: &ScriptRequest) {
 
         // `queryString()` keeps reporting the raw form above; the object API's
         // query() reads the decoded pairs so it agrees with $_GET.
+        let max_input_vars = MAX_INPUT_VARS.load(Ordering::Relaxed);
         data.query_parsed.reset();
-        parse_query_pairs(query_string, &mut data.query_parsed);
+        parse_query_pairs(query_string, max_input_vars, &mut data.query_parsed);
 
         data.protocol_version_str.clear();
         data.protocol_version_str.push_str(match req.version {
@@ -1301,18 +1302,7 @@ fn fill_request_data(req: &ScriptRequest) {
         data.cookies_parsed.reset();
         if let Some(cookie_hdr) = req.headers.get(header::COOKIE) {
             if let Ok(cookie_str) = cookie_hdr.to_str() {
-                for pair in cookie_str.split(';') {
-                    let pair = pair.trim();
-                    if let Some(eq) = pair.find('=') {
-                        // Cookie names are not decoded (PHP leaves them raw),
-                        // values are percent-decoded but keep a literal '+'.
-                        let bytes = pair.as_bytes();
-                        data.cookies_parsed.push_with(
-                            |name| name.extend_from_slice(&bytes[..eq]),
-                            |value| url_decode_into(&bytes[eq + 1..], false, value),
-                        );
-                    }
-                }
+                parse_cookie_pairs(cookie_str, max_input_vars, &mut data.cookies_parsed);
             }
         }
 
@@ -6134,12 +6124,17 @@ unsafe extern "C" fn req_query_param_cb(
         // is found by the name PHP callers actually pass — and a name that is
         // not valid UTF-8 compares correctly instead of being assumed.
         let search = std::slice::from_raw_parts(key as *const u8, key_len);
-        for (k, v) in data.query_parsed.iter() {
-            if k == search {
-                let (ptr, len) = value_ptr(v);
-                *out_len = len;
-                return ptr;
-            }
+        // The last of a repeated name, as in `query()` and, for a plain name, `$_GET`
+        // (PHP 8.4.27, 8.5.12).
+        let found = data
+            .query_parsed
+            .iter()
+            .filter(|(k, _)| *k == search)
+            .last();
+        if let Some((_, v)) = found {
+            let (ptr, len) = value_ptr(v);
+            *out_len = len;
+            return ptr;
         }
         *out_len = 0;
         std::ptr::null()
@@ -6203,6 +6198,31 @@ unsafe extern "C" fn req_body_cb(out_len: *mut usize) -> *const u8 {
 
 unsafe extern "C" fn req_is_active_cb() -> c_int {
     REQUEST_DATA.with(|rd| if rd.borrow().active { 1 } else { 0 })
+}
+
+/// How many query parameters and cookies a request's object API holds.
+///
+/// PHP's `max_input_vars` limits `$_GET` and `$_COOKIE` by the same count
+/// (PHP 8.4.27, 8.5.12). Holds PHP's default until [`read_max_input_vars`] has run.
+static MAX_INPUT_VARS: AtomicUsize = AtomicUsize::new(1000);
+
+/// Take the limit from PHP, once, after `php_module_startup()`.
+///
+/// One read serves the whole process. The setting is `PHP_INI_SYSTEM|PHP_INI_PERDIR`
+/// (PHP 8.4.27, 8.5.12), so `ini_set()` cannot change it, and this SAPI activates
+/// no per-directory sections. Tests fill a request with no PHP started, so a read
+/// per request would have nothing to read there.
+///
+/// # Safety
+/// Must be called from the thread that ran `php_module_startup()`, after it
+/// returned: `PG()` reads through the calling thread's TSRM storage, which does
+/// not exist before `php_tsrm_startup()` or on a thread without TSRM resources.
+pub unsafe fn read_max_input_vars() {
+    // SAFETY: by this function's contract this is the thread that ran
+    // `php_module_startup()`, so it has TSRM resources and PHP's parsed value of
+    // the setting.
+    let limit = unsafe { bindings::oxphp_bridge_max_input_vars() };
+    MAX_INPUT_VARS.store(limit, Ordering::Relaxed);
 }
 
 /// Register all request accessor callbacks with the bridge.

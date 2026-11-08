@@ -20,21 +20,6 @@ use http::{HeaderMap, HeaderName};
 
 use crate::php::request_buffers::PackedPairs;
 
-/// Upper bound on query pairs materialised per request.
-///
-/// Bounds how far a long query string can amplify into per-request memory:
-/// with a typical 8 KB request-line limit some 2000 pairs can arrive, so the
-/// cap is doing work rather than decorating.
-///
-/// The number is PHP's `max_input_vars` default, which is where the two
-/// agree — but that setting is `PHP_INI_SYSTEM|PHP_INI_PERDIR`, so a
-/// deployment that raises it gets a `$_GET` with more entries than `query()`
-/// reports, and PHP warns at its own limit where this simply stops. Reading
-/// the configured value would need a bridge accessor and a startup-time read
-/// (`set_request_data` runs before `php_request_startup()`), which is a
-/// larger change than the bound it would refine.
-const MAX_QUERY_PAIRS: usize = 1000;
-
 /// Percent-decode `s` into raw bytes.
 ///
 /// `plus_as_space` picks between the two decodings PHP itself applies when it
@@ -57,33 +42,56 @@ pub fn url_decode_into(s: &[u8], plus_as_space: bool, out: &mut Vec<u8>) {
     }
 }
 
-/// Split a query string into decoded (name, value) pairs.
+/// Split a query string into decoded (name, value) pairs, stopping after
+/// `max_pairs` of them.
 ///
 /// Splitting happens on the literal separators first, so an encoded `%26`
 /// stays part of a value. A pair with no `=` yields an empty value, matching
-/// PHP: `?flag` registers `$_GET['flag'] === ''`. Stops at
-/// [`MAX_QUERY_PAIRS`].
+/// PHP: `?flag` registers `$_GET['flag'] === ''`. A pair with no name (`?=x`)
+/// is left out, as it is of `$_GET`, but uses up one of `max_pairs` the way it
+/// uses up one of PHP's `max_input_vars`, as does each repeat of a name
+/// (PHP 8.4.27, 8.5.12).
 ///
 /// Names are decoded but not otherwise transformed. PHP additionally rewrites
 /// `' '`, `'.'` and `'['` in `$_GET` keys (`php_register_variable_ex`), so
 /// `?a.b=1` lands in `$_GET` as `a_b` while this returns `a.b` — the name the
 /// client actually sent. The decoding rules match; the key mangling
 /// deliberately does not.
-pub fn parse_query_pairs(query: &str, out: &mut PackedPairs) {
-    for pair in query.split('&') {
-        if pair.is_empty() {
-            continue;
-        }
-        if out.len() >= MAX_QUERY_PAIRS {
-            break;
-        }
+pub fn parse_query_pairs(query: &str, max_pairs: usize, out: &mut PackedPairs) {
+    for pair in query.split('&').filter(|p| !p.is_empty()).take(max_pairs) {
         let bytes = pair.as_bytes();
         match bytes.iter().position(|&b| b == b'=') {
+            Some(0) => {}
             Some(eq) => out.push_with(
                 |name| url_decode_into(&bytes[..eq], true, name),
                 |value| url_decode_into(&bytes[eq + 1..], true, value),
             ),
             None => out.push_with(|name| url_decode_into(bytes, true, name), |_| {}),
+        }
+    }
+}
+
+/// Split a `Cookie` header into (raw name, decoded value) pairs, stopping
+/// after `max_pairs` of them, in the steps `php_default_treat_data` takes for
+/// `$_COOKIE` (PHP 8.4.27, 8.5.12).
+///
+/// Only a name loses its leading whitespace; a value keeps any it ends with.
+/// A pair with no name is skipped before it can use up one of `max_pairs`, and
+/// a name with no `=` is a cookie with an empty value. Names stay undecoded,
+/// and values are percent-decoded with `+` left literal.
+pub fn parse_cookie_pairs(cookie: &str, max_pairs: usize, out: &mut PackedPairs) {
+    let pairs = cookie
+        .split(';')
+        .map(|pair| pair.trim_start_matches(|c: char| c.is_ascii_whitespace()))
+        .filter(|pair| !pair.is_empty() && !pair.starts_with('='));
+    for pair in pairs.take(max_pairs) {
+        let bytes = pair.as_bytes();
+        match bytes.iter().position(|&b| b == b'=') {
+            Some(eq) => out.push_with(
+                |name| name.extend_from_slice(&bytes[..eq]),
+                |value| url_decode_into(&bytes[eq + 1..], false, value),
+            ),
+            None => out.push(bytes, b""),
         }
     }
 }
@@ -154,7 +162,7 @@ mod tests {
 
     fn pairs(query: &str) -> Vec<(Vec<u8>, Vec<u8>)> {
         let mut out = PackedPairs::default();
-        parse_query_pairs(query, &mut out);
+        parse_query_pairs(query, usize::MAX, &mut out);
         out.iter()
             .map(|(name, value)| (name.to_vec(), value.to_vec()))
             .collect()
@@ -275,12 +283,117 @@ mod tests {
     }
 
     #[test]
-    fn parse_query_pairs_stops_at_the_cap() {
-        let query: String = (0..MAX_QUERY_PAIRS + 50)
-            .map(|i| format!("k{i}=1"))
-            .collect::<Vec<_>>()
-            .join("&");
-        assert_eq!(pairs(&query).len(), MAX_QUERY_PAIRS);
+    fn parse_query_pairs_stops_at_the_limit_it_is_given() {
+        for limit in [0, 3, 1200] {
+            let query: String = (0..limit + 50)
+                .map(|i| format!("k{i}=1"))
+                .collect::<Vec<_>>()
+                .join("&");
+            let mut out = PackedPairs::default();
+            parse_query_pairs(&query, limit, &mut out);
+            assert_eq!(out.len(), limit);
+        }
+    }
+
+    #[test]
+    fn parse_query_pairs_counts_against_the_limit_what_php_counts() {
+        let limited = |query: &str, limit| {
+            let mut out = PackedPairs::default();
+            parse_query_pairs(query, limit, &mut out);
+            out.iter()
+                .map(|(name, value)| (name.to_vec(), value.to_vec()))
+                .collect::<Vec<_>>()
+        };
+        let pair = |name: &str, value: &str| (name.as_bytes().to_vec(), value.as_bytes().to_vec());
+
+        // Each repeat uses up a slot, so the name past the limit is not reached.
+        assert_eq!(
+            limited("a=1&a=2&b=3", 2),
+            vec![pair("a", "1"), pair("a", "2")]
+        );
+        // A pair with no name is not registered and still uses up a slot.
+        assert!(limited("=x&a=1", 1).is_empty());
+        // A stray separator is not a pair at all.
+        assert_eq!(limited("&&a=1", 1), vec![pair("a", "1")]);
+    }
+
+    #[test]
+    fn parse_query_pairs_leaves_out_a_pair_with_no_name() {
+        assert!(pairs("=").is_empty());
+        assert!(pairs("=x").is_empty());
+        assert_eq!(
+            str_pairs("=x&a=1"),
+            vec![("a".to_string(), "1".to_string())]
+        );
+    }
+
+    fn cookies(header: &str, limit: usize) -> Vec<(String, String)> {
+        let mut out = PackedPairs::default();
+        parse_cookie_pairs(header, limit, &mut out);
+        out.iter()
+            .map(|(name, value)| {
+                (
+                    String::from_utf8(name.to_vec()).unwrap(),
+                    String::from_utf8(value.to_vec()).unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    fn owned(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
+        pairs
+            .iter()
+            .map(|(name, value)| (name.to_string(), value.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn parse_cookie_pairs_skips_a_pair_with_no_name() {
+        for header in ["=x", " =x", "=", ";;", " ; \t;", ""] {
+            assert!(cookies(header, usize::MAX).is_empty(), "{header:?}");
+        }
+        assert_eq!(cookies("=orphan; a=1", usize::MAX), owned(&[("a", "1")]));
+    }
+
+    #[test]
+    fn parse_cookie_pairs_reads_a_name_with_no_equals_as_empty() {
+        assert_eq!(
+            cookies("flag; a=1", usize::MAX),
+            owned(&[("flag", ""), ("a", "1")])
+        );
+    }
+
+    #[test]
+    fn parse_cookie_pairs_trims_only_the_start_of_a_name() {
+        assert_eq!(
+            cookies("a=1 ;  b=2;\tc=3", usize::MAX),
+            owned(&[("a", "1 "), ("b", "2"), ("c", "3")])
+        );
+    }
+
+    #[test]
+    fn parse_cookie_pairs_keeps_a_repeated_name_in_order() {
+        assert_eq!(
+            cookies("sid=app; sid=root", usize::MAX),
+            owned(&[("sid", "app"), ("sid", "root")])
+        );
+    }
+
+    #[test]
+    fn parse_cookie_pairs_decodes_values_and_not_names() {
+        assert_eq!(
+            cookies("a=%41+b; %41=1", usize::MAX),
+            owned(&[("a", "A+b"), ("%41", "1")])
+        );
+    }
+
+    #[test]
+    fn parse_cookie_pairs_counts_only_named_pairs_against_the_limit() {
+        assert_eq!(
+            cookies("a=1; =x; b=2; c=3", 2),
+            owned(&[("a", "1"), ("b", "2")])
+        );
+        assert!(cookies("a=1", 0).is_empty());
     }
 
     fn header_map(lines: &[(&'static str, &[u8])]) -> HeaderMap {
