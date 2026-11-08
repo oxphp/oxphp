@@ -26,7 +26,7 @@ fi
 apk add --no-cache \
     rust cargo gcc musl-dev make pkgconfig \
     readline-dev ncurses-dev curl-dev oniguruma-dev sqlite-dev argon2-dev \
-    libxml2-dev zlib-dev openssl-dev gnu-libiconv-dev protobuf-dev
+    libxml2-dev zlib-dev openssl-dev gnu-libiconv-dev
 
 # The bridge is built outside the checkout so no object files land in it.
 # `clean` first: a local make in ext/bridge leaves its objects there

@@ -98,8 +98,7 @@ RUN apt-get update && \
         libargon2-dev \
         libxml2-dev \
         zlib1g-dev \
-        libssl-dev \
-        protobuf-compiler && \
+        libssl-dev && \
     rm -rf /var/lib/apt/lists/*
 
 COPY rust-toolchain.toml /tmp/rust-toolchain.toml
@@ -114,9 +113,6 @@ COPY --from=bridge-builder /usr/local/include/oxphp_bridge.h /usr/local/include/
 WORKDIR /build
 
 COPY Cargo.toml Cargo.lock ./
-# build.rs runs prost_build::compile_protos unconditionally, so proto/
-# must be present even for the dep-cache build below.
-COPY proto ./proto
 COPY build.rs ./
 
 # Cache dependency compilation with production feature set baked in.

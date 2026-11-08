@@ -193,27 +193,52 @@ fn run_format_cache_wins_over_disk() {
 }
 
 #[test]
-fn speedscope_redirect_sets_location() {
+fn speedscope_redirect_path_is_rejected() {
     let tmp = TempDir::new().unwrap();
     let storage = storage_with_disk(tmp.path());
     let router = build_router(storage, None);
     let resp = issue(
         &*router,
         &http::Method::GET,
-        "/__profiler/runs/abc/speedscope",
+        "/__profiler/runs/x/speedscope",
         None,
         None,
     );
-    assert_eq!(resp.status(), StatusCode::FOUND);
-    let loc = resp
-        .headers()
-        .get(http::header::LOCATION)
-        .unwrap()
-        .to_str()
-        .unwrap();
-    assert!(loc.starts_with("https://www.speedscope.app/#profileURL="));
-    assert!(loc.contains("%2F__profiler%2Fruns%2Fabc.speedscope.json"));
-    assert!(loc.contains("127.0.0.1"));
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[test]
+fn old_run_with_removed_format_stays_listed_and_answers_404() {
+    let tmp = TempDir::new().unwrap();
+    write_index(
+        tmp.path(),
+        &[meta("old", 1, &["xhprof.json", "speedscope.json", "pprof"])],
+    );
+    for ext in ["xhprof.json", "speedscope.json", "pprof"] {
+        std::fs::write(tmp.path().join(format!("old.{ext}")), b"{}").unwrap();
+    }
+    let storage = storage_with_disk(tmp.path());
+    let router = build_router(storage, None);
+
+    let resp = issue(&*router, &http::Method::GET, "/__profiler/runs", None, None);
+    assert_eq!(resp.status(), StatusCode::OK);
+    let v: serde_json::Value = serde_json::from_slice(&body_to_bytes(resp)).unwrap();
+    assert_eq!(v["runs"][0]["run_id"], "old");
+
+    for ext in ["pprof", "speedscope.json"] {
+        let path = format!("/__profiler/runs/old.{ext}");
+        let resp = issue(&*router, &http::Method::GET, &path, None, None);
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "{ext}");
+    }
+
+    let resp = issue(
+        &*router,
+        &http::Method::GET,
+        "/__profiler/runs/old.xhprof.json",
+        None,
+        None,
+    );
+    assert_eq!(resp.status(), StatusCode::OK);
 }
 
 #[test]

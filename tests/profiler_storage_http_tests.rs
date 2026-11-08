@@ -190,8 +190,8 @@ async fn http_push_buggregator_envelope() {
 }
 
 /// An active envelope wins over a non-xhprof `PROFILER_EXPORT_FORMAT`: the
-/// pusher emits the Buggregator body, never the raw speedscope the format knob
-/// names. Guards against the "auto-detected envelope + speedscope → lost/empty"
+/// pusher emits the Buggregator body, never the raw stacks the format knob
+/// names. Guards against the "auto-detected envelope + collapsed → lost/empty"
 /// regression (which previously either crashed startup or shipped un-enveloped).
 #[tokio::test]
 async fn http_push_buggregator_envelope_wins_over_non_xhprof_format() {
@@ -199,7 +199,7 @@ async fn http_push_buggregator_envelope_wins_over_non_xhprof_format() {
     let pusher = Arc::new(
         HttpPusher::new(
             format!("http://127.0.0.1:{port}/api/profiler/store"),
-            OutputFormat::Speedscope, // ignored while the envelope is active
+            OutputFormat::Collapsed, // ignored while the envelope is active
             None,
             false,
             Some(BuggregatorMeta {
@@ -214,15 +214,11 @@ async fn http_push_buggregator_envelope_wins_over_non_xhprof_format() {
     pusher.push(&empty_meta(), &empty_tree()).await;
     let req = captured.lock().await;
     assert!(req.contains("\"app_name\""), "not buggregator body: {req}");
-    assert!(
-        !req.contains("\"$schema\"") && !req.contains("\"shared\""),
-        "speedscope leaked despite active envelope: {req}"
-    );
 }
 
 /// Content-Type follows the rendered body, not the format knob: with an active
-/// Buggregator envelope the body is JSON even when the format is pprof, so the
-/// header must be `application/json`, never the pprof content type — else a
+/// Buggregator envelope the body is JSON even when the format is collapsed, so the
+/// header must be `application/json`, never `text/plain` — else a
 /// strict receiver rejects the mislabeled push and the profile is lost.
 #[tokio::test]
 async fn http_push_content_type_follows_envelope_body_not_format() {
@@ -230,7 +226,7 @@ async fn http_push_content_type_follows_envelope_body_not_format() {
     let pusher = Arc::new(
         HttpPusher::new(
             format!("http://127.0.0.1:{port}/api/profiler/store"),
-            OutputFormat::Pprof, // body is still JSON (envelope wins)
+            OutputFormat::Collapsed, // body is still JSON (envelope wins)
             None,
             false,
             Some(BuggregatorMeta {
@@ -248,7 +244,10 @@ async fn http_push_content_type_follows_envelope_body_not_format() {
         req.contains("content-type: application/json"),
         "header must be json: {req}"
     );
-    assert!(!req.contains("pprof"), "must not tag body as pprof: {req}");
+    assert!(
+        !req.contains("text/plain"),
+        "must not tag body as text: {req}"
+    );
     assert!(
         req.contains("\"app_name\""),
         "body is buggregator json: {req}"
@@ -256,14 +255,14 @@ async fn http_push_content_type_follows_envelope_body_not_format() {
 }
 
 /// Same invariant for xhgui: envelope wins over a non-xhprof format, so the
-/// `{profile, meta}` wrapper is emitted rather than raw speedscope.
+/// `{profile, meta}` wrapper is emitted rather than raw stacks.
 #[tokio::test]
 async fn http_push_xhgui_envelope_wins_over_non_xhprof_format() {
     let (port, _hits, captured) = spawn_mock_server().await;
     let pusher = Arc::new(
         HttpPusher::new(
             format!("http://127.0.0.1:{port}/run/import"),
-            OutputFormat::Speedscope, // ignored while the envelope is active
+            OutputFormat::Collapsed, // ignored while the envelope is active
             None,
             true,
             None,
@@ -274,8 +273,4 @@ async fn http_push_xhgui_envelope_wins_over_non_xhprof_format() {
     pusher.push(&empty_meta(), &empty_tree()).await;
     let req = captured.lock().await;
     assert!(req.contains("\"meta\""), "not xhgui body: {req}");
-    assert!(
-        !req.contains("\"$schema\""),
-        "speedscope leaked despite active envelope: {req}"
-    );
 }

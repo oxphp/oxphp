@@ -48,7 +48,7 @@ FROM ${BASE_IMAGE} AS builder
 RUN apk add --no-cache \
     rust cargo gcc musl-dev pkgconfig readline-dev ncurses-dev curl-dev \
     oniguruma-dev sqlite-dev argon2-dev libxml2-dev zlib-dev openssl-dev \
-    gnu-libiconv-dev protobuf-dev
+    gnu-libiconv-dev
 COPY --from=bridge-builder /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
 COPY --from=bridge-builder /usr/local/include/oxphp_bridge.h /usr/local/include/
 WORKDIR /build
@@ -69,7 +69,6 @@ RUN mkdir src benches && \
 COPY src ./src
 COPY benches ./benches
 COPY build.rs ./
-COPY proto ./proto
 RUN cargo build --release --features "${CARGO_FEATURES}"
 
 # ── Stage 4: runtime + perf + FlameGraph (root, no USER drop) ──

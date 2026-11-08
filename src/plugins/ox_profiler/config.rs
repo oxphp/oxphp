@@ -60,7 +60,7 @@ impl Default for ProfilerConfig {
             max_spans: 50_000,
             max_depth: 0,
             output_dir: PathBuf::from("/tmp/oxphp-profiles"),
-            output_formats: vec!["xhprof".into(), "speedscope".into()],
+            output_formats: vec!["xhprof".into(), "collapsed".into()],
             disk_max_per_sec: 10,
             retention_count: 100,
             export_url: None,
@@ -124,7 +124,7 @@ impl ProfilerConfig {
 
         let output_formats = ctx
             .config("OUTPUT_FORMATS")
-            .unwrap_or_else(|| "xhprof,speedscope".to_string())
+            .unwrap_or_else(|| "xhprof,collapsed".to_string())
             .split(',')
             .map(|s| s.trim().to_lowercase())
             .filter(|s| !s.is_empty())
@@ -470,7 +470,7 @@ mod tests {
         assert!(cfg.auth_token.is_none());
         assert_eq!(cfg.max_spans, 50_000);
         assert_eq!(cfg.max_depth, 0);
-        assert_eq!(cfg.output_formats, vec!["xhprof", "speedscope"]);
+        assert_eq!(cfg.output_formats, vec!["xhprof", "collapsed"]);
         assert_eq!(cfg.retention_count, 100);
     }
 
@@ -664,7 +664,7 @@ mod tests {
             Some(OutputFormat::Xhprof)
         );
         assert_ne!(
-            OutputFormat::from_str_opt("speedscope"),
+            OutputFormat::from_str_opt("collapsed"),
             Some(OutputFormat::Xhprof)
         );
     }

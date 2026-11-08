@@ -60,14 +60,8 @@ lru = "0.18"
 # (tokio etc.); listed explicitly to make the direct dep visible.
 smallvec = "1"
 
-# pprof.proto encoding for the profiler exporter. Generated via
-# prost-build at compile time from proto/pprof.proto.
-prost = "0.13"
-
 # Gzip compression. Encodes responses for clients that do not accept
-# brotli, and the pprof exporter's payload (Content-Type:
-# application/vnd.google.pprof+proto+gzip). The backend is a whole-build
-# choice, so both use zlib-rs: a Rust rewrite of zlib that measured ~2x
+# brotli. The backend is zlib-rs: a Rust rewrite of zlib that measured ~2x
 # faster than miniz_oxide from ~16 KB up at the same output size, and
 # needs neither a C toolchain nor zlib headers at build time. zlib-ng
 # would be marginally faster still but requires cmake, which the Alpine
@@ -167,13 +161,6 @@ decorator-test = ["plugin-profiler"]
 lto = "fat"
 codegen-units = 1
 strip = "symbols"
-
-[build-dependencies]
-# Compiles bundled .proto files into Rust types at build time
-# (pprof.proto for src/profiling/export/pprof.rs).
-# Requires `protoc` on PATH. Alpine: `apk add --no-cache
-# protobuf-dev`. macOS: `brew install protobuf`.
-prost-build = "0.13"
 
 [dev-dependencies]
 bytes = "1"
