@@ -9,3 +9,12 @@ log ~OPcache restart scheduled
 log ~retiring: an OPcache restart is waiting for it
 log ~retiring: it opened while an OPcache restart was pending
 log ~OPcache restart done
+
+# Under a steady load of requests that park, a worker never has a moment with no
+# request in flight, so it stops taking new ones to reach one.
+opcacherestartworker/test_worker_load_then_reset
+log ~Worker taking no new requests
+log ~Worker retiring: an OPcache restart is waiting for it
+log ~OPcache restart done
+log ~retiring: it opened while an OPcache restart was pending
+opcacherestartworker/test_worker_restart_ran_under_load

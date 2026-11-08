@@ -12,18 +12,19 @@ if (!function_exists('ox_opcache_state')) {
      * once at its startup), whether a restart is pending, and how many restarts
      * opcache_reset() has run so far.
      *
-     * @return array{opcache_enabled: bool, restart_pending: bool, manual_restarts: int}
+     * @return array{opcache_enabled: bool, restart_pending: bool, manual_restarts: int, last_restart_time: int}
      */
     function ox_opcache_state(): array
     {
         $s = opcache_get_status(false);
         if (!is_array($s)) {
-            return ['opcache_enabled' => false, 'restart_pending' => false, 'manual_restarts' => -1];
+            return ['opcache_enabled' => false, 'restart_pending' => false, 'manual_restarts' => -1, 'last_restart_time' => 0];
         }
         return [
             'opcache_enabled' => (bool) $s['opcache_enabled'],
             'restart_pending' => (bool) $s['restart_pending'],
             'manual_restarts' => (int) $s['opcache_statistics']['manual_restarts'],
+            'last_restart_time' => (int) $s['opcache_statistics']['last_restart_time'],
         ];
     }
 
@@ -87,5 +88,46 @@ if (!function_exists('ox_opcache_state')) {
             usleep(100000);
         } while (microtime(true) < $deadline);
         return false;
+    }
+
+    /**
+     * Start load_pump.php in the background against `$path`, wait until its
+     * requests are out, and return the base of its marker files.
+     */
+    function ox_start_load(string $path, int $parallel, float $spread, float $seconds, string $name): string
+    {
+        $base = sys_get_temp_dir() . '/oxphp_opcacherestart_' . $name;
+        foreach (['started', 'finished', 'stop', 'before'] as $s) {
+            if (is_file("$base.$s")) {
+                unlink("$base.$s");
+            }
+        }
+        exec(sprintf(
+            '/usr/local/bin/php %s %s %d %F %F %s > /dev/null 2>&1 &',
+            escapeshellarg(__DIR__ . '/load_pump.php'),
+            escapeshellarg($path),
+            $parallel,
+            $spread,
+            $seconds,
+            escapeshellarg($base),
+        ));
+        $deadline = microtime(true) + 5.0;
+        while (!is_file("$base.started") && microtime(true) < $deadline) {
+            usleep(20000);
+            clearstatcache();
+        }
+        return $base;
+    }
+
+    /** Stop a load started with ox_start_load and return its tally. */
+    function ox_stop_load(string $base): ?array
+    {
+        touch("$base.stop");
+        $deadline = microtime(true) + 5.0;
+        while (!is_file("$base.finished") && microtime(true) < $deadline) {
+            usleep(20000);
+            clearstatcache();
+        }
+        return is_file("$base.finished") ? json_decode((string) file_get_contents("$base.finished"), true) : null;
     }
 }
