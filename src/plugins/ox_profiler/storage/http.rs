@@ -11,7 +11,7 @@ use rand::RngExt;
 
 use crate::profiling::export::{
     export_collapsed, export_pprof, export_speedscope, export_xhprof, export_xhprof_buggregator,
-    BuggregatorMeta, CollapsedMetric, XhprofMode,
+    BuggregatorMeta, XhprofMode,
 };
 use crate::profiling::SpanTree;
 
@@ -208,7 +208,7 @@ fn render(tree: &SpanTree, meta: &RunMeta, fmt: OutputFormat, envelope: &PushEnv
             OutputFormat::Xhprof => export_xhprof(tree, XhprofMode::Raw, None),
             OutputFormat::Speedscope => export_speedscope(tree),
             OutputFormat::Pprof => export_pprof(tree),
-            OutputFormat::Collapsed => export_collapsed(tree, CollapsedMetric::Wall),
+            OutputFormat::Collapsed => export_collapsed(tree),
         },
     }
 }

@@ -1,8 +1,6 @@
 //! PHP SDK functions for the profiler (`OxPHP\Profile\*`).
 //!
-//! Seven function symbols across five conceptual operations
-//! (start/stop and pause/resume each pair under one bullet in
-//! spec §6). Registered unconditionally — when the profiler is
+//! Registered unconditionally — when the profiler is
 //! disabled or no profile is active for the current request,
 //! the functions degrade to safe no-ops returning sentinel
 //! values (`is_active() === false`; mutators / writers are silent
@@ -18,7 +16,7 @@ use crate::profiling::{
     ProfilingMode, PROFILING_CONTEXT,
 };
 
-/// Register the seven PHP SDK function symbols. `enabled` is the
+/// Register the PHP SDK function symbols. `enabled` is the
 /// profiler's `PROFILER_ENABLED` switch; only `start()` reads it (see
 /// its handler). None of the functions checks a token.
 pub fn register_functions(
@@ -76,23 +74,6 @@ pub fn register_functions(
         .returns(PhpType::Void)
         .handler(|_call: &mut NativeCall| {
             set_profiling_paused(true);
-            Ok(())
-        })?;
-
-    // OxPHP\Profile\pause(): void — soft variant of stop. Same
-    // mechanism (paused flag); the distinction is documentary intent.
-    ctx.function("OxPHP\\Profile\\pause")
-        .returns(PhpType::Void)
-        .handler(|_call: &mut NativeCall| {
-            set_profiling_paused(true);
-            Ok(())
-        })?;
-
-    // OxPHP\Profile\resume(): void — clear pause.
-    ctx.function("OxPHP\\Profile\\resume")
-        .returns(PhpType::Void)
-        .handler(|_call: &mut NativeCall| {
-            set_profiling_paused(false);
             Ok(())
         })?;
 

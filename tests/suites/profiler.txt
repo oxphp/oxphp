@@ -3,7 +3,8 @@
 
 profiler/test_is_active
 profiler/test_start_stop
-profiler/test_pause_resume
+profiler/test_stop_start_gap
+profiler/test_stop_start_gap_index
 profiler/test_mark
 profiler/test_metric
 profiler/test_decorator_mark

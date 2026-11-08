@@ -9,9 +9,7 @@ to detect unintended wire-format changes during refactors.
 
 | File | Source | Compare |
 |------|--------|---------|
-| `tiny.collapsed`           | `export_collapsed(tree, Wall)` | byte-equal |
-| `tiny.collapsed.cpu`       | `export_collapsed(tree, Cpu)`  | byte-equal |
-| `tiny.collapsed.mem`       | `export_collapsed(tree, Mem)`  | byte-equal (may be empty) |
+| `tiny.collapsed`           | `export_collapsed(tree)` | byte-equal |
 | `tiny.xhprof.json`         | `export_xhprof(tree, Raw, None)` | semantic JSON-equal |
 | `tiny.xhprof.xhgui.json`   | `export_xhprof(tree, Xhgui, Some(meta))` | semantic JSON-equal |
 | `tiny.speedscope.json`     | `export_speedscope(tree)` | semantic JSON-equal |

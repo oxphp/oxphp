@@ -1,3 +1,0 @@
-main();outer;middle;inner 100
-main();outer;middle 300
-main();outer 500

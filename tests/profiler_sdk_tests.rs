@@ -81,8 +81,8 @@ fn mark_and_metric_are_noop_without_open_span() {
 }
 
 #[test]
-fn open_spans_close_naturally_after_pause() {
-    // Models PHP code that calls pause() between push() and pop()
+fn open_spans_close_naturally_after_stop() {
+    // Models PHP code that calls stop() between push() and pop()
     // — the Rust side must let the matching pop go through (the
     // C-end callback intentionally ignores the paused flag).
     set_profiling_mode(ProfilingMode::ProfileAll);
@@ -93,7 +93,7 @@ fn open_spans_close_naturally_after_pause() {
         ctx.reset(ProfilingMode::ProfileAll, "t".into(), "r".into());
         let id = ctx.push("outer".into(), vec![]);
 
-        // PHP calls pause(); span stays open.
+        // PHP calls stop(); span stays open.
         set_profiling_paused(true);
 
         // PHP returns from outer — pop runs.

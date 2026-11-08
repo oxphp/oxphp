@@ -390,7 +390,6 @@ fn event_kind_str(kind: SpanEventKind) -> &'static str {
         SpanEventKind::Exception => "exception",
         SpanEventKind::Slow => "slow",
         SpanEventKind::MemorySpike => "memory_spike",
-        SpanEventKind::Alloc => "alloc",
         SpanEventKind::Custom => "custom",
     }
 }
@@ -1138,7 +1137,6 @@ mod tests {
         assert_eq!(event_kind_str(SpanEventKind::Exception), "exception");
         assert_eq!(event_kind_str(SpanEventKind::Slow), "slow");
         assert_eq!(event_kind_str(SpanEventKind::MemorySpike), "memory_spike");
-        assert_eq!(event_kind_str(SpanEventKind::Alloc), "alloc");
         assert_eq!(event_kind_str(SpanEventKind::Custom), "custom");
     }
 

@@ -9,7 +9,7 @@ pub mod pprof;
 pub mod speedscope;
 pub mod xhprof;
 
-pub use collapsed::{export_collapsed, CollapsedMetric};
+pub use collapsed::export_collapsed;
 pub use pprof::export_pprof;
 pub use speedscope::export_speedscope;
 pub use xhprof::{

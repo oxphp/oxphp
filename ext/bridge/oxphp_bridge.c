@@ -6499,7 +6499,7 @@ static __thread struct {
      * actually pushed the entry. The end callback compares this
      * against execute_data->func and only pops when they match —
      * correctness guard for mixed-capture runs (ApmOnly with
-     * force_profile fns, PROFILE_ALL + pause/resume, sample misses,
+     * force_profile fns, PROFILE_ALL + stop/start, sample misses,
      * max_spans cap) where begin decides not to push but end still
      * fires for the same function. Without the check, end would
      * unbalance a span that belongs to a different (outer) function. */
@@ -7263,8 +7263,7 @@ oxphp_profiler_observer_init(zend_execute_data *execute_data) {
         return (zend_observer_fcall_handlers){NULL, NULL};
     }
     if (execute_data->func->common.type != ZEND_USER_FUNCTION) {
-        /* Internal functions skipped at the gate (PROFILER_INTERNAL
-         * toggle). */
+        /* The profiler records userland frames only. */
         return (zend_observer_fcall_handlers){NULL, NULL};
     }
 

@@ -434,7 +434,7 @@ fn export_for(
         OutputFormat::Xhprof => export_xhprof(tree, XhprofMode::Raw, None),
         OutputFormat::Speedscope => export_speedscope(tree),
         OutputFormat::Pprof => export_pprof(tree),
-        OutputFormat::Collapsed => export_collapsed(tree, CollapsedMetric::Wall),
+        OutputFormat::Collapsed => export_collapsed(tree),
     }
 }
 
