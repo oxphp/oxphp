@@ -4,7 +4,7 @@ require_once __DIR__ . '/../test_helper.php';
 
 $t = new TestCase('is_active', 'profiler');
 
-// Without a trigger header / cookie / query, this request did not
+// Without the trigger header, this request did not
 // activate ProfileAll, so is_active() must return false.
 $t->assertFalse('is_active() returns false without trigger',
     OxPHP\Profile\is_active());

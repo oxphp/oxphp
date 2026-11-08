@@ -2,7 +2,7 @@
 declare(strict_types=1);
 require_once __DIR__ . '/../test_helper.php';
 
-// Reads back the four runs the preceding source probes produced. This request
+// Reads back the two runs the preceding source probes produced. This request
 // carries no trigger and calls no start(), so it adds no run of its own.
 //
 // What it pins: the two facts the trigger knows when it admits a request — why
@@ -21,8 +21,6 @@ $dir = '/tmp/oxphp-profiles';
 /** @var array<string, string> $probes probe script name => expected source */
 $probes = [
     'header' => 'Header',
-    'cookie' => 'Cookie',
-    'query'  => 'Query',
     'sdk'    => 'Sdk',
 ];
 
@@ -54,9 +52,8 @@ foreach ($probes as $probe => $expected_source) {
     $t->assertTrue("index has the $probe run", isset($runs[$probe]));
 }
 
-// 1. Each run says how it was activated. Three of the four were filed as
-//    "Header" before the trigger's decision reached storage; the header run is
-//    the control that was right for the wrong reason.
+// 1. Each run says how it was activated. The header run is the control; the
+//    sdk run is what shows the decision reached storage.
 foreach ($probes as $probe => $expected_source) {
     $t->assertSame("$probe run reports source $expected_source",
         $runs[$probe]['source'] ?? null, $expected_source);
@@ -87,7 +84,7 @@ curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
 $body = (string) curl_exec($ch);
 $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
 $t->assertSame('metrics 200', $code, 200);
-foreach (['header', 'cookie', 'query', 'sdk'] as $bucket) {
+foreach (['header', 'sdk'] as $bucket) {
     $t->assertTrue("runs_total.$bucket counted at least one run",
         preg_match('/^oxphp_profiler_runs_total\{source="' . $bucket . '"\} ([0-9]+)$/m', $body, $m) === 1 && (int) $m[1] >= 1);
 }

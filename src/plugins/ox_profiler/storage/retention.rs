@@ -215,4 +215,19 @@ mod tests {
         assert!(!dir.path().join("a.speedscope.json").exists());
         assert!(!dir.path().join("a.pprof").exists());
     }
+
+    #[tokio::test]
+    async fn retention_removes_files_of_runs_from_removed_triggers() {
+        let dir = TempDir::new().unwrap();
+        let old = serde_json::to_string(&meta("a", 100))
+            .unwrap()
+            .replace("\"source\":\"Header\"", "\"source\":\"Cookie\"");
+        assert!(old.contains("\"source\":\"Cookie\""), "{old}");
+        let newer = serde_json::to_string(&meta("b", 200)).unwrap();
+        std::fs::write(dir.path().join("index.json"), format!("{old}\n{newer}\n")).unwrap();
+        std::fs::write(dir.path().join("a.collapsed"), b"x").unwrap();
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        sweep_once(dir.path(), 1, &lock).await.unwrap();
+        assert!(!dir.path().join("a.collapsed").exists());
+    }
 }

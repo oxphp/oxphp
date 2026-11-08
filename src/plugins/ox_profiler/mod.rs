@@ -1,7 +1,7 @@
 //! The `ox_profiler` plugin — per-request profiling activation.
 //!
 //! Reads `PROFILER_*` env vars at startup, inspects each incoming request for
-//! a cookie / header / query-string trigger (or random sampling), and — when
+//! the trigger header (or random sampling), and — when
 //! activation is decided — sets `ProfilingMode::ProfileAll` so the PHP worker
 //! runs its request under full profiling.
 
@@ -103,7 +103,7 @@ impl PluginRequestHandler for ProfilerRequestHandler {
         // in tests/profiler_trigger_tests.rs.
         //
         // Nothing else constrains the number. `should_profile` reads only the
-        // request itself (header, cookie, query, path) and the config, so it
+        // request itself (header, path) and the config, so it
         // depends on no other handler's output, and the one hard requirement
         // is that it run before the worker thread reads the mode.
         -85
@@ -878,8 +878,6 @@ mod tests {
     fn run_meta_takes_the_source_the_trigger_recorded() {
         for (wire, expected) in [
             ("header", ActivationSource::Header),
-            ("cookie", ActivationSource::Cookie),
-            ("query", ActivationSource::Query),
             ("sample", ActivationSource::SampleRate),
         ] {
             let metadata = vec![(META_SOURCE.into(), wire.into())];

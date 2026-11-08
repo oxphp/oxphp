@@ -36,3 +36,19 @@ pub struct RunMeta {
     /// configured formats if some writes failed).
     pub formats: Vec<String>,
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn index_line_with_removed_trigger_parses_as_header() {
+        for source in ["Cookie", "Query"] {
+            let line = format!(
+                r#"{{"run_id":"r","request_id":"q","trace_id":null,"timestamp_ms":1,"duration_ms":1,"method":"GET","url":"/","status":200,"user_agent":null,"client_ip":null,"source":"{source}","span_count":0,"event_count":0,"error_count":0,"leaked_count":0,"truncated":false,"oxphp_version":"0.15.0","formats":[]}}"#
+            );
+            let meta: RunMeta = serde_json::from_str(&line).expect(source);
+            assert_eq!(meta.source, ActivationSource::Header, "{source}");
+        }
+    }
+}
