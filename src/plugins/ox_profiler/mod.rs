@@ -426,6 +426,13 @@ impl Plugin for ProfilerPlugin {
                 "PROFILER_OUTPUT_FORMATS names an unknown format; skipped"
             );
         }
+        if !unknown_formats.is_empty() && unknown_formats.len() == self.config.output_formats.len()
+        {
+            tracing::warn!(
+                plugin = "profiler",
+                "PROFILER_OUTPUT_FORMATS names no known format; writing xhprof and collapsed"
+            );
+        }
 
         let metrics = storage::StorageMetrics::new();
 

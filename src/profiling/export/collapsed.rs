@@ -1,13 +1,16 @@
 //! Collapsed-stack exporter (Brendan Gregg `flamegraph.pl` format).
 //!
-//! Output: one line per `FinishedSpan` in the form
-//! `root;parent;...;leaf VALUE\n`. The path is leaf-last so
-//! `flamegraph.pl` reads it as a stack. Value is the span's wall-clock
-//! time without its direct callees, in microseconds: a flamegraph draws
-//! a frame as wide as its own line plus every line under it, so a span's
-//! whole duration here would be counted again at each level above it.
+//! Output: one line per distinct call stack in the form
+//! `root;parent;...;leaf VALUE\n`, in the order the stacks first finished.
+//! The path is leaf-last so `flamegraph.pl` reads it as a stack. Value is
+//! the wall-clock time of the calls on that stack without their direct
+//! callees, in microseconds: a flamegraph draws a frame as wide as its own
+//! line plus every line under it, so a span's whole duration here would be
+//! counted again at each level above it.
 
 use std::collections::HashMap;
+
+use indexmap::IndexMap;
 
 use crate::profiling::export::{index_by_span_id, walk_parent_chain};
 use crate::profiling::{FinishedSpan, SpanTree};
@@ -22,7 +25,6 @@ fn wall_ns(span: &FinishedSpan) -> u64 {
 /// An empty tree → empty output (no lines, no trailing newline).
 pub fn export_collapsed(tree: &SpanTree) -> Vec<u8> {
     let idx = index_by_span_id(tree);
-    let mut out: Vec<u8> = Vec::with_capacity(tree.finished.len() * 64);
 
     // Saturating: a force-closed span reads as decades long, its end taken
     // from another clock, and a dozen of them under one caller overflow u64.
@@ -32,31 +34,42 @@ pub fn export_collapsed(tree: &SpanTree) -> Vec<u8> {
         *sum = sum.saturating_add(wall_ns(span));
     }
 
+    // Summed per stack and cut to microseconds once per line: cut per call, a
+    // function running under a microsecond is written as 0 however often it
+    // runs, and its caller has already given that time up.
+    let mut own_ns_by_stack: IndexMap<Vec<u8>, u64> = IndexMap::new();
     for span in &tree.finished {
-        let callees = callees_ns.get(span.span_id.as_ref()).copied().unwrap_or(0);
-        let value = wall_ns(span).saturating_sub(callees) / 1000;
-
         let mut chain = walk_parent_chain(tree, &idx, span);
         chain.reverse(); // root-first
 
         // Synthetic "main()" root — the xhprof convention; gives
         // flamegraph.pl a single-rooted tree even when SpanTree's
         // root_span_id corresponds to no observed span.
-        out.extend_from_slice(b"main()");
+        let mut stack = b"main()".to_vec();
         for name in &chain {
-            out.push(b';');
+            stack.push(b';');
             // Escape `;` and ` ` in names so flamegraph.pl parses
             // unambiguously. PHP function names can't contain space
             // and rarely contain `;`; the escape is defensive.
             for byte in name.bytes() {
                 match byte {
-                    b';' => out.extend_from_slice(b"\\;"),
-                    b' ' => out.extend_from_slice(b"\\ "),
-                    _ => out.push(byte),
+                    b';' => stack.extend_from_slice(b"\\;"),
+                    b' ' => stack.extend_from_slice(b"\\ "),
+                    _ => stack.push(byte),
                 }
             }
         }
-        out.extend_from_slice(format!(" {value}\n").as_bytes());
+
+        let callees = callees_ns.get(span.span_id.as_ref()).copied().unwrap_or(0);
+        let own_ns = wall_ns(span).saturating_sub(callees);
+        let total = own_ns_by_stack.entry(stack).or_insert(0);
+        *total = total.saturating_add(own_ns);
+    }
+
+    let mut out: Vec<u8> = Vec::with_capacity(own_ns_by_stack.len() * 64);
+    for (stack, own_ns) in &own_ns_by_stack {
+        out.extend_from_slice(stack);
+        out.extend_from_slice(format!(" {}\n", own_ns / 1000).as_bytes());
     }
     out
 }

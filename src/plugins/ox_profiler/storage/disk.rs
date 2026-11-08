@@ -52,7 +52,10 @@ impl OutputFormat {
 }
 
 /// Splits configured names into the formats they select and the names no
-/// format answers to, which the caller reports.
+/// format answers to, which the caller reports. A list with no known name
+/// selects the defaults: taken as written it would leave every run listed
+/// with no file behind it. An empty list stays empty, it is how disk output
+/// is turned off.
 pub fn parse_output_formats(tokens: &[String]) -> (Vec<OutputFormat>, Vec<String>) {
     let mut known = Vec::with_capacity(tokens.len());
     let mut unknown = Vec::new();
@@ -61,6 +64,9 @@ pub fn parse_output_formats(tokens: &[String]) -> (Vec<OutputFormat>, Vec<String
             Some(format) => known.push(format),
             None => unknown.push(token.clone()),
         }
+    }
+    if known.is_empty() && !unknown.is_empty() {
+        known = vec![OutputFormat::Xhprof, OutputFormat::Collapsed];
     }
     (known, unknown)
 }
@@ -331,6 +337,21 @@ mod tests {
         let (known, unknown) = parse_output_formats(&tokens);
         assert_eq!(known, vec![OutputFormat::Xhprof, OutputFormat::Collapsed]);
         assert_eq!(unknown, vec!["pprof".to_string()]);
+    }
+
+    #[test]
+    fn a_list_with_no_known_name_selects_the_default_formats() {
+        let tokens = ["speedscope".to_string(), "pprof".to_string()];
+        let (known, unknown) = parse_output_formats(&tokens);
+        assert_eq!(known, vec![OutputFormat::Xhprof, OutputFormat::Collapsed]);
+        assert_eq!(unknown, tokens.to_vec());
+    }
+
+    #[test]
+    fn an_empty_list_selects_no_format() {
+        let (known, unknown) = parse_output_formats(&[]);
+        assert!(known.is_empty());
+        assert!(unknown.is_empty());
     }
 
     #[test]
