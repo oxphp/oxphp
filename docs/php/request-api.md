@@ -161,7 +161,7 @@ Access query string parameters.
 | `$request->query('page')` | The value of `page`, or `null` if absent |
 | `$request->query('page', 1)` | The value of `page`, or `1` if absent |
 
-> **Known gap:** bracket notation is not expanded into nested arrays yet. `?tags[]=php&tags[]=async` currently yields a flat entry named `tags[]` rather than a `tags` array, and a repeated name resolves to its first occurrence through `query('name')` while `query()` keeps the last. Use `$_GET` for array parameters until this is fixed.
+> **Names stay flat.** Bracket notation is not expanded into nested arrays: `?tags[]=php&tags[]=async` yields a flat entry named `tags[]` rather than a `tags` array, and a repeated name resolves to its first occurrence through `query('name')` while `query()` keeps the last. Use `$_GET` for array parameters.
 
 ```php
 // Request: GET /search?q=oxphp&tags[]=php&tags[]=async

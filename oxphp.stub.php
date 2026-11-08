@@ -510,8 +510,8 @@ namespace OxPHP\Http {
         /**
          * Access query string parameters.
          *
-         * Supports bracket notation: ?a[]=1&a[]=2 → ['a' => ['1', '2']].
-         * Bridge returns flat pairs; bracket parsing happens on PHP side.
+         * Names stay flat, as the client sent them: ?a[]=1 is the parameter
+         * named "a[]", not an array. Read $_GET for array parameters.
          *
          * @param string|null $key Specific key, or null for all params
          * @param mixed $default Returned when key is absent

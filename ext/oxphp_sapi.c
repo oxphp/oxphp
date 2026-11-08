@@ -427,7 +427,7 @@ ZEND_METHOD(OxPHP_Http_Request, startTime) {
 /* {{{ OxPHP\Http\Request::query(?string $key = null, mixed $default = null): mixed
  * When called with a key, does a single bridge lookup (fast path).
  * When called without arguments, builds the full array via visitor.
- * Bracket-notation is not yet supported in the initial version. */
+ * Names stay flat: "?a[]=1" is the parameter named "a[]", not an array. */
 ZEND_METHOD(OxPHP_Http_Request, query) {
     zend_string *key = NULL;
     zval *def = NULL;
