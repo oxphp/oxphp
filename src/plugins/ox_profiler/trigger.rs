@@ -3,7 +3,7 @@
 //! `should_profile` is a pure function: it inspects a `PluginRequestView`
 //! against the configured `ProfilerConfig` and returns
 //! `Some(ActivationDecision)` if the request meets the activation criteria
-//! (header / cookie / query-string token match, or random sampling hit).
+//! (header token match, or random sampling hit).
 //! `None` means "run at ApmOnly or Off as usual".
 
 use rand::{Rng, RngExt};
@@ -17,9 +17,11 @@ use super::config::ProfilerConfig;
 /// Why profiling was activated for a request.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ActivationSource {
+    // `index.json` survives an upgrade, and retention drops a line it cannot
+    // parse, leaving that run's files with nothing to delete them. These two
+    // names occur only in such lines.
+    #[serde(alias = "Cookie", alias = "Query")]
     Header,
-    Cookie,
-    Query,
     SampleRate,
     /// No trigger matched and the request was profiled anyway. Reconstructed
     /// at completion from the absence of a decision, so it names every such
@@ -38,8 +40,6 @@ impl ActivationSource {
     pub fn as_wire(self) -> &'static str {
         match self {
             ActivationSource::Header => "header",
-            ActivationSource::Cookie => "cookie",
-            ActivationSource::Query => "query",
             ActivationSource::SampleRate => "sample",
             ActivationSource::Sdk => "sdk",
         }
@@ -50,8 +50,6 @@ impl ActivationSource {
     pub fn from_wire(s: &str) -> Option<Self> {
         Some(match s {
             "header" => ActivationSource::Header,
-            "cookie" => ActivationSource::Cookie,
-            "query" => ActivationSource::Query,
             "sample" => ActivationSource::SampleRate,
             "sdk" => ActivationSource::Sdk,
             _ => return None,
@@ -79,16 +77,15 @@ pub fn should_profile<R: Rng + ?Sized>(
         return None;
     }
 
-    // Explicit activation: priority header > cookie > query.
-    if let Some(src) = check_explicit(req, cfg) {
+    if header_token_matches(req, cfg) {
         return Some(ActivationDecision {
-            source: src,
+            source: ActivationSource::Header,
             mode: ProfilingMode::ProfileAll,
         });
     }
 
     // Random sampling: no token required. Excluded paths are never sampled
-    // (short-circuits before the rng draw); explicit triggers above bypass this.
+    // (short-circuits before the rng draw); the header trigger above bypasses this.
     if cfg.sample_rate > 0.0
         && !path_excluded(req.uri, cfg)
         && rng.random::<f64>() < cfg.sample_rate
@@ -102,26 +99,10 @@ pub fn should_profile<R: Rng + ?Sized>(
     None
 }
 
-fn check_explicit(req: &PluginRequestView, cfg: &ProfilerConfig) -> Option<ActivationSource> {
-    if let Some(v) = req.header("x-oxphp-profile").and_then(|h| h.to_str().ok()) {
-        if validate_token(v, cfg) {
-            return Some(ActivationSource::Header);
-        }
-    }
-    // The whole cookie name, not a key inside this plugin's `__oxp_profiler_`
-    // namespace: `OXPROF` is what the documentation tells an operator to set
-    // from the browser, and the namespaced read would never see it.
-    if let Some(v) = req.global_cookie("OXPROF") {
-        if validate_token(v, cfg) {
-            return Some(ActivationSource::Cookie);
-        }
-    }
-    if let Some(v) = extract_query_param(req.uri, "__oxprof") {
-        if validate_token(&v, cfg) {
-            return Some(ActivationSource::Query);
-        }
-    }
-    None
+fn header_token_matches(req: &PluginRequestView, cfg: &ProfilerConfig) -> bool {
+    req.header("x-oxphp-profile")
+        .and_then(|h| h.to_str().ok())
+        .is_some_and(|v| validate_token(v, cfg))
 }
 
 fn validate_token(provided: &str, cfg: &ProfilerConfig) -> bool {
@@ -139,23 +120,10 @@ fn validate_token(provided: &str, cfg: &ProfilerConfig) -> bool {
     }
 }
 
-fn extract_query_param(uri: &http::Uri, key: &str) -> Option<String> {
-    uri.query().and_then(|q| {
-        q.split('&').find_map(|kv| {
-            let (k, v) = kv.split_once('=')?;
-            if k == key {
-                Some(v.to_string())
-            } else {
-                None
-            }
-        })
-    })
-}
-
 /// True when the request path matches `PROFILER_EXCLUDE_PATHS`. The leading
 /// `/` is stripped to match the normalized patterns. `None` set → never
-/// excluded. Consulted by `sample_rate` activation only — explicit triggers
-/// (header/cookie/query) bypass this and run first.
+/// excluded. Consulted by `sample_rate` activation only — the header trigger
+/// bypasses this and runs first.
 ///
 /// Matches the **raw** request path (`uri.path()`): unlike `PHP_DENY_PATHS`,
 /// which runs against the routing layer's sanitized path, this runs at
@@ -253,7 +221,7 @@ mod tests {
 
     impl ViewFixture {
         /// `cookie_header` is the verbatim value of the `Cookie` request
-        /// header, e.g. `"session=abc; OXPROF=tok"`. Empty means the request
+        /// header, e.g. `"session=abc; theme=dark"`. Empty means the request
         /// carries no `Cookie` header at all.
         fn new(uri: &str, mut headers: HeaderMap, cookie_header: &str) -> Self {
             if !cookie_header.is_empty() {
@@ -306,90 +274,16 @@ mod tests {
     }
 
     #[test]
-    fn test_cookie_activates_without_token() {
-        let cfg = base_config(true);
-        let mut rng = StdRng::seed_from_u64(0);
-        let fx = ViewFixture::new("/", HeaderMap::new(), "OXPROF=whatever");
-        let d = should_profile(&fx.view(), &cfg, &mut rng).unwrap();
-        assert_eq!(d.source, ActivationSource::Cookie);
-    }
-
-    #[test]
-    fn test_cookie_activates_among_other_cookies() {
-        // The trigger has to find its own cookie beside the application's,
-        // which is the shape every browser request has. Splitting them across
-        // several `Cookie` field lines, which HTTP/2 allows, is covered by
-        // `find_raw_cookie`'s own tests.
-        let cfg = base_config(true);
-        let mut rng = StdRng::seed_from_u64(0);
-        let fx = ViewFixture::new(
-            "/",
-            HeaderMap::new(),
-            "session=abc; OXPROF=whatever; theme=dark",
-        );
-        let d = should_profile(&fx.view(), &cfg, &mut rng).expect("should activate");
-        assert_eq!(d.source, ActivationSource::Cookie);
-    }
-
-    #[test]
-    fn test_cookie_carries_the_token_through() {
-        // The value the browser set has to reach the comparison intact, not
-        // merely be present: this is the shape the e2e probe sends.
+    fn cookie_and_query_do_not_activate() {
         let mut cfg = base_config(true);
         cfg.auth_token = Some(Arc::<str>::from("secret-123"));
         let mut rng = StdRng::seed_from_u64(0);
-        let fx = ViewFixture::new("/", HeaderMap::new(), "OXPROF=secret-123");
-        let d = should_profile(&fx.view(), &cfg, &mut rng).expect("should activate");
-        assert_eq!(d.source, ActivationSource::Cookie);
-
-        let wrong = ViewFixture::new("/", HeaderMap::new(), "OXPROF=secret-456");
-        assert!(should_profile(&wrong.view(), &cfg, &mut rng).is_none());
-    }
-
-    #[test]
-    fn test_plugin_namespaced_cookie_name_does_not_activate() {
-        // `OXPROF` is the whole cookie name, not a key inside this plugin's
-        // `__oxp_profiler_` namespace. A cookie spelled the namespaced way is
-        // a different cookie and activates nothing. Pinned so the lookup is
-        // not moved back behind `extract_plugin_cookies`, where the only name
-        // the documentation gives is unreachable.
-        let cfg = base_config(true);
-        let mut rng = StdRng::seed_from_u64(0);
-        let fx = ViewFixture::new("/", HeaderMap::new(), "__oxp_profiler_OXPROF=whatever");
+        let fx = ViewFixture::new(
+            "/?__oxprof=secret-123",
+            HeaderMap::new(),
+            "OXPROF=secret-123",
+        );
         assert!(should_profile(&fx.view(), &cfg, &mut rng).is_none());
-    }
-
-    #[test]
-    fn test_query_activates_without_token() {
-        let cfg = base_config(true);
-        let mut rng = StdRng::seed_from_u64(0);
-        let fx = ViewFixture::new("/foo?__oxprof=yes&other=ok", HeaderMap::new(), "");
-        let d = should_profile(&fx.view(), &cfg, &mut rng).unwrap();
-        assert_eq!(d.source, ActivationSource::Query);
-    }
-
-    #[test]
-    fn test_header_priority_over_cookie_and_query() {
-        let cfg = base_config(true);
-        let mut rng = StdRng::seed_from_u64(0);
-        let mut h = HeaderMap::new();
-        h.insert("x-oxphp-profile", "x".parse().unwrap());
-        let fx = ViewFixture::new("/?__oxprof=q", h, "OXPROF=c");
-        assert_eq!(
-            should_profile(&fx.view(), &cfg, &mut rng).unwrap().source,
-            ActivationSource::Header
-        );
-    }
-
-    #[test]
-    fn test_cookie_priority_over_query() {
-        let cfg = base_config(true);
-        let mut rng = StdRng::seed_from_u64(0);
-        let fx = ViewFixture::new("/?__oxprof=q", HeaderMap::new(), "OXPROF=c");
-        assert_eq!(
-            should_profile(&fx.view(), &cfg, &mut rng).unwrap().source,
-            ActivationSource::Cookie
-        );
     }
 
     #[test]
@@ -435,7 +329,7 @@ mod tests {
         assert_eq!(d.source, ActivationSource::SampleRate);
     }
 
-    /// `PROFILER_AUTH_TOKEN` gates the three explicit triggers, not
+    /// `PROFILER_AUTH_TOKEN` gates the header trigger, not
     /// `PROFILER_SAMPLE_RATE` — a request carrying no trigger at all is still
     /// sampled while a token is configured. Pins the documented contract; it
     /// holds today, and this is what would break if the token check ever moved
@@ -539,8 +433,6 @@ mod tests {
         // does not come back is a run filed under the wrong source.
         for src in [
             ActivationSource::Header,
-            ActivationSource::Cookie,
-            ActivationSource::Query,
             ActivationSource::SampleRate,
             ActivationSource::Sdk,
         ] {
@@ -557,6 +449,19 @@ mod tests {
         assert_eq!(ActivationSource::from_wire(""), None);
         assert_eq!(ActivationSource::from_wire("Header"), None);
         assert_eq!(ActivationSource::from_wire("sampleRate"), None);
+    }
+
+    #[test]
+    fn from_wire_knows_three_sources() {
+        for (wire, expected) in [
+            ("header", Some(ActivationSource::Header)),
+            ("sample", Some(ActivationSource::SampleRate)),
+            ("sdk", Some(ActivationSource::Sdk)),
+            ("cookie", None),
+            ("query", None),
+        ] {
+            assert_eq!(ActivationSource::from_wire(wire), expected, "{wire}");
+        }
     }
 
     #[test]

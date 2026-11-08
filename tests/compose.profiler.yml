@@ -1,5 +1,5 @@
 # Profiler mode: ox_profiler plugin enabled with a known token.
-# Activated via X-OxPHP-Profile / OXPROF cookie / ?__oxprof=...
+# Activated via the X-OxPHP-Profile header.
 #
 # Standalone usage:
 #   docker compose -f compose.yml -f compose.profiler.yml up

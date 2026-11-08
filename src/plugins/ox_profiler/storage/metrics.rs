@@ -12,7 +12,7 @@ use super::disk::OutputFormat;
 use crate::plugins::ox_profiler::trigger::ActivationSource;
 
 const FORMAT_COUNT: usize = 2;
-const SOURCE_COUNT: usize = 5;
+const SOURCE_COUNT: usize = 3;
 
 pub struct StorageMetrics {
     pub runs_total: [AtomicU64; SOURCE_COUNT],
@@ -191,7 +191,7 @@ impl StorageMetrics {
 }
 
 const FORMAT_LABELS: [&str; FORMAT_COUNT] = ["xhprof", "collapsed"];
-const SOURCE_LABELS: [&str; SOURCE_COUNT] = ["header", "cookie", "query", "sample", "sdk"];
+const SOURCE_LABELS: [&str; SOURCE_COUNT] = ["header", "sample", "sdk"];
 
 fn format_index(f: OutputFormat) -> usize {
     match f {
@@ -203,10 +203,8 @@ fn format_index(f: OutputFormat) -> usize {
 fn source_index(s: ActivationSource) -> usize {
     match s {
         ActivationSource::Header => 0,
-        ActivationSource::Cookie => 1,
-        ActivationSource::Query => 2,
-        ActivationSource::SampleRate => 3,
-        ActivationSource::Sdk => 4,
+        ActivationSource::SampleRate => 1,
+        ActivationSource::Sdk => 2,
     }
 }
 
@@ -221,8 +219,6 @@ mod tests {
         // file its runs under a neighbour's counter.
         for src in [
             ActivationSource::Header,
-            ActivationSource::Cookie,
-            ActivationSource::Query,
             ActivationSource::SampleRate,
             ActivationSource::Sdk,
         ] {

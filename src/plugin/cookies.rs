@@ -80,44 +80,6 @@ pub fn extract_plugin_cookies(headers: &HeaderMap, prefix: &str) -> PluginCookie
     PluginCookies { cookies }
 }
 
-/// Find a cookie by its **full** name in the `Cookie` header, outside any
-/// plugin's `__oxp_{name}_` namespace.
-///
-/// [`extract_plugin_cookies`] is the namespaced read, and it is what a plugin
-/// gets through `PluginRequestView::cookie`. This one exists for a cookie
-/// whose whole name is part of a documented interface an operator types by
-/// hand, which a per-plugin prefix would put out of reach.
-///
-/// The `Cookie` field lines are scanned in the order they arrived and the
-/// first pair whose name matches wins; a line carrying a non-ASCII byte is
-/// skipped rather than ending the search. On a request the server is handling
-/// there is only one line by the time any plugin runs —
-/// [`join_cookie_field_lines`] has joined the rest into it — so there a
-/// non-ASCII byte anywhere in the header makes all of it unreadable, as it
-/// does for [`extract_plugin_cookies`] and the superglobals.
-///
-/// The name is matched whole: a cookie called `__oxp_profiler_OXPROF` is not a
-/// match for `OXPROF`. Nothing here strips the cookie from the request either,
-/// so — unlike a `__oxp_*` one — the application still sees it, in `$_COOKIE`
-/// and `$_SERVER['HTTP_COOKIE']` alike.
-#[allow(dead_code)] // consumed by feature-gated plugins
-pub(crate) fn find_raw_cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
-    headers
-        .get_all(COOKIE)
-        .iter()
-        .filter_map(|v| v.to_str().ok())
-        .find_map(|cookie_str| {
-            cookie_str.split(';').find_map(|pair| {
-                let (k, v) = pair.split_once('=')?;
-                if k.trim() == name {
-                    Some(v.trim())
-                } else {
-                    None
-                }
-            })
-        })
-}
-
 /// Whether PHP would register this `name=value` pair under a `__oxp_` key.
 ///
 /// PHP skips whitespace before a cookie name (`php_default_treat_data`) and
@@ -356,80 +318,6 @@ mod tests {
         join_cookie_field_lines(&mut parts.headers);
         strip_plugin_cookies(&mut parts);
         assert_eq!(cookie_lines(&parts.headers), [b"a=1; b=2".as_slice()]);
-    }
-
-    // ── find_raw_cookie tests ──
-
-    #[test]
-    fn test_find_raw_cookie_among_others() {
-        let headers = make_headers("session=abc; OXPROF=tok; theme=dark");
-        assert_eq!(find_raw_cookie(&headers, "OXPROF"), Some("tok"));
-        assert_eq!(find_raw_cookie(&headers, "session"), Some("abc"));
-        assert_eq!(find_raw_cookie(&headers, "absent"), None);
-    }
-
-    #[test]
-    fn test_find_raw_cookie_matches_the_whole_name() {
-        // Not a prefix match in either direction: the namespaced spelling is a
-        // different cookie, and a name this one merely starts with is not it.
-        let headers = make_headers("__oxp_profiler_OXPROF=tok; OXPROFX=other");
-        assert_eq!(find_raw_cookie(&headers, "OXPROF"), None);
-    }
-
-    #[test]
-    fn test_find_raw_cookie_ignores_surrounding_space() {
-        // `; ` between pairs is what every user agent sends.
-        let headers = make_headers("a=1;   OXPROF = tok  ; b=2");
-        assert_eq!(find_raw_cookie(&headers, "OXPROF"), Some("tok"));
-    }
-
-    #[test]
-    fn test_find_raw_cookie_no_cookie_header() {
-        assert_eq!(find_raw_cookie(&HeaderMap::new(), "OXPROF"), None);
-    }
-
-    #[test]
-    fn test_find_raw_cookie_takes_the_first_of_a_duplicate() {
-        let headers = make_headers("OXPROF=first; OXPROF=second");
-        assert_eq!(find_raw_cookie(&headers, "OXPROF"), Some("first"));
-    }
-
-    #[test]
-    fn test_find_raw_cookie_skips_a_pair_with_no_value() {
-        let headers = make_headers("flag; OXPROF=tok");
-        assert_eq!(find_raw_cookie(&headers, "OXPROF"), Some("tok"));
-    }
-
-    #[test]
-    fn test_find_raw_cookie_reads_a_split_cookie_header() {
-        // An HTTP/2 client may split `Cookie` across several field lines, and
-        // nothing below us rejoins them. The cookie is found wherever it lands.
-        let mut headers = HeaderMap::new();
-        headers.append(COOKIE, "session=abc".parse().unwrap());
-        headers.append(COOKIE, "OXPROF=tok".parse().unwrap());
-        assert_eq!(find_raw_cookie(&headers, "OXPROF"), Some("tok"));
-        assert_eq!(find_raw_cookie(&headers, "session"), Some("abc"));
-        assert_eq!(find_raw_cookie(&headers, "absent"), None);
-    }
-
-    #[test]
-    fn test_find_raw_cookie_skips_an_unreadable_field_line() {
-        // A byte outside visible ASCII costs that line, not the whole lookup —
-        // the cookie is still found on a later one.
-        let mut headers = HeaderMap::new();
-        headers.append(COOKIE, http::HeaderValue::from_bytes(b"junk=\xff").unwrap());
-        headers.append(COOKIE, "OXPROF=tok".parse().unwrap());
-        assert_eq!(find_raw_cookie(&headers, "OXPROF"), Some("tok"));
-    }
-
-    #[test]
-    fn test_find_raw_cookie_takes_the_first_across_split_headers() {
-        // Same rule as within one header, applied to the concatenation the
-        // field lines stand for: the earlier pair wins.
-        let mut headers = HeaderMap::new();
-        headers.append(COOKIE, "OXPROF=first".parse().unwrap());
-        headers.append(COOKIE, "OXPROF=second".parse().unwrap());
-        assert_eq!(find_raw_cookie(&headers, "OXPROF"), Some("first"));
     }
 
     // ── strip_plugin_cookies tests ──

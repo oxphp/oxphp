@@ -2286,7 +2286,7 @@ namespace OxPHP\Profile {
      * Whether profiling is actively capturing spans for this request.
      *
      * Returns true when a profile is active for this request — turned on by
-     * a trigger (cookie / header / query / sample rate) or by {@see start()}
+     * a trigger (header / sample rate) or by {@see start()}
      * — and not stopped by {@see stop()}. With the profiler
      * disabled (`PROFILER_ENABLED`) triggers are not checked and start()
      * does nothing, so neither turns a profile on. Cheap: two thread-local
