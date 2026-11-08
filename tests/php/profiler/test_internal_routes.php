@@ -41,13 +41,6 @@ function curl_internal(string $url, array $opts = [], ?string $auth = null): arr
     ];
 }
 
-// /__profiler/stats
-$r = curl_internal("$base/stats", [], $auth);
-$t->assertSame('stats 200', $r['code'], 200);
-$stats = json_decode($r['body'], true);
-$t->assertTrue('stats has spans_collected_total', is_array($stats) && isset($stats['spans_collected_total']));
-$t->assertTrue('spans_collected_total >= 1', is_array($stats) && $stats['spans_collected_total'] >= 1);
-
 // /__profiler/runs
 $r = curl_internal("$base/runs?limit=5", [], $auth);
 $t->assertSame('runs 200', $r['code'], 200);
@@ -77,10 +70,10 @@ $t->assertTrue('Location to speedscope.app',
 );
 
 // Auth enforcement
-$r = curl_internal("$base/stats");
-$t->assertSame('stats no auth 401', $r['code'], 401);
-$r = curl_internal("$base/stats", [], 'wrong-token');
-$t->assertSame('stats wrong auth 401', $r['code'], 401);
+$r = curl_internal("$base/runs");
+$t->assertSame('runs no auth 401', $r['code'], 401);
+$r = curl_internal("$base/runs", [], 'wrong-token');
+$t->assertSame('runs wrong auth 401', $r['code'], 401);
 
 // /metrics exposes oxphp_profiler_* lines from the registered collector
 $r = curl_internal('http://127.0.0.1:9090/metrics');
@@ -89,10 +82,14 @@ $t->assertTrue('metrics contains oxphp_profiler_runs_total',
     str_contains($r['body'], 'oxphp_profiler_runs_total')
 );
 
-// DELETE removes the run + index entry
+// The admin surface is read-only and has no index page or stats endpoint.
+foreach (['/', '/stats'] as $gone) {
+    $r = curl_internal($base . $gone, [], $auth);
+    $t->assertSame("$gone answers 404", $r['code'], 404);
+}
 $r = curl_internal("$base/runs/$run_id", ['method' => 'DELETE'], $auth);
-$t->assertSame('delete 204', $r['code'], 204);
+$t->assertSame('delete 405', $r['code'], 405);
 $r = curl_internal("$base/runs/$run_id", [], $auth);
-$t->assertSame('deleted run gone', $r['code'], 404);
+$t->assertSame('run survives a delete attempt', $r['code'], 200);
 
 $t->done();

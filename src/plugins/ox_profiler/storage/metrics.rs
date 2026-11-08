@@ -220,10 +220,8 @@ mod tests {
     #[test]
     fn source_labels_match_the_wire_names() {
         // The Prometheus label and the metadata entry name a source with the
-        // same string; `/stats` builds its `runs_total` object from this very
-        // table, so it is covered by being the table rather than by this
-        // loop. A variant added to one and not the other would silently file
-        // its runs under a neighbour's counter.
+        // same string. A variant added to one and not the other would silently
+        // file its runs under a neighbour's counter.
         for src in [
             ActivationSource::Header,
             ActivationSource::Cookie,

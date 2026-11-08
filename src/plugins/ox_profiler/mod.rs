@@ -469,9 +469,8 @@ impl Plugin for ProfilerPlugin {
 
         let metrics = storage::StorageMetrics::new();
 
-        // One lock shared by the DiskWriter append path, the
-        // retention sweep, and the DELETE route so all three are
-        // totally ordered against each other on index.json.
+        // One lock shared by the DiskWriter append path and the
+        // retention sweep so the two are totally ordered on index.json.
         let index_lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
 
         let disk = if !self.config.output_dir.as_os_str().is_empty() {

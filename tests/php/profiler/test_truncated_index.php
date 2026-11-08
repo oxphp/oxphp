@@ -7,8 +7,8 @@ require_once __DIR__ . '/../test_helper.php';
 //
 // What it pins: the span cap is reported all the way out to the artefacts
 // operators read — the `truncated` field of an index.json entry and the
-// oxphp_profiler_truncated_total counter behind /__profiler/stats — and it
-// is reported for the run that hit the cap and for no other.
+// oxphp_profiler_truncated_total counter on /metrics — and it is reported
+// for the run that hit the cap and for no other.
 
 $t = new TestCase('truncated_index', 'profiler');
 
@@ -94,16 +94,14 @@ $t->assertSame('deep-stack run leaked the frames past the mirror',
 $t->assertSame('under-cap run leaked nothing', $runs['under_cap']['leaked_count'] ?? null, 0);
 
 // The same fact drives the metric that the documented alert rule watches.
-$ch = curl_init('http://127.0.0.1:9090/__profiler/stats');
+$ch = curl_init('http://127.0.0.1:9090/metrics');
 curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-curl_setopt($ch, CURLOPT_HTTPHEADER, ['Authorization: Bearer test-token']);
 $body = (string) curl_exec($ch);
 $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-$stats = json_decode($body, true);
-$t->assertSame('stats 200', $code, 200);
+$t->assertSame('metrics 200', $code, 200);
 $t->assertTrue(
     'truncated_total counted the truncated run',
-    is_array($stats) && isset($stats['truncated_total']) && $stats['truncated_total'] >= 1
+    preg_match('/^oxphp_profiler_truncated_total ([0-9]+)$/m', $body, $m) === 1 && (int) $m[1] >= 1
 );
 
 $t->done();

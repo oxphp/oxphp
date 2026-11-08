@@ -80,20 +80,16 @@ foreach (array_keys($probes) as $probe) {
         $run_id !== '' && $run_id !== $request_id);
 }
 
-// 3. The same facts drive the counters behind /__profiler/stats and the
-//    Prometheus runs_total series, which is what a dashboard splits by source.
-$ch = curl_init('http://127.0.0.1:9090/__profiler/stats');
+// 3. The same facts drive the Prometheus runs_total series, which is what a
+//    dashboard splits by source.
+$ch = curl_init('http://127.0.0.1:9090/metrics');
 curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
-curl_setopt($ch, CURLOPT_HTTPHEADER, ['Authorization: Bearer test-token']);
 $body = (string) curl_exec($ch);
 $code = (int) curl_getinfo($ch, CURLINFO_HTTP_CODE);
-$stats = json_decode($body, true);
-$t->assertSame('stats 200', $code, 200);
-$t->assertTrue('stats has a runs_total breakdown',
-    is_array($stats) && isset($stats['runs_total']) && is_array($stats['runs_total']));
+$t->assertSame('metrics 200', $code, 200);
 foreach (['header', 'cookie', 'query', 'sdk'] as $bucket) {
     $t->assertTrue("runs_total.$bucket counted at least one run",
-        isset($stats['runs_total'][$bucket]) && $stats['runs_total'][$bucket] >= 1);
+        preg_match('/^oxphp_profiler_runs_total\{source="' . $bucket . '"\} ([0-9]+)$/m', $body, $m) === 1 && (int) $m[1] >= 1);
 }
 
 $t->done();
