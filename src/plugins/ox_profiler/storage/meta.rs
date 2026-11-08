@@ -1,7 +1,6 @@
 //! Per-run metadata captured at storage time. Centralises the
 //! request-context fields used by:
 //! - `index.json` per-line entry (disk.rs)
-//! - xhgui envelope (built via `meta.to_xhgui_meta()`)
 //! - Internal routes + Prometheus metric labels
 //!
 //! Built once at `ProfilerCompleteHandler::handle` from the
@@ -36,29 +35,4 @@ pub struct RunMeta {
     /// entry uses this; storage may write a subset of the
     /// configured formats if some writes failed).
     pub formats: Vec<String>,
-}
-
-impl RunMeta {
-    /// Storage time (request completion) as whole Unix epoch seconds — this is
-    /// `timestamp_ms`, which `build_run_meta` stamps at request-complete, not
-    /// request start. Shared by the xhgui `meta` and the Buggregator envelope's
-    /// `date` so their time mapping can't drift.
-    pub fn timestamp_secs(&self) -> u64 {
-        self.timestamp_ms / 1000
-    }
-
-    /// Build the xhgui envelope's `meta` struct from this RunMeta.
-    /// Only the fields xhgui actually inspects are populated.
-    pub fn to_xhgui_meta(&self) -> crate::profiling::export::XhguiMeta {
-        crate::profiling::export::XhguiMeta {
-            url: self.url.clone(),
-            request_method: self.method.clone(),
-            request_ts: self.timestamp_secs(),
-            request_ts_micro: (self.timestamp_ms as f64) / 1000.0,
-            server_name: String::new(),
-            get: serde_json::Map::new(),
-            post: serde_json::Map::new(),
-            server: serde_json::Map::new(),
-        }
-    }
 }

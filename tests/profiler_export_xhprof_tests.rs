@@ -2,7 +2,7 @@
 
 #![cfg(feature = "plugin-profiler")]
 
-use oxphp::profiling::export::{export_xhprof, XhguiMeta, XhprofMode};
+use oxphp::profiling::export::export_xhprof;
 use oxphp::profiling::{ProfilingContext, ProfilingMode};
 use serde_json::Value;
 
@@ -19,9 +19,9 @@ fn build_simple_tree() -> oxphp::profiling::SpanTree {
 }
 
 #[test]
-fn raw_mode_emits_pair_map() {
+fn emits_pair_map() {
     let tree = build_simple_tree();
-    let bytes = export_xhprof(&tree, XhprofMode::Raw, None);
+    let bytes = export_xhprof(&tree);
     let v: Value = serde_json::from_slice(&bytes).expect("valid JSON");
     let map = v.as_object().expect("top-level is an object");
 
@@ -34,7 +34,7 @@ fn raw_mode_emits_pair_map() {
 #[test]
 fn pair_entries_have_5_metrics() {
     let tree = build_simple_tree();
-    let bytes = export_xhprof(&tree, XhprofMode::Raw, None);
+    let bytes = export_xhprof(&tree);
     let v: Value = serde_json::from_slice(&bytes).unwrap();
     let entry = v.get("main()==>outer").unwrap().as_object().unwrap();
     for k in &["ct", "wt", "cpu", "mu", "pmu"] {
@@ -56,29 +56,10 @@ fn aggregation_sums_repeated_parent_child_pairs() {
     }
     let tree = ctx.finalize();
     let owned = tree.as_ref().clone();
-    let bytes = export_xhprof(&owned, XhprofMode::Raw, None);
+    let bytes = export_xhprof(&owned);
     let v: Value = serde_json::from_slice(&bytes).unwrap();
     let entry = v.get("outer==>inner").unwrap().as_object().unwrap();
     assert_eq!(entry.get("ct").unwrap().as_u64(), Some(3));
-}
-
-#[test]
-fn xhgui_mode_wraps_in_envelope_with_meta() {
-    let tree = build_simple_tree();
-    let meta = XhguiMeta {
-        url: "/api/users/42".into(),
-        request_method: "GET".into(),
-        request_ts: 1_700_000_000,
-        request_ts_micro: 1_700_000_000.123_456,
-        ..Default::default()
-    };
-    let bytes = export_xhprof(&tree, XhprofMode::Xhgui, Some(meta));
-    let v: Value = serde_json::from_slice(&bytes).unwrap();
-    assert!(v.get("profile").is_some(), "xhgui has profile field");
-    let m = v.get("meta").unwrap().as_object().unwrap();
-    assert_eq!(m.get("url").unwrap().as_str(), Some("/api/users/42"));
-    assert_eq!(m.get("request_method").unwrap().as_str(), Some("GET"));
-    assert_eq!(m.get("request_ts").unwrap().as_u64(), Some(1_700_000_000));
 }
 
 #[test]
@@ -86,7 +67,7 @@ fn empty_tree_yields_empty_pair_map() {
     let mut ctx = ProfilingContext::new();
     ctx.reset(ProfilingMode::ProfileAll, "trace".into(), "root".into());
     let tree = ctx.finalize().as_ref().clone();
-    let bytes = export_xhprof(&tree, XhprofMode::Raw, None);
+    let bytes = export_xhprof(&tree);
     let v: Value = serde_json::from_slice(&bytes).unwrap();
     assert!(v.as_object().unwrap().is_empty());
 }
@@ -100,7 +81,7 @@ fn metric_units_microseconds_for_wt_cpu_and_bytes_for_mu_pmu() {
     let id = ctx.push_with_metrics("op".into(), vec![], 0, 1_000_000, 100, 200);
     ctx.pop_with_metrics(id, 0, 1_500_000, 250, 400);
     let tree = ctx.finalize().as_ref().clone();
-    let bytes = export_xhprof(&tree, XhprofMode::Raw, None);
+    let bytes = export_xhprof(&tree);
     let v: Value = serde_json::from_slice(&bytes).unwrap();
     let entry = v.get("main()==>op").unwrap().as_object().unwrap();
     assert_eq!(
