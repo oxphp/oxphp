@@ -1,0 +1,28 @@
+name: Advisories
+
+# The RustSec database changes independently of this repository, so a version
+# already pinned in Cargo.lock can become vulnerable with no commit here. That
+# is why there is no "has main moved" gate as in nightly.yml and e2e.yml, and
+# why this is not a pull-request check, where a new advisory would fail changes
+# unrelated to it. pr.yml runs it too, on pull requests that touch the
+# dependency files.
+
+on:
+  schedule:
+    - cron: '17 5 * * *'   # daily; off the hour, where GitHub may drop queued runs under load
+  workflow_dispatch:       # manual trigger
+
+permissions:
+  contents: read
+
+jobs:
+  advisories:
+    name: Advisories
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: cargo-deny (advisories)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories
