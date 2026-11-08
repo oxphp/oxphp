@@ -107,6 +107,10 @@ pub struct AsyncTask {
     /// task's fiber keeps it, and the tasks it dispatches inherit it: a closure
     /// the task creates is part of its code.
     pub code_in_request_memory: bool,
+    /// Holds OPcache restarts back while the task's code is in OPcache's shared
+    /// memory, which a restart resets; taken at dispatch. `None` for code in
+    /// request memory.
+    pub opcache_hold: Option<crate::php::opcache_restart::Hold>,
     /// Shared cancellation state — the cancel flag plus the running worker's
     /// `EG(vm_interrupt)` address. Checked by the async worker before/during
     /// execution; the address lets the awaiter interrupt a CPU-bound fiber.
@@ -117,8 +121,9 @@ pub struct AsyncTask {
 
 // SAFETY: op_array_buf is a system-malloc'd buffer exclusively owned by this task,
 // containing a snapshot of the zend_op_array struct. Its internal pointers reference
-// the closure's body, which stays allocated while it is in OPcache's shared memory or
-// while the request whose memory holds it keeps it alive; a body flagged as outside
+// the closure's body, which stays allocated while it is in OPcache's shared memory (whose
+// restart `opcache_hold` holds back until the task ends) or while the request whose
+// memory holds it keeps it alive; a body flagged as outside
 // shared memory is held by the dispatching request until the task ends. That covers its
 // lifetime only: outside shared memory the engine on the pool thread still writes into
 // it, to the reference count of an array literal for one.
@@ -275,6 +280,7 @@ mod tests {
             serialized_args: ptr::null_mut(),
             serialized_args_len: 0,
             code_in_request_memory: false,
+            opcache_hold: None,
             cancelled: cancelled.clone(),
             result_tx: tx,
         };

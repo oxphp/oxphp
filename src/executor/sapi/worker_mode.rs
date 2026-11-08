@@ -78,6 +78,8 @@ fn worker_mode_thread(
     //    see it run until `_php_thread` drops. Its waker first: plugins take
     //    it as the thread starts.
     let wake_rx = crate::plugin::php_thread::install_waker();
+    let _opcache_restart_waker =
+        crate::plugin::PhpThreadWaker::current().map(crate::php::opcache_restart::register_waker);
     let _php_thread = unsafe { crate::php::thread::PhpThread::enter(worker_id) };
 
     // 2. Set worker mode TLS flags

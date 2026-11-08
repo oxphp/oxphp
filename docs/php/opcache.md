@@ -46,7 +46,7 @@ opcache.jit=tracing
 | `memory_consumption` | `128` | Shared memory in MB for compiled scripts. Increase if `opcache_get_status()` shows low free memory. |
 | `interned_strings_buffer` | `16` | Memory in MB for interned strings shared across all workers. |
 | `max_accelerated_files` | `10000` | Maximum number of cached scripts. Set this higher than your total `.php` file count. |
-| `validate_timestamps` | `0` | When `0`, OPcache never checks the filesystem for changes. Restart the container or call `opcache_reset()` to pick up code changes. |
+| `validate_timestamps` | `0` | When `0`, OPcache never checks the filesystem for changes. Restart the container to pick up code changes. `opcache_reset()` picks them up too, at the cost described in [OPcache Restarts](#opcache-restarts). |
 | `revalidate_freq` | `0` | Seconds between filesystem checks. Has no effect when `validate_timestamps=0`. |
 | `file_update_protection` | `0` | Seconds after file modification before the file is eligible for caching. Set to `0` to cache immediately at startup. |
 
@@ -180,6 +180,28 @@ echo "Free memory: "    . $status['memory_usage']['free_memory'] . " bytes\n";
 ```
 
 If `free_memory` is consistently low, increase `opcache.memory_consumption`.
+
+## OPcache Restarts
+
+OPcache restarts its shared memory — drops every cached script and starts over — when `opcache_reset()` is called, and when its memory (`opcache.memory_consumption`) or its table of scripts (`opcache.max_accelerated_files`) is full while at least `opcache.max_wasted_percentage` of the memory (5 % by default) is taken by scripts it has discarded, such as files that changed after it cached them. A restart must not run while code from that memory is still running. Under PHP-FPM, OPcache waits until no other process is still running a request that has used the cache. All of OxPHP's PHP threads are one process, which OPcache's own check cannot see into, so on Linux OxPHP holds the restart itself:
+
+- Requests that start after OPcache has scheduled the restart run without the cache, as under PHP-FPM: they compile what they include, or load it from `opcache.file_cache` when that is set, and do not wait. Such a request runs without the cache to its end, even once the restart has run, and from then on holds the next restart: with `opcache.file_cache`, a script it includes after the restart that the file cache already holds is loaded from there into the cache's new memory.
+- The restart runs in the startup of the first request to start once nothing that can run code from the cache is left. Each of these holds it until it ends: a request that started with the cache, an [`oxphp_async()`](../features/async-promises.md) task whose closure came from the cache, a pool thread that has run such a task, a worker or pool thread that has called the factory or destroy callback of a `Shared\Pool` another thread created (even a call the pool refused), and a request that started while an earlier restart waited. Requests that start after it use the cache again.
+- In [Worker Mode](../features/worker-mode.md), a worker keeps the PHP request it opened at boot until it exits, so a worker that booted with the cache holds the restart and is retired at its next moment with no request in flight. A worker that booted while the restart waited runs without the cache, and is retired at such a moment once the restart has run, or once nothing else holds it, so that its replacement runs the restart. Each replacement runs the worker script's bootstrap again: a restart costs up to two rounds of worker replacement, plus one each time a worker that booted while the restart waited calls such a `Shared\Pool` callback before the restart has run. Workers are not retired during a graceful shutdown.
+- The threads of the `oxphp_async()` pool are replaced the same way, at a moment they run no task. A thread that started while the restart waited and runs a task whose closure came from the cache before the restart has run holds it, and is replaced again.
+
+A holder that does not end — a Server-Sent Events stream or a long poll that started with the cache, a task in an endless loop whose closure came from the cache — keeps the restart waiting for as long as it runs, and so does a worker that never has a moment with no request in flight. A stream that started while the restart waited does not hold it, but holds the next one. OxPHP stops none of them. `opcache.force_restart_timeout` (180 seconds by default), after which OPcache kills the processes that still hold a restart under PHP-FPM, only makes the server log a warning once a restart has waited that long, with the number of requests and tasks holding it (`holders`); `0` turns the warning off. Until the restart runs, requests run without the cache.
+
+The log at `info` level records each restart and each thread it replaces:
+
+| Message | When |
+|---------|------|
+| `OPcache restart scheduled` | The request that scheduled the restart has ended. `reason` is `opcache_reset()`, `out of memory` or `hash overflow`. |
+| `Worker retiring: …`, `Async worker thread retiring: …` | A worker or pool thread is replaced: `an OPcache restart is waiting for it`, or `it opened while an OPcache restart was pending`. |
+| `OPcache restart done` | The restart has run; `waited_ms` is how long it waited. |
+| `OPcache restart still waiting, …` (`warn`) | The restart has waited longer than `opcache.force_restart_timeout`. |
+
+To deploy new code, prefer replacing the container: `opcache_reset()` runs every request without the cache until the restart and, in Worker Mode, boots every worker again.
 
 ## See Also
 

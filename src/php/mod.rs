@@ -5,6 +5,7 @@ pub mod bootstrap;
 pub mod fiber;
 pub mod header_match;
 pub mod heartbeat;
+pub mod opcache_restart;
 pub mod request_buffers;
 pub mod request_decode;
 pub mod response_spool;

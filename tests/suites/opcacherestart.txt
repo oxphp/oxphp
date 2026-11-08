@@ -1,0 +1,28 @@
+# profile: opcacherestart
+# description: OPcache restarts with traditional routing and the async pool — a restart runs only once nothing still runs code from the shared memory it resets
+
+# Order is the test: each block counts on the restarts the blocks above it ran.
+
+# A request holds a restart another request schedules; once it has ended, the
+# restart runs, and the pool threads, replaced around it, run with the cache.
+opcacherestart/test_reset_waits_for_the_running_request
+opcacherestart/test_reset_runs_once_its_holders_are_gone
+log ~OPcache restart scheduled
+log ~retiring: an OPcache restart is waiting for it
+log ~retiring: it opened while an OPcache restart was pending
+log ~OPcache restart done
+
+# A task whose code is in the shared memory holds a restart after the request
+# that dispatched it has ended. The restart waits longer than
+# opcache.force_restart_timeout, and the server says so.
+opcacherestart/test_task_dispatched_before_the_reset
+opcacherestart/test_task_holds_the_restart_past_its_request
+opcacherestart/test_restart_runs_after_the_task
+log ~OPcache restart still waiting
+
+# A pool thread that ran a task's code from the shared memory holds restarts
+# after the task has ended, and a request opened while a restart waited holds
+# the next one once that restart has run.
+opcacherestart/test_task_declares_a_function_while_a_restart_waits
+opcacherestart/test_thread_and_request_without_the_cache_hold_restarts
+opcacherestart/test_restart_runs_after_the_request_opened_while_it_waited

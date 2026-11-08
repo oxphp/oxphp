@@ -1951,7 +1951,7 @@ typedef enum {
  * rather than a deadline anything is counting down. A task that lowers it with
  * set_time_limit() therefore shortens this wait for the tasks that follow it on
  * the same thread too, since the entry is rolled back at the end of a request and
- * that thread's request does not end. */
+ * that thread's request ends only with the thread. */
 static int64_t oxphp_claim_budget_ns(void)
 {
     zend_long limits[2] = {

@@ -1,0 +1,44 @@
+# OPcache restarts with traditional routing and the oxphp_async() pool: a
+# restart opcache_reset() schedules runs only once no request, pool thread or
+# task still runs code from the shared memory it resets.
+#
+# A profile of its own because every block resets OPcache for the whole
+# server; in a shared profile that would empty the cache under the neighbouring
+# tests and make their timings and cache assertions meaningless.
+#
+# opcacherestart.ini lowers opcache.force_restart_timeout to 2 s.
+#
+# Standalone usage:
+#   docker compose -f compose.yml -f compose.opcacherestart.yml up
+services:
+  oxphp-opcacherestart:
+    build:
+      context: ..
+      dockerfile: docker/dev/Dockerfile
+      args:
+        PHP_VERSION:
+        BASE_IMAGE:
+    ports:
+      - "80"
+    networks: [test-net]
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    environment:
+      # info: the lines the suite asserts — a restart scheduled, run, still
+      # waiting, a pool thread replaced — are written at info and warn.
+      LOG_LEVEL: info
+      INTERNAL_ADDR: 0.0.0.0:9090
+      # Two pool threads, so a task can run while the other thread is replaced.
+      ASYNC_WORKERS: 2
+      # A test request, the requests it sends to this server and a request that
+      # waits for a task all run at once.
+      PHP_WORKERS: "4"
+    volumes:
+      - ../www:/var/www/html
+      - ./php:/var/www/html/public/tests
+      - ./opcacherestart.ini:/usr/local/etc/php/conf.d/zz-opcacherestart.ini:ro

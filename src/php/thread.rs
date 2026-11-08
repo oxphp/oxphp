@@ -58,7 +58,7 @@ pub(crate) unsafe fn open_request(scope: RequestScope) -> bool {
     // Before the startup: it can run userland code (a session that
     // `session.auto_start` decodes wakes its objects up).
     installed().request_frame_opening(scope);
-    if bindings::php_request_startup() != 0 {
+    if !crate::php::opcache_restart::start_request(|| bindings::php_request_startup() == 0) {
         return false;
     }
     // The request is open from here: a plugin that panics now would unwind
@@ -82,5 +82,6 @@ pub(crate) unsafe fn close_request() {
     installed().request_frame_closing();
     drop(request_open);
     bindings::php_request_shutdown(std::ptr::null_mut());
+    crate::php::opcache_restart::request_closed();
     installed().request_frame_closed();
 }

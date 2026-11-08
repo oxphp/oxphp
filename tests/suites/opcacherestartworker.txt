@@ -1,0 +1,11 @@
+# profile: opcacherestartworker
+# description: OPcache restarts in worker mode — workers that hold the restart are replaced, and so are those that booted while it waited
+
+# Order is the test: each block counts on the restart the first one schedules.
+opcacherestartworker/test_worker_reset_waits_for_this_request
+opcacherestartworker/test_worker_restart_converges
+opcacherestartworker/test_worker_every_worker_runs_cached
+log ~OPcache restart scheduled
+log ~retiring: an OPcache restart is waiting for it
+log ~retiring: it opened while an OPcache restart was pending
+log ~OPcache restart done
