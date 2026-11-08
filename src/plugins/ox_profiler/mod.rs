@@ -563,7 +563,6 @@ impl Plugin for ProfilerPlugin {
             "enabled": true,
             "auth_token_configured": self.config.auth_token.is_some(),
             "sample_rate": self.config.sample_rate,
-            "internal": self.config.internal,
             "max_spans": self.config.max_spans,
             "max_depth": self.config.max_depth,
             "output_dir": self.config.output_dir.display().to_string(),
@@ -669,7 +668,6 @@ impl Plugin for ProfilerPlugin {
         tracing::info!(
             plugin = "profiler",
             sample_rate = self.config.sample_rate,
-            internal = self.config.internal,
             max_spans = self.config.max_spans,
             max_depth = self.config.max_depth,
             auth_token_configured = self.config.auth_token.is_some(),
@@ -762,7 +760,6 @@ mod tests {
     /// affect an unrelated `init`.
     const BOOL_VARS: &[&str] = &[
         "PROFILER_ENABLED",
-        "PROFILER_INTERNAL",
         "PROFILER_EXPORT_XHGUI",
         "PROFILER_EXPORT_BUGGREGATOR",
         "PROFILER_EXPORT_TAGS",
@@ -907,39 +904,6 @@ mod tests {
         plugin.shutdown();
     }
 
-    #[test]
-    fn test_profiler_validates_other_bools_when_disabled() {
-        // PROFILER_ENABLED=false used to skip parsing of every other bool —
-        // a typo like PROFILER_INTERNAL=ture would only surface in prod the
-        // day someone flipped PROFILER_ENABLED=true. With the unified policy
-        // the typo must fail at startup regardless of `enabled`.
-        let err = with_env(
-            &[("PROFILER_ENABLED", "false"), ("PROFILER_INTERNAL", "ture")],
-            || {
-                let mut plugin = ProfilerPlugin::new();
-                try_init_profiler_plugin(&mut plugin)
-                    .expect_err("PROFILER_INTERNAL=ture must fail even when disabled")
-            },
-        );
-
-        let msg = err.to_string();
-        assert!(
-            msg.contains("PROFILER_INTERNAL"),
-            "error should name the offending var, got: {msg}"
-        );
-        assert!(
-            msg.contains("ture"),
-            "error should echo the value, got: {msg}"
-        );
-    }
-
-    /// The stored run metadata must report truncation from the tree the
-    /// worker finalized. Only the PHP worker thread can read the bridge
-    /// flag that says the span cap fired, so `SpanTree::truncated` is the
-    /// single path by which that fact reaches `index.json`, `/stats` and
-    /// `oxphp_profiler_truncated_total`; a `build_run_meta` that does not
-    /// copy it leaves all three reporting "not truncated" for a run that
-    /// was.
     #[test]
     fn run_meta_reports_the_trees_truncation() {
         use crate::profiling::{ProfilingMode, SpanTree};

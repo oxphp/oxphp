@@ -19,8 +19,7 @@
 use std::path::PathBuf;
 
 use oxphp::profiling::export::{
-    export_collapsed, export_pprof, export_speedscope, export_xhprof, CollapsedMetric, XhguiMeta,
-    XhprofMode,
+    export_collapsed, export_pprof, export_speedscope, export_xhprof, XhguiMeta, XhprofMode,
 };
 use oxphp::profiling::{FinishedSpan, ProfilingMode, SpanTree};
 
@@ -125,34 +124,12 @@ fn read_fixture(name: &str) -> Vec<u8> {
 #[test]
 fn collapsed_wall_matches_fixture() {
     let tree = make_fixture_tree();
-    let out = export_collapsed(&tree, CollapsedMetric::Wall);
+    let out = export_collapsed(&tree);
     let expected = read_fixture("tiny.collapsed");
     assert_eq!(
         std::str::from_utf8(&out).unwrap(),
         std::str::from_utf8(&expected).unwrap(),
         "collapsed Wall output drifted from fixture"
-    );
-}
-
-#[test]
-fn collapsed_cpu_matches_fixture() {
-    let tree = make_fixture_tree();
-    let out = export_collapsed(&tree, CollapsedMetric::Cpu);
-    let expected = read_fixture("tiny.collapsed.cpu");
-    assert_eq!(
-        std::str::from_utf8(&out).unwrap(),
-        std::str::from_utf8(&expected).unwrap()
-    );
-}
-
-#[test]
-fn collapsed_mem_matches_fixture() {
-    let tree = make_fixture_tree();
-    let out = export_collapsed(&tree, CollapsedMetric::Mem);
-    let expected = read_fixture("tiny.collapsed.mem");
-    assert_eq!(
-        std::str::from_utf8(&out).unwrap(),
-        std::str::from_utf8(&expected).unwrap()
     );
 }
 
@@ -298,18 +275,7 @@ fn regenerate_fixtures() {
         std::fs::write(&path, &bytes).unwrap();
         println!("wrote {} ({} bytes)", path.display(), bytes.len());
     };
-    write(
-        "tiny.collapsed",
-        export_collapsed(&tree, CollapsedMetric::Wall),
-    );
-    write(
-        "tiny.collapsed.cpu",
-        export_collapsed(&tree, CollapsedMetric::Cpu),
-    );
-    write(
-        "tiny.collapsed.mem",
-        export_collapsed(&tree, CollapsedMetric::Mem),
-    );
+    write("tiny.collapsed", export_collapsed(&tree));
     write(
         "tiny.xhprof.json",
         export_xhprof(&tree, XhprofMode::Raw, None),

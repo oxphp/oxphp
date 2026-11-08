@@ -89,8 +89,6 @@ pub enum SpanEventKind {
     Slow,
     /// Memory-spike event, set when a decorated span allocated beyond its KB budget.
     MemorySpike,
-    /// Sampled heap allocation. Reserved — unused until the heap hook lands.
-    Alloc,
     /// Any event that doesn't fit the above categories.
     #[default]
     Custom,

@@ -12,7 +12,7 @@ use tokio::fs::{self, OpenOptions};
 use tokio::io::AsyncWriteExt;
 
 use crate::profiling::export::{
-    export_collapsed, export_pprof, export_speedscope, export_xhprof, CollapsedMetric, XhprofMode,
+    export_collapsed, export_pprof, export_speedscope, export_xhprof, XhprofMode,
 };
 use crate::profiling::SpanTree;
 
@@ -289,7 +289,7 @@ fn render(tree: &SpanTree, meta: &RunMeta, fmt: OutputFormat, xhgui_envelope: bo
         }
         OutputFormat::Speedscope => export_speedscope(tree),
         OutputFormat::Pprof => export_pprof(tree),
-        OutputFormat::Collapsed => export_collapsed(tree, CollapsedMetric::Wall),
+        OutputFormat::Collapsed => export_collapsed(tree),
     }
 }
 

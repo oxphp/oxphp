@@ -200,7 +200,7 @@ pub fn profiler_rshutdown_flush() {
 }
 
 /// Set the per-thread paused flag in the C bridge. PHP's
-/// `OxPHP\Profile\pause()` / `resume()` toggle this. When paused,
+/// `OxPHP\Profile\stop()` / `start()` toggle this. When paused,
 /// `oxphp_profiler_begin` early-returns; `end` still pops so open
 /// spans close cleanly.
 pub fn set_profiling_paused(paused: bool) {

@@ -21,7 +21,6 @@ pub struct ProfilerConfig {
     pub enabled: bool,
     pub auth_token: Option<Arc<str>>,
     pub sample_rate: f64,
-    pub internal: bool,
     pub max_spans: u32,
     pub max_depth: u16,
     pub output_dir: PathBuf,
@@ -58,7 +57,6 @@ impl Default for ProfilerConfig {
             enabled: false,
             auth_token: None,
             sample_rate: 0.0,
-            internal: false,
             max_spans: 50_000,
             max_depth: 0,
             output_dir: PathBuf::from("/tmp/oxphp-profiles"),
@@ -82,8 +80,8 @@ impl ProfilerConfig {
     /// Parse `PROFILER_*` config from the plugin context.
     ///
     /// Every field is parsed unconditionally — even when `enabled=false` —
-    /// so a typo like `PROFILER_INTERNAL=ture` surfaces at startup instead
-    /// of waiting until the operator flips `PROFILER_ENABLED=true` in prod.
+    /// so a value the parser rejects surfaces at startup instead of waiting
+    /// until the operator flips `PROFILER_ENABLED=true` in prod.
     pub fn from_ctx(ctx: &PluginContext) -> Result<Self, PluginError> {
         let enabled = parse_bool_opt("PROFILER_ENABLED", ctx.config("ENABLED").as_deref(), false)
             .map_err(|e| PluginError::Config(e.to_string()))?;
@@ -97,12 +95,6 @@ impl ProfilerConfig {
         });
 
         let sample_rate = parse_f64(ctx.config("SAMPLE_RATE").as_deref(), 0.0).clamp(0.0, 1.0);
-        let internal = parse_bool_opt(
-            "PROFILER_INTERNAL",
-            ctx.config("INTERNAL").as_deref(),
-            false,
-        )
-        .map_err(|e| PluginError::Config(e.to_string()))?;
         let max_spans = parse_u32(ctx.config("MAX_SPANS").as_deref(), 50_000);
         // 0 = no cap. The ceiling is the observer's open-frame limit,
         // not an arbitrary number: the engine hook fires on deeper
@@ -279,7 +271,6 @@ impl ProfilerConfig {
             enabled,
             auth_token,
             sample_rate,
-            internal,
             max_spans,
             max_depth,
             output_dir,

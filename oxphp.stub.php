@@ -2287,7 +2287,7 @@ namespace OxPHP\Profile {
      *
      * Returns true when a profile is active for this request — turned on by
      * a trigger (cookie / header / query / sample rate) or by {@see start()}
-     * — and not paused by {@see pause()} / {@see stop()}. With the profiler
+     * — and not stopped by {@see stop()}. With the profiler
      * disabled (`PROFILER_ENABLED`) triggers are not checked and start()
      * does nothing, so neither turns a profile on. Cheap: two thread-local
      * reads.
@@ -2305,7 +2305,7 @@ namespace OxPHP\Profile {
     /**
      * Enable profiling for the rest of the current request.
      *
-     * Sets the mode to "profile all" and clears any paused state. If a
+     * Sets the mode to "profile all" and undoes {@see stop()}. If a
      * profile was already running in a lower-detail mode, the span buffer
      * is reset (mid-request upgrade invariant). Call at most once per
      * request — the trigger at RINIT is the preferred entry point.
@@ -2321,16 +2321,6 @@ namespace OxPHP\Profile {
      * PHP returns through them so `open_stack` stays balanced.
      */
     function stop(): void {}
-
-    /**
-     * Soft variant of {@see stop()} — identical semantics but documentary
-     * intent is "temporarily pause, will resume()". Pair with
-     * {@see resume()} around hot sections you don't care to profile.
-     */
-    function pause(): void {}
-
-    /** Clear the paused flag. Inverse of {@see pause()}. */
-    function resume(): void {}
 
     /**
      * Attach a named marker event to the topmost open span.

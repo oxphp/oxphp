@@ -26,9 +26,4 @@ $t->assertFalse('is_active() is false before start()', OxPHP\Profile\is_active()
 OxPHP\Profile\start();
 $t->assertFalse('is_active() is still false after start()', OxPHP\Profile\is_active());
 
-// is_active() also reads the paused flag. resume() clears it, so a false here
-// can only come from the mode start() left alone, not from a pause.
-OxPHP\Profile\resume();
-$t->assertFalse('is_active() is false with the pause cleared', OxPHP\Profile\is_active());
-
 $t->done();
