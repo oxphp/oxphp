@@ -6807,7 +6807,7 @@ int oxphp_bridge_read_attr_arg_variant(
 #include "Zend/zend_observer.h"
 #include "Zend/zend_compile.h"
 /* zend_attributes.h is included higher up alongside the other PHP
- * headers (filter cache needs zend_attribute earlier). */
+ * headers. */
 
 /* Synthesise a span name for a zend_function. Returns a pointer into
  * a per-thread static buffer (overwritten on next call). May return

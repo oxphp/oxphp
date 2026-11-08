@@ -411,27 +411,22 @@ In-process concurrency primitives (`OxPHP\Shared\Counter`, `Map`, `Channel`, `Mu
 
 ## Profiling
 
-Sampling profiler that emits xhprof / speedscope traces. See [Profiling](../features/profiling.md) for output formats and viewer integration.
+Per-request profiler that writes xhprof and collapsed-stack profiles. See [Profiling](../features/profiling.md) for output formats and viewer integration.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PROFILER_ENABLED` | `false` | Boolean — see [Boolean values](#boolean-values). Master switch. All other `PROFILER_*` vars are still parsed at startup so typos surface immediately |
 | `PROFILER_SAMPLE_RATE` | `0.0` | Probability (0.0–1.0) that a request is sampled. Values outside the range are clamped |
-| `PROFILER_INTERNAL` | `false` | Boolean. When truthy, requests to the internal server (`/health`, `/metrics`, plugin endpoints) are also eligible for sampling |
-| `PROFILER_AUTH_TOKEN` | *(unset)* | Secret the explicit triggers must carry — the `X-OxPHP-Profile` header, the `OXPROF` cookie, the `__oxprof` query parameter — and the bearer token for the `/__profiler/*` routes on the internal server. Unset or empty = no token required: any non-empty trigger value passes, and the `/__profiler/*` routes answer without a bearer. `PROFILER_SAMPLE_RATE` sampling and the `OxPHP\Profile\*` PHP functions never consult it — under `PROFILER_ENABLED=true` a script that calls `OxPHP\Profile\start()` profiles its own request with no token involved |
+| `PROFILER_AUTH_TOKEN` | *(unset)* | Secret the `X-OxPHP-Profile` header must carry, and the bearer token for the `/__profiler/*` routes on the internal server. Unset or empty = no token required: any non-empty header value passes, and the `/__profiler/*` routes answer without a bearer. `PROFILER_SAMPLE_RATE` sampling and the `OxPHP\Profile\*` PHP functions never consult it — under `PROFILER_ENABLED=true` a script that calls `OxPHP\Profile\start()` profiles its own request with no token involved |
 | `PROFILER_MAX_SPANS` | `50000` | Per-request cap on profile spans. Profiles exceeding the cap are truncated |
 | `PROFILER_MAX_DEPTH` | `0` (no cap) | Maximum nesting depth of recorded calls; a deeper call and, except under self-recursion past 32 frames, everything it calls are absent from the profile — their time is not, and reads as exclusive time of the call at the limit. Dropped calls still count against `PROFILER_MAX_SPANS`. Clamped to `32`, the depth the engine observer tracks; with `PROFILER_ENABLED=true` a larger value is reported as clamped at startup |
 | `PROFILER_OUTPUT_DIR` | `/tmp/oxphp-profiles` | Directory for on-disk profile files |
-| `PROFILER_OUTPUT_FORMATS` | `xhprof,speedscope` | Comma-separated list of output formats to write to disk |
+| `PROFILER_OUTPUT_FORMATS` | `xhprof,collapsed` | Comma-separated list of output formats to write to disk: `xhprof`, `collapsed`. An unknown name is skipped with a startup warning |
 | `PROFILER_DISK_MAX_PER_SEC` | `10` | Rate limit on profile files written to disk per second |
 | `PROFILER_RETENTION_COUNT` | `100` | Maximum profile files kept in `PROFILER_OUTPUT_DIR`. Older files are pruned |
 | `PROFILER_EXPORT_URL` | *(unset)* | Remote endpoint to POST profiles to. When set, disk writes still happen unless `PROFILER_OUTPUT_FORMATS` is empty |
-| `PROFILER_EXPORT_FORMAT` | `xhprof` | Wire format for `PROFILER_EXPORT_URL` posts |
+| `PROFILER_EXPORT_FORMAT` | `xhprof` | Wire format for `PROFILER_EXPORT_URL` posts: `xhprof` or `collapsed`. The body is exactly that format. An unknown value falls back to `xhprof` with a startup warning |
 | `PROFILER_EXPORT_AUTH_TOKEN` | *(unset)* | Optional bearer token sent with each export request |
-| `PROFILER_EXPORT_XHGUI` | *(auto-detect)* | Boolean. Forces XHGui-compatible wrapping of the export payload. Unset = auto-detect when the `PROFILER_EXPORT_URL` path ends with `/run/import` (host/query hints are not matched) |
-| `PROFILER_EXPORT_BUGGREGATOR` | *(auto-detect)* | Boolean. Forces the Buggregator envelope. Unset = auto-detect when the `PROFILER_EXPORT_URL` path ends with `/api/profiler/store`. The envelope always emits xhprof, so `PROFILER_EXPORT_FORMAT` is ignored for it (a non-xhprof value warns, non-fatal). Mutually exclusive with `PROFILER_EXPORT_XHGUI` — enabling both is a startup error |
-| `PROFILER_EXPORT_APP_NAME` | *(unset)* | Buggregator `app_name` for project grouping |
-| `PROFILER_EXPORT_TAGS` | *(unset)* | Buggregator `tags` as `key=value,key2=value2`; a malformed token, empty key, or duplicate key is a startup error |
 
 ## Example Configurations
 

@@ -40,8 +40,6 @@ OxPHP registers its functions through the `oxphp_sapi` extension, which loads au
 - [OxPHP\\Profile\\is_active()](#oxphpprofileis_active)
 - [OxPHP\\Profile\\start()](#oxphpprofilestart)
 - [OxPHP\\Profile\\stop()](#oxphpprofilestop)
-- [OxPHP\\Profile\\pause()](#oxphpprofilepause)
-- [OxPHP\\Profile\\resume()](#oxphpprofileresume)
 - [OxPHP\\Profile\\mark()](#oxphpprofilemark)
 - [OxPHP\\Profile\\metric()](#oxphpprofilemetric)
 - [Classes and Interfaces](#classes-and-interfaces)
@@ -918,7 +916,7 @@ oxphp_apm_end($spanId);
 OxPHP\Profile\is_active(): bool
 ```
 
-Returns `true` when profile capture is currently active for this request — i.e. a trigger turned it on (header, cookie, query parameter, or sample rate) or the script called [`start()`](#oxphpprofilestart), and capture is not paused by [`pause()`](#oxphpprofilepause) or [`stop()`](#oxphpprofilestop). With the profiler disabled (`PROFILER_ENABLED`), triggers are not checked and `start()` does nothing, so neither turns capture on.
+Returns `true` when profile capture is currently active for this request — i.e. a trigger turned it on (header or sample rate) or the script called [`start()`](#oxphpprofilestart), and capture has not been ended by [`stop()`](#oxphpprofilestop). With the profiler disabled (`PROFILER_ENABLED`), triggers are not checked and `start()` does nothing, so neither turns capture on.
 
 Useful for guarding expensive instrumentation that should only run when profiling is on.
 
@@ -941,7 +939,7 @@ if (OxPHP\Profile\is_active()) {
 OxPHP\Profile\start(): void
 ```
 
-Programmatically enables profile capture for the remainder of the current request, even if no trigger fired at RINIT. Sets profiling mode to `PROFILE_ALL` and clears the paused flag.
+Programmatically enables profile capture for the remainder of the current request, even if no trigger fired at RINIT. Sets profiling mode to `PROFILE_ALL` and undoes [`stop()`](#oxphpprofilestop).
 
 Does nothing while the profiler is disabled (`PROFILER_ENABLED`): the profiler records no function calls then, so the call neither turns capture on nor makes [`is_active()`](#oxphpprofileis_active) return `true`.
 
@@ -978,39 +976,6 @@ OxPHP\Profile\start();
 expensive_work();
 OxPHP\Profile\stop();
 non_profiled_work();
-```
-
----
-
-## OxPHP\Profile\pause()
-
-```php
-OxPHP\Profile\pause(): void
-```
-
-Soft variant of [`stop()`](#oxphpprofilestop). Same effect (sets the paused flag); the distinction is intent — `pause()` signals that capture will resume later via [`resume()`](#oxphpprofileresume), while `stop()` does not.
-
-**Returns:** `void`.
-
----
-
-## OxPHP\Profile\resume()
-
-```php
-OxPHP\Profile\resume(): void
-```
-
-Clears the paused flag set by [`pause()`](#oxphpprofilepause) or [`stop()`](#oxphpprofilestop). Profile mode itself is not changed — if it was never enabled, `resume()` does nothing observable.
-
-**Returns:** `void`.
-
-**Example:**
-
-```php
-<?php
-OxPHP\Profile\pause();
-$secret = decrypt_payload($data);
-OxPHP\Profile\resume();
 ```
 
 ---
