@@ -4,6 +4,42 @@ All notable changes to OxPHP are documented in this file.
 
 ## [Unreleased]
 
+### Migration from 0.15.0
+
+The profiler lost most of its surface in this release, with no deprecation cycle. It keeps two triggers, two file formats and a plain HTTP push.
+
+**`PROFILER_OUTPUT_FORMATS` now defaults to `xhprof,collapsed`, and `speedscope` and `pprof` are no longer formats.** A list that still names them writes the rest and logs a startup warning for each name it skips.
+
+**A profile is now started only by the `X-OxPHP-Profile` header or by sampling.** An `OXPROF` cookie or a `__oxprof` query parameter does nothing, even with the right token. Send the header instead; in a browser, a request-header extension does this for a whole walk through pages.
+
+**`OxPHP\Profile\pause()` and `resume()` no longer exist, and calling either raises an `Error`.** Replace a pair with `stop()` and `start()`, and keep the check below: `resume()` did nothing on a request that was not being profiled, while `start()` turns profiling on for it.
+
+```php
+$profiled = OxPHP\Profile\is_active();
+if ($profiled) { OxPHP\Profile\stop(); }
+noisy_work();
+if ($profiled) { OxPHP\Profile\start(); }
+```
+
+**`GET /__profiler/stats` is gone: read the `oxphp_profiler_*` series on `/metrics`.** The label values `format="speedscope"`, `format="pprof"`, `source="cookie"` and `source="query"` no longer appear, so a dashboard or an alert selecting them goes empty.
+
+**`PROFILER_EXPORT_URL` now receives exactly what `PROFILER_EXPORT_FORMAT` names, with no wrapper.** A URL ending in `/run/import` or `/api/profiler/store` used to get an xhgui or Buggregator envelope automatically. To keep pushing to either, put an adapter in front of it that wraps the body.
+
+**`#[Profile]`, `#[Exclude]`, `#[Sample]` and `#[Tag]` no longer exist and can be deleted from your code.** PHP ignores an attribute whose class is missing, so the code keeps running without their effect. Only `ReflectionAttribute::newInstance()` on one of them throws an `Error`.
+
+**`GET /__profiler/runs/{id}/speedscope` is gone.** Download `/__profiler/runs/{id}.collapsed` and drop the file on speedscope.app.
+
+**Runs stored by the previous version stay listed in `/__profiler/runs`.** Retention deletes their `.speedscope.json` and `.pprof` files as usual, and asking for those two formats over HTTP answers `404`.
+
+### Removed
+
+- **The profiler's `OXPROF` cookie and `__oxprof` query-parameter triggers.**
+- **`OxPHP\Profile\pause()`, `OxPHP\Profile\resume()` and `PROFILER_INTERNAL`.** The two functions set the same flag as `stop()` and `start()`, and nothing read the variable.
+- **The `#[Profile]`, `#[Exclude]`, `#[Sample]` and `#[Tag]` attributes.** `#[Mark]`, `#[SlowThreshold]` and `#[MemoryThreshold]` stay.
+- **The speedscope and pprof profile formats.** Building OxPHP no longer needs `protoc`.
+- **The xhgui and Buggregator push envelopes**, with `PROFILER_EXPORT_XHGUI`, `PROFILER_EXPORT_BUGGREGATOR`, `PROFILER_EXPORT_APP_NAME` and `PROFILER_EXPORT_TAGS`, which are ignored if still set. A malformed value in them no longer stops the server at startup.
+- **The profiler's landing page, `/__profiler/stats`, `DELETE /__profiler/runs/{id}` and the speedscope redirect.** The admin routes left are `/config`, `/runs`, `/runs/{id}` and `/runs/{id}.{format}`.
+
 ### Changed
 
 - **`$request->payload()` now returns the fields of an `application/x-www-form-urlencoded` body on `PUT`, `PATCH`, `DELETE` and `QUERY`, where it returned an empty array.** PHP parses a form body for `POST` alone, so `payload()` now runs such a body through the parser `parse_str()` uses: it splits fields on `arg_separator.input` (`&` by default), stops at a raw NUL byte, and raises the `max_input_vars` warning from the `payload()` call that reaches the limit. `$_POST` stays empty on these methods, as it does under PHP, and `body()`, `php://input` and `request_parse_body()` still see the whole body. A `multipart/form-data` body on these methods still returns an empty array and leaves `file()` at `null`: read it with `request_parse_body()`. See [Parsed Body](docs/php/request-api.md#parsed-body).

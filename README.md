@@ -178,14 +178,14 @@ Full guide: [Distributed tracing](docs/features/distributed-tracing.md).
 
 Full guide: [Profiling](docs/features/profiling.md).
 
-- **Per-request profile capture** — triggered by cookie (`OXPROF`), header (`X-OxPHP-Profile`), query (`?__oxprof=`), or statistical sampling (`PROFILER_SAMPLE_RATE`); constant-time token compare
-- **Four export formats** — xhprof (for xhgui), speedscope (for speedscope.app), pprof (Go tools / Pyroscope), collapsed (FlameGraph)
+- **Per-request profile capture** — triggered by header (`X-OxPHP-Profile`) or statistical sampling (`PROFILER_SAMPLE_RATE`); constant-time token compare
+- **Two export formats** — collapsed stacks (speedscope.app, FlameGraph) and xhprof JSON
 - **Rich per-span data** — wall-time, CPU time, memory (start/end), events, attributes — nanosecond precision throughout
-- **PHP SDK** — 7 functions (`OxPHP\Profile\{start, stop, pause, resume, mark, metric, is_active}`) + 7 attributes (4 observer-filter: `#[Profile]` / `#[Exclude]` / `#[Sample]` / `#[Tag]`; 3 decorators: `#[Mark]` / `#[SlowThreshold]` / `#[MemoryThreshold]`)
+- **PHP SDK** — 5 functions (`OxPHP\Profile\{start, stop, mark, metric, is_active}`) + 3 decorator attributes (`#[Mark]` / `#[SlowThreshold]` / `#[MemoryThreshold]`)
 - **Shared tree with APM** — both plugins read one `Arc<SpanTree>`; no double collection; APM continues to export only explicit spans to OTel while the profiler keeps the full tree
 - **In-memory LRU + disk retention** — last `PROFILER_RETENTION_COUNT` runs always retrievable, token-bucket rate-limited writes, 5 s atomic-rename background trimmer
-- **HTTP push** — ship profiles to xhgui or any collector; 3× exponential backoff (100/200/400 ms) with 5 s wallclock cap; xhgui envelope auto-detect
-- **Internal HTTP routes** at `/__profiler/` — 8 endpoints (list / metadata / raw / speedscope redirect / DELETE / config / stats / landing) with optional bearer-token auth and path-traversal validation
+- **HTTP push** — ship profiles to any collector; 3× exponential backoff (100/200/400 ms) with 5 s wallclock cap
+- **Internal HTTP routes** at `/__profiler/` — 4 endpoints (list / metadata / raw / config) with optional bearer-token auth and path-traversal validation
 - **Prometheus metrics** — 8 counters + 1 gauge (runs, spans, bytes, disk drops, disk/HTTP saturation drops, push failures, truncated, in-memory runs) via `/metrics`
 
 ### Reliability & Operations
@@ -366,7 +366,7 @@ LISTEN_ADDR=127.0.0.1:8080 DOCUMENT_ROOT=./www/public ./target/release/oxphp
 | ~~**OpenTelemetry**~~  | ✅ Implemented — OTLP trace export via `plugin-otel` feature, W3C context propagation, per-request spans with standard semantic conventions |
 | ~~**APM & Auto-Instrumentation**~~ | ✅ Implemented — `plugin-apm` feature: automatic tracing of internal PHP functions across PDO, mysqli, cURL, Redis, Memcached, and file I/O, `#[OxPHP\Apm\Trace]` decorator, 10 `oxphp_apm_*()` SDK functions, PHP error capture |
 | **Custom Metrics** | PHP API for registering application-defined Prometheus metrics from userland code |
-| ~~**Built-in PHP Profiler**~~ | ✅ Implemented — `plugin-profiler` feature: per-request profiling with xhprof/speedscope/pprof/collapsed formats, PHP SDK, attribute triggers, in-memory LRU + disk retention, HTTP push to xhgui, `/__profiler/` internal routes, Prometheus metrics — see [Profiling](docs/features/profiling.md) |
+| ~~**Built-in PHP Profiler**~~ | ✅ Implemented — `plugin-profiler` feature: per-request profiling with xhprof and collapsed formats, PHP SDK, in-memory LRU + disk retention, HTTP push, `/__profiler/` internal routes, Prometheus metrics — see [Profiling](docs/features/profiling.md) |
 | ~~**Debian image in releases**~~ | ✅ Implemented — every release from 0.13.0 on is also published on Debian trixie (glibc) as `:trixie`, `:php8.5-trixie` and the release's other tags with a `-trixie` suffix, an alternative to the default Alpine image — see [Debian (glibc) Image](docs/getting-started/installation.md#debian-glibc-image) |
 | **Non-Docker Install** | *(speculative)* Native installation via system package managers (apt, brew, etc.) |
 | **HTTP/3** | QUIC-based HTTP/3 support |

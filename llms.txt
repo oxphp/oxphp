@@ -33,7 +33,7 @@
 - [Early Response](docs/features/early-response.md): Send the HTTP response immediately with oxphp_finish_request() and continue running background tasks in OxPHP.
 - [Fiber Multiplexing](docs/features/fiber-multiplexing.md): Handle hundreds of concurrent requests on a single PHP worker thread using cooperative multitasking with fibers.
 - [Internal Server](docs/features/internal-server.md): A dedicated HTTP server for health checks, Prometheus metrics, live configuration, and plugin endpoints.
-- [Profiling PHP code](docs/features/profiling.md): The definitive practical guide — from first run to production use. Triggers, PHP SDK, attributes, export formats, integration with speedscope/xhgui/pprof, metrics, troubleshooting.
+- [Profiling PHP code](docs/features/profiling.md): The definitive practical guide — from first run to production use. Triggers, PHP SDK, attributes, export formats, integration with speedscope and flamegraph.pl, metrics, troubleshooting.
 - [Rate Limiting](docs/features/rate-limiting.md): Built-in per-IP rate limiting for OxPHP with configurable thresholds, time windows, and standard HTTP rate limit response headers.
 - [Request IDs](docs/features/request-ids.md): Automatic unique request identifiers in OxPHP for distributed tracing and log correlation across your stack.
 - [Routing](docs/features/routing.md): Configure OxPHP routing with three modes — traditional file mapping, framework front-controller, and SPA fallback. Each mode mirrors the equivalent nginx try_files directive.

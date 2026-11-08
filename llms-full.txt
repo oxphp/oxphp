@@ -5386,8 +5386,7 @@ Worker mode metrics appear only when worker mode is enabled (`WORKER_MODE_ENABLE
 
 OxPHP ships a built-in, per-request profiler. Unlike xdebug or standalone
 extensions, it runs inside the server itself, requires no PHP restart, and
-adds no meaningful overhead when disabled (the `mode=Off` branch bails out
-before even touching the filter cache).
+adds no meaningful overhead when disabled.
 
 This document is a **practical guide**: from zero config, to hunting slow
 production endpoints, to reading flamegraphs, to comparing before/after
@@ -5406,7 +5405,6 @@ services:
       INTERNAL_ADDR: 0.0.0.0:9090
       PROFILER_ENABLED: "true"
       PROFILER_AUTH_TOKEN: "dev-secret"
-      PROFILER_OUTPUT_FORMATS: "xhprof,speedscope,collapsed"
     volumes:
       - ./www:/var/www/html
       - profiles:/tmp/oxphp-profiles
@@ -5426,9 +5424,15 @@ curl -H "X-OxPHP-Profile: dev-secret" http://localhost/slow-endpoint
 curl -H "Authorization: Bearer dev-secret" http://localhost:9090/__profiler/runs \
   | jq '.runs[0]'
 
-# 3. Open the profile in speedscope (in-browser flamegraph).
-open "http://localhost:9090/__profiler/runs/<run_id>/speedscope"
+# 3. Download the newest run as collapsed stacks.
+RUN_ID=$(curl -s -H "Authorization: Bearer dev-secret" http://localhost:9090/__profiler/runs \
+  | jq -r '.runs[0].run_id')
+curl -H "Authorization: Bearer dev-secret" \
+  "http://localhost:9090/__profiler/runs/$RUN_ID.collapsed" > profile.collapsed
 ```
+
+Drop `profile.collapsed` on [speedscope.app](https://www.speedscope.app/) to see
+the flamegraph.
 
 That's it. The rest of this guide explains what actually happens, and how
 to turn that into production insight.
@@ -5441,11 +5445,11 @@ to turn that into production insight.
   bytecode patching, no changes to application code.
 - **Builds a span tree** with wall-time, CPU-time, memory at entry/exit,
   attributes, and events.
-- **Exports four formats** simultaneously: `xhprof.json`, `speedscope.json`,
-  `pprof` (protobuf + gzip), `collapsed` (for `flamegraph.pl`).
+- **Exports two formats** simultaneously: `xhprof.json` and `collapsed` (for
+  `flamegraph.pl` and speedscope.app).
 - **Persists runs**: in-memory LRU cache + disk files + optional HTTP push
-  (xhgui or any custom collector).
-- **Exposes 8 internal HTTP routes** on `INTERNAL_ADDR` to browse and
+  to any collector.
+- **Exposes 4 internal HTTP routes** on `INTERNAL_ADDR` to browse and
   download profiles.
 - **Emits Prometheus metrics** — runs per source, spans collected,
   bytes written, drops, push failures.
@@ -5458,7 +5462,7 @@ to turn that into production insight.
 ```
  ┌─ Request ─────────────────────────────────────────────────────────┐
  │  1. Tokio thread: ProfilerRequestHandler inspects the trigger      │
- │     (header/cookie/query/sample_rate, constant-time compare)       │
+ │     (header/sample_rate, constant-time compare)                    │
  │                                                                    │
  │  2. Decision is written into PluginRequestActions → forwarded      │
  │     to the worker via the SAPI channel                             │
@@ -5471,7 +5475,7 @@ to turn that into production insight.
  │     a thread-local interner — no extra allocations)                │
  │                                                                    │
  │  5. After the response: ProfilerCompleteHandler receives           │
- │     Arc<SpanTree>, runs 4 exporters, puts into the LRU cache,      │
+ │     Arc<SpanTree>, puts it into the LRU cache,                     │
  │     spawns disk-write and HTTP-push tasks (semaphores bound        │
  │     the fan-out)                                                   │
  └────────────────────────────────────────────────────────────────────┘
@@ -5513,10 +5517,10 @@ docker compose exec app cat /proc/self/maps | grep -i profiler
 
 ---
 
-## 5. Activation — 4 trigger types
+## 5. Activation — 2 trigger types
 
-Check order (priority): **header → cookie → query → sample_rate**. Any
-match activates `ProfileAll`. Tokens are compared in **constant time**
+Check order (priority): **header → sample_rate**. Either one activates
+`ProfileAll`. The header token is compared in **constant time**
 (`subtle::ConstantTimeEq`).
 
 ### 5.1. HTTP header (for development and scripts)
@@ -5525,37 +5529,11 @@ match activates `ProfileAll`. Tokens are compared in **constant time**
 curl -H "X-OxPHP-Profile: dev-secret" https://app.local/checkout
 ```
 
-Ideal for CI benchmarks, Postman collections, curl scripts.
+Ideal for CI benchmarks, Postman collections, curl scripts. To walk a scenario
+in a browser, set the header with a request-header extension: every request
+sent while it is on is profiled.
 
-### 5.2. Cookie (for browser debugging)
-
-Set the cookie in the browser via DevTools / an extension:
-
-```
-OXPROF=dev-secret; Domain=app.local; Path=/
-```
-
-As long as the cookie is alive, every request is profiled. Delete it to
-stop. Useful for walking a user scenario (open product → add to cart →
-checkout) and collecting a **series** of profiles.
-
-The cookie is not stripped from the request: the token stays visible to the
-code being profiled and to anything that logs or forwards cookies. It appears
-in `$_COOKIE` and `$_SERVER['HTTP_COOKIE']` like any other cookie. One more
-reason to keep a production token off this path — see
-[Best practices](#17-best-practices).
-
-### 5.3. Query string (for sharing links)
-
-```
-https://app.local/admin/report?__oxprof=dev-secret
-```
-
-The bluntest method, but handy when you want to send a coworker a link
-like "open this, it reproduces the bug". Careful: the parameter ends up
-in access logs and in `Referer` — don't use it with a production token.
-
-### 5.4. Random sampling (for production)
+### 5.2. Random sampling (for production)
 
 ```bash
 PROFILER_SAMPLE_RATE=0.001   # ≈ 1 in 1000 requests
@@ -5563,10 +5541,9 @@ PROFILER_SAMPLE_RATE=0.001   # ≈ 1 in 1000 requests
 
 Runs **without a token**. Turn it on in production to accumulate statistics
 against real traffic. A good starting range is `0.0005..0.002`; higher
-values produce noticeable overhead, especially with
-`PROFILER_INTERNAL=true`.
+values produce noticeable overhead.
 
-### 5.5. Excluding paths from sampling
+### 5.3. Excluding paths from sampling
 
 `PROFILER_SAMPLE_RATE` samples a random fraction of **all** requests — including
 framework self-traffic that pollutes the data. Symfony's web debug toolbar polls
@@ -5584,11 +5561,10 @@ path **or** its subtree only if you list both — `/_profiler/**` covers
 Patterns match the request path as received — no percent-decoding or `..`
 normalization — so list the literal path your framework uses.
 
-> **Exclusion affects automatic sampling only.** A request carrying an explicit
-> trigger — the `x-oxphp-profile` header, the `OXPROF` cookie, or the `__oxprof`
-> query parameter — is **always** profiled, even on an excluded path. This lets
-> you deliberately profile `/_profiler` itself while keeping it out of background
-> sampling.
+> **Exclusion affects automatic sampling only.** A request carrying the
+> `x-oxphp-profile` header is **always** profiled, even on an excluded path. This
+> lets you deliberately profile `/_profiler` itself while keeping it out of
+> background sampling.
 
 ---
 
@@ -5597,23 +5573,18 @@ normalization — so list the literal path your framework uses.
 | Variable | Default | Description |
 |---|---|---|
 | `PROFILER_ENABLED` | `false` | Master switch. `true` → plugin is loaded. |
-| `PROFILER_AUTH_TOKEN` | *(unset)* | Secret for triggers and bearer token for `/__profiler/*` routes. Empty string = "no token required" (any non-empty trigger value passes). **Never commit the token to the repo.** |
+| `PROFILER_AUTH_TOKEN` | *(unset)* | Secret for the header trigger and bearer token for `/__profiler/*` routes. Empty string = "no token required" (any non-empty header value passes). **Never commit the token to the repo.** |
 | `PROFILER_SAMPLE_RATE` | `0.0` | `[0.0; 1.0]`. Random sampling rate. |
-| `PROFILER_EXCLUDE_PATHS` | *(unset)* | CSV glob patterns (`PHP_DENY_PATHS` syntax) excluded from `PROFILER_SAMPLE_RATE`. Explicit triggers still profile them. Example: `/_profiler,/_profiler/**,/_wdt/**`. |
-| `PROFILER_INTERNAL` | `false` | Observe **internal** C functions (`strlen`, `json_encode`, …). Full coverage, but **2–5× overhead**. Use surgically. |
+| `PROFILER_EXCLUDE_PATHS` | *(unset)* | CSV glob patterns (`PHP_DENY_PATHS` syntax) excluded from `PROFILER_SAMPLE_RATE`. The header trigger still profiles them. Example: `/_profiler,/_profiler/**,/_wdt/**`. |
 | `PROFILER_MAX_SPANS` | `50000` | Hard cap on the calls observed per request. Once it is reached no further spans are recorded, and the run is flagged `truncated`. With no depth limit set this is also the size of the tree; under `PROFILER_MAX_DEPTH` it is not, because a call the depth limit discards is counted here before the limit is applied — a truncated run then reaches disk with a fraction of this many spans. |
 | `PROFILER_MAX_DEPTH` | `0` (no cap) | Maximum nesting depth of recorded calls. A call nested deeper is not recorded, and normally neither is anything it calls — that subtree is absent from the profile rather than flattened into it. Its time is not: the call at the limit still spans everything it did, and with nothing recorded underneath it that duration reads as its own exclusive time, so a frame at the boundary looks hot in itself rather than hot in what it called. The exception to the depth rule is a function that recurses into itself more than 32 frames deep: past that the engine observer loses track of which call a return belongs to and attributes it to a shallower frame of the same function, so a call deeper than the limit can still be recorded and the durations around it should not be trusted. The effective maximum is `32`, the depth to which the engine observer tracks open calls; a larger value is accepted and clamped, and — with `PROFILER_ENABLED=true` — reported as clamped at startup. This bounds the profile, not the cost of producing it: the engine hook still runs on the deeper frames, and the calls it drops are still counted against `PROFILER_MAX_SPANS`. Spans an application pushes through the APM helpers are not subject to it. |
 | `PROFILER_OUTPUT_DIR` | `/tmp/oxphp-profiles` | Absolute path. Must be writable by `www-data`. |
-| `PROFILER_OUTPUT_FORMATS` | `xhprof,speedscope` | CSV subset of `xhprof`, `speedscope`, `pprof`, `collapsed`. |
+| `PROFILER_OUTPUT_FORMATS` | `xhprof,collapsed` | CSV subset of `xhprof`, `collapsed`. An unknown name is skipped with a startup warning. |
 | `PROFILER_RETENTION_COUNT` | `100` | How many runs to keep (both on disk and in LRU). Background trim every 5 seconds. |
 | `PROFILER_DISK_MAX_PER_SEC` | `10` | Token bucket protecting the disk. Overflow is dropped and increments `oxphp_profiler_disk_drops_total`. |
-| `PROFILER_EXPORT_URL` | *(unset)* | POST URL for each captured run (xhgui, custom collector). |
-| `PROFILER_EXPORT_FORMAT` | `xhprof` | One of the four formats for HTTP push. |
+| `PROFILER_EXPORT_URL` | *(unset)* | POST URL for each captured run. The body is exactly the `PROFILER_EXPORT_FORMAT` output. |
+| `PROFILER_EXPORT_FORMAT` | `xhprof` | `xhprof` or `collapsed`. An unknown value falls back to `xhprof` with a startup warning. |
 | `PROFILER_EXPORT_AUTH_TOKEN` | *(unset)* | Bearer token for the push target. |
-| `PROFILER_EXPORT_XHGUI` | `auto` | Force xhgui envelope mode. Auto: URL path ends with `/run/import` (the canonical xhgui endpoint; host/query hints are not matched — set this to `true` for a non-standard path). |
-| `PROFILER_EXPORT_BUGGREGATOR` | `auto` | Force the Buggregator envelope. Auto: URL path ends with `/api/profiler/store`. The envelope always emits xhprof, so `PROFILER_EXPORT_FORMAT` is ignored for it (a non-xhprof value is warned, not fatal). Mutually exclusive with `PROFILER_EXPORT_XHGUI` (enabling both is a startup error). |
-| `PROFILER_EXPORT_APP_NAME` | *(unset)* | Buggregator `app_name` — the project a profile is grouped under. |
-| `PROFILER_EXPORT_TAGS` | *(unset)* | Buggregator `tags`, a `key=value,key2=value2` list for filtering. A malformed token (not `key=value`), an empty key, or a duplicate key is a startup error. |
 
 ### Example production config
 
@@ -5622,18 +5593,17 @@ environment:
   PROFILER_ENABLED: "true"
   PROFILER_AUTH_TOKEN: "${PROFILER_TOKEN_FROM_VAULT}"
   PROFILER_SAMPLE_RATE: "0.001"             # ~0.1% of traffic
-  PROFILER_INTERNAL: "false"
   PROFILER_OUTPUT_DIR: /var/lib/oxphp/profiles
   PROFILER_OUTPUT_FORMATS: "xhprof,collapsed"
   PROFILER_RETENTION_COUNT: "500"
   PROFILER_DISK_MAX_PER_SEC: "20"
-  PROFILER_EXPORT_URL: "http://xhgui.monitoring.svc.cluster.local/run/import"
+  PROFILER_EXPORT_URL: "http://profile-collector.monitoring.svc.cluster.local/ingest"
   PROFILER_EXPORT_FORMAT: "xhprof"
 ```
 
 ---
 
-## 7. PHP SDK — seven functions
+## 7. PHP SDK — five functions
 
 All functions live in the `OxPHP\Profile` namespace. They are always safe
 to call: if profiling isn't active for the current request, mutators are
@@ -5657,26 +5627,11 @@ function heavy_report(): array
 `start()` is idempotent. `stop()` is too — calling it twice in a row is
 safe.
 
-> ⚠️ Calling `start()` mid-request **resets** the current tree (see
-> `PROFILING_CONTEXT.reset()` in `php_sdk.rs`). This matches the spec
-> invariant: mode is set **once** per request — either by the trigger at
-> RINIT, or by the first `start()` call.
+> ⚠️ If the request was running in APM-only mode, `start()` **discards** the
+> spans collected so far. A request that is already profiling keeps its tree,
+> so `stop()` followed by `start()` leaves a gap in it, not a reset.
 
-### 7.2. Pause and resume
-
-```php
-use function OxPHP\Profile\{pause, resume};
-
-pause();
-noisy_helper_we_dont_care_about();  // will not land in the tree
-resume();
-```
-
-Unlike `stop()`, pause/resume is a documentary signal for "temporarily".
-Internally it is the same flag, but the distinction helps a reader of the
-code.
-
-### 7.3. Point markers — mark()
+### 7.2. Point markers — mark()
 
 ```php
 use function OxPHP\Profile\mark;
@@ -5687,9 +5642,10 @@ mark('got_auth_token', ['user_id' => (string) $user->id]);
 
 Attaches a `SpanEventKind::Mark` event to the **topmost open span**. No-op
 when no span is open. Useful for interim timestamps in a long function
-or for marking if/else branches.
+or for marking if/else branches. See [section 9](#9-what-a-captured-span-contains)
+for where events can be read.
 
-### 7.4. Numeric metrics — metric()
+### 7.3. Numeric metrics — metric()
 
 ```php
 use function OxPHP\Profile\metric;
@@ -5700,10 +5656,11 @@ metric('payload.kb', strlen($body) / 1024.0);
 ```
 
 Appends `metric.<name>=<value>` to the **attributes** of the current span.
-Unlike `mark()`, this is a plain key-value pair (no timestamp). It shows
-up in speedscope/xhgui as a span property.
+Unlike `mark()`, this is a plain key-value pair (no timestamp), and like
+events, attributes are in neither file format. See
+[section 9](#9-what-a-captured-span-contains).
 
-### 7.5. Status check — is_active()
+### 7.4. Status check — is_active()
 
 ```php
 if (OxPHP\Profile\is_active()) {
@@ -5717,43 +5674,16 @@ Two TLS reads. Safe to call in hot code.
 
 ---
 
-## 8. Attributes (PHP 8) — declarative control
+## 8. Attributes (PHP 8) — decorators
 
-The seven attributes split into two categories: **observer filters** run
-**before** span creation; **decorators** run **after** the span closes.
+Three attributes add an event to the span of a function or method, and change
+nothing else about it.
 
-| Attribute | Category | Effect |
-|---|---|---|
-| `#[Profile]` | filter | Force-include the function in the tree (even if general rules would exclude it). |
-| `#[Exclude]` | filter | Skip the function; its children re-parent to the nearest included ancestor. |
-| `#[Sample(rate: 0.1)]` | filter | Keep only a fraction of calls (`rate ∈ [0.0; 1.0]`). Probabilistic — lock-free. |
-| `#[Tag(key, value)]` | filter | Attach a label to the span. Repeatable — multiple `#[Tag]` accumulate. |
-| `#[Mark(label?)]` | decorator | Emit a `Mark` event on function entry. |
-| `#[SlowThreshold(ms)]` | decorator | Emit a `Slow` event + set status when wall-time ≥ `ms`. |
-| `#[MemoryThreshold(kb)]` | decorator | Emit `MemorySpike` + status when net allocation ≥ `kb`. |
-
-### Class vs method composition
-
-```php
-use OxPHP\Profile\{Tag, Profile, Exclude};
-
-#[Tag(key: 'layer', value: 'domain')]
-#[Profile]                                    // the whole class is always profiled
-class OrderService
-{
-    #[Tag(key: 'op', value: 'create')]
-    public function create(array $data): Order { /* ... */ }
-
-    #[Exclude]                                 // excluded, despite class-level #[Profile]
-    public function debug_dump(): void { /* ... */ }
-
-    public function find(int $id): ?Order { /* ... */ }   // inherits #[Profile] and #[Tag(layer)]
-}
-```
-
-- Class-level attributes **propagate** to every method.
-- Method-level attributes **add to** class-level ones (tags accumulate).
-- `#[Exclude]` on a method **overrides** class-level `#[Profile]`.
+| Attribute | Effect |
+|---|---|
+| `#[Mark(label?)]` | Emit a `Mark` event on function entry. Without a label, the event takes the function's name. |
+| `#[SlowThreshold(ms)]` | Emit a `Slow` event when wall-time ≥ `ms`. |
+| `#[MemoryThreshold(kb)]` | Emit a `MemorySpike` event when net allocation ≥ `kb`. |
 
 ### Slow-function threshold
 
@@ -5763,8 +5693,7 @@ use OxPHP\Profile\SlowThreshold;
 #[SlowThreshold(ms: 250)]
 function render_dashboard(User $u): string
 {
-    // if it runs ≥ 250 ms — a Slow event is appended to the span and
-    // status_code=2 (error). Immediately visible in xhgui / speedscope.
+    // if it runs ≥ 250 ms, a Slow event is appended to the span
 }
 ```
 
@@ -5776,30 +5705,10 @@ use OxPHP\Profile\MemoryThreshold;
 #[MemoryThreshold(kb: 512)]
 function import_csv(string $path): int
 {
-    // if the function net-allocates ≥ 512 KB during execution —
-    // MemorySpike event + status=error
+    // if the function net-allocates ≥ 512 KB during execution,
+    // a MemorySpike event is appended to the span
 }
 ```
-
-### Sampling individual functions
-
-```php
-use OxPHP\Profile\Sample;
-
-#[Sample(rate: 0.01)]
-function log_event(string $evt, array $ctx): void
-{
-    // ≈ 1% of calls land in the tree; the rest are skipped entirely —
-    // neither the span nor its children are created. Useful for functions
-    // called millions of times per request.
-}
-```
-
-> **Filters vs decorators?** When a function is called **very often** and
-> you want to reduce capture cost — use `#[Sample]` or `#[Exclude]`
-> (they work before span creation). When you want to flag an event above
-> a threshold — use `#[SlowThreshold]` / `#[MemoryThreshold]` (they look
-> at the already-collected span).
 
 ---
 
@@ -5816,7 +5725,7 @@ FinishedSpan {
   cpu_ns          # CLOCK_THREAD_CPUTIME_ID (0 when the platform doesn't provide it)
   memory_start    # zend_memory_usage(0) on entry
   memory_end      # zend_memory_usage(0) on exit
-  attributes      # Vec<(Arc<str>, Arc<str>)> — from #[Tag], metric(), APM SQL/HTTP
+  attributes      # Vec<(Arc<str>, Arc<str>)> — from metric(), APM
   events          # Vec<SpanEvent { ts, kind, label, attrs }>
   status_code     # 0 = unset, 1 = ok, 2 = error
   status_message
@@ -5828,14 +5737,15 @@ FinishedSpan {
 
 | Kind | Emitted by |
 |---|---|
-| `Mark` | `mark()`, `metric()`, `#[Mark]` |
+| `Mark` | `mark()`, `#[Mark]` |
 | `Slow` | `#[SlowThreshold]` |
 | `MemorySpike` | `#[MemoryThreshold]` |
-| `Sql` | APM hooks (PDO, mysqli) |
-| `Http` | APM hooks (cURL, HTTP streams) |
 | `Exception` | APM exception handler |
-| `Alloc` | (reserved for heap sampling) |
-| `Other` | fallback |
+| `Custom` | `oxphp_apm_event()` |
+
+Events and attributes are in neither file format. The run index counts events
+in `event_count`, and they leave the server only through the APM OTLP export, on
+the spans APM exports, with the kind in the event attribute `oxphp.event.kind`.
 
 ---
 
@@ -5853,94 +5763,32 @@ tie a profile to its access-log line, use the `request_id` field of the
 `index.json` entry, which carries the id in full and is what the access log
 prints.
 
-### 10.1. speedscope (🏆 default for interactive analysis)
-
-Extension: `.speedscope.json`
-
-- In-browser flamegraph with zoom, search, CPU / time / memory toggle.
-- Zero setup — open directly at [speedscope.app](https://www.speedscope.app/).
-- OxPHP returns a 302 redirect at `/__profiler/runs/{id}/speedscope` →
-  speedscope.app with a `profileURL=…` parameter that fetches the profile
-  straight from your server.
-
-```bash
-# Ctrl-click in macOS Terminal / xdg-open on Linux
-open "http://localhost:9090/__profiler/runs/<run_id>/speedscope"
-```
-
-### 10.2. xhprof (for xhgui — timeline + historical diff)
-
-Extension: `.xhprof.json`
-
-- Compatible with xhgui (URL search, trends, diff between two runs).
-- Perfect for **production accumulation**: run an xhgui container next
-  to your app, point `PROFILER_EXPORT_URL=http://xhgui/run/import`, and
-  history piles up in the UI.
-- Ready docker-compose: `tests/compose.xhgui.yml`.
-
-### 10.3. pprof (Google pprof tooling, Grafana pprof plugin, Pyroscope)
-
-Extension: `.pprof` (protobuf + gzip, level `fast`, zlib backend)
-
-```bash
-# save and open
-curl -H "Authorization: Bearer dev-secret" \
-  http://localhost:9090/__profiler/runs/<run_id>.pprof > profile.pprof
-
-go tool pprof -http=:8080 profile.pprof
-# or
-pyroscope-cli adhoc --input profile.pprof
-```
-
-### 10.4. collapsed (Brendan Gregg's flamegraph.pl)
+### 10.1. collapsed (flamegraphs)
 
 Extension: `.collapsed`
 
-- Text format `func;child;grandchild <count>`.
-- De facto input for SVG flamegraphs.
-- Three metric variants: wall-time, CPU, memory. OxPHP writes `.collapsed`
-  (wall); internal pathways also produce `.collapsed.cpu` and
-  `.collapsed.mem` (see `tests/fixtures/profiler_exports/`).
+- Text format `main();func;child <microseconds>`, one line per call. The number
+  is the wall time of that call alone, without the calls it made, so the widths
+  in a flamegraph add up.
+- Opens in [speedscope.app](https://www.speedscope.app/): drop the file on the
+  page and pick **Left Heavy** to merge repeated calls.
+- De facto input for SVG flamegraphs with `flamegraph.pl`.
 
 ```bash
 curl -H "Authorization: Bearer dev-secret" \
   http://localhost:9090/__profiler/runs/<run_id>.collapsed \
-  | flamegraph.pl --title "Checkout $run_id" > flame.svg
+  | flamegraph.pl --title "Checkout" > flame.svg
 ```
 
-### 10.5. Buggregator (local debug server)
+### 10.2. xhprof (call-graph numbers)
 
-[Buggregator](https://buggregator.dev) is a single-binary debug server that,
-among other things, renders xhprof profiles as flame graphs grouped by project.
-The `xhprof` push targets its `POST /api/profiler/store` endpoint directly — no
-xhprof PHP extension or client library needed, OxPHP's native profiler produces
-the data.
+Extension: `.xhprof.json`
 
-```yaml
-services:
-  buggregator:
-    image: ghcr.io/buggregator/server:latest
-    ports: ["8000:8000"]
-
-  app:
-    image: ghcr.io/oxphp/oxphp:latest
-    environment:
-      PROFILER_ENABLED: "true"
-      PROFILER_SAMPLE_RATE: "0.01"
-      PROFILER_EXPORT_URL: "http://buggregator:8000/api/profiler/store"
-      PROFILER_EXPORT_FORMAT: "xhprof"
-      PROFILER_EXPORT_APP_NAME: "checkout"          # groups profiles by project
-      PROFILER_EXPORT_TAGS: "env=staging,region=eu" # filterable in the UI
-```
-
-A URL whose path ends in `/api/profiler/store` auto-selects the Buggregator
-envelope (`PROFILER_EXPORT_BUGGREGATOR: "true"` forces it for a custom URL;
-`"false"` opts out). This envelope always emits xhprof, so `PROFILER_EXPORT_FORMAT`
-is ignored for it (a non-xhprof value is warned at startup, not fatal — the
-profiler never crashes the server over an export knob). `app_name` and `tags`
-drive Buggregator's project grouping and filtering; without them the profile
-still renders but lands ungrouped. `hostname` comes from `$HOSTNAME`, falling
-back to the `gethostname(2)` syscall when that variable is not set.
+- The pair map `xhprof_disable()` returns:
+  `{"caller==>callee": {"ct", "wt", "cpu", "mu", "pmu"}}`.
+- Suits scripts: see [Hunting a memory leak](#153-hunting-a-memory-leak) for a
+  `jq` one-liner over it.
+- A viewer with its own import format needs an adapter in front of it.
 
 ---
 
@@ -5950,7 +5798,7 @@ back to the `gethostname(2)` syscall when that variable is not set.
 /tmp/oxphp-profiles/
 ├── index.json                                # NDJSON — one record per line
 ├── 1713600000000-a1b2c3d4-0f5e.xhprof.json
-├── 1713600000000-a1b2c3d4-0f5e.speedscope.json
+├── 1713600000000-a1b2c3d4-0f5e.collapsed
 └── 1713600001234-b2c3d4e5-4a2b.xhprof.json
 ```
 
@@ -5968,19 +5816,19 @@ back to the `gethostname(2)` syscall when that variable is not set.
   "status": 200,
   "user_agent": "Mozilla/5.0 …",
   "client_ip": "10.0.0.42",
-  "source": "Header",                 // Header | Cookie | Query | SampleRate | Sdk
+  "source": "Header",                 // Header | SampleRate | Sdk
   "span_count": 4821,
   "event_count": 7,
   "error_count": 0,
   "leaked_count": 0,
   "truncated": false,                 // true — exceeded PROFILER_MAX_SPANS
   "oxphp_version": "0.15.0",
-  "formats": ["xhprof.json", "speedscope.json"]
+  "formats": ["xhprof.json", "collapsed"]
 }
 ```
 
-`source` names what admitted the run. `Header`, `Cookie` and `Query` are the
-three triggers of section 5 and `SampleRate` is the sampling draw; `Sdk` covers
+`source` names what admitted the run. `Header` is the header trigger of
+section 5 and `SampleRate` is the sampling draw; `Sdk` covers
 every run no trigger admitted — a request that turned profiling on for itself
 with `OxPHP\Profile\start()`, and equally a plugin that selected full
 profiling on its own.
@@ -6003,21 +5851,17 @@ paginated via `?limit=N&offset=M`.
 
 ## 12. Internal HTTP routes
 
-With `INTERNAL_ADDR=0.0.0.0:9090`, the plugin registers 8 endpoints under
+With `INTERNAL_ADDR=0.0.0.0:9090`, the plugin registers 4 endpoints under
 the `/__profiler/` prefix. All require `Authorization: Bearer
 <PROFILER_AUTH_TOKEN>` when a token is configured. Comparison is
 **constant time**.
 
 | Route | Method | Purpose |
 |---|---|---|
-| `/__profiler/` | GET | HTML landing page with endpoint index. |
 | `/__profiler/runs` | GET | JSON array of runs. `?limit=N&offset=M`. |
 | `/__profiler/runs/{id}` | GET | JSON metadata for one run. |
-| `/__profiler/runs/{id}.{format}` | GET | Raw profile bytes. `format` ∈ `xhprof.json`, `speedscope.json`, `pprof`, `collapsed`. |
-| `/__profiler/runs/{id}/speedscope` | GET | 302 → speedscope.app with `profileURL=…`. |
-| `/__profiler/runs/{id}` | DELETE | Delete all format files + index entry (returns 204). |
+| `/__profiler/runs/{id}.{format}` | GET | Raw profile bytes. `format` ∈ `xhprof.json`, `collapsed`. |
 | `/__profiler/config` | GET | Current plugin configuration (tokens redacted). |
-| `/__profiler/stats` | GET | JSON counter snapshot. |
 
 ### Example scripts
 
@@ -6031,46 +5875,28 @@ curl -s -H "Authorization: Bearer $TOK" \
 curl -s -H "Authorization: Bearer $TOK" \
      "http://localhost:9090/__profiler/runs?limit=500" \
   | jq '.runs[] | select(.url == "/checkout")'
-
-# Delete all runs older than 1 hour (independent of the plugin's retention)
-NOW=$(date +%s%3N)
-CUTOFF=$((NOW - 3600000))
-curl -s -H "Authorization: Bearer $TOK" \
-     "http://localhost:9090/__profiler/runs?limit=1000" \
-  | jq -r --arg c "$CUTOFF" '.runs[] | select(.timestamp_ms < ($c|tonumber)) | .run_id' \
-  | xargs -I{} curl -X DELETE -H "Authorization: Bearer $TOK" \
-       "http://localhost:9090/__profiler/runs/{}"
 ```
 
 ---
 
-## 13. HTTP push + xhgui
+## 13. HTTP push
 
 Send each run to a remote collector:
 
 ```yaml
 environment:
-  PROFILER_EXPORT_URL: "http://xhgui/run/import"
+  PROFILER_EXPORT_URL: "http://profile-collector/ingest"
   PROFILER_EXPORT_FORMAT: "xhprof"
   PROFILER_EXPORT_AUTH_TOKEN: "shared-secret"   # optional
 ```
 
-- xhgui envelope auto-detection: URL **path ends with `/run/import`** (the
-  canonical xhgui endpoint). A fuzzy `xhgui` substring in the host or query is
-  not matched — force via `PROFILER_EXPORT_XHGUI=true|false` for such URLs.
+- The request body is exactly the `PROFILER_EXPORT_FORMAT` output, with no
+  wrapper. A collector that expects its own envelope needs an adapter in front
+  of it.
 - Retry plan: 3 attempts with exponential backoff `100/200/400 ms`, total
   budget 5 s wall-clock. The request body is shared across attempts as
   `bytes::Bytes` (zero retry allocations).
 - Errors increment `oxphp_profiler_http_push_failures_total`.
-
-### Full demo stack
-
-```bash
-docker compose -f tests/compose.xhgui.yml up -d
-# app: :80, xhgui: :8142 (UI), :27017 (mongo)
-```
-
-E2E smoke test: `tests/php/profiler/test_xhgui_import.php`.
 
 ---
 
@@ -6079,9 +5905,9 @@ E2E smoke test: `tests/php/profiler/test_xhgui_import.php`.
 Exposed on `/metrics`:
 
 ```
-oxphp_profiler_runs_total{source="header"|"cookie"|"query"|"sample"|"sdk"}
+oxphp_profiler_runs_total{source="header"|"sample"|"sdk"}
 oxphp_profiler_spans_collected_total
-oxphp_profiler_bytes_written_total{format="xhprof"|"speedscope"|"pprof"|"collapsed"}
+oxphp_profiler_bytes_written_total{format="xhprof"|"collapsed"}
 oxphp_profiler_disk_drops_total
 oxphp_profiler_http_push_failures_total
 oxphp_profiler_truncated_total
@@ -6099,7 +5925,7 @@ Starter Prometheus alerts:
 - alert: ProfilerPushFailing
   expr: rate(oxphp_profiler_http_push_failures_total[5m]) > 0
   annotations:
-    summary: "xhgui / collector is unreachable"
+    summary: "Profile collector is unreachable"
 
 - alert: ProfilerTruncatingTrees
   expr: rate(oxphp_profiler_truncated_total[5m]) > 0
@@ -6121,10 +5947,15 @@ Starter Prometheus alerts:
      | jq '.runs | sort_by(.duration_ms) | reverse | .[:10]
             | map({run_id, url, duration_ms, span_count})'
    ```
-3. Open the top one in speedscope: `.../__profiler/runs/<id>/speedscope`.
+3. Download the top one and drop it on
+   [speedscope.app](https://www.speedscope.app/):
+   ```bash
+   curl -s -H "Authorization: Bearer $TOK" \
+        "http://INT_ADDR/__profiler/runs/<id>.collapsed" > top.collapsed
+   ```
 4. Enable **Left Heavy** mode in speedscope — you'll see the functions
    with the most cumulative time.
-5. Click the widest bar — get file:line and the list of children.
+5. Click the widest bar to see its time and what it calls.
 
 ### 15.2. Validate a before/after hypothesis
 
@@ -6138,8 +5969,11 @@ Starter Prometheus alerts:
      | jq '.runs | map(.duration_ms) | add / length' > /tmp/p50_before.txt
    ```
 2. Apply changes, rebuild, repeat. Compare the medians.
-3. For a detailed diff, download two xhprof profiles and upload into
-   xhgui — it has a built-in diff view.
+3. For a detailed diff, download the `.collapsed` of one run from each side
+   and compare them with the FlameGraph scripts:
+   ```bash
+   difffolded.pl before.collapsed after.collapsed | flamegraph.pl > diff.svg
+   ```
 
 ### 15.3. Hunting a memory leak
 
@@ -6147,21 +5981,24 @@ Starter Prometheus alerts:
    ```bash
    curl -H "X-OxPHP-Profile: dev-secret" http://localhost/import?file=big.csv
    ```
-2. Open it in speedscope, switch to the **memory metric** (via
-   `.collapsed.mem` or speedscope's memory view).
-3. Add `#[MemoryThreshold(kb: 1024)]` on suspicious functions — you'll
-   get explicit `MemorySpike` events on the next run.
-4. Use `metric('mem.after', memory_get_usage())` for surgical
-   instrumentation.
+2. Download its xhprof profile and list the calls that grew memory the most:
+   ```bash
+   curl -s -H "Authorization: Bearer dev-secret" \
+        "http://localhost:9090/__profiler/runs/<id>.xhprof.json" \
+     | jq 'to_entries | sort_by(-.value.mu) | .[:10]
+           | map({call: .key, mu: .value.mu, pmu: .value.pmu})'
+   ```
+3. Add `#[MemoryThreshold(kb: 1024)]` on suspicious functions: a call over the
+   limit adds a `MemorySpike` event to its span, counted in `event_count` of
+   the run.
 
 ### 15.4. Continuous monitoring of a critical path
 
 ```php
-#[Profile]
 #[SlowThreshold(ms: 500)]
 public function chargeCard(PaymentRequest $r): PaymentResult
 {
-    // always captured + an explicit Slow mark when it lags
+    // an explicit Slow event on the span when it lags
 }
 ```
 
@@ -6169,18 +6006,6 @@ In Grafana, add a panel for
 `oxphp_profiler_runs_total{source="sample"}` and an alert on
 `duration_ms` outliers from `index.json` (via a log-based metric or a
 sidecar exporter).
-
-### 15.5. Reproduce a bug via a link
-
-A coworker says "/admin/report returns 500 for me". You reply:
-
-```
-https://app.local/admin/report?__oxprof=<one-time-token>
-```
-
-After they visit — `/__profiler/runs?limit=5`, open the profile, and
-see exactly where the exception landed (`status_code=2` + `Exception`
-event).
 
 ---
 
@@ -6201,22 +6026,21 @@ event).
 
 1. **Never commit `PROFILER_AUTH_TOKEN`**. Read from Vault / Docker
    secrets / Kubernetes secrets.
-2. **In production — only `SAMPLE_RATE`**. Header/cookie/query are
-   developer tools. If you need on-demand prod profiling — use a
+2. **In production — only `SAMPLE_RATE`**. The header trigger is a
+   developer tool. If you need on-demand prod profiling — use a
    dedicated, daily-rotated token.
-3. **Don't turn on `PROFILER_INTERNAL=true` globally**. 2–5× overhead
-   turns production into a lab. Use surgically in isolation.
-4. **Keep `PROFILER_RETENTION_COUNT` realistic** — a run can weigh from
+3. **Keep `PROFILER_RETENTION_COUNT` realistic** — a run can weigh from
    hundreds of KB (small request) to megabytes (large tree). 500 runs ×
    2 MB = 1 GB. Size the disk accordingly.
-5. **`#[Exclude]` noisy helpers** (logging, i18n, the autoloader) — the
-   tree becomes readable without losing meaning.
-6. **Link profiles to traces**: `trace_id` is shared. In Grafana / Kibana,
+4. **Mind `PROFILER_MAX_SPANS` on heavy requests**. A request that calls
+   helpers tens of thousands of times hits the cap: raise it, or profile
+   only the section of interest with `start()`/`stop()`.
+5. **Link profiles to traces**: `trace_id` is shared. In Grafana / Kibana,
    link `/__profiler/runs/<id>` from the trace view.
-7. **Git-friendly identifiers**. In this build, `span_id` is a
+6. **Git-friendly identifiers**. In this build, `span_id` is a
    deterministic big-endian monotonic counter. Diffing two stored
    profiles is clean.
-8. **APM + profiler is free**. Keep both enabled; the tree is shared,
+7. **APM + profiler is free**. Keep both enabled; the tree is shared,
    overhead comes only from APM's accumulated coverage.
 
 ---
@@ -6231,7 +6055,6 @@ event).
 2. `PROFILER_ENABLED=true`?
 3. Does the trigger actually match `PROFILER_AUTH_TOKEN`?
    - Look for a stray `\n` in the env var.
-   - For query — is it correctly URL-encoded?
 4. Does the server see your request at all? Check the access log.
 
 ### 401 from `/__profiler/runs`
@@ -6240,7 +6063,7 @@ The bearer token in the header doesn't match `PROFILER_AUTH_TOKEN`.
 Common trap: `echo "secret" > secret.txt` appends `\n`. Use `printf`
 or pass via env.
 
-### "xhgui doesn't show new runs"
+### "The collector doesn't receive new runs"
 
 1. Check reachability:
    ```bash
@@ -6262,7 +6085,6 @@ or pass via env.
 
 ### Too much overhead in production
 
-- `PROFILER_INTERNAL=false` (this is the default).
 - `PROFILER_SAMPLE_RATE` in a reasonable range (0.0005..0.002).
 - Reasonable `PROFILER_MAX_SPANS` — once it is reached no further spans
   are recorded, the request itself is not interrupted, and the prefix
@@ -6274,9 +6096,8 @@ or pass via env.
 
 A request exceeded `PROFILER_MAX_SPANS` (default 50,000). Options:
 1. Raise the cap (trading memory for detail).
-2. Add `#[Exclude]` / `#[Sample(rate: 0.01)]` on functions called tens
-   of thousands of times.
-3. Wrap only the suspect region in `start()`/`stop()`.
+2. Profile from PHP instead of a trigger, wrapping only the suspect region
+   in `start()`/`stop()`.
 
 ---
 
@@ -6290,26 +6111,22 @@ curl -H "X-OxPHP-Profile: $TOK" http://localhost/endpoint
 curl -sH "Authorization: Bearer $TOK" http://localhost:9090/__profiler/runs \
   | jq '.runs | sort_by(.duration_ms) | reverse | .[:10]'
 
-# Open in speedscope
-open "http://localhost:9090/__profiler/runs/$RUN_ID/speedscope"
+# The newest run's id
+RUN_ID=$(curl -sH "Authorization: Bearer $TOK" http://localhost:9090/__profiler/runs \
+  | jq -r '.runs[0].run_id')
 
-# Download as xhprof for xhgui import
+# Download for speedscope.app (drop the file on the page)
+curl -sH "Authorization: Bearer $TOK" \
+  http://localhost:9090/__profiler/runs/$RUN_ID.collapsed > run.collapsed
+
+# Download as xhprof
 curl -sH "Authorization: Bearer $TOK" \
   http://localhost:9090/__profiler/runs/$RUN_ID.xhprof.json > run.xhprof.json
-
-# Download as pprof and open
-curl -sH "Authorization: Bearer $TOK" \
-  http://localhost:9090/__profiler/runs/$RUN_ID.pprof > run.pprof
-go tool pprof -http=:8080 run.pprof
 
 # flamegraph.pl
 curl -sH "Authorization: Bearer $TOK" \
   http://localhost:9090/__profiler/runs/$RUN_ID.collapsed \
   | flamegraph.pl > flame.svg
-
-# Delete a run
-curl -X DELETE -H "Authorization: Bearer $TOK" \
-  http://localhost:9090/__profiler/runs/$RUN_ID
 
 # Metrics
 curl -s http://localhost:9090/metrics | grep oxphp_profiler_
@@ -6386,11 +6203,8 @@ curl -H "X-OxPHP-Profile: dev-secret" 'http://localhost/report.php?user_id=42'
 // www/lib/OrderService.php
 declare(strict_types=1);
 
-use OxPHP\Profile\{Profile, Tag, Exclude, Sample, SlowThreshold, MemoryThreshold};
+use OxPHP\Profile\{SlowThreshold, MemoryThreshold};
 
-#[Profile]
-#[Tag(key: 'layer', value: 'domain')]
-#[Tag(key: 'svc',   value: 'orders')]
 final class OrderService
 {
     public function __construct(
@@ -6399,7 +6213,6 @@ final class OrderService
     ) {}
 
     #[SlowThreshold(ms: 250)]
-    #[Tag(key: 'op', value: 'create')]
     public function create(array $payload): int
     {
         $this->db->beginTransaction();
@@ -6416,7 +6229,6 @@ final class OrderService
     }
 
     #[MemoryThreshold(kb: 2048)]
-    #[Tag(key: 'op', value: 'export')]
     public function exportCsv(int $user_id): string
     {
         $stmt = $this->db->prepare('SELECT * FROM orders WHERE user_id = ?');
@@ -6431,23 +6243,6 @@ final class OrderService
         return stream_get_contents($buf);
     }
 
-    // Trivial getter — don't clutter the tree.
-    #[Exclude]
-    public function find(int $id): ?array
-    {
-        $stmt = $this->db->prepare('SELECT * FROM orders WHERE id = ?');
-        $stmt->execute([$id]);
-        return $stmt->fetch(PDO::FETCH_ASSOC) ?: null;
-    }
-
-    // Very frequent audit — sample to avoid inflating the tree.
-    #[Sample(rate: 0.05)]
-    private function audit(string $event, array $ctx): void
-    {
-        $this->db->prepare('INSERT INTO audit (event, ctx) VALUES (?, ?)')
-                 ->execute([$event, json_encode($ctx)]);
-    }
-
     private function insertOrder(array $p): int { /* ... */ return 0; }
     private function insertLines(int $id, array $items): void { /* ... */ }
 }
@@ -6460,7 +6255,7 @@ final class OrderService
 // www/bin/import.php
 declare(strict_types=1);
 
-use function OxPHP\Profile\{start, stop, pause, resume, mark};
+use function OxPHP\Profile\{start, stop, mark};
 
 $files = glob('/data/incoming/*.csv');
 $i = 0;
@@ -6469,8 +6264,6 @@ foreach ($files as $path) {
     if ($i === 0) {
         start();                       // profile only the first file in full
         mark('batch.begin', ['path' => $path]);
-    } else {
-        pause();                       // the rest — no-op for capture
     }
 
     import_one($path);
@@ -6538,7 +6331,7 @@ curl -H "X-OxPHP-Profile: dev-secret" "http://localhost/bench.php?impl=naive"
 # Streaming
 curl -H "X-OxPHP-Profile: dev-secret" "http://localhost/bench.php?impl=streaming"
 
-# Diff in xhgui (two latest xhprof runs)
+# The two latest runs: download their .collapsed files and diff them (section 15.2)
 curl -sH "Authorization: Bearer dev-secret" \
      "http://localhost:9090/__profiler/runs?limit=2" | jq '.runs[] | .run_id'
 ```
@@ -6678,10 +6471,7 @@ currently watching.
 - Bridge (C): `ext/bridge/oxphp_bridge.c`, `ext/oxphp_sapi.c`
 - PHP tests: `tests/php/profiler/`
 - Format fixtures: `tests/fixtures/profiler_exports/`
-- xhgui demo: `tests/compose.xhgui.yml`
 - speedscope: <https://www.speedscope.app/>
-- xhgui: <https://github.com/perftools/xhgui>
-- Google pprof: <https://github.com/google/pprof>
 - flamegraph.pl: <https://github.com/brendangregg/FlameGraph>
 
 ---
@@ -13396,8 +13186,6 @@ OxPHP registers its functions through the `oxphp_sapi` extension, which loads au
 - [OxPHP\\Profile\\is_active()](#oxphpprofileis_active)
 - [OxPHP\\Profile\\start()](#oxphpprofilestart)
 - [OxPHP\\Profile\\stop()](#oxphpprofilestop)
-- [OxPHP\\Profile\\pause()](#oxphpprofilepause)
-- [OxPHP\\Profile\\resume()](#oxphpprofileresume)
 - [OxPHP\\Profile\\mark()](#oxphpprofilemark)
 - [OxPHP\\Profile\\metric()](#oxphpprofilemetric)
 - [Classes and Interfaces](#classes-and-interfaces)
@@ -14274,7 +14062,7 @@ oxphp_apm_end($spanId);
 OxPHP\Profile\is_active(): bool
 ```
 
-Returns `true` when profile capture is currently active for this request — i.e. a trigger turned it on (header, cookie, query parameter, or sample rate) or the script called [`start()`](#oxphpprofilestart), and capture is not paused by [`pause()`](#oxphpprofilepause) or [`stop()`](#oxphpprofilestop). With the profiler disabled (`PROFILER_ENABLED`), triggers are not checked and `start()` does nothing, so neither turns capture on.
+Returns `true` when profile capture is currently active for this request — i.e. a trigger turned it on (header or sample rate) or the script called [`start()`](#oxphpprofilestart), and capture has not been ended by [`stop()`](#oxphpprofilestop). With the profiler disabled (`PROFILER_ENABLED`), triggers are not checked and `start()` does nothing, so neither turns capture on.
 
 Useful for guarding expensive instrumentation that should only run when profiling is on.
 
@@ -14297,7 +14085,7 @@ if (OxPHP\Profile\is_active()) {
 OxPHP\Profile\start(): void
 ```
 
-Programmatically enables profile capture for the remainder of the current request, even if no trigger fired at RINIT. Sets profiling mode to `PROFILE_ALL` and clears the paused flag.
+Programmatically enables profile capture for the remainder of the current request, even if no trigger fired at RINIT. Sets profiling mode to `PROFILE_ALL` and undoes [`stop()`](#oxphpprofilestop).
 
 Does nothing while the profiler is disabled (`PROFILER_ENABLED`): the profiler records no function calls then, so the call neither turns capture on nor makes [`is_active()`](#oxphpprofileis_active) return `true`.
 
@@ -14334,39 +14122,6 @@ OxPHP\Profile\start();
 expensive_work();
 OxPHP\Profile\stop();
 non_profiled_work();
-```
-
----
-
-## OxPHP\Profile\pause()
-
-```php
-OxPHP\Profile\pause(): void
-```
-
-Soft variant of [`stop()`](#oxphpprofilestop). Same effect (sets the paused flag); the distinction is intent — `pause()` signals that capture will resume later via [`resume()`](#oxphpprofileresume), while `stop()` does not.
-
-**Returns:** `void`.
-
----
-
-## OxPHP\Profile\resume()
-
-```php
-OxPHP\Profile\resume(): void
-```
-
-Clears the paused flag set by [`pause()`](#oxphpprofilepause) or [`stop()`](#oxphpprofilestop). Profile mode itself is not changed — if it was never enabled, `resume()` does nothing observable.
-
-**Returns:** `void`.
-
-**Example:**
-
-```php
-<?php
-OxPHP\Profile\pause();
-$secret = decrypt_payload($data);
-OxPHP\Profile\resume();
 ```
 
 ---
@@ -14809,7 +14564,7 @@ $theme   = $_COOKIE['theme'];    // "dark"
 
 > **Note:** Cookies with the `__oxp_` prefix are reserved for internal OxPHP plugins. They are stripped from the `Cookie` header before it reaches PHP and will not appear in `$_COOKIE`. So are cookies whose name PHP would register under that prefix, such as `__oxp.x`: PHP turns a space, a dot or an unmatched `[` in a cookie name into `_`. Every `[` counts here, so a name PHP would make an array, such as `__oxp[a]` (`$_COOKIE['__oxp']['a']`) or `_[oxp_t]`, is stripped as well.
 
-> **Note:** A `Cookie` header holding a byte outside ASCII is dropped as a whole, with no log message about it. `$_COOKIE` is empty, `$_SERVER['HTTP_COOKIE']` is not set, and the request object finds no cookies and no `cookie` header. Plugins and the profiler's `OXPROF` trigger see no cookies on such a request either.
+> **Note:** A `Cookie` header holding a byte outside ASCII is dropped as a whole, with no log message about it. `$_COOKIE` is empty, `$_SERVER['HTTP_COOKIE']` is not set, and the request object finds no cookies and no `cookie` header. Plugins see no cookies on such a request either.
 
 > **`filter_input(INPUT_COOKIE, …)`** reads the filter extension's own copy of the cookies rather than `$_COOKIE` — see the note under [`$_GET`](#_get) for what that copy is and how long it lasts.
 
@@ -15505,27 +15260,22 @@ In-process concurrency primitives (`OxPHP\Shared\Counter`, `Map`, `Channel`, `Mu
 
 ## Profiling
 
-Sampling profiler that emits xhprof / speedscope traces. See [Profiling](../features/profiling.md) for output formats and viewer integration.
+Per-request profiler that writes xhprof and collapsed-stack profiles. See [Profiling](../features/profiling.md) for output formats and viewer integration.
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `PROFILER_ENABLED` | `false` | Boolean — see [Boolean values](#boolean-values). Master switch. All other `PROFILER_*` vars are still parsed at startup so typos surface immediately |
 | `PROFILER_SAMPLE_RATE` | `0.0` | Probability (0.0–1.0) that a request is sampled. Values outside the range are clamped |
-| `PROFILER_INTERNAL` | `false` | Boolean. When truthy, requests to the internal server (`/health`, `/metrics`, plugin endpoints) are also eligible for sampling |
-| `PROFILER_AUTH_TOKEN` | *(unset)* | Secret the explicit triggers must carry — the `X-OxPHP-Profile` header, the `OXPROF` cookie, the `__oxprof` query parameter — and the bearer token for the `/__profiler/*` routes on the internal server. Unset or empty = no token required: any non-empty trigger value passes, and the `/__profiler/*` routes answer without a bearer. `PROFILER_SAMPLE_RATE` sampling and the `OxPHP\Profile\*` PHP functions never consult it — under `PROFILER_ENABLED=true` a script that calls `OxPHP\Profile\start()` profiles its own request with no token involved |
+| `PROFILER_AUTH_TOKEN` | *(unset)* | Secret the `X-OxPHP-Profile` header must carry, and the bearer token for the `/__profiler/*` routes on the internal server. Unset or empty = no token required: any non-empty header value passes, and the `/__profiler/*` routes answer without a bearer. `PROFILER_SAMPLE_RATE` sampling and the `OxPHP\Profile\*` PHP functions never consult it — under `PROFILER_ENABLED=true` a script that calls `OxPHP\Profile\start()` profiles its own request with no token involved |
 | `PROFILER_MAX_SPANS` | `50000` | Per-request cap on profile spans. Profiles exceeding the cap are truncated |
 | `PROFILER_MAX_DEPTH` | `0` (no cap) | Maximum nesting depth of recorded calls; a deeper call and, except under self-recursion past 32 frames, everything it calls are absent from the profile — their time is not, and reads as exclusive time of the call at the limit. Dropped calls still count against `PROFILER_MAX_SPANS`. Clamped to `32`, the depth the engine observer tracks; with `PROFILER_ENABLED=true` a larger value is reported as clamped at startup |
 | `PROFILER_OUTPUT_DIR` | `/tmp/oxphp-profiles` | Directory for on-disk profile files |
-| `PROFILER_OUTPUT_FORMATS` | `xhprof,speedscope` | Comma-separated list of output formats to write to disk |
+| `PROFILER_OUTPUT_FORMATS` | `xhprof,collapsed` | Comma-separated list of output formats to write to disk: `xhprof`, `collapsed`. An unknown name is skipped with a startup warning |
 | `PROFILER_DISK_MAX_PER_SEC` | `10` | Rate limit on profile files written to disk per second |
 | `PROFILER_RETENTION_COUNT` | `100` | Maximum profile files kept in `PROFILER_OUTPUT_DIR`. Older files are pruned |
 | `PROFILER_EXPORT_URL` | *(unset)* | Remote endpoint to POST profiles to. When set, disk writes still happen unless `PROFILER_OUTPUT_FORMATS` is empty |
-| `PROFILER_EXPORT_FORMAT` | `xhprof` | Wire format for `PROFILER_EXPORT_URL` posts |
+| `PROFILER_EXPORT_FORMAT` | `xhprof` | Wire format for `PROFILER_EXPORT_URL` posts: `xhprof` or `collapsed`. The body is exactly that format. An unknown value falls back to `xhprof` with a startup warning |
 | `PROFILER_EXPORT_AUTH_TOKEN` | *(unset)* | Optional bearer token sent with each export request |
-| `PROFILER_EXPORT_XHGUI` | *(auto-detect)* | Boolean. Forces XHGui-compatible wrapping of the export payload. Unset = auto-detect when the `PROFILER_EXPORT_URL` path ends with `/run/import` (host/query hints are not matched) |
-| `PROFILER_EXPORT_BUGGREGATOR` | *(auto-detect)* | Boolean. Forces the Buggregator envelope. Unset = auto-detect when the `PROFILER_EXPORT_URL` path ends with `/api/profiler/store`. The envelope always emits xhprof, so `PROFILER_EXPORT_FORMAT` is ignored for it (a non-xhprof value warns, non-fatal). Mutually exclusive with `PROFILER_EXPORT_XHGUI` — enabling both is a startup error |
-| `PROFILER_EXPORT_APP_NAME` | *(unset)* | Buggregator `app_name` for project grouping |
-| `PROFILER_EXPORT_TAGS` | *(unset)* | Buggregator `tags` as `key=value,key2=value2`; a malformed token, empty key, or duplicate key is a startup error |
 
 ## Example Configurations
 

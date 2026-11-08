@@ -2361,7 +2361,7 @@ namespace OxPHP\Profile {
     }
 
     /**
-     * Emit a `slow.call` marker if the decorated call exceeds `$ms`
+     * Emit a `slow` marker if the decorated call exceeds `$ms`
      * wall-clock milliseconds.
      */
     #[\Attribute(\Attribute::TARGET_FUNCTION | \Attribute::TARGET_METHOD)]
@@ -2371,7 +2371,7 @@ namespace OxPHP\Profile {
     }
 
     /**
-     * Emit a `memory.spike` marker if the decorated call grows PHP's
+     * Emit a `memory_spike` marker if the decorated call grows PHP's
      * memory usage by more than `$kb` kilobytes.
      */
     #[\Attribute(\Attribute::TARGET_FUNCTION | \Attribute::TARGET_METHOD)]
