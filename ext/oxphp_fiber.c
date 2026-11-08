@@ -6468,6 +6468,13 @@ void oxphp_scheduler_start_fiber(oxphp_fiber_scheduler *sched, oxphp_request_fib
      * this request's — see oxphp_recover_from_reported_oom(). */
     oxphp_recover_from_reported_oom();
 
+    if (!sched->first_started) {
+        sched->first_started = true;
+        if (oxphp_bridge_get_runtime_hooks()[0] != '\0') {
+            sched->first_alone = fiber;
+        }
+    }
+
     sched->current = fiber;
 
     void *saved_stack_base = EG(stack_base);
@@ -6713,6 +6720,10 @@ void oxphp_scheduler_finalize_fiber(oxphp_fiber_scheduler *sched, oxphp_request_
     /* Do NOT release the fiber — its loop is parked at the bottom, keeping the C
      * and VM stacks alive for the next request. oxphp_fiber_release runs only in
      * scheduler_destroy (final cleanup). */
+
+    if (sched->first_alone == fiber) {
+        sched->first_alone = NULL;
+    }
 
     /* Remove from active list */
     if (fiber->prev) fiber->prev->next = fiber->next;
@@ -7543,6 +7554,17 @@ static uint32_t oxphp_io_collect_ready(oxphp_fiber_scheduler *sched,
 
 /* ─── Event Loop Tick ──────────────────────────────────── */
 
+/* How long a worker's first request keeps the worker to itself once it has begun
+ * to wait: long enough for what building an application asks of a nearby cache or
+ * database. The requests held back are spending their QUEUE_WAIT_TIMEOUT_MS budget
+ * (1000 ms by default, from their arrival), and on a pool with no other worker free
+ * one that runs out is refused with a 529, so this has to stay well short of it.
+ * Work the first request did before waiting has already used some up: past about
+ * 750 ms of it, a first request still running when the budget ends costs the next
+ * one a 529. The window is not shortened for that, because a build that waits
+ * briefly after such work ends within the budget and would be overlapped. */
+#define OXPHP_FIRST_REQUEST_ALONE_NS (250ULL * 1000000ULL)
+
 int oxphp_scheduler_tick(oxphp_fiber_scheduler *sched) {
     int work_done = 0;
 
@@ -7554,11 +7576,27 @@ int oxphp_scheduler_tick(oxphp_fiber_scheduler *sched) {
         work_done = 1;
     }
 
+    /* The tick runs only once the handler has given the thread back, so the
+     * first look at this request is the moment it began to wait. */
+    if (sched->first_alone != NULL) {
+        struct timespec ts;
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        uint64_t now_ns = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+
+        if (sched->first_alone_until_ns == 0) {
+            sched->first_alone_until_ns = now_ns + OXPHP_FIRST_REQUEST_ALONE_NS;
+        } else if (now_ns >= sched->first_alone_until_ns) {
+            sched->first_alone = NULL;
+        }
+    }
+
     /* 1. Check for new requests (non-blocking). None while a session is parked
      * open on the worker, including one opened by a request admitted in this
-     * loop: the queue is shared, so what is not taken here waits for another
-     * worker or for the session to close. */
-    while (sched->fiber_count < OXPHP_MAX_FIBERS && sched->session_holder == NULL) {
+     * loop, nor beside a worker's first request while it runs alone: the queue
+     * is shared, so what is not taken here waits for another worker or for this
+     * one to take requests again. */
+    while (sched->fiber_count < OXPHP_MAX_FIBERS && sched->session_holder == NULL
+           && sched->first_alone == NULL) {
         int rc = oxphp_bridge_worker_try_recv();
         if (rc == -1) return -1; /* shutdown */
         if (rc == 1) break;     /* empty */
