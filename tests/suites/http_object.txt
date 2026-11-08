@@ -43,6 +43,25 @@ http_object/test_payload_json_false | POST | -H "Content-Type: application/json"
 http_object/test_payload_json_null | POST | -H "Content-Type: application/json" -d 'null' | |
 http_object/test_payload_json_invalid | POST | -H "Content-Type: application/json" -d '{bad' | |
 http_object/test_payload_form | POST | -H "Content-Type: application/x-www-form-urlencoded" -d "key=value&num=42" | |
+http_object/test_payload_numeric_key >> ?body=json | POST | -H "Content-Type: application/json" -d '{"0":"a","12":"b","-1":"c","01":"d","name":"n"}' | |
+http_object/test_payload_numeric_key >> ?body=form | POST | -H "Content-Type: application/x-www-form-urlencoded" -d "0=a&12=b&-1=c&01=d&name=n" | |
+http_object/test_file_numeric_field | POST | -F "0=@$FIXTURES_DIR/small.txt" -F "12=@$FIXTURES_DIR/small.txt" -F "named=@$FIXTURES_DIR/small.txt" | |
+http_object/test_session_numeric_key
+http_object/test_payload_put_form >> ?method=put | PUT | -H "Content-Type: application/x-www-form-urlencoded" -d "a=1&b=two&7=seven" | |
+http_object/test_payload_put_form >> ?method=patch | PATCH | -H "Content-Type: application/x-www-form-urlencoded" -d "a=1&b=two&7=seven" | |
+http_object/test_payload_put_form >> ?method=delete | DELETE | -H "Content-Type: application/x-www-form-urlencoded" -d "a=1&b=two&7=seven" | |
+http_object/test_payload_put_form >> ?method=query | QUERY | -H "Content-Type: application/x-www-form-urlencoded" -d "a=1&b=two&7=seven" | |
+http_object/test_payload_put_form >> ?ct=mixed-case | PUT | -H "Content-Type: Application/X-WWW-Form-Urlencoded; charset=UTF-8" -d "a=1&b=two&7=seven" | |
+http_object/test_payload_put_other_type | PUT | -H "Content-Type: application/vnd.example.long-type+xml" -d "a=1&b=two" | |
+http_object/test_payload_form_raw_nul >> ?method=post | POST | -H "Content-Type: application/x-www-form-urlencoded" --data-binary "@$FIXTURES_DIR/form_raw_nul.bin" | |
+http_object/test_payload_form_raw_nul >> ?method=put | PUT | -H "Content-Type: application/x-www-form-urlencoded" --data-binary "@$FIXTURES_DIR/form_raw_nul.bin" | |
+http_object/test_payload_put_multipart >> ?method=put | PUT | -F "field=fieldval" -F "doc=@$FIXTURES_DIR/small.txt" | |
+http_object/test_payload_put_multipart >> ?method=patch | PATCH | -F "field=fieldval" -F "doc=@$FIXTURES_DIR/small.txt" | |
+http_object/test_payload_post_as_sent | POST | -H "Content-Type: application/x-www-form-urlencoded" -d "a=1" | |
+http_object/test_payload_json_last_error >> ?body=scalar | POST | -H "Content-Type: application/json" -d '"hello"' | |
+http_object/test_payload_json_last_error >> ?body=array | POST | -H "Content-Type: application/json" -d '{"a":1}' | |
+http_object/test_payload_json_last_error >> ?body=invalid | POST | -H "Content-Type: application/json" -d '{bad' | |
+http_object/test_payload_put_max_input_vars | PUT | -H "Content-Type: application/x-www-form-urlencoded" --data-binary "@$FIXTURES_DIR/thousand_and_one.urlencoded" | |
 http_object/test_ip
 http_object/test_start_time
 http_object/test_attributes

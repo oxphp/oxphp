@@ -12326,7 +12326,7 @@ OxPHP provides an object-oriented API for accessing HTTP request data. Instead o
 
 **Why use it instead of superglobals?**
 
-- **JSON body parsing is built in.** `$request->payload()` hands back a decoded `application/json` body whatever the request method is, and the fields of a `POST` form body — `application/x-www-form-urlencoded` or `multipart/form-data` — without extra code. The exact returns are in [Parsed Body](#parsed-body).
+- **JSON body parsing is built in.** `$request->payload()` hands back a decoded `application/json` body and the fields of an `application/x-www-form-urlencoded` body on any method that carries one, and the text fields of a `POST` `multipart/form-data` body, without extra code. The exact returns are in [Parsed Body](#parsed-body).
 - **No array key typos.** `$request->method()` is harder to mistype than `$_SERVER['REQUEST_METHOD']`.
 - **Type-detected file uploads.** `$request->file('avatar')->type()` returns the MIME type determined from the file's actual contents, not the client-supplied value.
 - **Testable.** Because behavior is defined by interfaces, you can inject mock implementations in unit tests.
@@ -12492,12 +12492,18 @@ Returns the parsed request body. The body is parsed according to the `Content-Ty
 
 | Content-Type | Returns |
 |---|---|
-| `application/x-www-form-urlencoded` | Associative array of field values, on a POST request; an empty array on any other method |
+| `application/x-www-form-urlencoded` | Associative array of field values, on any method that carries a body |
 | `multipart/form-data` | Associative array of text field values, on a POST request; an empty array on any other method |
 | `application/json` | The decoded value — an array for an object or an array, otherwise the scalar itself (`string`, `int`, `float`, `bool`); `null` for invalid JSON and for a literal `null` body |
 | Any other value | `null`. Matching is by prefix, so anything beginning `application/json` — `application/json-patch+json`, for one — takes the JSON row above, while `text/json` and `application/vnd.api+json` land here |
 
-A JSON body is decoded whatever the request method is. A form body is not: the two form rows read what PHP parsed the body into, and PHP does that for POST alone, so `payload()` on a `PUT` or `PATCH` carrying form fields returns an empty array. Send such bodies as JSON, or read them from [`body()`](#raw-body) and parse them yourself. Both form rows also give you the body as it arrived rather than as your code left it: writing to `$_POST` later separates a copy for the script, and `payload()` goes on reading the array PHP parsed out of the body.
+On `POST`, the two form rows return what PHP parsed the body into. PHP parses a form body for `POST` alone, so on `PUT`, `PATCH`, `DELETE` and `QUERY`, the other methods the server reads a body for, `payload()` runs an urlencoded body through the parser `parse_str()` uses and `$_POST` stays empty, as it does under PHP. That parser splits fields on `arg_separator.input` (`&` by default), stops at a raw NUL byte, and raises the `max_input_vars` warning from the `payload()` call that reaches the limit. `post_max_size` does not limit this parsing, or a JSON body on any method: by then the server has read the body into memory, so what bounds it is the server's own limit of 10 MiB, or `MAX_QUERY_BODY` on `QUERY`.
+
+A `multipart/form-data` body on a method other than `POST` is not parsed: `payload()` returns an empty array, `file()` returns `null`, and the body is left for [`request_parse_body()`](https://www.php.net/manual/en/function.request-parse-body.php) to read.
+
+Form fields come back as the body arrived rather than as your code left it: writing to `$_POST` separates a copy for the script, and `payload()` goes on reading the array PHP parsed out of the body.
+
+Reading a body leaves `json_last_error()` as it was. A JSON body that does not parse does not set it, and one that does parse does not clear an earlier failure.
 
 The parsed result is cached on the first call and reused by later calls on the same object. A second `oxphp_http_request()` is a second object, with a cache of its own — it builds the result again.
 

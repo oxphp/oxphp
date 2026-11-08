@@ -1,0 +1,5 @@
+# profile: arg_separator
+# description: splitting a urlencoded body under a non-default arg_separator.input
+
+http_object/test_payload_arg_separator >> ?method=put | PUT | -H "Content-Type: application/x-www-form-urlencoded" -d "a=1;b=2&c=3" | |
+http_object/test_payload_arg_separator >> ?method=post | POST | -H "Content-Type: application/x-www-form-urlencoded" -d "a=1;b=2&c=3" | |

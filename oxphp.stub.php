@@ -532,11 +532,16 @@ namespace OxPHP\Http {
          * - invalid JSON, a JSON null body, an empty body, any other
          *   Content-Type → null
          *
-         * A JSON body is decoded whatever the method is. A form body is not
-         * decoded here at all: it is $_POST as PHP built it, name mangling,
-         * max_input_vars and all, and PHP builds $_POST for the POST method
-         * only (and only with 'P' in variables_order, the default) — so a
-         * form body sent with PUT or PATCH arrives here as an empty array.
+         * A JSON or urlencoded body is read on any method that carries one.
+         * On POST a form body is the $_POST PHP built, name mangling,
+         * max_input_vars and all (only with 'P' in variables_order, the
+         * default), and later writes to $_POST do not show here. PHP builds
+         * $_POST for POST alone, so on any other method a urlencoded body goes
+         * through the parser parse_str() uses and $_POST stays empty, while a
+         * multipart body arrives as an empty array and is left for
+         * request_parse_body().
+         *
+         * json_last_error() is left as it was, whether or not the body parses.
          *
          * $default stands in for null, the one result that means "nothing to
          * return"; a body of false is a value and comes back as false. With a
