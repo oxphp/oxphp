@@ -45,6 +45,55 @@ fn paths_are_root_first_with_synthetic_main() {
     assert!(text.contains("main();outer "), "actual:\n{text}");
 }
 
+/// A flamegraph draws a frame as wide as its own line plus every line under
+/// it, so the lines of a run must add up to the outermost call's duration.
+#[test]
+fn each_line_counts_the_call_without_its_callees() {
+    let tree = build_simple_tree();
+    let bytes = export_collapsed(&tree);
+    let text = std::str::from_utf8(&bytes).unwrap();
+
+    assert!(text.contains("main();outer;middle;inner 1\n"), "{text}");
+    assert!(text.contains("main();outer;middle 2\n"), "{text}");
+    assert!(text.contains("main();outer 2\n"), "{text}");
+}
+
+#[test]
+fn sibling_callees_are_all_taken_out_of_the_caller() {
+    let mut ctx = ProfilingContext::new();
+    ctx.reset(ProfilingMode::ProfileAll, "trace".into(), "root".into());
+    let outer = ctx.push_with_metrics("outer".into(), vec![], 0, 0, 0, 0);
+    let first = ctx.push_with_metrics("first".into(), vec![], 1_000, 0, 0, 0);
+    ctx.pop_with_metrics(first, 3_000, 0, 0, 0);
+    let second = ctx.push_with_metrics("second".into(), vec![], 4_000, 0, 0, 0);
+    ctx.pop_with_metrics(second, 7_000, 0, 0, 0);
+    ctx.pop_with_metrics(outer, 10_000, 0, 0, 0);
+    let tree = ctx.finalize();
+
+    let bytes = export_collapsed(&tree);
+    let text = std::str::from_utf8(&bytes).unwrap();
+    assert!(text.contains("main();outer 5\n"), "{text}");
+}
+
+/// A force-closed span can read as far longer than its caller, because its
+/// end comes from another clock. The caller is then 0, not a wrapped integer.
+#[test]
+fn callee_longer_than_its_caller_leaves_the_caller_at_zero() {
+    let mut ctx = ProfilingContext::new();
+    ctx.reset(ProfilingMode::ProfileAll, "trace".into(), "root".into());
+    let outer = ctx.push_with_metrics("outer".into(), vec![], 1_000, 0, 0, 0);
+    for _ in 0..12 {
+        let child = ctx.push_with_metrics("leaked".into(), vec![], 0, 0, 0, 0);
+        ctx.pop_with_metrics(child, u64::MAX / 8, 0, 0, 0);
+    }
+    ctx.pop_with_metrics(outer, 2_000, 0, 0, 0);
+    let tree = ctx.finalize();
+
+    let bytes = export_collapsed(&tree);
+    let text = std::str::from_utf8(&bytes).unwrap();
+    assert!(text.contains("main();outer 0\n"), "{text}");
+}
+
 #[test]
 fn empty_tree_yields_empty_output() {
     let mut ctx = ProfilingContext::new();
