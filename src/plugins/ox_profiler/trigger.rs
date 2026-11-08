@@ -31,7 +31,7 @@ pub enum ActivationSource {
 }
 
 impl ActivationSource {
-    /// Wire name, shared by the Prometheus label, the `/stats` key and the
+    /// Wire name, shared by the Prometheus label and the
     /// request-metadata entry that carries the decision from the request
     /// handler to the complete handler. Kept in step with the label table in
     /// `storage::metrics` by a test there.

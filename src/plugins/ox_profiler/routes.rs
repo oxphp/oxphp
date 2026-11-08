@@ -13,9 +13,7 @@ use crate::types::{full_body, ResponseBody};
 use super::storage::Storage;
 
 mod path {
-    pub const LANDING: &str = "/__profiler/";
     pub const CONFIG: &str = "/__profiler/config";
-    pub const STATS: &str = "/__profiler/stats";
     pub const RUNS: &str = "/__profiler/runs";
     pub const RUNS_PREFIX: &str = "/__profiler/runs/";
 }
@@ -31,9 +29,7 @@ pub fn register(
         auth_token,
         config_view,
     });
-    ctx.internal_route(path::LANDING, RouterHandler(Arc::clone(&router)));
     ctx.internal_route(path::CONFIG, RouterHandler(Arc::clone(&router)));
-    ctx.internal_route(path::STATS, RouterHandler(Arc::clone(&router)));
     ctx.internal_route(path::RUNS, RouterHandler(Arc::clone(&router)));
     ctx.internal_route_prefix(path::RUNS_PREFIX, RouterHandler(Arc::clone(&router)));
 }
@@ -58,9 +54,7 @@ impl ProfilerRouter {
             return bad;
         }
         match (req.method.as_str(), req.path) {
-            ("GET", path::LANDING) => self.landing(),
             ("GET", path::CONFIG) => self.config_page(),
-            ("GET", path::STATS) => self.stats_page(),
             ("GET", path::RUNS) => self.list_runs(req.query),
             _ if req.path.starts_with(path::RUNS_PREFIX) => self.per_run(req),
             _ => text(StatusCode::NOT_FOUND, "404 not found"),
@@ -89,47 +83,11 @@ impl ProfilerRouter {
         }
     }
 
-    fn landing(&self) -> Response<ResponseBody> {
-        Response::builder()
-            .status(StatusCode::OK)
-            .header(http::header::CONTENT_TYPE, "text/html; charset=utf-8")
-            .body(full_body(Bytes::from_static(LANDING_HTML)))
-            .unwrap()
-    }
-
     fn config_page(&self) -> Response<ResponseBody> {
         let mut redacted = self.config_view.clone();
         redact_in_place(&mut redacted);
         let body = serde_json::to_string_pretty(&redacted).unwrap_or_else(|_| "{}".into());
         json_response(StatusCode::OK, body)
-    }
-
-    fn stats_page(&self) -> Response<ResponseBody> {
-        use std::sync::atomic::Ordering;
-        let m = &self.storage.metrics;
-        // Keyed off the same table the Prometheus label is rendered from, so
-        // a source cannot be counted under one name here and another there.
-        let runs_total: serde_json::Map<String, serde_json::Value> =
-            super::storage::metrics::SOURCE_LABELS
-                .iter()
-                .zip(m.runs_total.iter())
-                .map(|(label, c)| ((*label).to_string(), c.load(Ordering::Relaxed).into()))
-                .collect();
-        let body = serde_json::json!({
-            "runs_total": runs_total,
-            "spans_collected_total": m.spans_collected_total.load(Ordering::Relaxed),
-            "disk_drops_total": m.disk_drops_total.load(Ordering::Relaxed),
-            "http_push_failures_total": m.http_push_failures_total.load(Ordering::Relaxed),
-            "truncated_total": m.truncated_total.load(Ordering::Relaxed),
-            "bytes_written_total": {
-                "xhprof":     m.bytes_written_total[0].load(Ordering::Relaxed),
-                "speedscope": m.bytes_written_total[1].load(Ordering::Relaxed),
-                "pprof":      m.bytes_written_total[2].load(Ordering::Relaxed),
-                "collapsed":  m.bytes_written_total[3].load(Ordering::Relaxed),
-            },
-            "in_memory_runs": self.storage.cache.len(),
-        });
-        json_response(StatusCode::OK, body.to_string())
     }
 
     fn list_runs(&self, query: Option<&str>) -> Response<ResponseBody> {
@@ -183,7 +141,6 @@ impl ProfilerRouter {
             ("GET", RunModifier::None) => self.run_metadata_json(run_id),
             ("GET", RunModifier::Format(ext)) => self.run_format_bytes(run_id, ext),
             ("GET", RunModifier::Speedscope) => self.run_speedscope_redirect(req, run_id),
-            ("DELETE", RunModifier::None) => self.run_delete(run_id),
             _ => text(StatusCode::METHOD_NOT_ALLOWED, "405 method not allowed"),
         }
     }
@@ -236,89 +193,6 @@ impl ProfilerRouter {
         Response::builder()
             .status(StatusCode::FOUND)
             .header(http::header::LOCATION, location)
-            .body(full_body(Bytes::new()))
-            .unwrap()
-    }
-
-    fn run_delete(&self, run_id: &str) -> Response<ResponseBody> {
-        let Some(disk) = self.storage.disk.as_deref() else {
-            return text(StatusCode::NOT_FOUND, "404 disk storage disabled");
-        };
-        let index_path = disk.output_dir.join("index.json");
-        // Serialize with DiskWriter's append path and the retention
-        // sweep. The plugin trait calls handle() synchronously, but the
-        // internal HTTP server itself runs the dispatcher inside hyper's
-        // async service — so this thread IS a tokio worker. A naked
-        // `blocking_lock()` panics with "Cannot block the current thread
-        // from within a runtime". A try_lock retry with a hard deadline
-        // is correct in every runtime (current_thread or multi_thread)
-        // and degrades to 503 instead of panicking when truly contended.
-        let _guard = {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-            loop {
-                if let Ok(g) = disk.index_lock.try_lock() {
-                    break g;
-                }
-                if std::time::Instant::now() >= deadline {
-                    return text(StatusCode::SERVICE_UNAVAILABLE, "503 index lock contended");
-                }
-                std::thread::sleep(std::time::Duration::from_millis(2));
-            }
-        };
-        // TODO(async-discipline): sync fs in sync trait handler; see list_runs.
-        let contents = match std::fs::read_to_string(&index_path) {
-            Ok(s) => s,
-            Err(_) => return text(StatusCode::NOT_FOUND, "404 no runs"),
-        };
-        let mut found: Option<super::storage::RunMeta> = None;
-        let mut kept = String::new();
-        for line in contents.lines() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            let Ok(meta) = serde_json::from_str::<super::storage::RunMeta>(line) else {
-                kept.push_str(line);
-                kept.push('\n');
-                continue;
-            };
-            if meta.run_id == run_id {
-                found = Some(meta);
-            } else {
-                kept.push_str(line);
-                kept.push('\n');
-            }
-        }
-        let Some(meta) = found else {
-            return text(StatusCode::NOT_FOUND, "404 run not found");
-        };
-        let tmp_path = disk.output_dir.join("index.json.tmp");
-        // TODO(async-discipline): sync write+rename+remove block below; see list_runs.
-        if let Err(e) = std::fs::write(&tmp_path, kept.as_bytes()) {
-            tracing::warn!(
-                plugin = "profiler", error = %e, path = %tmp_path.display(),
-                "index.json.tmp write failed during DELETE"
-            );
-            return text(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "500 index rewrite failed",
-            );
-        }
-        if let Err(e) = std::fs::rename(&tmp_path, &index_path) {
-            tracing::warn!(
-                plugin = "profiler", error = %e,
-                "index.json rename failed during DELETE"
-            );
-            return text(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                "500 index rewrite failed",
-            );
-        }
-        for fmt_ext in &meta.formats {
-            let p = disk.output_dir.join(format!("{}.{}", run_id, fmt_ext));
-            let _ = std::fs::remove_file(&p);
-        }
-        Response::builder()
-            .status(StatusCode::NO_CONTENT)
             .body(full_body(Bytes::new()))
             .unwrap()
     }
@@ -464,28 +338,6 @@ fn redact_in_place(v: &mut serde_json::Value) {
     }
 }
 
-const LANDING_HTML: &[u8] = br#"<!DOCTYPE html>
-<html lang="en">
-<head><meta charset="utf-8"><title>OxPHP Profiler</title>
-<style>body{font:14px/1.5 system-ui,sans-serif;max-width:720px;margin:2em auto;padding:0 1em}
-code{background:#f3f3f3;padding:.1em .3em;border-radius:3px}
-a{color:#0366d6;text-decoration:none}a:hover{text-decoration:underline}
-table{border-collapse:collapse;margin-top:1em}th,td{text-align:left;padding:.35em .75em;border-bottom:1px solid #eee}</style></head>
-<body><h1>OxPHP Profiler</h1>
-<p>Internal endpoints for the <code>ox_profiler</code> plugin. Send
-<code>Authorization: Bearer &lt;PROFILER_AUTH_TOKEN&gt;</code> when a token is configured.</p>
-<table>
-<tr><th>Route</th><th>Purpose</th></tr>
-<tr><td><a href="./runs">GET /runs</a></td><td>List captured runs (<code>?limit=N&amp;offset=M</code>).</td></tr>
-<tr><td><code>GET /runs/{run_id}</code></td><td>JSON metadata for one run.</td></tr>
-<tr><td><code>GET /runs/{run_id}.{xhprof.json|speedscope.json|pprof|collapsed}</code></td><td>Raw profile bytes.</td></tr>
-<tr><td><code>GET /runs/{run_id}/speedscope</code></td><td>302 to speedscope.app.</td></tr>
-<tr><td><code>DELETE /runs/{run_id}</code></td><td>Remove all format files + index entry.</td></tr>
-<tr><td><a href="./config">GET /config</a></td><td>Active plugin configuration (tokens redacted).</td></tr>
-<tr><td><a href="./stats">GET /stats</a></td><td>Counter snapshot in JSON.</td></tr>
-</table></body></html>
-"#;
-
 /// Test-only constructor used by `tests/profiler_routes_tests.rs`.
 ///
 /// Not gated by `#[cfg(test)]` because integration tests are a separate
@@ -533,7 +385,7 @@ mod tests {
         let headers = http::HeaderMap::new();
         let req = PluginInternalRequest {
             method: &http::Method::GET,
-            path: "/__profiler/stats",
+            path: "/__profiler/config",
             headers: &headers,
             query: None,
         };
@@ -546,7 +398,7 @@ mod tests {
         let headers = http::HeaderMap::new();
         let req = PluginInternalRequest {
             method: &http::Method::GET,
-            path: "/__profiler/stats",
+            path: "/__profiler/config",
             headers: &headers,
             query: None,
         };
@@ -563,7 +415,7 @@ mod tests {
         headers.insert("authorization", "Bearer nope".parse().unwrap());
         let req = PluginInternalRequest {
             method: &http::Method::GET,
-            path: "/__profiler/stats",
+            path: "/__profiler/config",
             headers: &headers,
             query: None,
         };
@@ -580,20 +432,11 @@ mod tests {
         headers.insert("authorization", "Bearer s3cret".parse().unwrap());
         let req = PluginInternalRequest {
             method: &http::Method::GET,
-            path: "/__profiler/stats",
+            path: "/__profiler/config",
             headers: &headers,
             query: None,
         };
         assert!(r.check_auth(&req).is_none());
-    }
-
-    #[test]
-    fn landing_is_html() {
-        let r = dummy_router(None);
-        let resp = r.landing();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let ct = resp.headers().get(http::header::CONTENT_TYPE).unwrap();
-        assert!(ct.to_str().unwrap().starts_with("text/html"));
     }
 
     #[test]
@@ -607,15 +450,6 @@ mod tests {
             v["auth_token"],
             serde_json::Value::String("<redacted>".into())
         );
-    }
-
-    #[test]
-    fn stats_returns_application_json() {
-        let r = dummy_router(None);
-        let resp = r.stats_page();
-        assert_eq!(resp.status(), StatusCode::OK);
-        let ct = resp.headers().get(http::header::CONTENT_TYPE).unwrap();
-        assert_eq!(ct, "application/json");
     }
 
     #[test]

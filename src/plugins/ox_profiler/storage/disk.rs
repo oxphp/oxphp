@@ -99,12 +99,10 @@ pub struct DiskWriter {
     bucket: Mutex<TokenBucket>,
     metrics: Arc<super::StorageMetrics>,
     /// Serialises every read-modify-write of `index.json`. Shared
-    /// with `RetentionTask` (async sweep) and the routes DELETE
-    /// handler (sync — uses `blocking_lock()`) so all three writers
-    /// are totally ordered regardless of which one starts first.
-    /// Without this, retention's rewrite races with append and
-    /// DELETE's rewrite races with both, losing entries on Linux
-    /// and crashing on Windows.
+    /// with `RetentionTask` (async sweep) so append and rewrite are
+    /// totally ordered regardless of which one starts first.
+    /// Without this, retention's rewrite races with append, losing
+    /// entries on Linux and crashing on Windows.
     pub index_lock: Arc<tokio::sync::Mutex<()>>,
 }
 
@@ -303,8 +301,8 @@ async fn append_index_entry(
     let path = output_dir.join("index.json");
     // Hold the shared index.json mutex across the open+write+flush.
     // Even though `O_APPEND` writes are atomic on Linux for small
-    // writes, we must still serialise with the rewrite-via-rename
-    // paths (retention + DELETE) — otherwise we could open the
+    // writes, we must still serialise with retention's rewrite-via-rename
+    // — otherwise we could open the
     // pre-rename fd and write into a file that is about to be
     // unlinked, losing the appended entry.
     let _guard = index_lock.lock().await;

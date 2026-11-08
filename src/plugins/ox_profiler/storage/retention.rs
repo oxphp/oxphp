@@ -20,7 +20,7 @@ const RETENTION_INTERVAL: Duration = Duration::from_secs(5);
 ///
 /// `index_lock` must be the same `Arc` given to the
 /// paired `DiskWriter`; it serialises the sweep's read-then-
-/// rewrite-via-rename against append and DELETE.
+/// rewrite-via-rename against append.
 ///
 /// Safely no-ops (with a debug log) when called outside a Tokio
 /// context — happens in unit tests that exercise plugin init
@@ -60,7 +60,7 @@ async fn sweep_once(
     }
 
     // Hold the mutex across the read → sort → write-tmp → rename
-    // sequence so concurrent appends/DELETEs can't interleave.
+    // sequence so concurrent appends can't interleave.
     let _guard = index_lock.lock().await;
 
     // Read all entries.

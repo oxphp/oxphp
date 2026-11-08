@@ -217,16 +217,18 @@ fn speedscope_redirect_sets_location() {
 }
 
 #[test]
-fn delete_removes_run_and_index_entry() {
+fn removed_admin_routes_are_gone() {
     let tmp = TempDir::new().unwrap();
-    write_index(
-        tmp.path(),
-        &[meta("a", 1, &["collapsed"]), meta("b", 2, &["collapsed"])],
-    );
+    write_index(tmp.path(), &[meta("a", 1, &["collapsed"])]);
     std::fs::write(tmp.path().join("a.collapsed"), b"x").unwrap();
-    std::fs::write(tmp.path().join("b.collapsed"), b"y").unwrap();
     let storage = storage_with_disk(tmp.path());
     let router = build_router(storage, None);
+
+    for path in ["/__profiler/", "/__profiler/stats"] {
+        let resp = issue(&*router, &http::Method::GET, path, None, None);
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND, "GET {path}");
+    }
+
     let resp = issue(
         &*router,
         &http::Method::DELETE,
@@ -234,16 +236,14 @@ fn delete_removes_run_and_index_entry() {
         None,
         None,
     );
-    assert_eq!(resp.status(), StatusCode::NO_CONTENT);
-    assert!(!tmp.path().join("a.collapsed").exists());
-    assert!(tmp.path().join("b.collapsed").exists());
+    assert_eq!(resp.status(), StatusCode::METHOD_NOT_ALLOWED);
+    assert!(tmp.path().join("a.collapsed").exists());
     let idx = std::fs::read_to_string(tmp.path().join("index.json")).unwrap();
-    assert!(!idx.contains("\"run_id\":\"a\""));
-    assert!(idx.contains("\"run_id\":\"b\""));
+    assert!(idx.contains("\"run_id\":\"a\""));
 }
 
 #[test]
-fn auth_enforced_on_stats_when_token_configured() {
+fn auth_enforced_when_token_configured() {
     let tmp = TempDir::new().unwrap();
     let storage = storage_with_disk(tmp.path());
     let router = build_router(storage, Some("s3cret"));
@@ -251,7 +251,7 @@ fn auth_enforced_on_stats_when_token_configured() {
     let resp = issue(
         &*router,
         &http::Method::GET,
-        "/__profiler/stats",
+        "/__profiler/config",
         None,
         None,
     );
@@ -260,7 +260,7 @@ fn auth_enforced_on_stats_when_token_configured() {
     let resp = issue(
         &*router,
         &http::Method::GET,
-        "/__profiler/stats",
+        "/__profiler/config",
         Some("nope"),
         None,
     );
@@ -269,7 +269,7 @@ fn auth_enforced_on_stats_when_token_configured() {
     let resp = issue(
         &*router,
         &http::Method::GET,
-        "/__profiler/stats",
+        "/__profiler/config",
         Some("s3cret"),
         None,
     );
