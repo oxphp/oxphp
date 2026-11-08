@@ -73,8 +73,8 @@ $t->assertTrue(
 // emitted a BEGIN that no END ever matched, so finalize force-closed them
 // and marked them leaked: they are in the tree, but their duration is not
 // readable. The observer stamps a span's start from CLOCK_MONOTONIC while
-// the force-close stamps its end from the wall clock, so these eight come
-// out of the .collapsed export at ~1.79e15 us against single-digit
+// the force-close stamps its end from the wall clock, so these eight each
+// span ~1.79e15 us against single-digit
 // microseconds for the frames that closed normally. Present but unusable
 // is still not the same as absent, which is what the cap does. The shallow
 // run shows none of it, which is what ties the leaks to the depth rather
