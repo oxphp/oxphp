@@ -238,7 +238,9 @@ $session = $_COOKIE['session'];  // "abc123"
 $theme   = $_COOKIE['theme'];    // "dark"
 ```
 
-> **Note:** Cookies with the `__oxp_` prefix are reserved for internal OxPHP plugins. They are stripped from the `Cookie` header before it reaches PHP and will not appear in `$_COOKIE`.
+> **Note:** Cookies with the `__oxp_` prefix are reserved for internal OxPHP plugins. They are stripped from the `Cookie` header before it reaches PHP and will not appear in `$_COOKIE`. So are cookies whose name PHP would register under that prefix, such as `__oxp.x`: PHP turns a space, a dot or an unmatched `[` in a cookie name into `_`. Every `[` counts here, so a name PHP would make an array, such as `__oxp[a]` (`$_COOKIE['__oxp']['a']`) or `_[oxp_t]`, is stripped as well.
+
+> **Note:** A `Cookie` header holding a byte outside ASCII is dropped as a whole, with no log message about it. `$_COOKIE` is empty, `$_SERVER['HTTP_COOKIE']` is not set, and the request object finds no cookies and no `cookie` header. Plugins and the profiler's `OXPROF` trigger see no cookies on such a request either.
 
 > **`filter_input(INPUT_COOKIE, …)`** reads the filter extension's own copy of the cookies rather than `$_COOKIE` — see the note under [`$_GET`](#_get) for what that copy is and how long it lasts.
 

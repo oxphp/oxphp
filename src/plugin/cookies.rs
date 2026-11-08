@@ -41,13 +41,19 @@ pub fn join_cookie_field_lines(headers: &mut HeaderMap) {
     // Each line is already a valid field value, and so is the separator. Were
     // that ever not so, dropping the header keeps a plugin cookie on a later
     // line from reaching the application.
-    match HeaderValue::from_bytes(&joined) {
-        Ok(value) => {
-            headers.insert(COOKIE, value);
-        }
-        Err(_) => {
-            headers.remove(COOKIE);
-        }
+    replace_cookie_header(headers, HeaderValue::from_bytes(&joined).ok());
+}
+
+/// Make `value` the only `Cookie` line, or drop the header when there is no
+/// value or no room for one.
+///
+/// `HeaderMap::insert` panics when the map has to grow and cannot, even for a
+/// key it already holds (http 1.4). Losing the cookies is what keeps a plugin cookie from
+/// reaching the application.
+fn replace_cookie_header(headers: &mut HeaderMap, value: Option<HeaderValue>) {
+    let stored = value.is_some_and(|value| headers.try_insert(COOKIE, value).is_ok());
+    if !stored {
+        headers.remove(COOKIE);
     }
 }
 
@@ -112,7 +118,27 @@ pub(crate) fn find_raw_cookie<'a>(headers: &'a HeaderMap, name: &str) -> Option<
         })
 }
 
-/// Strip all `__oxp_*` cookies from the Cookie header before PHP sees them.
+/// Whether PHP would register this `name=value` pair under a `__oxp_` key.
+///
+/// PHP skips whitespace before a cookie name (`php_default_treat_data`) and
+/// registers a space, a `.` or an unmatched `[` in it as `_`
+/// (`php_register_variable_ex`), in 8.4 and 8.5. A `[` that opens an array, or
+/// that makes PHP discard the name by coming first, counts too: this close to
+/// the reserved prefix, telling them apart is not worth it.
+fn is_plugin_cookie(pair: &str) -> bool {
+    const PREFIX: &[u8] = b"__oxp_";
+    let name = pair.trim_start().as_bytes();
+    name.len() >= PREFIX.len()
+        && name.iter().zip(PREFIX).all(|(&byte, &expected)| {
+            byte == expected || (expected == b'_' && matches!(byte, b' ' | b'.' | b'['))
+        })
+}
+
+/// Strip `__oxp_*` cookies, and names `is_plugin_cookie` reads as one, from the
+/// Cookie header before PHP sees them.
+///
+/// A header holding a non-ASCII byte is dropped whole: nothing that reads
+/// cookies accepts one, and it must not stay in the request unstripped.
 pub fn strip_plugin_cookies(parts: &mut http::request::Parts) {
     let cookie_header = match parts.headers.get(COOKIE) {
         Some(h) => h,
@@ -121,17 +147,19 @@ pub fn strip_plugin_cookies(parts: &mut http::request::Parts) {
 
     let cookie_str = match cookie_header.to_str() {
         Ok(s) => s,
-        Err(_) => return,
+        Err(_) => {
+            parts.headers.remove(COOKIE);
+            return;
+        }
     };
 
-    // Quick check: any __oxp_ cookies present?
-    if !cookie_str.contains("__oxp_") {
+    if !cookie_str.split(';').any(is_plugin_cookie) {
         return;
     }
 
     let filtered: Vec<&str> = cookie_str
         .split(';')
-        .filter(|pair| !pair.trim_start().starts_with("__oxp_"))
+        .filter(|pair| !is_plugin_cookie(pair))
         .collect();
 
     if filtered.is_empty() {
@@ -142,9 +170,7 @@ pub fn strip_plugin_cookies(parts: &mut http::request::Parts) {
             .map(|s| s.trim())
             .collect::<Vec<_>>()
             .join("; ");
-        if let Ok(hv) = http::HeaderValue::from_str(&new_value) {
-            parts.headers.insert(COOKIE, hv);
-        }
+        replace_cookie_header(&mut parts.headers, HeaderValue::from_str(&new_value).ok());
     }
 }
 
@@ -445,6 +471,117 @@ mod tests {
             .unwrap()
             .into_parts();
         strip_plugin_cookies(&mut parts); // should not panic
+        assert!(parts.headers.get(COOKIE).is_none());
+    }
+
+    #[test]
+    fn test_strip_plugin_cookies_drops_a_header_with_a_non_ascii_byte() {
+        for cookie in [
+            b"__oxp_t_s=1; app=keep; bin=\xff".as_slice(),
+            b"app=keep; bin=\xff".as_slice(),
+        ] {
+            let mut parts = make_parts("placeholder=1");
+            parts
+                .headers
+                .insert(COOKIE, HeaderValue::from_bytes(cookie).unwrap());
+            strip_plugin_cookies(&mut parts);
+            assert!(parts.headers.get(COOKIE).is_none(), "{cookie:?}");
+        }
+    }
+
+    #[test]
+    fn test_strip_plugin_cookies_removes_a_name_php_registers_under_the_prefix() {
+        for name in [
+            "__oxp.t_s",
+            "__oxp t_s",
+            "__oxp[t_s",
+            "..oxp_t_s",
+            "._oxp_t_s",
+            "_.oxp_t_s",
+            "_ oxp_t_s",
+            "_[oxp_t_s",
+        ] {
+            let mut parts = make_parts(&format!("{name}=1; a=1"));
+            strip_plugin_cookies(&mut parts);
+            assert_eq!(cookie_lines(&parts.headers), [b"a=1".as_slice()], "{name}");
+        }
+    }
+
+    #[test]
+    fn test_strip_plugin_cookies_removes_a_name_with_a_bracket_php_would_keep() {
+        for name in ["__oxp[a]", "_[oxp_t]", "[_oxp_t"] {
+            let mut parts = make_parts(&format!("{name}=1; a=1"));
+            strip_plugin_cookies(&mut parts);
+            assert_eq!(cookie_lines(&parts.headers), [b"a=1".as_slice()], "{name}");
+        }
+    }
+
+    #[test]
+    fn test_strip_plugin_cookies_skips_whitespace_before_a_mangled_name() {
+        let mut parts = make_parts("a=1;\t__oxp.t_s=1;  ..oxp_t_u=2");
+        strip_plugin_cookies(&mut parts);
+        assert_eq!(cookie_lines(&parts.headers), [b"a=1".as_slice()]);
+    }
+
+    #[test]
+    fn test_strip_plugin_cookies_leaves_other_names_as_they_arrived() {
+        for cookie in [
+            "__oxp=1;a=1",
+            "__oxp;a=1",
+            "__.xp_t=1;a=1",
+            "__oxpx=1;a=1",
+            "_oxp_t=1;a=1",
+            "x__oxp_t=1;a=1",
+            "a=__oxp.t;b=2",
+            "a=__oxp_t;b=2",
+        ] {
+            let mut parts = make_parts(cookie);
+            strip_plugin_cookies(&mut parts);
+            assert_eq!(cookie_lines(&parts.headers), [cookie.as_bytes()]);
+        }
+    }
+
+    #[test]
+    fn test_replace_cookie_header_without_a_value_drops_every_line() {
+        let mut headers = HeaderMap::new();
+        headers.append(COOKIE, "a=1".parse().unwrap());
+        headers.append(COOKIE, "b=2".parse().unwrap());
+        replace_cookie_header(&mut headers, None);
+        assert!(headers.get(COOKIE).is_none());
+    }
+
+    // ── a header map with no room left ──
+
+    /// Adds distinct names until the map refuses one, so that any later call
+    /// which reserves a slot fails, even for a key the map already holds.
+    fn fill_to_capacity(headers: &mut HeaderMap) {
+        for i in 0.. {
+            let name = http::HeaderName::from_bytes(format!("x{i}").as_bytes()).unwrap();
+            if headers
+                .try_append(name, HeaderValue::from_static(""))
+                .is_err()
+            {
+                break;
+            }
+        }
+        assert_eq!(headers.keys_len(), headers.capacity());
+    }
+
+    #[test]
+    fn test_join_cookie_field_lines_drops_the_header_on_a_full_map() {
+        let mut headers = HeaderMap::new();
+        headers.append(COOKIE, "a=1".parse().unwrap());
+        headers.append(COOKIE, "__oxp_t_s=1".parse().unwrap());
+        fill_to_capacity(&mut headers);
+        join_cookie_field_lines(&mut headers);
+        assert!(headers.get(COOKIE).is_none());
+    }
+
+    #[test]
+    fn test_strip_plugin_cookies_drops_the_header_on_a_full_map() {
+        let mut parts = make_parts("__oxp_x=1; a=1");
+        fill_to_capacity(&mut parts.headers);
+        strip_plugin_cookies(&mut parts);
         assert!(parts.headers.get(COOKIE).is_none());
     }
 
