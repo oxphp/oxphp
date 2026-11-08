@@ -689,8 +689,8 @@ pub(crate) fn stop_taking_work(kind: ThreadKind) -> bool {
     matches!(after, Drain::Draining { .. })
 }
 
-/// The calling thread of `kind` is about to take work for the first time. Called
-/// on every entry to its wait, and acts once.
+/// The calling thread of `kind` is about to take work for the first time. Only
+/// the first call on a thread acts, so a caller may repeat it.
 pub(crate) fn thread_ready(kind: ThreadKind) {
     if !READY.with(|r| r.replace(true)) {
         COORDINATOR.thread_ready(kind);

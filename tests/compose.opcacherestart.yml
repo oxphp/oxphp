@@ -38,6 +38,10 @@ services:
       # A test request, the requests it sends to this server and a request that
       # waits for a task all run at once.
       PHP_WORKERS: "4"
+      # Under the load every worker is taken, so a request queues for one, and
+      # for longer while the pool threads are replaced; the 1 s default could
+      # refuse it.
+      QUEUE_WAIT_TIMEOUT_MS: "10000"
     volumes:
       - ../www:/var/www/html
       - ./php:/var/www/html/public/tests
