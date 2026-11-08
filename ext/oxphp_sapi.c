@@ -15,9 +15,11 @@
 #include "ext/standard/basic_functions.h"
 #include "ext/standard/php_filestat.h"
 #include "ext/json/php_json.h"
+#include "ext/json/php_json_parser.h"
 #include "ext/spl/spl_exceptions.h"
 #include "ext/session/php_session.h"
 #include "main/php_network.h"
+#include "main/php_variables.h"
 /* PDO's own header, so that a claim can name the connection rather than the PHP
  * object holding it: PDO::ATTR_PERSISTENT reuses one pdo_dbh_t for every object
  * built from the same DSN, and an object address is recycled by the allocator
@@ -502,43 +504,65 @@ ZEND_METHOD(OxPHP_Http_Request, payload) {
         ZVAL_NULL(&parsed); /* "nothing to return" */
 
         if (ct && body_data && body_len > 0) {
+            bool urlencoded = ct_len >= 33 && strncasecmp(ct, "application/x-www-form-urlencoded", 33) == 0;
+            size_t method_len = 0;
+            const char *method = oxphp_req_method(&method_len);
+            bool is_post = method && method_len == 4 && memcmp(method, "POST", 4) == 0;
+
             if (ct_len >= 16 && strncasecmp(ct, "application/json", 16) == 0) {
-                /* JSON decode — call php_json_decode_ex directly to avoid
-                 * any issues with the static-inline php_json_decode wrapper
-                 * across PHP ZTS builds.  Its return value is what separates
-                 * a body that would not parse from one that parsed to a
-                 * top-level scalar: both leave a zval this code has to keep,
-                 * and only the first of them is an error. */
+                /* The parser rather than php_json_decode_ex(), which stores a
+                 * failure where json_last_error() reads it: reading the body
+                 * must not change what that function tells the script.  The
+                 * copy is for the scanner, which needs a NUL after the last
+                 * byte. */
                 zend_string *body_str = zend_string_init((const char *)body_data, body_len, 0);
                 zval json_result;
                 ZVAL_NULL(&json_result);
-                if (php_json_decode_ex(&json_result, ZSTR_VAL(body_str), ZSTR_LEN(body_str),
-                        PHP_JSON_OBJECT_AS_ARRAY, PHP_JSON_PARSER_DEFAULT_DEPTH) == SUCCESS) {
+                php_json_parser parser;
+                php_json_parser_init(&parser, &json_result, ZSTR_VAL(body_str), ZSTR_LEN(body_str),
+                    PHP_JSON_OBJECT_AS_ARRAY, PHP_JSON_PARSER_DEFAULT_DEPTH);
+                if (php_json_parse(&parser) == 0) {
                     ZVAL_COPY_VALUE(&parsed, &json_result);
                 } else {
                     zval_ptr_dtor(&json_result);
                 }
                 zend_string_release(body_str);
-            } else if (
-                (ct_len >= 33 && strncasecmp(ct, "application/x-www-form-urlencoded", 33) == 0) ||
-                (ct_len >= 19 && strncasecmp(ct, "multipart/form-data", 19) == 0)
-            ) {
+            } else if (urlencoded && !is_post) {
+                /* PHP builds $_POST for POST alone, so this body is parsed here.
+                 * treat_data() is what parse_str() calls: it works on its own
+                 * copy and writes only to `parsed`, which leaves $_POST,
+                 * php://input and a later request_parse_body() as they were. */
+                array_init(&parsed);
+                sapi_module.treat_data(PARSE_STRING, estrndup((const char *)body_data, body_len), &parsed);
+            } else if (urlencoded || (ct_len >= 19 && strncasecmp(ct, "multipart/form-data", 19) == 0)) {
                 /* Form data — the body is not parsed here at all, $_POST is
                  * taken as PHP built it.  Not gated on SUPERGLOBALS_ENABLED:
                  * that setting is read where $_SERVER is filled and where the
                  * query string is handed over for $_GET, while the body and
                  * cookie callbacks go to PHP unconditionally, so $_POST holds
-                 * the parsed body whichever way the setting is set.  Gating
-                 * here refused data that was sitting in the slot below.
+                 * the parsed body whichever way the setting is set.
                  *
-                 * PHP builds it for the POST method only — and only with 'P'
-                 * in variables_order, which is the default — so a form body
-                 * sent with PUT or PATCH arrives as an empty array. */
+                 * The engine's slot and not the $_POST symbol, because this
+                 * method answers with the body as it was sent and a write from
+                 * PHP separates a copy for the script.
+                 *
+                 * The slot is filled for POST alone — and only with 'P' in
+                 * variables_order, which is the default — so a multipart body
+                 * on any other method arrives as an empty array.  Parsing it
+                 * here would use up the body request_parse_body() reads, and
+                 * rfc1867 can only do that once per request. */
                 zval *post = &PG(http_globals)[TRACK_VARS_POST];
                 if (Z_TYPE_P(post) == IS_ARRAY) {
                     ZVAL_COPY(&parsed, post);
                 }
             }
+        }
+
+        /* A handler that threw from the max_input_vars warning leaves part of
+         * the body here; cached, it would answer the next call as the whole. */
+        if (EG(exception)) {
+            zval_ptr_dtor(&parsed);
+            RETURN_THROWS();
         }
 
         zend_update_property(oxphp_http_request_ce, Z_OBJ_P(ZEND_THIS),
@@ -553,7 +577,9 @@ ZEND_METHOD(OxPHP_Http_Request, payload) {
 
     if (key) {
         if (cached && Z_TYPE_P(cached) == IS_ARRAY) {
-            zval *found = zend_hash_find(Z_ARRVAL_P(cached), key);
+            /* A canonical numeric name is an integer key in JSON and form
+             * arrays alike. */
+            zval *found = zend_symtable_find(Z_ARRVAL_P(cached), key);
             if (found) {
                 RETURN_COPY(found);
             }
@@ -679,7 +705,7 @@ ZEND_METHOD(OxPHP_Http_Request, file) {
     if (Z_TYPE_P(files) != IS_ARRAY) {
         RETURN_NULL();
     }
-    zval *entry = zend_hash_find(Z_ARRVAL_P(files), name);
+    zval *entry = zend_symtable_find(Z_ARRVAL_P(files), name);
     if (!entry || Z_TYPE_P(entry) != IS_ARRAY) {
         RETURN_NULL();
     }
@@ -719,7 +745,7 @@ ZEND_METHOD(OxPHP_Http_Request, files) {
     }
 
     if (name) {
-        zval *entry = zend_hash_find(Z_ARRVAL_P(files), name);
+        zval *entry = zend_symtable_find(Z_ARRVAL_P(files), name);
         if (entry && Z_TYPE_P(entry) == IS_ARRAY) {
             oxphp_append_field_files(return_value, entry);
         }
@@ -890,7 +916,7 @@ ZEND_METHOD(OxPHP_Http_Session, get) {
     zval *session = zend_hash_str_find(&EG(symbol_table), "_SESSION", sizeof("_SESSION")-1);
     if (session) { ZVAL_DEREF(session); }
     if (session && Z_TYPE_P(session) == IS_ARRAY) {
-        zval *found = zend_hash_find(Z_ARRVAL_P(session), key);
+        zval *found = zend_symtable_find(Z_ARRVAL_P(session), key);
         if (found) {
             RETURN_COPY(found);
         }
@@ -912,7 +938,7 @@ ZEND_METHOD(OxPHP_Http_Session, has) {
     zval *session = zend_hash_str_find(&EG(symbol_table), "_SESSION", sizeof("_SESSION")-1);
     if (session) { ZVAL_DEREF(session); }
     RETURN_BOOL(session && Z_TYPE_P(session) == IS_ARRAY &&
-        zend_hash_exists(Z_ARRVAL_P(session), key));
+        zend_symtable_exists(Z_ARRVAL_P(session), key));
 }
 /* }}} */
 

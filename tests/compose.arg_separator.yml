@@ -1,0 +1,33 @@
+# arg_separator.input set to ";" — how a urlencoded body is split when the
+# setting is not the default.
+#
+# arg_separator.ini sets it: the directive is PHP_INI_PERDIR, so a script cannot
+# change it with ini_set().
+#
+# Standalone usage:
+#   docker compose -f compose.yml -f compose.arg_separator.yml up
+services:
+  oxphp-arg_separator:
+    build:
+      context: ..
+      dockerfile: docker/dev/Dockerfile
+      args:
+        PHP_VERSION:
+        BASE_IMAGE:
+    ports:
+      - "80"
+    networks: [test-net]
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    environment:
+      LOG_LEVEL: error
+      INTERNAL_ADDR: 0.0.0.0:9090
+    volumes:
+      - ../www:/var/www/html
+      - ./php:/var/www/html/public/tests
+      - ./arg_separator.ini:/usr/local/etc/php/conf.d/zz-arg_separator.ini:ro
