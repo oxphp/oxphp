@@ -11,7 +11,7 @@ use std::sync::Arc;
 use super::disk::OutputFormat;
 use crate::plugins::ox_profiler::trigger::ActivationSource;
 
-const FORMAT_COUNT: usize = 4;
+const FORMAT_COUNT: usize = 2;
 const SOURCE_COUNT: usize = 5;
 
 pub struct StorageMetrics {
@@ -190,16 +190,13 @@ impl StorageMetrics {
     }
 }
 
-const FORMAT_LABELS: [&str; FORMAT_COUNT] = ["xhprof", "speedscope", "pprof", "collapsed"];
-pub(crate) const SOURCE_LABELS: [&str; SOURCE_COUNT] =
-    ["header", "cookie", "query", "sample", "sdk"];
+const FORMAT_LABELS: [&str; FORMAT_COUNT] = ["xhprof", "collapsed"];
+const SOURCE_LABELS: [&str; SOURCE_COUNT] = ["header", "cookie", "query", "sample", "sdk"];
 
 fn format_index(f: OutputFormat) -> usize {
     match f {
         OutputFormat::Xhprof => 0,
-        OutputFormat::Speedscope => 1,
-        OutputFormat::Pprof => 2,
-        OutputFormat::Collapsed => 3,
+        OutputFormat::Collapsed => 1,
     }
 }
 

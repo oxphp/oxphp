@@ -10,8 +10,7 @@ use bytes::Bytes;
 use rand::RngExt;
 
 use crate::profiling::export::{
-    export_collapsed, export_pprof, export_speedscope, export_xhprof, export_xhprof_buggregator,
-    BuggregatorMeta, XhprofMode,
+    export_collapsed, export_xhprof, export_xhprof_buggregator, BuggregatorMeta, XhprofMode,
 };
 use crate::profiling::SpanTree;
 
@@ -82,46 +81,14 @@ impl HttpPusher {
     /// exponential backoff, capped at 5 s total wallclock. Failures
     /// are logged and the profile is dropped (does not block).
     pub async fn push(self: &Arc<Self>, meta: &RunMeta, tree: &Arc<SpanTree>) {
-        // pprof's gzip step takes milliseconds — detour it through the
-        // blocking pool so the Tokio reactor isn't stalled. Other
-        // formats are pure serde_json and render inline.
-        // Only a Raw-envelope pprof push actually renders protobuf+gzip; an
-        // active xhgui/buggregator envelope always emits JSON (fast), so it
-        // renders inline regardless of the format knob.
-        let renders_pprof =
-            matches!(self.envelope, PushEnvelope::Raw) && self.format == OutputFormat::Pprof;
-        let bytes = if renders_pprof {
-            let tree_c = Arc::clone(tree);
-            let meta_c = meta.clone();
-            let fmt = self.format;
-            // pprof's gzip is CPU-heavy — detour it off the reactor.
-            match tokio::task::spawn_blocking(move || {
-                render(&tree_c, &meta_c, fmt, &PushEnvelope::Raw)
-            })
-            .await
-            {
-                Ok(b) => b,
-                Err(e) => {
-                    tracing::error!(
-                        plugin = "profiler",
-                        run_id = %meta.run_id,
-                        error = %e,
-                        "pprof render task panicked; dropping push"
-                    );
-                    self.metrics.inc_http_push_failure();
-                    return;
-                }
-            }
-        } else {
-            render(tree, meta, self.format, &self.envelope)
-        };
+        let bytes = render(tree, meta, self.format, &self.envelope);
         // Wrap the rendered payload in `Bytes` once so retries are
         // cheap refcount bumps rather than per-attempt clones of an
         // MB-scale profile. `reqwest::Body::from(Bytes)` is zero-copy.
         let body = Bytes::from(bytes);
         // Content-Type must follow the *rendered body*, not the format knob: an
         // active xhgui/buggregator envelope always emits JSON even when
-        // PROFILER_EXPORT_FORMAT names pprof (protobuf) or collapsed (text), so
+        // PROFILER_EXPORT_FORMAT names collapsed (text), so
         // tagging the push by `self.format` would mislabel the body and get it
         // rejected by a strict receiver.
         let content_type = match self.envelope {
@@ -206,8 +173,6 @@ fn render(tree: &SpanTree, meta: &RunMeta, fmt: OutputFormat, envelope: &PushEnv
         // Raw: PROFILER_EXPORT_FORMAT selects the serializer.
         PushEnvelope::Raw => match fmt {
             OutputFormat::Xhprof => export_xhprof(tree, XhprofMode::Raw, None),
-            OutputFormat::Speedscope => export_speedscope(tree),
-            OutputFormat::Pprof => export_pprof(tree),
             OutputFormat::Collapsed => export_collapsed(tree),
         },
     }
@@ -215,8 +180,7 @@ fn render(tree: &SpanTree, meta: &RunMeta, fmt: OutputFormat, envelope: &PushEnv
 
 fn content_type_for(fmt: OutputFormat) -> &'static str {
     match fmt {
-        OutputFormat::Xhprof | OutputFormat::Speedscope => "application/json",
-        OutputFormat::Pprof => "application/vnd.google.pprof+proto+gzip",
+        OutputFormat::Xhprof => "application/json",
         OutputFormat::Collapsed => "text/plain",
     }
 }

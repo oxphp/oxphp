@@ -88,8 +88,7 @@ RUN apk add --no-cache \
     libxml2-dev \
     zlib-dev \
     openssl-dev \
-    gnu-libiconv-dev \
-    protobuf-dev
+    gnu-libiconv-dev
 
 # Install bridge library (needed for Rust linking)
 COPY --from=bridge-builder /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
@@ -120,7 +119,6 @@ RUN mkdir src benches && \
 COPY src ./src
 COPY benches ./benches
 COPY build.rs ./
-COPY proto ./proto
 
 # Declared after the dependency build: an ARG in scope is part of the cache
 # key of every RUN below it, so each new version would recompile the deps.

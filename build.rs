@@ -31,17 +31,6 @@ fn main() {
         detect_and_emit_php_cfg();
     }
 
-    // Compile bundled .proto files into Rust types.
-    // Currently only `proto/pprof.proto` (Google pprof.proto, used
-    // by src/profiling/export/pprof.rs). Generated code lands in
-    // $OUT_DIR/perftools.profiles.rs and is included via include!()
-    // inside the exporter module. Requires `protoc` on PATH —
-    // Alpine: `apk add --no-cache protobuf-dev`; macOS: `brew install
-    // protobuf`.
-    println!("cargo:rerun-if-changed=proto/pprof.proto");
-    prost_build::compile_protos(&["proto/pprof.proto"], &["proto/"])
-        .expect("failed to compile proto/pprof.proto — is protoc on PATH?");
-
     println!("cargo:rerun-if-changed=build.rs");
 }
 

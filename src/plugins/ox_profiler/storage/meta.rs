@@ -2,7 +2,6 @@
 //! request-context fields used by:
 //! - `index.json` per-line entry (disk.rs)
 //! - xhgui envelope (built via `meta.to_xhgui_meta()`)
-//! - pprof labels and time_nanos
 //! - Internal routes + Prometheus metric labels
 //!
 //! Built once at `ProfilerCompleteHandler::handle` from the

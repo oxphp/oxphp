@@ -3,7 +3,7 @@
 //! Contains:
 //! - `RunMeta` — per-run context object built at complete time.
 //! - `ProfileCache` — in-memory LRU keyed by `run_id`.
-//! - `DiskWriter` — fan-out 4 format files + index.json.
+//! - `DiskWriter` — fan-out format files + index.json.
 //! - `RetentionTask` — background trim of oldest entries.
 //! - `HttpPusher` — single-URL push with retry+backoff.
 //! - `Storage` — composite handle owned by `ProfilerPlugin` and

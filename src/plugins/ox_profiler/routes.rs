@@ -140,7 +140,6 @@ impl ProfilerRouter {
         match (req.method.as_str(), modifier) {
             ("GET", RunModifier::None) => self.run_metadata_json(run_id),
             ("GET", RunModifier::Format(ext)) => self.run_format_bytes(run_id, ext),
-            ("GET", RunModifier::Speedscope) => self.run_speedscope_redirect(req, run_id),
             _ => text(StatusCode::METHOD_NOT_ALLOWED, "405 method not allowed"),
         }
     }
@@ -174,27 +173,6 @@ impl ProfilerRouter {
                 .unwrap(),
             Err(_) => text(StatusCode::NOT_FOUND, "404 format not on disk"),
         }
-    }
-
-    fn run_speedscope_redirect(
-        &self,
-        req: &PluginInternalRequest,
-        run_id: &str,
-    ) -> Response<ResponseBody> {
-        let host = req
-            .header("host")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("127.0.0.1");
-        let profile_url = format!("http://{}/__profiler/runs/{}.speedscope.json", host, run_id);
-        let location = format!(
-            "https://www.speedscope.app/#profileURL={}",
-            percent_encode(&profile_url)
-        );
-        Response::builder()
-            .status(StatusCode::FOUND)
-            .header(http::header::LOCATION, location)
-            .body(full_body(Bytes::new()))
-            .unwrap()
     }
 
     fn run_metadata_json(&self, run_id: &str) -> Response<ResponseBody> {
@@ -257,17 +235,11 @@ fn parse_pagination(query: Option<&str>) -> (usize, usize) {
 enum RunModifier<'a> {
     None,
     Format(&'a str),
-    Speedscope,
 }
 
 fn split_run_id_modifier(tail: &str) -> (&str, RunModifier<'_>) {
     if let Some((id, fmt)) = tail.split_once('.') {
         return (id, RunModifier::Format(fmt));
-    }
-    if let Some((id, rest)) = tail.split_once('/') {
-        if rest == "speedscope" {
-            return (id, RunModifier::Speedscope);
-        }
     }
     (tail, RunModifier::None)
 }
@@ -292,8 +264,6 @@ fn content_type_for_format(fmt: super::storage::disk::OutputFormat) -> &'static 
     use super::storage::disk::OutputFormat;
     match fmt {
         OutputFormat::Xhprof => "application/json",
-        OutputFormat::Speedscope => "application/json",
-        OutputFormat::Pprof => "application/octet-stream",
         OutputFormat::Collapsed => "text/plain; charset=utf-8",
     }
 }
@@ -306,23 +276,8 @@ fn export_for(
     use crate::profiling::export::*;
     match fmt {
         OutputFormat::Xhprof => export_xhprof(tree, XhprofMode::Raw, None),
-        OutputFormat::Speedscope => export_speedscope(tree),
-        OutputFormat::Pprof => export_pprof(tree),
         OutputFormat::Collapsed => export_collapsed(tree),
     }
-}
-
-fn percent_encode(s: &str) -> String {
-    use std::fmt::Write;
-    let mut out = String::with_capacity(s.len());
-    for b in s.bytes() {
-        if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'~' {
-            out.push(b as char);
-        } else {
-            let _ = write!(&mut out, "%{:02X}", b);
-        }
-    }
-    out
 }
 
 fn redact_in_place(v: &mut serde_json::Value) {
@@ -459,14 +414,6 @@ mod tests {
             split_run_id_modifier("abc.xhprof.json"),
             ("abc", RunModifier::Format("xhprof.json"))
         );
-        assert_eq!(
-            split_run_id_modifier("abc.pprof"),
-            ("abc", RunModifier::Format("pprof"))
-        );
-        assert_eq!(
-            split_run_id_modifier("abc/speedscope"),
-            ("abc", RunModifier::Speedscope)
-        );
         // Unknown tail — treat full tail as id; run_id_is_safe will reject it at the call site.
         assert_eq!(
             split_run_id_modifier("abc/other"),
@@ -485,26 +432,11 @@ mod tests {
     }
 
     #[test]
-    fn percent_encode_basic() {
-        assert_eq!(percent_encode("abc_123.~"), "abc_123.~");
-        assert_eq!(percent_encode("/foo bar"), "%2Ffoo%20bar");
-        assert_eq!(percent_encode(":/?#"), "%3A%2F%3F%23");
-    }
-
-    #[test]
     fn content_type_for_each_format() {
         use super::super::storage::disk::OutputFormat;
         assert_eq!(
             content_type_for_format(OutputFormat::Xhprof),
             "application/json"
-        );
-        assert_eq!(
-            content_type_for_format(OutputFormat::Speedscope),
-            "application/json"
-        );
-        assert_eq!(
-            content_type_for_format(OutputFormat::Pprof),
-            "application/octet-stream"
         );
         assert!(content_type_for_format(OutputFormat::Collapsed).starts_with("text/plain"));
     }

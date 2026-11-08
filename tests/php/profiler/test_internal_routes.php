@@ -61,14 +61,6 @@ $r = curl_internal("$base/runs/$run_id.collapsed", [], $auth);
 $t->assertSame('collapsed 200', $r['code'], 200);
 $t->assertTrue('collapsed non-empty', strlen($r['body']) > 0);
 
-// /__profiler/runs/{id}/speedscope -> 302 to speedscope.app
-// Hyper emits header names in lowercase, so match case-insensitively.
-$r = curl_internal("$base/runs/$run_id/speedscope", [], $auth);
-$t->assertSame('speedscope 302', $r['code'], 302);
-$t->assertTrue('Location to speedscope.app',
-    stripos($r['head'], 'location: https://www.speedscope.app/#profileURL=') !== false
-);
-
 // Auth enforcement
 $r = curl_internal("$base/runs");
 $t->assertSame('runs no auth 401', $r['code'], 401);

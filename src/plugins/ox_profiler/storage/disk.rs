@@ -1,5 +1,5 @@
-//! Disk writer for profile runs. Fans out 4 format files plus a
-//! per-line `index.json` entry. Rate-limited via token bucket;
+//! Disk writer for profile runs. Fans out one file per configured
+//! format plus a per-line `index.json` entry. Rate-limited via token bucket;
 //! drops with WARN when the bucket is empty.
 
 use std::path::{Path, PathBuf};
@@ -11,19 +11,15 @@ use parking_lot::Mutex;
 use tokio::fs::{self, OpenOptions};
 use tokio::io::AsyncWriteExt;
 
-use crate::profiling::export::{
-    export_collapsed, export_pprof, export_speedscope, export_xhprof, XhprofMode,
-};
+use crate::profiling::export::{export_collapsed, export_xhprof, XhprofMode};
 use crate::profiling::SpanTree;
 
 use super::RunMeta;
 
-/// One of the four exporters the disk writer can fan out to.
+/// An exporter the disk writer can fan out to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputFormat {
     Xhprof,
-    Speedscope,
-    Pprof,
     Collapsed,
 }
 
@@ -33,8 +29,6 @@ impl OutputFormat {
     pub fn from_str_opt(s: &str) -> Option<Self> {
         match s.to_ascii_lowercase().as_str() {
             "xhprof" | "xhprof.json" => Some(Self::Xhprof),
-            "speedscope" | "speedscope.json" => Some(Self::Speedscope),
-            "pprof" => Some(Self::Pprof),
             "collapsed" => Some(Self::Collapsed),
             _ => None,
         }
@@ -44,11 +38,23 @@ impl OutputFormat {
     pub fn extension(self) -> &'static str {
         match self {
             Self::Xhprof => "xhprof.json",
-            Self::Speedscope => "speedscope.json",
-            Self::Pprof => "pprof",
             Self::Collapsed => "collapsed",
         }
     }
+}
+
+/// Splits configured names into the formats they select and the names no
+/// format answers to, which the caller reports.
+pub fn parse_output_formats(tokens: &[String]) -> (Vec<OutputFormat>, Vec<String>) {
+    let mut known = Vec::with_capacity(tokens.len());
+    let mut unknown = Vec::new();
+    for token in tokens {
+        match OutputFormat::from_str_opt(token) {
+            Some(format) => known.push(format),
+            None => unknown.push(token.clone()),
+        }
+    }
+    (known, unknown)
 }
 
 /// Token bucket rate limiter — `try_consume` refills since
@@ -184,45 +190,9 @@ impl DiskWriter {
         // Fan out the format writes via tokio::spawn so they happen
         // in parallel. Each future returns `Some(format_extension)`
         // on success; collect those for the index entry.
-        //
-        // pprof's render is gzip-heavy (milliseconds for non-trivial
-        // profiles) — it would stall a Tokio worker thread. Detour it
-        // through `spawn_blocking` first, then reuse the same fan-out
-        // path for the file write. Other formats are pure serde_json
-        // (cheap) and render inline.
-        let mut pprof_bytes: Option<Vec<u8>> = if formats.contains(&OutputFormat::Pprof) {
-            let tree_c = Arc::clone(tree);
-            let meta_c = meta.clone();
-            match tokio::task::spawn_blocking(move || {
-                render(&tree_c, &meta_c, OutputFormat::Pprof, xhgui_envelope)
-            })
-            .await
-            {
-                Ok(b) => Some(b),
-                Err(e) => {
-                    tracing::error!(
-                        plugin = "profiler",
-                        run_id = %meta.run_id,
-                        error = %e,
-                        "pprof render task panicked"
-                    );
-                    self.metrics.inc_disk_drop();
-                    None
-                }
-            }
-        } else {
-            None
-        };
         let mut tasks = Vec::with_capacity(formats.len());
         for &fmt in formats {
-            let bytes = if fmt == OutputFormat::Pprof {
-                match pprof_bytes.take() {
-                    Some(b) => b,
-                    None => continue, // render failed or already consumed
-                }
-            } else {
-                render(tree, meta, fmt, xhgui_envelope)
-            };
+            let bytes = render(tree, meta, fmt, xhgui_envelope);
             let path = self
                 .output_dir
                 .join(format!("{}.{}", meta.run_id, fmt.extension()));
@@ -285,8 +255,6 @@ fn render(tree: &SpanTree, meta: &RunMeta, fmt: OutputFormat, xhgui_envelope: bo
             };
             export_xhprof(tree, mode, xhgui)
         }
-        OutputFormat::Speedscope => export_speedscope(tree),
-        OutputFormat::Pprof => export_pprof(tree),
         OutputFormat::Collapsed => export_collapsed(tree),
     }
 }
@@ -348,13 +316,27 @@ mod tests {
     }
 
     #[test]
+    fn removed_formats_do_not_parse() {
+        for name in ["pprof", "speedscope", "speedscope.json"] {
+            assert_eq!(OutputFormat::from_str_opt(name), None, "{name}");
+        }
+    }
+
+    #[test]
+    fn parse_output_formats_reports_unknown_names() {
+        let tokens = [
+            "xhprof".to_string(),
+            "pprof".to_string(),
+            "collapsed".to_string(),
+        ];
+        let (known, unknown) = parse_output_formats(&tokens);
+        assert_eq!(known, vec![OutputFormat::Xhprof, OutputFormat::Collapsed]);
+        assert_eq!(unknown, vec!["pprof".to_string()]);
+    }
+
+    #[test]
     fn output_format_string_round_trip() {
-        for fmt in [
-            OutputFormat::Xhprof,
-            OutputFormat::Speedscope,
-            OutputFormat::Pprof,
-            OutputFormat::Collapsed,
-        ] {
+        for fmt in [OutputFormat::Xhprof, OutputFormat::Collapsed] {
             let s = fmt.extension();
             assert!(OutputFormat::from_str_opt(s).is_some(), "{s}");
         }

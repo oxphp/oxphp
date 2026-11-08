@@ -5,13 +5,9 @@
 //! exporter and writing the bytes to disk / pushing over HTTP.
 
 pub mod collapsed;
-pub mod pprof;
-pub mod speedscope;
 pub mod xhprof;
 
 pub use collapsed::export_collapsed;
-pub use pprof::export_pprof;
-pub use speedscope::export_speedscope;
 pub use xhprof::{
     export_xhprof, export_xhprof_buggregator, BuggregatorMeta, XhguiMeta, XhprofMode,
 };

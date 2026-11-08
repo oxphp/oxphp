@@ -460,12 +460,15 @@ impl Plugin for ProfilerPlugin {
         // Build the storage handle (cache always; disk + http
         // optional) and wire the complete handler to it.
         // Retention background task runs only when disk is enabled.
-        let output_formats: Vec<storage::OutputFormat> = self
-            .config
-            .output_formats
-            .iter()
-            .filter_map(|s| storage::OutputFormat::from_str_opt(s))
-            .collect();
+        let (output_formats, unknown_formats) =
+            storage::disk::parse_output_formats(&self.config.output_formats);
+        for name in &unknown_formats {
+            tracing::warn!(
+                plugin = "profiler",
+                format = %name,
+                "PROFILER_OUTPUT_FORMATS names an unknown format; skipped"
+            );
+        }
 
         let metrics = storage::StorageMetrics::new();
 
@@ -488,7 +491,14 @@ impl Plugin for ProfilerPlugin {
 
         let http = self.config.export_url.as_ref().and_then(|url| {
             let format = storage::OutputFormat::from_str_opt(&self.config.export_format)
-                .unwrap_or(storage::OutputFormat::Xhprof);
+                .unwrap_or_else(|| {
+                    tracing::warn!(
+                        plugin = "profiler",
+                        format = %self.config.export_format,
+                        "PROFILER_EXPORT_FORMAT names an unknown format; using xhprof"
+                    );
+                    storage::OutputFormat::Xhprof
+                });
             let token = self
                 .config
                 .export_auth_token

@@ -60,7 +60,7 @@ fn fixture_meta(run_id: &str) -> RunMeta {
 }
 
 #[tokio::test]
-async fn writes_all_four_formats() {
+async fn writes_every_format() {
     let dir = TempDir::new().unwrap();
     let writer = DiskWriter::new(
         dir.path().to_path_buf(),
@@ -70,15 +70,10 @@ async fn writes_all_four_formats() {
     );
     let tree = fixture_tree();
     let meta = fixture_meta("run-abc");
-    let formats = [
-        OutputFormat::Collapsed,
-        OutputFormat::Xhprof,
-        OutputFormat::Speedscope,
-        OutputFormat::Pprof,
-    ];
+    let formats = [OutputFormat::Collapsed, OutputFormat::Xhprof];
     let ok = writer.write_run(&meta, &tree, &formats, false).await;
     assert!(ok);
-    for ext in &["collapsed", "xhprof.json", "speedscope.json", "pprof"] {
+    for ext in &["collapsed", "xhprof.json"] {
         let p = dir.path().join(format!("run-abc.{ext}"));
         assert!(p.exists(), "{} should exist", p.display());
     }

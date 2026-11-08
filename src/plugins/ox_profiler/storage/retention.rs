@@ -201,4 +201,18 @@ mod tests {
             "format file deleted"
         );
     }
+
+    #[tokio::test]
+    async fn retention_removes_files_of_removed_formats() {
+        let dir = TempDir::new().unwrap();
+        let mut old = meta("a", 100);
+        old.formats = vec!["speedscope.json".into(), "pprof".into()];
+        write_index(dir.path(), &[old, meta("b", 200)]).await;
+        std::fs::write(dir.path().join("a.speedscope.json"), b"x").unwrap();
+        std::fs::write(dir.path().join("a.pprof"), b"x").unwrap();
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        sweep_once(dir.path(), 1, &lock).await.unwrap();
+        assert!(!dir.path().join("a.speedscope.json").exists());
+        assert!(!dir.path().join("a.pprof").exists());
+    }
 }

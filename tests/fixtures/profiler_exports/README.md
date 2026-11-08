@@ -12,11 +12,6 @@ to detect unintended wire-format changes during refactors.
 | `tiny.collapsed`           | `export_collapsed(tree)` | byte-equal |
 | `tiny.xhprof.json`         | `export_xhprof(tree, Raw, None)` | semantic JSON-equal |
 | `tiny.xhprof.xhgui.json`   | `export_xhprof(tree, Xhgui, Some(meta))` | semantic JSON-equal |
-| `tiny.speedscope.json`     | `export_speedscope(tree)` | semantic JSON-equal |
-
-(pprof has no committed fixture — gzip + protobuf field-ordering
-make byte equality fragile. The test decodes the bytes back into a
-`Profile` struct and compares structurally.)
 
 ## Regenerating
 
