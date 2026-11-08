@@ -421,7 +421,7 @@ Per-request profiler that writes xhprof and collapsed-stack profiles. See [Profi
 | `PROFILER_MAX_SPANS` | `50000` | Per-request cap on profile spans. Profiles exceeding the cap are truncated |
 | `PROFILER_MAX_DEPTH` | `0` (no cap) | Maximum nesting depth of recorded calls; a deeper call and, except under self-recursion past 32 frames, everything it calls are absent from the profile — their time is not, and reads as exclusive time of the call at the limit. Dropped calls still count against `PROFILER_MAX_SPANS`. Clamped to `32`, the depth the engine observer tracks; with `PROFILER_ENABLED=true` a larger value is reported as clamped at startup |
 | `PROFILER_OUTPUT_DIR` | `/tmp/oxphp-profiles` | Directory for on-disk profile files |
-| `PROFILER_OUTPUT_FORMATS` | `xhprof,collapsed` | Comma-separated list of output formats to write to disk: `xhprof`, `collapsed`. An unknown name is skipped with a startup warning |
+| `PROFILER_OUTPUT_FORMATS` | `xhprof,collapsed` | Comma-separated list of output formats to write to disk: `xhprof`, `collapsed`. An unknown name is skipped with a startup warning; a list with no known name writes both |
 | `PROFILER_DISK_MAX_PER_SEC` | `10` | Rate limit on profile files written to disk per second |
 | `PROFILER_RETENTION_COUNT` | `100` | Maximum profile files kept in `PROFILER_OUTPUT_DIR`. Older files are pruned |
 | `PROFILER_EXPORT_URL` | *(unset)* | Remote endpoint to POST profiles to. When set, disk writes still happen unless `PROFILER_OUTPUT_FORMATS` is empty |

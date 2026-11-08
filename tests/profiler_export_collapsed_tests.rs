@@ -21,12 +21,12 @@ fn build_simple_tree() -> oxphp::profiling::SpanTree {
 }
 
 #[test]
-fn wall_metric_emits_one_line_per_span() {
+fn each_distinct_stack_gets_one_line() {
     let tree = build_simple_tree();
     let bytes = export_collapsed(&tree);
     let text = std::str::from_utf8(&bytes).unwrap();
     let lines: Vec<&str> = text.lines().collect();
-    assert_eq!(lines.len(), 3, "one line per finished span");
+    assert_eq!(lines.len(), 3, "one line per distinct stack");
     assert!(lines.iter().all(|l| l.starts_with("main();")));
 }
 
@@ -46,7 +46,7 @@ fn paths_are_root_first_with_synthetic_main() {
 }
 
 /// A flamegraph draws a frame as wide as its own line plus every line under
-/// it, so the lines of a run must add up to the outermost call's duration.
+/// it, so a line carries the call without its callees.
 #[test]
 fn each_line_counts_the_call_without_its_callees() {
     let tree = build_simple_tree();
@@ -56,6 +56,28 @@ fn each_line_counts_the_call_without_its_callees() {
     assert!(text.contains("main();outer;middle;inner 1\n"), "{text}");
     assert!(text.contains("main();outer;middle 2\n"), "{text}");
     assert!(text.contains("main();outer 2\n"), "{text}");
+}
+
+/// Ten calls of 900 ns are 9 µs. Cut to microseconds per call they would be
+/// ten zeros, and the caller has already given those nanoseconds up.
+#[test]
+fn calls_shorter_than_a_microsecond_add_up_on_their_stack() {
+    let mut ctx = ProfilingContext::new();
+    ctx.reset(ProfilingMode::ProfileAll, "trace".into(), "root".into());
+    let outer = ctx.push_with_metrics("outer".into(), vec![], 0, 0, 0, 0);
+    for i in 0..10u64 {
+        let start = 100 + i * 1_000;
+        let leaf = ctx.push_with_metrics("leaf".into(), vec![], start, 0, 0, 0);
+        ctx.pop_with_metrics(leaf, start + 900, 0, 0, 0);
+    }
+    ctx.pop_with_metrics(outer, 10_000, 0, 0, 0);
+    let tree = ctx.finalize();
+
+    let bytes = export_collapsed(&tree);
+    let text = std::str::from_utf8(&bytes).unwrap();
+    assert!(text.contains("main();outer;leaf 9\n"), "{text}");
+    assert!(text.contains("main();outer 1\n"), "{text}");
+    assert_eq!(text.lines().count(), 2, "{text}");
 }
 
 #[test]
