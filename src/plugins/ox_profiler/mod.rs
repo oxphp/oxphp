@@ -46,6 +46,29 @@ pub struct ProfilerPlugin {
     config: ProfilerConfig,
 }
 
+/// The writer for profile files, or `None` when this configuration writes
+/// none. An empty `PROFILER_OUTPUT_FORMATS` is how disk output is turned off,
+/// and a writer with nothing to write would still spend the disk rate limit
+/// and list every run in `index.json`.
+fn build_disk_writer(
+    config: &ProfilerConfig,
+    output_formats: &[storage::OutputFormat],
+    metrics: &std::sync::Arc<storage::StorageMetrics>,
+    index_lock: &std::sync::Arc<tokio::sync::Mutex<()>>,
+) -> Option<storage::DiskWriter> {
+    if config.output_dir.as_os_str().is_empty() || output_formats.is_empty() {
+        return None;
+    }
+    let rate = config.disk_max_per_sec.max(1) as f64;
+    Some(storage::DiskWriter::with_index_lock(
+        config.output_dir.clone(),
+        rate,
+        rate, // capacity == burst budget
+        std::sync::Arc::clone(metrics),
+        std::sync::Arc::clone(index_lock),
+    ))
+}
+
 impl Default for ProfilerPlugin {
     fn default() -> Self {
         Self::new()
@@ -440,18 +463,7 @@ impl Plugin for ProfilerPlugin {
         // retention sweep so the two are totally ordered on index.json.
         let index_lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
 
-        let disk = if !self.config.output_dir.as_os_str().is_empty() {
-            let rate = self.config.disk_max_per_sec.max(1) as f64;
-            Some(storage::DiskWriter::with_index_lock(
-                self.config.output_dir.clone(),
-                rate,
-                rate, // capacity == burst budget
-                std::sync::Arc::clone(&metrics),
-                std::sync::Arc::clone(&index_lock),
-            ))
-        } else {
-            None
-        };
+        let disk = build_disk_writer(&self.config, &output_formats, &metrics, &index_lock);
 
         let http = self.config.export_url.as_ref().and_then(|url| {
             let format = storage::OutputFormat::from_str_opt(&self.config.export_format)
@@ -709,6 +721,23 @@ mod tests {
                 assert_eq!(installed, 7);
             },
         );
+    }
+
+    #[test]
+    fn an_empty_format_list_builds_no_disk_writer() {
+        let metrics = storage::StorageMetrics::new();
+        let index_lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+        let writer = build_disk_writer(&ProfilerConfig::default(), &[], &metrics, &index_lock);
+        assert!(writer.is_none());
+    }
+
+    #[test]
+    fn a_selected_format_builds_a_disk_writer() {
+        let metrics = storage::StorageMetrics::new();
+        let index_lock = std::sync::Arc::new(tokio::sync::Mutex::new(()));
+        let formats = [storage::OutputFormat::Collapsed];
+        let writer = build_disk_writer(&ProfilerConfig::default(), &formats, &metrics, &index_lock);
+        assert!(writer.is_some());
     }
 
     /// Unset means unbounded. The knob was inert for its whole life,

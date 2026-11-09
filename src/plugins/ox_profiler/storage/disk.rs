@@ -53,9 +53,9 @@ impl OutputFormat {
 
 /// Splits configured names into the formats they select and the names no
 /// format answers to, which the caller reports. A list with no known name
-/// selects the defaults: taken as written it would leave every run listed
-/// with no file behind it. An empty list stays empty, it is how disk output
-/// is turned off.
+/// selects the defaults, so that naming only formats this version lacks does
+/// not turn disk output off. An empty list stays empty: that is how disk
+/// output is turned off.
 pub fn parse_output_formats(tokens: &[String]) -> (Vec<OutputFormat>, Vec<String>) {
     let mut known = Vec::with_capacity(tokens.len());
     let mut unknown = Vec::new();

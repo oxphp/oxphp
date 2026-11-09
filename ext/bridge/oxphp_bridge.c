@@ -6889,7 +6889,8 @@ static void oxphp_profiler_begin(zend_execute_data *execute_data) {
     uintptr_t fn_id = (uintptr_t)execute_data->func;
 
     /* Per-request span cap. next_seq grows monotonically under
-     * mode != OFF; once the cap is reached we stop emitting new
+     * PROFILE_ALL, the only mode past the gate above; once the cap
+     * is reached we stop emitting new
      * span events. A sentinel (fn_id=0) is still pushed to
      * open_fn_stack so the matching end pops in LIFO order — this
      * is required for correctness under recursion, where the
@@ -6965,8 +6966,14 @@ static void oxphp_profiler_end(zend_execute_data *execute_data, zval *retval) {
 
     /* Correctness guard: if the begin for THIS function did not push
      * (capture was off when it ran), open_fn_stack top belongs to an
-     * outer span — popping would
-     * unbalance it. Skip silently.
+     * outer span of another function, and popping would unbalance it.
+     * Skip silently.
+     *
+     * The guard compares functions, not calls. A recursive call begun
+     * while capture was off finds its own function on top and takes
+     * the outer call's slot: that span ends early, and the outer
+     * call's own end finds its slot gone. Pushes and pops still pair
+     * up, so the stack stays balanced.
      *
      * The check uses execute_data->func which is the same pointer the
      * observer API keyed the handler-pair cache on, so equality with
