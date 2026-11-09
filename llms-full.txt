@@ -15264,7 +15264,7 @@ Per-request profiler that writes xhprof and collapsed-stack profiles. See [Profi
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `PROFILER_ENABLED` | `false` | Boolean — see [Boolean values](#boolean-values). Master switch. All other `PROFILER_*` vars are still parsed at startup so typos surface immediately |
+| `PROFILER_ENABLED` | `false` | Boolean — see [Boolean values](#boolean-values). Master switch. Only this variable and `PROFILER_EXCLUDE_PATHS` stop the server from starting on a bad value, and they do so with the profiler off as well. A number in another `PROFILER_*` variable that does not parse silently takes its default |
 | `PROFILER_SAMPLE_RATE` | `0.0` | Probability (0.0–1.0) that a request is sampled. Values outside the range are clamped |
 | `PROFILER_AUTH_TOKEN` | *(unset)* | Secret the `X-OxPHP-Profile` header must carry, and the bearer token for the `/__profiler/*` routes on the internal server. Unset or empty = no token required: any non-empty header value passes, and the `/__profiler/*` routes answer without a bearer. `PROFILER_SAMPLE_RATE` sampling and the `OxPHP\Profile\*` PHP functions never consult it — under `PROFILER_ENABLED=true` a script that calls `OxPHP\Profile\start()` profiles its own request with no token involved |
 | `PROFILER_MAX_SPANS` | `50000` | Per-request cap on profile spans. Profiles exceeding the cap are truncated |
