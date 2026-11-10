@@ -715,7 +715,8 @@ namespace OxPHP\Http {
      * Request::files() return new objects on every call, and each of them
      * reads the file again on its first type() call, so hold the object if
      * you need the type more than once. After moveTo(), the object that moved
-     * the file reads it at its new path if type() was not called on it before.
+     * the file reads it at its new path unless it keeps a type from before the
+     * move; a type() call that threw keeps none.
      */
     interface UploadedFileInterface
     {
@@ -729,14 +730,15 @@ namespace OxPHP\Http {
          * MIME type detected from file contents (magic bytes).
          *
          * The first call reads the file and keeps the result on this object;
-         * later calls return it without reading again. If this object's first
-         * call comes after a successful moveTo() on it, that call reads the
-         * file at the destination. Returns "application/octet-stream" if
-         * detection fails, and keeps that answer too: later calls return it
-         * without a warning. A call that throws instead (see below) keeps
-         * nothing. Detection fails, for one, on another object for the same
-         * upload whose first call comes after the move, where
-         * mime_content_type() also raises a warning for the missing file.
+         * later calls return it without reading again. Returns
+         * "application/octet-stream" if detection fails, and keeps that answer
+         * too: later calls return it without a warning. A call that throws
+         * instead (see below) keeps nothing, and the next call reads the file
+         * again. Once a moveTo() on this object has succeeded, a call that
+         * reads the file reads it at the destination. Detection fails, for
+         * one, on another object for the same upload that keeps no type from
+         * before the move, where mime_content_type() also raises a warning for
+         * the missing file.
          *
          * Detection needs mime_content_type() from ext/fileinfo. Without it —
          * the extension not loaded, or the function listed in
@@ -764,17 +766,18 @@ namespace OxPHP\Http {
         /**
          * Move the uploaded file to a destination path.
          *
-         * Moves it with move_uploaded_file() and does not detect its type. If
-         * type() was not called on this object before the move, it reads the
-         * file at $path afterwards: for a local path, the moved file, by the
-         * absolute path the move put it at, whatever the working directory is
-         * later; for a stream-wrapper URL, whatever the wrapper returns when the
-         * URL is opened again — "application/octet-stream" where it cannot
-         * open the URL for reading or stat it. For such destinations, call
-         * type() before moveTo(). A data: URL is never decoded: the move
-         * renames to it as a local file name, which type() reads, or, where
-         * that fails, copies to the URL, which takes no writes — only an empty
-         * upload gets through, with nothing written, and type() finds no file.
+         * Moves it with move_uploaded_file() and does not detect its type.
+         * Unless this object keeps a type from before the move — a type() call
+         * that threw keeps none — type() reads the file at $path afterwards:
+         * for a local path, the moved file, by the absolute path the move put
+         * it at, whatever the working directory is later; for a stream-wrapper
+         * URL, whatever the wrapper returns when the URL is opened again —
+         * "application/octet-stream" where it cannot open the URL for reading
+         * or stat it. For such destinations, call type() before moveTo(). A
+         * data: URL is never decoded: the move renames to it as a local file
+         * name, which type() reads, or, where that fails, copies to the URL,
+         * which takes no writes — only an empty upload gets through, with
+         * nothing written, and type() finds no file.
          * Returns false if the file is not valid or the move fails. A valid
          * file is also not moved, with false and a warning, if
          * move_uploaded_file is listed in disable_functions; a function the
