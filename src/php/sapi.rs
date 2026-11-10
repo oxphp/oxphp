@@ -518,25 +518,30 @@ fn push_server_var_fmt(vars: &mut PackedPairs, key: &str, val: std::fmt::Argumen
     );
 }
 
-/// Parse a Host header value into (server_name, server_port).
-/// Handles IPv6 literals per RFC 9110 §7.2 / RFC 3986 §3.2.2.
-fn parse_host<'a>(host: &'a str, default_port: &'a str) -> (&'a str, &'a str) {
-    if host.starts_with('[') {
-        // IPv6 literal: find closing bracket, then optional :port
-        if let Some(bracket_end) = host.find(']') {
-            if host.get(bracket_end + 1..bracket_end + 2) == Some(":") {
-                (&host[..bracket_end + 1], &host[bracket_end + 2..])
-            } else {
-                (host, default_port)
-            }
-        } else {
-            (host, default_port)
-        }
-    } else if let Some(colon) = host.rfind(':') {
-        (&host[..colon], &host[colon + 1..])
+/// Split a host as `Host` carries it into the name and the port, an IPv6
+/// literal keeping its brackets (RFC 3986 section 3.2.2). A port that is empty
+/// or no number up to 65535 is `None`, the scheme's default: RFC 9110 section
+/// 4.2.3 reads an empty one that way. `$_SERVER` and the request object both
+/// split the host here, so `SERVER_PORT` and `port()` read the same port.
+fn parse_host(host: &str) -> (&str, Option<u16>) {
+    let split = if host.starts_with('[') {
+        host.find(']')
+            .and_then(|end| Some((&host[..=end], host[end + 1..].strip_prefix(':')?)))
     } else {
-        (host, default_port)
+        host.rsplit_once(':')
+    };
+    match split {
+        Some((name, port)) => (name, port.parse().ok()),
+        None => (host, None),
     }
+}
+
+/// The host a request is for: the one a trusted proxy forwards, else `Host`.
+/// A `Host` that is not text counts as none.
+fn request_host(req: &ScriptRequest) -> Option<&str> {
+    req.forwarded_host
+        .as_deref()
+        .or_else(|| req.headers.get(header::HOST).and_then(|v| v.to_str().ok()))
 }
 
 /// Set minimal $_SERVER variables for the worker mode boot phase.
@@ -1107,26 +1112,14 @@ fn fill_request_data(req: &ScriptRequest) {
 
             // SERVER_NAME and SERVER_PORT. Port priority: X-Forwarded-Port >
             // port suffix of forwarded/Host header > scheme default.
-            let default_port = if effective_tls { "443" } else { "80" };
-            let fwd_port = req.forwarded_port.map(|p| p.to_string());
-            if let Some(ref fwd_host) = req.forwarded_host {
-                let (name, port) = parse_host(fwd_host, default_port);
-                push_server_var(vars, "SERVER_NAME", name);
-                push_server_var(vars, "SERVER_PORT", fwd_port.as_deref().unwrap_or(port));
-            } else if let Some(host) = req.headers.get(header::HOST) {
-                if let Ok(host_str) = host.to_str() {
-                    let (name, port) = parse_host(host_str, default_port);
-                    push_server_var(vars, "SERVER_NAME", name);
-                    push_server_var(vars, "SERVER_PORT", fwd_port.as_deref().unwrap_or(port));
-                }
-            } else {
-                push_server_var(vars, "SERVER_NAME", "localhost");
-                push_server_var(
-                    vars,
-                    "SERVER_PORT",
-                    fwd_port.as_deref().unwrap_or(default_port),
-                );
-            }
+            let (name, port) = request_host(req).map_or(("localhost", None), parse_host);
+            push_server_var(vars, "SERVER_NAME", name);
+            let default_port: u16 = if effective_tls { 443 } else { 80 };
+            push_server_var_fmt(
+                vars,
+                "SERVER_PORT",
+                format_args!("{}", req.forwarded_port.or(port).unwrap_or(default_port)),
+            );
 
             // CONTENT_TYPE and CONTENT_LENGTH (no HTTP_ prefix per CGI spec)
             if let Some(ct) = header_field_value(&req.headers, &header::CONTENT_TYPE) {
@@ -1221,38 +1214,14 @@ fn fill_request_data(req: &ScriptRequest) {
         data.scheme_str
             .push_str(if effective_tls { "https" } else { "http" });
 
-        // Parse host and port: forwarded host takes priority
         reset_string(&mut data.host_str);
-        data.port_val = if effective_tls { 443 } else { 80 };
-
-        let host_source = req
-            .forwarded_host
-            .as_deref()
-            .or_else(|| req.headers.get(header::HOST).and_then(|v| v.to_str().ok()));
-
-        if let Some(host_val) = host_source {
-            // Handle IPv6: [::1]:8080
-            if let Some(bracket_end) = host_val.find(']') {
-                data.host_str.push_str(&host_val[..=bracket_end]);
-                if let Some(port_str) = host_val.get(bracket_end + 2..) {
-                    if let Ok(p) = port_str.parse::<u16>() {
-                        data.port_val = p;
-                    }
-                }
-            } else if let Some(colon) = host_val.rfind(':') {
-                data.host_str.push_str(&host_val[..colon]);
-                if let Ok(p) = host_val[colon + 1..].parse::<u16>() {
-                    data.port_val = p;
-                }
-            } else {
-                data.host_str.push_str(host_val);
-            }
-        }
-
+        let (host, port) = request_host(req).map_or(("", None), parse_host);
+        data.host_str.push_str(host);
         // X-Forwarded-Port overrides any port derived from the host above.
-        if let Some(p) = req.forwarded_port {
-            data.port_val = p;
-        }
+        data.port_val = req
+            .forwarded_port
+            .or(port)
+            .unwrap_or(if effective_tls { 443 } else { 80 });
 
         reset_string(&mut data.query_string_raw);
         data.query_string_raw.push_str(query_string);
@@ -6692,48 +6661,54 @@ mod tests {
 
     #[test]
     fn parse_host_ipv6_bare() {
-        assert_eq!(parse_host("[::1]", "80"), ("[::1]", "80"));
+        assert_eq!(parse_host("[::1]"), ("[::1]", None));
     }
 
     #[test]
     fn parse_host_ipv6_with_port() {
-        assert_eq!(parse_host("[::1]:8080", "80"), ("[::1]", "8080"));
+        assert_eq!(parse_host("[::1]:8080"), ("[::1]", Some(8080)));
     }
 
     #[test]
     fn parse_host_ipv6_full_bare() {
-        assert_eq!(parse_host("[2001:db8::1]", "443"), ("[2001:db8::1]", "443"));
+        assert_eq!(parse_host("[2001:db8::1]"), ("[2001:db8::1]", None));
     }
 
     #[test]
     fn parse_host_ipv6_full_with_port() {
         assert_eq!(
-            parse_host("[2001:db8::1]:9000", "443"),
-            ("[2001:db8::1]", "9000")
+            parse_host("[2001:db8::1]:9000"),
+            ("[2001:db8::1]", Some(9000))
         );
     }
 
     #[test]
     fn parse_host_domain_with_port() {
-        assert_eq!(
-            parse_host("example.com:8080", "80"),
-            ("example.com", "8080")
-        );
+        assert_eq!(parse_host("example.com:8080"), ("example.com", Some(8080)));
     }
 
     #[test]
     fn parse_host_domain_without_port() {
-        assert_eq!(parse_host("example.com", "80"), ("example.com", "80"));
+        assert_eq!(parse_host("example.com"), ("example.com", None));
     }
 
     #[test]
     fn parse_host_ipv4_with_port() {
-        assert_eq!(parse_host("127.0.0.1:3000", "80"), ("127.0.0.1", "3000"));
+        assert_eq!(parse_host("127.0.0.1:3000"), ("127.0.0.1", Some(3000)));
     }
 
     #[test]
     fn parse_host_ipv4_without_port() {
-        assert_eq!(parse_host("127.0.0.1", "80"), ("127.0.0.1", "80"));
+        assert_eq!(parse_host("127.0.0.1"), ("127.0.0.1", None));
+    }
+
+    #[test]
+    fn parse_host_empty_or_non_numeric_port_is_none() {
+        assert_eq!(parse_host("a.example:"), ("a.example", None));
+        assert_eq!(parse_host("[::1]:"), ("[::1]", None));
+        assert_eq!(parse_host("a.example:abc"), ("a.example", None));
+        assert_eq!(parse_host("a.example:65536"), ("a.example", None));
+        assert_eq!(parse_host(":80"), ("", Some(80)));
     }
 
     #[test]
@@ -6961,6 +6936,110 @@ mod tests {
         assert_eq!(server_var_values("HTTP_HOST"), ["a.example"]);
         assert_eq!(raw_header_values("host"), ["a.example"]);
         assert_eq!(server_var_values("SERVER_NAME"), ["a.example"]);
+    }
+
+    /// `SERVER_NAME`, `SERVER_PORT` and the request object's host and port.
+    fn host_and_port() -> (Vec<String>, Vec<String>, String, u16) {
+        let (host, port) = REQUEST_DATA.with(|rd| {
+            let data = rd.borrow();
+            (data.host_str.clone(), data.port_val)
+        });
+        (
+            server_var_values("SERVER_NAME"),
+            server_var_values("SERVER_PORT"),
+            host,
+            port,
+        )
+    }
+
+    /// RFC 9110 section 4.2.3 reads an empty port as the scheme's default, and
+    /// `SERVER_PORT` gives the port `port()` gives.
+    #[test]
+    fn host_with_an_empty_port_reaches_php_with_the_default_port() {
+        for (value, name) in [(&b"a.example:"[..], "a.example"), (b"[::1]:", "[::1]")] {
+            fill_with_header_lines(&[(header::HOST, value)]);
+            assert_eq!(
+                host_and_port(),
+                (
+                    vec![name.to_owned()],
+                    vec!["80".to_owned()],
+                    name.to_owned(),
+                    80
+                ),
+                "{}",
+                String::from_utf8_lossy(value)
+            );
+        }
+    }
+
+    /// A trusted proxy's host is not held to the `Host` rules, and a port
+    /// that is no number reads as the default in `SERVER_PORT` as in `port()`.
+    #[test]
+    fn forwarded_host_port_that_is_no_number_reads_as_the_default() {
+        // SAFETY: writes one process-wide flag and touches nothing else.
+        unsafe { bindings::oxphp_bridge_set_superglobals_enabled(true) };
+        for value in ["a.example:abc", "a.example:", "a.example:65536"] {
+            let mut req = queued_request(None).script;
+            req.forwarded_host = Some(value.into());
+            fill_request_data(&req);
+            assert_eq!(
+                host_and_port(),
+                (
+                    vec!["a.example".to_owned()],
+                    vec!["80".to_owned()],
+                    "a.example".to_owned(),
+                    80
+                ),
+                "{value}"
+            );
+        }
+    }
+
+    /// `X-Forwarded-Port` outranks the port the host names, and a TLS request
+    /// whose host names none, or an empty one, is on 443.
+    #[test]
+    fn forwarded_port_and_tls_decide_the_port_alike_for_both_apis() {
+        // SAFETY: writes one process-wide flag and touches nothing else.
+        unsafe { bindings::oxphp_bridge_set_superglobals_enabled(true) };
+        let expect = |port: u16| {
+            (
+                vec!["a.example".to_owned()],
+                vec![port.to_string()],
+                "a.example".to_owned(),
+                port,
+            )
+        };
+        let mut req = queued_request(None).script;
+        req.headers
+            .insert(header::HOST, HeaderValue::from_static("a.example:8080"));
+        req.forwarded_port = Some(8443);
+        fill_request_data(&req);
+        assert_eq!(host_and_port(), expect(8443));
+
+        req.forwarded_port = None;
+        req.is_tls = true;
+        for value in ["a.example", "a.example:"] {
+            req.headers
+                .insert(header::HOST, HeaderValue::from_static(value));
+            fill_request_data(&req);
+            assert_eq!(host_and_port(), expect(443), "{value}");
+        }
+    }
+
+    /// A `Host` that is not text gives PHP what an absent one does, so
+    /// `SERVER_NAME` and `SERVER_PORT` are never missing.
+    #[test]
+    fn host_that_is_not_text_reads_as_an_absent_one() {
+        fill_with_header_lines(&[(header::HOST, b"caf\xc3\xa9.example")]);
+        assert_eq!(
+            host_and_port(),
+            (
+                vec!["localhost".to_owned()],
+                vec!["80".to_owned()],
+                String::new(),
+                80
+            )
+        );
     }
 
     #[test]

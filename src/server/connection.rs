@@ -61,12 +61,14 @@ fn is_query_method(method: &Method) -> bool {
 /// The URI parser lets through an authority whose host is empty, such as
 /// `:80`, and RFC 9110 sections 4.2.1 and 4.2.2 have a recipient reject an
 /// `http` or `https` URI like that. It names no host to take, and the request
-/// is refused, an HTTP/2 `CONNECT` naming none included.
+/// is refused, an HTTP/2 `CONNECT` naming none included. It also lets through
+/// a port that is no number, as in `http://a.example:abc/`, and a host or port
+/// [`host_is_valid`] refuses in a `Host` header is refused here too.
 ///
 /// Over HTTP/2 a server may also treat a `Host` naming another host as
 /// malformed: that request is refused, as nginx refuses it. Host names are
 /// compared without regard to case; ports are compared as written. HTTP/1.x
-/// has no such rule, and its `Host` is not looked at.
+/// has no such rule, and its `Host` is not compared with the target's.
 ///
 /// `Err` holds the status and body of the refusal.
 fn host_from_authority(
@@ -88,6 +90,12 @@ fn host_from_authority(
     let host = authority
         .rsplit_once('@')
         .map_or(authority, |(_, host)| host);
+    if !host_is_valid(host.as_bytes()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            b"400 Bad Request: invalid host in the request target",
+        ));
+    }
     if parts.version == http::Version::HTTP_2
         && parts
             .headers
@@ -112,6 +120,86 @@ fn host_from_authority(
         }
     }
     Ok(())
+}
+
+/// Whether `value` is `uri-host [ ":" port ]`, the `Host` grammar of RFC 9110
+/// section 7.2, with a host that is not empty, as RFC 9110 section 4.2.1 has
+/// it for every `http` and `https` URI.
+///
+/// The host is a reg-name, which an IPv4 address also is, or an IP literal in
+/// brackets (RFC 3986 section 3.2.2). The content of the brackets is only held
+/// to the characters an IPv6 address or an IPvFuture may use; a zone
+/// identifier, which needs a `%`, is not one of them. The port may be empty,
+/// as RFC 3986 section 3.2.3 allows, and is otherwise a number up to 65535.
+fn host_is_valid(value: &[u8]) -> bool {
+    let unreserved_or_sub_delim =
+        |b: u8| b.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=".contains(&b);
+    let port = if let Some(literal) = value.strip_prefix(b"[") {
+        let Some(end) = literal.iter().position(|&b| b == b']') else {
+            return false;
+        };
+        let content = &literal[..end];
+        if content.is_empty()
+            || !content
+                .iter()
+                .all(|&b| unreserved_or_sub_delim(b) || b == b':')
+        {
+            return false;
+        }
+        &literal[end + 1..]
+    } else {
+        let end = value.iter().position(|&b| b == b':');
+        let (mut name, port) = value.split_at(end.unwrap_or(value.len()));
+        if name.is_empty() {
+            return false;
+        }
+        while let Some((&b, rest)) = name.split_first() {
+            name = match (b, rest) {
+                (b'%', [high, low, rest @ ..])
+                    if high.is_ascii_hexdigit() && low.is_ascii_hexdigit() =>
+                {
+                    rest
+                }
+                _ if unreserved_or_sub_delim(b) => rest,
+                _ => return false,
+            };
+        }
+        port
+    };
+    match port {
+        [] => true,
+        [b':', digits @ ..] => digits
+            .iter()
+            .try_fold(0u16, |port, &digit| {
+                digit.is_ascii_digit().then_some(())?;
+                port.checked_mul(10)?.checked_add(u16::from(digit - b'0'))
+            })
+            .is_some(),
+        _ => false,
+    }
+}
+
+/// Refuse a request whose `Host` RFC 9112 section 3.2 has a server answer with
+/// `400`: one sent on more than one line or with a value [`host_is_valid`]
+/// refuses, whatever the version, and none at all in an HTTP/1.1 request.
+/// RFC 9110 section 7.2 lets a client leave `Host` out only when it sends the
+/// host as an `:authority` pseudo-header, so an HTTP/2 request with neither
+/// is refused as well. One with an `:authority` is left to `host_from_authority`,
+/// which takes the host from it and holds `Host` to it.
+///
+/// A refused request gets a `400` with the body this returns.
+fn check_host(parts: &http::request::Parts) -> Result<(), &'static [u8]> {
+    if parts.version == http::Version::HTTP_2 && parts.uri.authority().is_some() {
+        return Ok(());
+    }
+    let mut lines = parts.headers.get_all(header::HOST).iter();
+    match (lines.next(), lines.next()) {
+        (None, _) if parts.version <= http::Version::HTTP_10 => Ok(()),
+        (None, _) => Err(b"400 Bad Request: missing Host header"),
+        (Some(_), Some(_)) => Err(b"400 Bad Request: more than one Host header"),
+        (Some(value), None) if host_is_valid(value.as_bytes()) => Ok(()),
+        (Some(_), None) => Err(b"400 Bad Request: invalid Host header"),
+    }
 }
 
 /// Refuse a request target in none of the forms its method may take, or an
@@ -717,6 +805,30 @@ async fn await_queued(
     ))
 }
 
+/// A plain-text refusal of the request `parts` describes. After one of an
+/// HTTP/1.x `CONNECT` the connection is closed, as nginx closes it: what the
+/// client sent behind the `CONNECT` was meant for the tunnel, not for this
+/// server, and hyper 1.10 keeps the connection open after any answer to a
+/// `CONNECT` that is not a 2xx. HTTP/2 forbids a Connection header, and there
+/// the stream ends.
+fn refusal(
+    parts: &http::request::Parts,
+    status: StatusCode,
+    reason: &'static [u8],
+) -> http::Result<Response<ResponseBody>> {
+    let mut response = Response::builder()
+        .status(status)
+        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8");
+    if parts.method == Method::CONNECT && parts.version != http::Version::HTTP_2 {
+        // In the request's version: hyper makes an HTTP/1.1 answer to an
+        // HTTP/1.0 request asking for keep-alive a keep-alive one.
+        response = response
+            .version(parts.version)
+            .header(header::CONNECTION, "close");
+    }
+    response.body(full_body(Bytes::from_static(reason)))
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn dispatch_request(
     mut parts: http::request::Parts,
@@ -729,16 +841,19 @@ async fn dispatch_request(
     cancel_state: std::sync::Arc<crate::bridge::cancel::CancellationState>,
     coding: Option<compression::Coding>,
 ) -> Result<(Response<ResponseBody>, usize, PhpExecData), crate::types::BoxError> {
-    // Before routing, so a static file is refused the same as a script.
-    if let Err((status, reason)) = host_from_authority(&mut parts) {
+    // Before `host_from_authority`, which puts the host of an absolute-form
+    // target in place of the `Host` the client sent.
+    if let Err(reason) = check_host(&parts) {
         return Ok((
-            Response::builder()
-                .status(status)
-                .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
-                .body(full_body(Bytes::from_static(reason)))?,
+            refusal(&parts, StatusCode::BAD_REQUEST, reason)?,
             0,
             PhpExecData::default(),
         ));
+    }
+
+    // Before routing, so a static file is refused the same as a script.
+    if let Err((status, reason)) = host_from_authority(&mut parts) {
+        return Ok((refusal(&parts, status, reason)?, 0, PhpExecData::default()));
     }
 
     // A CONNECT asks for a tunnel, which this server never opens, and RFC
@@ -747,25 +862,13 @@ async fn dispatch_request(
     // client anyway: RFC 9110 section 9.3.6 has the tunnel start right after
     // a 2xx's header, so hyper sends that header without the body, and sends
     // nothing for one carrying a Content-Length (over HTTP/2, a non-zero one).
-    // An HTTP/1.x connection is closed after the refusal, as nginx closes it:
-    // what the client sent behind the CONNECT was meant for the tunnel, not
-    // for this server. HTTP/2 forbids a Connection header, and there the
-    // stream ends.
     if parts.method == Method::CONNECT {
-        let mut refusal = Response::builder()
-            .status(StatusCode::NOT_IMPLEMENTED)
-            .header(header::CONTENT_TYPE, "text/plain; charset=utf-8");
-        if parts.version != http::Version::HTTP_2 {
-            // In the request's version: hyper makes an HTTP/1.1 answer to an
-            // HTTP/1.0 request asking for keep-alive a keep-alive one.
-            refusal = refusal
-                .version(parts.version)
-                .header(header::CONNECTION, "close");
-        }
         return Ok((
-            refusal.body(full_body(Bytes::from_static(
+            refusal(
+                &parts,
+                StatusCode::NOT_IMPLEMENTED,
                 b"501 Not Implemented: CONNECT is not supported",
-            )))?,
+            )?,
             0,
             PhpExecData::default(),
         ));
@@ -1175,6 +1278,65 @@ mod tests {
                 b"431 Request Header Fields Too Large: too many header fields".as_slice()
             ))
         );
+    }
+
+    #[test]
+    fn host_is_valid_follows_the_uri_host_and_port_grammar() {
+        let valid: &[&[u8]] = &[
+            b"a.example",
+            b"a.example.",
+            b"A.Example:8080",
+            b"a.example:",
+            b"a.example:0",
+            b"a.example:65535",
+            b"a.example:0080",
+            b"127.0.0.1:3000",
+            b"a%41.example",
+            b"my_host-1~x",
+            b"!$&'()*+,;=",
+            b"[::1]",
+            b"[::1]:",
+            b"[2001:db8::1]:443",
+            b"[v1.a:b]",
+        ];
+        let invalid: &[&[u8]] = &[
+            b"",
+            b":",
+            b":80",
+            b"a.example:65536",
+            b"a.example:99999999999",
+            b"a.example:+80",
+            b"a.example:-1",
+            b"a.example:abc",
+            b"a.example:80:80",
+            b"a.example: 80",
+            b"a%zz.example",
+            b"a%4",
+            b"%",
+            b"a b",
+            b"a/b",
+            b"a?b",
+            b"a#b",
+            b"a\"b",
+            b"u@a.example",
+            b"a[b]",
+            b"a]",
+            b"caf\xc3\xa9.example",
+            b"[]",
+            b"[]:80",
+            b"[::1",
+            b"[::1]x",
+            b"[::1]]",
+            b"[::1]:abc",
+            b"[fe80::1%25eth0]",
+            b"[::1/64]",
+        ];
+        for value in valid {
+            assert!(host_is_valid(value), "{}", value.escape_ascii());
+        }
+        for value in invalid {
+            assert!(!host_is_valid(value), "{}", value.escape_ascii());
+        }
     }
 
     /// Builds the pieces `await_queued` needs, with `deadline` measured from

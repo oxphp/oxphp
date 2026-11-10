@@ -119,7 +119,7 @@ Hostname from the `Host` header. Returns an empty string when the header is abse
 $request->port(): int
 ```
 
-Port from the `Host` header. When not explicitly present, returns the default for the scheme: `80` for HTTP, `443` for HTTPS.
+Port from the `Host` header. When not explicitly present, returns the default for the scheme: `80` for HTTP, `443` for HTTPS. A port left empty, as in `Host: example.com:`, counts as not present. `$_SERVER['SERVER_PORT']` holds the same number.
 
 > **Behind a reverse proxy:** `scheme()`, `isSecure()`, `host()`, and `port()` honor `X-Forwarded-Proto` and `X-Forwarded-Host` when `TRUSTED_PROXIES` includes the peer. Without trusted proxies they reflect the direct connection.
 
