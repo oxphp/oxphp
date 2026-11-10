@@ -1,0 +1,4 @@
+# profile: move_uploaded_file_off
+# description: UploadedFile::moveTo() with move_uploaded_file() in disable_functions
+
+move_uploaded_file_off/test_object_file_move_disabled | POST | -F "doc=@$FIXTURES_DIR/small.txt" -F "avatar=@/dev/null;filename=" | |

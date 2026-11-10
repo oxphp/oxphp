@@ -992,7 +992,6 @@ ZEND_METHOD(OxPHP_Http_UploadedFile, clientType) {
  * Detects real MIME type via mime_content_type(), caches in _type property. */
 ZEND_METHOD(OxPHP_Http_UploadedFile, type) {
     ZEND_PARSE_PARAMETERS_NONE();
-    /* Check cached _type first */
     zval *cached = zend_read_property(oxphp_http_uploaded_file_ce, Z_OBJ_P(ZEND_THIS),
         "_type", sizeof("_type")-1, 1, NULL);
     if (cached && Z_TYPE_P(cached) == IS_STRING) {
@@ -1034,8 +1033,11 @@ ZEND_METHOD(OxPHP_Http_UploadedFile, type) {
         ZVAL_STRING(&func_name, "mime_content_type");
         zval args[1];
         ZVAL_COPY(&args[0], path);
+        /* A string can come with an exception: a mime_content_type() the
+         * application declared returns it, and a destructor of one of its
+         * locals throws on the way out. */
         if (call_user_function(NULL, NULL, &func_name, &retval, 1, args) == SUCCESS
-            && Z_TYPE(retval) == IS_STRING) {
+            && Z_TYPE(retval) == IS_STRING && !EG(exception)) {
             zend_update_property(oxphp_http_uploaded_file_ce, Z_OBJ_P(ZEND_THIS),
                 "_type", sizeof("_type")-1, &retval);
             zval_ptr_dtor(&func_name);
@@ -1044,6 +1046,13 @@ ZEND_METHOD(OxPHP_Http_UploadedFile, type) {
         }
         zval_ptr_dtor(&func_name);
         zval_ptr_dtor(&args[0]);
+        /* Released before the exception check, since its destructor may throw
+         * too. A call that threw detected nothing, so it keeps nothing, and
+         * the next call reads the file again. */
+        zval_ptr_dtor(&retval);
+        if (EG(exception)) {
+            RETURN_THROWS();
+        }
     }
     zend_update_property_string(oxphp_http_uploaded_file_ce, Z_OBJ_P(ZEND_THIS),
         "_type", sizeof("_type")-1, "application/octet-stream");
@@ -1094,18 +1103,27 @@ ZEND_METHOD(OxPHP_Http_UploadedFile, moveTo) {
         Z_PARAM_STR(destination)
     ZEND_PARSE_PARAMETERS_END();
 
-    /* No type detection here: moveTo() does what move_uploaded_file() does,
-     * and nothing else that could fail or throw. If this object keeps no type
-     * yet, type() reads the file at the destination recorded below instead. */
+    /* No type detection here: the move must not depend on it. If this object
+     * keeps no type yet, type() reads the file at the destination recorded
+     * below instead. */
 
-    /* Check isValid */
     zval *err = zend_read_property(oxphp_http_uploaded_file_ce, Z_OBJ_P(ZEND_THIS),
         "error", sizeof("error")-1, 1, NULL);
     if (!err || Z_TYPE_P(err) != IS_LONG || Z_LVAL_P(err) != 0) {
         RETURN_FALSE;
     }
 
-    /* Call move_uploaded_file() */
+    /* Only PHP's own function does what this method promises. Listed in
+     * disable_functions, it is out of the function table, where the
+     * application may declare one under its name: a call by name would run
+     * that, or throw "Invalid callback" where there is none. */
+    zend_function *move = zend_hash_str_find_ptr(EG(function_table), ZEND_STRL("move_uploaded_file"));
+    if (!move || move->type != ZEND_INTERNAL_FUNCTION) {
+        php_error_docref(NULL, E_WARNING, "move_uploaded_file() is not available "
+            "(it is listed in disable_functions); the file was not moved");
+        RETURN_FALSE;
+    }
+
     zval *tmp_path = zend_read_property(oxphp_http_uploaded_file_ce, Z_OBJ_P(ZEND_THIS),
         "tmpPath", sizeof("tmpPath")-1, 1, NULL);
     /* The upload's inode, to tell after the move whether the rename moved
@@ -1119,16 +1137,14 @@ ZEND_METHOD(OxPHP_Http_UploadedFile, moveTo) {
      * the working directory, as may another request on this thread while the
      * handler waits. CWD_EXPAND leaves the realpath cache alone. */
     char *lexical = expand_filepath_with_mode(ZSTR_VAL(destination), NULL, NULL, 0, CWD_EXPAND);
-    zval func_name, retval;
-    ZVAL_STRING(&func_name, "move_uploaded_file");
+    zval retval;
     zval args[2];
     ZVAL_COPY(&args[0], tmp_path);
     ZVAL_STR_COPY(&args[1], destination);
-    int rc = call_user_function(NULL, NULL, &func_name, &retval, 2, args);
-    zval_ptr_dtor(&func_name);
+    zend_call_known_function(move, NULL, NULL, &retval, 2, args, NULL);
     zval_ptr_dtor(&args[0]);
     zval_ptr_dtor(&args[1]);
-    if (rc == SUCCESS && Z_TYPE(retval) == IS_TRUE) {
+    if (Z_TYPE(retval) == IS_TRUE) {
         /* Record where the file is now, as an absolute path wherever it is a
          * local file: type() opens it later through PHP's streams, which read
          * a relative name starting with "data:" (a client's file name, say) as
