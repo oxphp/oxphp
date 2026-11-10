@@ -371,11 +371,13 @@ async fn h1_connect_naming_a_static_file_is_refused() {
 /// A `CONNECT` client may send what it means for the tunnel right behind its
 /// request, without waiting for the answer. The connection closes after the
 /// refusal, as nginx closes it, so those bytes are not served as a request of
-/// their own. An HTTP/1.0 client asking to keep the connection alive gets
-/// the same.
+/// their own. That holds whichever check refuses the `CONNECT`, the `Host`
+/// and target checks before the `501` included, and an HTTP/1.0 client
+/// asking to keep the connection alive gets the same.
 #[tokio::test]
 async fn h1_connect_refusal_closes_the_connection() {
     let fx = start().await;
+    let behind = "GET /index.php HTTP/1.1\r\nHost: a.example\r\n\r\n";
     for (head, status_line) in [
         (
             "CONNECT a.example:80 HTTP/1.1\r\n\
@@ -389,6 +391,37 @@ async fn h1_connect_refusal_closes_the_connection() {
              Connection: keep-alive\r\n\r\n\
              GET /index.php HTTP/1.0\r\n\r\n",
             "HTTP/1.0 501 ",
+        ),
+        (
+            &format!("CONNECT a.example:80 HTTP/1.1\r\n\r\n{behind}"),
+            "HTTP/1.1 400 ",
+        ),
+        (
+            &format!(
+                "CONNECT a.example:80 HTTP/1.1\r\n\
+                 Host: a.example:80\r\n\
+                 Host: a.example:80\r\n\r\n{behind}"
+            ),
+            "HTTP/1.1 400 ",
+        ),
+        (
+            &format!("CONNECT a.example:80 HTTP/1.1\r\nHost: a.example:abc\r\n\r\n{behind}"),
+            "HTTP/1.1 400 ",
+        ),
+        (
+            "CONNECT a.example:80 HTTP/1.0\r\n\
+             Connection: keep-alive\r\n\
+             Host: a b\r\n\r\n\
+             GET /index.php HTTP/1.0\r\n\r\n",
+            "HTTP/1.0 400 ",
+        ),
+        (
+            &format!("CONNECT http://a.example:abc/ HTTP/1.1\r\nHost: a.example\r\n\r\n{behind}"),
+            "HTTP/1.1 400 ",
+        ),
+        (
+            &format!("CONNECT http://:80/ HTTP/1.1\r\nHost: a.example\r\n\r\n{behind}"),
+            "HTTP/1.1 400 ",
         ),
     ] {
         let mut sock = TcpStream::connect(fx.addr).await.unwrap();
@@ -406,7 +439,7 @@ async fn h1_connect_refusal_closes_the_connection() {
                 fx.executed.load(Ordering::SeqCst)
             ),
             (true, 1, true, 0),
-            "{head:?}: (closed, answers, first is the 501, requests the application ran): {answer:?}"
+            "{head:?}: (closed, answers, first is the refusal, requests the application ran): {answer:?}"
         );
     }
 }
@@ -511,5 +544,237 @@ async fn empty_host_in_the_target_is_refused() {
         fx.executed.load(Ordering::SeqCst),
         0,
         "a refused request must not reach the application"
+    );
+}
+
+/// The answer to a request whose `Host` RFC 9112 section 3.2 has a server
+/// refuse, for each of the three reasons it gives.
+const MISSING_HOST: &[u8] = b"400 Bad Request: missing Host header";
+const REPEATED_HOST: &[u8] = b"400 Bad Request: more than one Host header";
+const INVALID_HOST: &[u8] = b"400 Bad Request: invalid Host header";
+
+/// Asserts that every request in `heads` got a `400` with `body`, and that
+/// none of them reached the application. Every request is sent before the
+/// check, so a failure lists all the ones that were not refused.
+async fn assert_refused_h1(fx: &Fixture, heads: &[String], body: &[u8]) {
+    let mut wrong = Vec::new();
+    for head in heads {
+        let (status, got) = get_h1(fx.addr, head).await;
+        if (status, got.as_slice()) != (400, body) {
+            wrong.push(format!(
+                "{head:?}: {status} {:?}",
+                String::from_utf8_lossy(&got)
+            ));
+        }
+    }
+    assert_refused(fx, &wrong, body);
+}
+
+fn assert_refused(fx: &Fixture, wrong: &[String], body: &[u8]) {
+    assert!(
+        wrong.is_empty(),
+        "not answered with 400 {:?}:\n{}",
+        String::from_utf8_lossy(body),
+        wrong.join("\n")
+    );
+    assert_eq!(
+        fx.executed.load(Ordering::SeqCst),
+        0,
+        "a refused request must not reach the application"
+    );
+}
+
+/// An HTTP/1.1 request without `Host` is refused, RFC 9112 section 3.2 says
+/// so for every HTTP/1.1 request. That covers a target in absolute form,
+/// whose host would otherwise stand in for the missing header, and a static
+/// file, since the check comes before routing.
+#[tokio::test]
+async fn http_1_1_without_host_is_refused() {
+    let fx = start().await;
+    let heads = [
+        "GET /index.php HTTP/1.1\r\nConnection: close\r\n\r\n",
+        "GET http://a.example/index.php HTTP/1.1\r\nConnection: close\r\n\r\n",
+        "GET /a.txt HTTP/1.1\r\nConnection: close\r\n\r\n",
+    ]
+    .map(str::to_owned);
+    assert_refused_h1(&fx, &heads, MISSING_HOST).await;
+}
+
+/// HTTP/1.0 does not require `Host`, and a request without one is served:
+/// the application gets no `Host` line.
+#[tokio::test]
+async fn http_1_0_without_host_is_served() {
+    let fx = start().await;
+    let (status, body) = get_h1(fx.addr, "GET /index.php HTTP/1.0\r\n\r\n").await;
+    assert_eq!((status, delivered(&body)), (200, Vec::<String>::new()));
+}
+
+/// Two `Host` lines are refused even when they agree, over either HTTP/1.x
+/// version and in front of an absolute-form target: RFC 9112 section 3.2
+/// counts field lines, not values.
+#[tokio::test]
+async fn more_than_one_host_is_refused() {
+    let fx = start().await;
+    let mut heads = Vec::new();
+    for (target, version) in [
+        ("/index.php", "1.1"),
+        ("http://a.example/index.php", "1.1"),
+        ("/index.php", "1.0"),
+    ] {
+        for lines in [
+            "Host: a.example\r\nHost: b.example:8443",
+            "Host: a.example\r\nHost: a.example",
+        ] {
+            heads.push(format!(
+                "GET {target} HTTP/{version}\r\n{lines}\r\nConnection: close\r\n\r\n"
+            ));
+        }
+    }
+    assert_refused_h1(&fx, &heads, REPEATED_HOST).await;
+}
+
+/// `Host` values that are not a host and an optional port as RFC 9110
+/// section 7.2 defines them: bytes outside ASCII, an empty host, which no
+/// `http` URI may have (RFC 9110 section 4.2.1), a port that is not a
+/// number in the TCP port range, and characters no URI host contains.
+const INVALID_HOST_VALUES: [&str; 13] = [
+    "café.example",
+    "",
+    ":80",
+    ":",
+    "a.example:abc",
+    "a.example:65536",
+    "a.example:+80",
+    "a.example:80:80",
+    "a b",
+    "a/b",
+    "u@a.example",
+    "[::1",
+    "[::1]x",
+];
+
+/// A `Host` with an invalid value is refused over either HTTP/1.x version,
+/// HTTP/1.0 included: it does not have to send one, but one it sends is read
+/// the same way.
+#[tokio::test]
+async fn invalid_host_is_refused() {
+    let fx = start().await;
+    let mut heads = Vec::new();
+    for value in INVALID_HOST_VALUES {
+        for version in ["1.1", "1.0"] {
+            heads.push(format!(
+                "GET /index.php HTTP/{version}\r\nHost: {value}\r\nConnection: close\r\n\r\n"
+            ));
+        }
+    }
+    assert_refused_h1(&fx, &heads, INVALID_HOST).await;
+}
+
+/// An HTTP/2 request without `:authority` takes its host from `host`, and
+/// RFC 9110 section 7.2 lets a client leave `Host` out only when it sends
+/// `:authority`: the rules for HTTP/1.1 apply to it.
+#[tokio::test]
+async fn h2_without_authority_follows_the_host_rules() {
+    let fx = start().await;
+    let mut cases: Vec<(Vec<&str>, &[u8])> = vec![
+        (vec![], MISSING_HOST),
+        (vec!["a.example", "b.example"], REPEATED_HOST),
+        (vec!["a.example", "a.example"], REPEATED_HOST),
+    ];
+    for value in INVALID_HOST_VALUES {
+        cases.push((vec![value], INVALID_HOST));
+    }
+    let mut wrong = Vec::new();
+    for (host_lines, body) in cases {
+        let (status, got) = get_h2(fx.addr, "/index.php", &host_lines).await;
+        if (status, got.as_slice()) != (400, body) {
+            wrong.push(format!(
+                "host {host_lines:?}: {status} {:?}, wanted {:?}",
+                String::from_utf8_lossy(&got),
+                String::from_utf8_lossy(body)
+            ));
+        }
+    }
+    assert_refused(&fx, &wrong, b"");
+}
+
+/// The host an absolute-form target or an `:authority` names is held to the
+/// rule a `Host` value is, since it becomes the request's `Host`. The URI
+/// parser lets a port that is no number through.
+#[tokio::test]
+async fn invalid_host_in_the_target_is_refused() {
+    const BODY: &[u8] = b"400 Bad Request: invalid host in the request target";
+    let fx = start().await;
+    let heads = [
+        "GET http://a.example:abc/index.php HTTP/1.1\r\nHost: a.example\r\nConnection: close\r\n\r\n",
+        "GET http://a.example:65536/index.php HTTP/1.1\r\nHost: a.example\r\nConnection: close\r\n\r\n",
+        "GET http://a.example:abc/index.php HTTP/1.0\r\n\r\n",
+    ]
+    .map(str::to_owned);
+    let mut wrong = Vec::new();
+    for head in &heads {
+        let (status, got) = get_h1(fx.addr, head).await;
+        if (status, got.as_slice()) != (400, BODY) {
+            wrong.push(format!(
+                "{head:?}: {status} {:?}",
+                String::from_utf8_lossy(&got)
+            ));
+        }
+    }
+    for target in [
+        "http://a.example:abc/index.php",
+        "http://a.example:65536/index.php",
+    ] {
+        let (status, got) = get_h2(fx.addr, target, &[]).await;
+        if (status, got.as_slice()) != (400, BODY) {
+            wrong.push(format!(
+                "h2 {target}: {status} {:?}",
+                String::from_utf8_lossy(&got)
+            ));
+        }
+    }
+    assert_refused(&fx, &wrong, BODY);
+}
+
+/// Hosts the rule lets through reach the application as they were sent: a
+/// name of any case, with the characters RFC 3986 section 3.2.2 allows in
+/// one, an IPv4 or IPv6 address, any port in range, and an empty port, which
+/// RFC 9110 section 4.2.3 reads as the scheme's default.
+#[tokio::test]
+async fn valid_host_is_served() {
+    let fx = start().await;
+    for value in [
+        "a.example",
+        "A.Example:8080",
+        "a.example.",
+        "my_host-1~x",
+        "xn--caf-dma.example",
+        "a%41.example",
+        "127.0.0.1:65535",
+        "[::1]",
+        "[2001:db8::1]:0",
+        "a.example:",
+        "[::1]:",
+    ] {
+        for version in ["1.1", "1.0"] {
+            let head = format!(
+                "GET /index.php HTTP/{version}\r\nHost: {value}\r\nConnection: close\r\n\r\n"
+            );
+            let (status, body) = get_h1(fx.addr, &head).await;
+            assert_eq!(
+                (status, delivered(&body)),
+                (200, vec![value.to_owned()]),
+                "{head:?}"
+            );
+        }
+    }
+    let (status, body) = get_h1(
+        fx.addr,
+        "GET http://a.example:/index.php HTTP/1.1\r\nHost: a.example\r\nConnection: close\r\n\r\n",
+    )
+    .await;
+    assert_eq!(
+        (status, delivered(&body)),
+        (200, vec!["a.example:".to_owned()])
     );
 }
