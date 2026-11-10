@@ -732,11 +732,11 @@ namespace OxPHP\Http {
          * later calls return it without reading again. If this object's first
          * call comes after a successful moveTo() on it, that call reads the
          * file at the destination. Returns "application/octet-stream" if
-         * detection fails, and keeps that answer too, also after a call that
-         * threw instead (see below): later calls return it without a warning.
-         * Detection fails, for one, on another object for the same upload
-         * whose first call comes after the move, where mime_content_type() also
-         * raises a warning for the missing file.
+         * detection fails, and keeps that answer too: later calls return it
+         * without a warning. A call that throws instead (see below) keeps
+         * nothing. Detection fails, for one, on another object for the same
+         * upload whose first call comes after the move, where
+         * mime_content_type() also raises a warning for the missing file.
          *
          * Detection needs mime_content_type() from ext/fileinfo. Without it —
          * the extension not loaded, or the function listed in
@@ -775,7 +775,10 @@ namespace OxPHP\Http {
          * renames to it as a local file name, which type() reads, or, where
          * that fails, copies to the URL, which takes no writes — only an empty
          * upload gets through, with nothing written, and type() finds no file.
-         * Returns false if the file is not valid or the move fails.
+         * Returns false if the file is not valid or the move fails. A valid
+         * file is also not moved, with false and a warning, if
+         * move_uploaded_file is listed in disable_functions; a function the
+         * application declares under that name is not called.
          *
          * @param string $path Destination file path
          * @return bool true on success
