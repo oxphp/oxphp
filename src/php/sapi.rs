@@ -520,9 +520,10 @@ fn push_server_var_fmt(vars: &mut PackedPairs, key: &str, val: std::fmt::Argumen
 
 /// Split a host as `Host` carries it into the name and the port, an IPv6
 /// literal keeping its brackets (RFC 3986 section 3.2.2). A port that is empty
-/// or no number up to 65535 is `None`, the scheme's default: RFC 9110 section
-/// 4.2.3 reads an empty one that way. `$_SERVER` and the request object both
-/// split the host here, so `SERVER_PORT` and `port()` read the same port.
+/// or not a number up to 65535 in digits is `None`, the scheme's default: RFC
+/// 9110 section 4.2.3 reads an empty one that way. `$_SERVER` and the request
+/// object both split the host here, so `SERVER_PORT` and `port()` read the
+/// same port.
 fn parse_host(host: &str) -> (&str, Option<u16>) {
     let split = if host.starts_with('[') {
         host.find(']')
@@ -531,7 +532,11 @@ fn parse_host(host: &str) -> (&str, Option<u16>) {
         host.rsplit_once(':')
     };
     match split {
-        Some((name, port)) => (name, port.parse().ok()),
+        Some((name, port)) => {
+            // `parse` takes a leading `+`, which RFC 3986 section 3.2.3 does not.
+            let digits = port.bytes().all(|b| b.is_ascii_digit());
+            (name, port.parse().ok().filter(|_| digits))
+        }
         None => (host, None),
     }
 }
@@ -6708,6 +6713,7 @@ mod tests {
         assert_eq!(parse_host("[::1]:"), ("[::1]", None));
         assert_eq!(parse_host("a.example:abc"), ("a.example", None));
         assert_eq!(parse_host("a.example:65536"), ("a.example", None));
+        assert_eq!(parse_host("a.example:+80"), ("a.example", None));
         assert_eq!(parse_host(":80"), ("", Some(80)));
     }
 
@@ -6973,12 +6979,18 @@ mod tests {
     }
 
     /// A trusted proxy's host is not held to the `Host` rules, and a port
-    /// that is no number reads as the default in `SERVER_PORT` as in `port()`.
+    /// that is not a number in digits reads as the default in `SERVER_PORT`
+    /// as in `port()`.
     #[test]
     fn forwarded_host_port_that_is_no_number_reads_as_the_default() {
         // SAFETY: writes one process-wide flag and touches nothing else.
         unsafe { bindings::oxphp_bridge_set_superglobals_enabled(true) };
-        for value in ["a.example:abc", "a.example:", "a.example:65536"] {
+        for value in [
+            "a.example:abc",
+            "a.example:",
+            "a.example:65536",
+            "a.example:+8080",
+        ] {
             let mut req = queued_request(None).script;
             req.forwarded_host = Some(value.into());
             fill_request_data(&req);

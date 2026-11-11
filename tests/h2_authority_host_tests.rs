@@ -636,8 +636,9 @@ async fn more_than_one_host_is_refused() {
 /// `Host` values that are not a host and an optional port as RFC 9110
 /// section 7.2 defines them: bytes outside ASCII, an empty host, which no
 /// `http` URI may have (RFC 9110 section 4.2.1), a port that is not a
-/// number in the TCP port range, and characters no URI host contains.
-const INVALID_HOST_VALUES: [&str; 13] = [
+/// number in the TCP port range, characters no URI host contains, and
+/// brackets around something other than an IPv6 address or an IPvFuture.
+const INVALID_HOST_VALUES: [&str; 14] = [
     "café.example",
     "",
     ":80",
@@ -651,6 +652,7 @@ const INVALID_HOST_VALUES: [&str; 13] = [
     "u@a.example",
     "[::1",
     "[::1]x",
+    "[a.example]",
 ];
 
 /// A `Host` with an invalid value is refused over either HTTP/1.x version,
@@ -709,6 +711,7 @@ async fn invalid_host_in_the_target_is_refused() {
         "GET http://a.example:abc/index.php HTTP/1.1\r\nHost: a.example\r\nConnection: close\r\n\r\n",
         "GET http://a.example:65536/index.php HTTP/1.1\r\nHost: a.example\r\nConnection: close\r\n\r\n",
         "GET http://a.example:abc/index.php HTTP/1.0\r\n\r\n",
+        "GET http://[a.example]/index.php HTTP/1.1\r\nHost: a.example\r\nConnection: close\r\n\r\n",
     ]
     .map(str::to_owned);
     let mut wrong = Vec::new();
@@ -724,6 +727,7 @@ async fn invalid_host_in_the_target_is_refused() {
     for target in [
         "http://a.example:abc/index.php",
         "http://a.example:65536/index.php",
+        "http://[a.example]/index.php",
     ] {
         let (status, got) = get_h2(fx.addr, target, &[]).await;
         if (status, got.as_slice()) != (400, BODY) {

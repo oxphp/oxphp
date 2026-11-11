@@ -127,10 +127,11 @@ fn host_from_authority(
 /// it for every `http` and `https` URI.
 ///
 /// The host is a reg-name, which an IPv4 address also is, or an IP literal in
-/// brackets (RFC 3986 section 3.2.2). The content of the brackets is only held
-/// to the characters an IPv6 address or an IPvFuture may use; a zone
-/// identifier, which needs a `%`, is not one of them. The port may be empty,
-/// as RFC 3986 section 3.2.3 allows, and is otherwise a number up to 65535.
+/// brackets (RFC 3986 section 3.2.2): an IPv6 address or an IPvFuture.
+/// `Ipv6Addr`'s parser takes the IPv6address forms of RFC 3986, none of which
+/// has a zone identifier, and nothing else (Rust 1.91.1,
+/// `core/src/net/parser.rs`). The port may be empty, as RFC 3986 section
+/// 3.2.3 allows, and is otherwise a number up to 65535.
 fn host_is_valid(value: &[u8]) -> bool {
     let unreserved_or_sub_delim =
         |b: u8| b.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=".contains(&b);
@@ -138,12 +139,22 @@ fn host_is_valid(value: &[u8]) -> bool {
         let Some(end) = literal.iter().position(|&b| b == b']') else {
             return false;
         };
-        let content = &literal[..end];
-        if content.is_empty()
-            || !content
-                .iter()
-                .all(|&b| unreserved_or_sub_delim(b) || b == b':')
-        {
+        let ip_literal = match &literal[..end] {
+            [b'v' | b'V', future @ ..] => {
+                future.iter().position(|&b| b == b'.').is_some_and(|dot| {
+                    let (version, address) = (&future[..dot], &future[dot + 1..]);
+                    !version.is_empty()
+                        && version.iter().all(u8::is_ascii_hexdigit)
+                        && !address.is_empty()
+                        && address
+                            .iter()
+                            .all(|&b| unreserved_or_sub_delim(b) || b == b':')
+                })
+            }
+            content => std::str::from_utf8(content)
+                .is_ok_and(|text| text.parse::<std::net::Ipv6Addr>().is_ok()),
+        };
+        if !ip_literal {
             return false;
         }
         &literal[end + 1..]
@@ -1297,7 +1308,10 @@ mod tests {
             b"[::1]",
             b"[::1]:",
             b"[2001:db8::1]:443",
+            b"[::ffff:1.2.3.4]",
+            b"[1:2:3:4:5:6:7::]",
             b"[v1.a:b]",
+            b"[V1F.x~!]",
         ];
         let invalid: &[&[u8]] = &[
             b"",
@@ -1330,6 +1344,17 @@ mod tests {
             b"[::1]:abc",
             b"[fe80::1%25eth0]",
             b"[::1/64]",
+            b"[a.example]",
+            b"[1.2.3.4]",
+            b"[:]",
+            b"[1::2::3]",
+            b"[12345::]",
+            b"[::1.02.3.4]",
+            b"[v.a]",
+            b"[v1.]",
+            b"[vx.a]",
+            b"[v1a]",
+            b"[v1.a/b]",
         ];
         for value in valid {
             assert!(host_is_valid(value), "{}", value.escape_ascii());
