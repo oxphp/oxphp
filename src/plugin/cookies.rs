@@ -119,19 +119,19 @@ pub fn strip_plugin_cookies(parts: &mut http::request::Parts) {
         return;
     }
 
+    // Empty pairs go too: a stray `;` next to a stripped cookie would otherwise
+    // leave an empty header, or a trailing `; `, that the client never sent.
     let filtered: Vec<&str> = cookie_str
         .split(';')
         .filter(|pair| !is_plugin_cookie(pair))
+        .map(str::trim)
+        .filter(|pair| !pair.is_empty())
         .collect();
 
     if filtered.is_empty() {
         parts.headers.remove(COOKIE);
     } else {
-        let new_value = filtered
-            .iter()
-            .map(|s| s.trim())
-            .collect::<Vec<_>>()
-            .join("; ");
+        let new_value = filtered.join("; ");
         replace_cookie_header(&mut parts.headers, HeaderValue::from_str(&new_value).ok());
     }
 }
@@ -401,6 +401,30 @@ mod tests {
             let mut parts = make_parts(&format!("{name}=1; a=1"));
             strip_plugin_cookies(&mut parts);
             assert_eq!(cookie_lines(&parts.headers), [b"a=1".as_slice()], "{name}");
+        }
+    }
+
+    #[test]
+    fn test_strip_plugin_cookies_leaves_no_empty_pair_behind() {
+        for cookie in [
+            "__oxp_x=1;",
+            "; __oxp_x=1",
+            "__oxp_x=1; __oxp_y=2;",
+            "__oxp.x=1;",
+            "__oxp_x=1; ;\t; __oxp_y=2",
+        ] {
+            let mut parts = make_parts(cookie);
+            strip_plugin_cookies(&mut parts);
+            assert!(parts.headers.get(COOKIE).is_none(), "{cookie}");
+        }
+        for cookie in ["__oxp_x=1; a=1;", "; a=1; __oxp_x=1", "__oxp.x=1; a=1;"] {
+            let mut parts = make_parts(cookie);
+            strip_plugin_cookies(&mut parts);
+            assert_eq!(
+                cookie_lines(&parts.headers),
+                [b"a=1".as_slice()],
+                "{cookie}"
+            );
         }
     }
 
