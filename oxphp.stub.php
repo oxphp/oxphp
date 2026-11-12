@@ -684,10 +684,22 @@ namespace OxPHP\Http {
      */
     interface SessionInterface
     {
-        /** Current session ID (session_id()). */
+        /**
+         * Current session ID, as session_id() returns it.
+         *
+         * If session_id is listed in disable_functions, returns '' with a
+         * warning; a function the application declares under that name is
+         * not called.
+         */
         public function id(): string;
 
-        /** Current session name (session_name()). */
+        /**
+         * Current session name, as session_name() returns it.
+         *
+         * If session_name is listed in disable_functions, returns '' with a
+         * warning; a function the application declares under that name is
+         * not called.
+         */
         public function name(): string;
 
         /**

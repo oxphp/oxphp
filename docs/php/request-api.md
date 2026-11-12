@@ -492,8 +492,8 @@ interface SessionInterface
 
 | Method | Description |
 |--------|-------------|
-| `id()` | The session ID |
-| `name()` | The session name (default: `"PHPSESSID"`) |
+| `id()` | The session ID, as `session_id()` returns it. If `session_id` is listed in `disable_functions`, returns `""` with a warning — that warning throws instead under an error handler that turns warnings into exceptions. A function the application declares under that name is not called. |
+| `name()` | The session name (default: `"PHPSESSID"`), as `session_name()` returns it. If `session_name` is listed in `disable_functions`, returns `""` with a warning — that warning throws instead under an error handler that turns warnings into exceptions. A function the application declares under that name is not called. |
 | `get(key, default)` | A single session value, or `$default` if the key is absent |
 | `has(key)` | `true` if the key exists in `$_SESSION` |
 | `all()` | All session data as an array |

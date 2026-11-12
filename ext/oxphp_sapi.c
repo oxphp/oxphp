@@ -887,31 +887,32 @@ ZEND_METHOD(OxPHP_Http_Attributes, all) {
  *  OxPHP\Http\Session — ZEND_METHOD implementations
  * ═══════════════════════════════════════════════════════════════ */
 
+/* Answer with PHP's own session function, called without arguments. Listed in
+ * disable_functions, it is out of the function table, where the application
+ * may declare one under its name: a call by name would run that, or throw
+ * "Invalid callback" where there is none. */
+static void oxphp_session_builtin(const char *name, size_t name_len, zval *return_value)
+{
+    zend_function *fn = zend_hash_str_find_ptr(EG(function_table), name, name_len);
+    if (!fn || fn->type != ZEND_INTERNAL_FUNCTION) {
+        php_error_docref(NULL, E_WARNING, "%s() is not available "
+            "(it is listed in disable_functions); returning an empty string", name);
+        RETURN_EMPTY_STRING();
+    }
+    zend_call_known_function(fn, NULL, NULL, return_value, 0, NULL, NULL);
+}
+
 /* {{{ OxPHP\Http\Session::id(): string */
 ZEND_METHOD(OxPHP_Http_Session, id) {
     ZEND_PARSE_PARAMETERS_NONE();
-    zval func_name, retval;
-    ZVAL_STRING(&func_name, "session_id");
-    if (call_user_function(NULL, NULL, &func_name, &retval, 0, NULL) == SUCCESS) {
-        zval_ptr_dtor(&func_name);
-        RETURN_ZVAL(&retval, 0, 0);
-    }
-    zval_ptr_dtor(&func_name);
-    RETURN_EMPTY_STRING();
+    oxphp_session_builtin(ZEND_STRL("session_id"), return_value);
 }
 /* }}} */
 
 /* {{{ OxPHP\Http\Session::name(): string */
 ZEND_METHOD(OxPHP_Http_Session, name) {
     ZEND_PARSE_PARAMETERS_NONE();
-    zval func_name, retval;
-    ZVAL_STRING(&func_name, "session_name");
-    if (call_user_function(NULL, NULL, &func_name, &retval, 0, NULL) == SUCCESS) {
-        zval_ptr_dtor(&func_name);
-        RETURN_ZVAL(&retval, 0, 0);
-    }
-    zval_ptr_dtor(&func_name);
-    RETURN_EMPTY_STRING();
+    oxphp_session_builtin(ZEND_STRL("session_name"), return_value);
 }
 /* }}} */
 
