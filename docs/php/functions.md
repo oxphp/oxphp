@@ -65,6 +65,8 @@ Returns a request object for the current HTTP request — a new one on every cal
 | `\OxPHP\Http\Exception\AsyncContextException` | Inside an `oxphp_async()` callback |
 | `\OxPHP\Http\Exception\NoActiveRequestException` | Any other context without an active request |
 
+The object belongs to the request it was created in: its methods throw `NoActiveRequestException` when called while another request is being served — see [Worker Mode](request-api.md#worker-mode).
+
 In normal request-handling code, no exception handling is required.
 
 **Example:**
@@ -1087,7 +1089,7 @@ All exceptions registered by the extension:
 | `OxPHP\Async\TimeoutException` | `OxPHP\Async\AsyncException` | Timeout exceeded in any of `oxphp_async_await()`, `oxphp_async_await_all()`, `oxphp_async_await_race()`, or `oxphp_async_await_any()`. For `oxphp_async_await_any()` timeouts the accessors `getPartialErrors(): array<int, \Throwable>` and `getCancelledPromiseIds(): list<int>` are populated; for the other call sites both return `[]`. |
 | `OxPHP\Async\AggregateAsyncException` | `OxPHP\Async\AsyncException` | Thrown by `oxphp_async_await_any()` when every promise rejected. Methods: `getErrors(): list<\Throwable>` (positional, keyed 0..N-1 by input position), `getErrorMap(): array<int, \Throwable>` (keyed by promise id), `getPromiseIds(): list<int>` (input promise ids in order). |
 | `OxPHP\Async\BorrowException` | `\Exception` | Error borrowing a value between threads |
-| `OxPHP\Http\Exception\NoActiveRequestException` | `\RuntimeException` | Calling `oxphp_http_request()` outside an active request |
+| `OxPHP\Http\Exception\NoActiveRequestException` | `\RuntimeException` | Calling `oxphp_http_request()` outside an active request, or a method of a `Request` object while another request is being served |
 | `OxPHP\Http\Exception\AsyncContextException` | `NoActiveRequestException` | Calling `oxphp_http_request()` inside an `oxphp_async()` callback |
 | `OxPHP\Http\Exception\WorkerIdleException` | `NoActiveRequestException` | Calling `oxphp_http_request()` in worker mode between requests |
 | `OxPHP\Decorator\RejectedException` | `\Exception` | A decorator rejected a function/method call |

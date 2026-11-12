@@ -351,7 +351,7 @@ extern "C" {
             ),
         >,
         body_fn: Option<unsafe extern "C" fn(*mut usize) -> *const u8>,
-        is_active_fn: Option<unsafe extern "C" fn() -> c_int>,
+        seq_fn: Option<unsafe extern "C" fn() -> u64>,
     );
 
     // ─── Worker mode ────────────────────────────────────

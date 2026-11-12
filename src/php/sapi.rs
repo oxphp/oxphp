@@ -1,7 +1,7 @@
 use std::cell::RefCell;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_long, c_uint, c_void};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::{Instant, SystemTime};
 
@@ -411,6 +411,10 @@ pub(crate) struct RequestData {
     body_offset: usize,
     /// Whether this slot has been populated for the current request.
     active: bool,
+    /// Which request the slot holds while `active`, unique in the process.
+    /// A Request object keeps the value it was created under and refuses to
+    /// answer once the slot holds another.
+    seq: u64,
     /// Whether $_SERVER superglobal population is enabled for this request.
     sg_enabled: bool,
 
@@ -463,6 +467,7 @@ impl RequestData {
             body: Bytes::new(),
             body_offset: 0,
             active: false,
+            seq: 0,
             sg_enabled: true,
             method_str: String::new(),
             path_str: String::new(),
@@ -478,6 +483,13 @@ impl RequestData {
             cookies_parsed: PackedPairs::default(),
             query_parsed: PackedPairs::default(),
         }
+    }
+
+    /// Mark the slot as holding a request that no Request object has seen yet.
+    fn activate(&mut self) {
+        static NEXT_SEQ: AtomicU64 = AtomicU64::new(1);
+        self.active = true;
+        self.seq = NEXT_SEQ.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -577,7 +589,7 @@ pub fn set_boot_server_vars(script_path: &std::path::Path, document_root: &std::
         push_server_var(vars, "QUERY_STRING", "");
         push_server_var(vars, "GATEWAY_INTERFACE", "CGI/1.1");
 
-        data.active = true;
+        data.activate();
     });
 }
 
@@ -607,7 +619,7 @@ pub fn set_cli_request_data(php_self: &str, script_filename: &str) {
         push_server_var(vars, "DOCUMENT_ROOT", "");
 
         data.sg_enabled = unsafe { bindings::oxphp_bridge_get_superglobals_enabled() };
-        data.active = true;
+        data.activate();
     });
 }
 
@@ -1280,7 +1292,7 @@ fn fill_request_data(req: &ScriptRequest) {
             }
         }
 
-        data.active = true;
+        data.activate();
 
         // Set request ID in bridge TLS so oxphp_request_id() returns it.
         data.request_id_cstr.set(req.request_id.as_bytes());
@@ -6170,8 +6182,15 @@ unsafe extern "C" fn req_body_cb(out_len: *mut usize) -> *const u8 {
     })
 }
 
-unsafe extern "C" fn req_is_active_cb() -> c_int {
-    REQUEST_DATA.with(|rd| if rd.borrow().active { 1 } else { 0 })
+unsafe extern "C" fn req_seq_cb() -> u64 {
+    REQUEST_DATA.with(|rd| {
+        let data = rd.borrow();
+        if data.active {
+            data.seq
+        } else {
+            0
+        }
+    })
 }
 
 /// How many query parameters and cookies a request's object API holds.
@@ -6202,6 +6221,9 @@ pub unsafe fn read_max_input_vars() {
 /// Register all request accessor callbacks with the bridge.
 /// Must be called once at startup before any request processing.
 pub fn register_request_accessors() {
+    // SAFETY: the setter only stores the pointers; each is an `extern "C"` fn
+    // whose type is the one its slot declares in `bindings/common.rs`, matching
+    // `ext/bridge/oxphp_bridge.h`.
     unsafe {
         bindings::oxphp_bridge_set_request_accessors(
             Some(req_method_cb),
@@ -6223,7 +6245,7 @@ pub fn register_request_accessors() {
             Some(req_cookies_all_cb),
             Some(req_query_params_all_cb),
             Some(req_body_cb),
-            Some(req_is_active_cb),
+            Some(req_seq_cb),
         );
     }
 }

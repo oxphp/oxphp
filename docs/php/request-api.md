@@ -449,7 +449,7 @@ oxphp_http_request()->attributes()->get('tenant_id');   // null — a second Req
 
 Pass the object along, as `$request` is in the first of the two examples above, and everything that holds it reads and writes the one container — including a Fiber you hand it to. A Fiber that calls `oxphp_http_request()` for itself gets a container of its own, like any other caller. Because PHP Fibers are cooperative, no two of them are ever inside a container at the same moment.
 
-Nothing is reset between requests, because there is nothing to reset: the container goes when the object holding it does, and the next request's handler calls `oxphp_http_request()` and gets one of its own.
+Nothing is reset between requests, because there is nothing to reset: the container goes when the object holding it does, and the next request's handler calls `oxphp_http_request()` and gets one of its own. An object kept into a later request throws from `attributes()` rather than handing its container over — see [Worker Mode](#worker-mode).
 
 ---
 
@@ -590,7 +590,7 @@ interface AttributesInterface
 
 ## Exceptions
 
-Calling `oxphp_http_request()` outside an active request context throws an exception from the `OxPHP\Http\Exception` namespace.
+Calling `oxphp_http_request()` outside an active request context throws an exception from the `OxPHP\Http\Exception` namespace. So does every method of a `Request` object called where that function would throw, or while a request other than the object's own is being served.
 
 ```php
 namespace OxPHP\Http\Exception;
@@ -602,7 +602,7 @@ class WorkerIdleException extends NoActiveRequestException {}
 
 | Exception | When thrown |
 |-----------|-------------|
-| `NoActiveRequestException` | No active HTTP request: CLI, MINIT, after shutdown, or a Fiber that outlives its request |
+| `NoActiveRequestException` | No active HTTP request: CLI, MINIT, after shutdown, or a Fiber that outlives its request. Also a method of a `Request` object called while another request is being served, with the message `Cannot access HTTP request: this Request object belongs to another request` — see [Worker Mode](#worker-mode) |
 | `AsyncContextException` | Inside an `oxphp_async()` callback — async workers run on separate threads with no request context |
 | `WorkerIdleException` | Worker mode, between requests — the worker is waiting for the next request |
 
@@ -682,7 +682,7 @@ oxphp_worker(function () use ($app) {
 });
 ```
 
-Do not keep an object past the handler that built it. One held across requests is not invalidated, and nothing reports it as stale: `method()`, `path()`, `header()` and the other uncached readers go on answering out of whatever request the worker thread is serving at the moment you call them, while what the object cached — the `query()` array, the parsed `payload()`, the attributes container — is whatever each of them took on its own first call, which for one never made before is this request's. Nothing on a `Request` is cleared when the next request begins — what the soft reset between requests does cover is listed under [What Gets Reset Between Requests](../features/worker-mode.md#what-gets-reset-between-requests).
+Do not keep an object past the handler that built it. A `Request` belongs to the request it was created in. Kept in a static, a container or a closure and called while the worker serves a later request, every one of its methods throws `NoActiveRequestException` with the message `Cannot access HTTP request: this Request object belongs to another request`, so neither that request's data nor what the object cached in its own request — the `query()` array, the parsed `payload()`, the attributes container — reaches the code serving it. That includes an object built in the worker script before `oxphp_worker()` is called: it belongs to the boot, not to any request. It includes one read by a destructor, too: when the cycle collector runs that destructor while a later request is being served, the exception is raised in that request, at whichever statement the collector ran from. Nothing on a `Request` is cleared when the next request begins — what the soft reset between requests does cover is listed under [What Gets Reset Between Requests](../features/worker-mode.md#what-gets-reset-between-requests).
 
 ---
 

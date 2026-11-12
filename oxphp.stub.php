@@ -24,6 +24,8 @@
 /**
  * Returns an HTTP Request object for the current request context — a new one
  * on every call, each with caches and an attributes container of its own.
+ * The object belongs to that request: called while another request is being
+ * served, every method throws NoActiveRequestException.
  *
  * The object is a lightweight proxy — data is fetched lazily from Rust
  * thread-local storage via FFI only when a method is called. No allocation
@@ -906,7 +908,9 @@ namespace OxPHP\Http\Exception {
      * No active HTTP request in this context.
      *
      * Base class for all request-context exceptions.
-     * Thrown by oxphp_http_request() when called outside a request lifecycle.
+     * Thrown by oxphp_http_request() when called outside a request lifecycle,
+     * and by a Request method called while a request other than the one the
+     * object was created in is being served.
      */
     class NoActiveRequestException extends \RuntimeException {}
 

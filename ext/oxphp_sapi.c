@@ -150,11 +150,70 @@ oxphp_profiler_observer_init(zend_execute_data *execute_data);
  *  OxPHP\Http\Request — ZEND_METHOD implementations
  * ═══════════════════════════════════════════════════════════════ */
 
+/* A Request object and the request it was created in, as oxphp_req_seq() gave
+ * it then. Set once, and the only request the object reads for. */
+typedef struct {
+    uint64_t    request_seq;
+    zend_object std;
+} oxphp_http_request_obj;
+
+static zend_always_inline oxphp_http_request_obj *oxphp_http_request_from(zend_object *obj) {
+    return (oxphp_http_request_obj *)((char *)obj - XtOffsetOf(oxphp_http_request_obj, std));
+}
+
+/* create_object rather than the factory, so `new Request()` is stamped too. */
+static zend_object *oxphp_http_request_create(zend_class_entry *ce) {
+    oxphp_http_request_obj *intern = zend_object_alloc(sizeof(oxphp_http_request_obj), ce);
+    intern->request_seq = oxphp_req_seq();
+    zend_object_std_init(&intern->std, ce);
+    object_properties_init(&intern->std, ce);
+    return &intern->std;
+}
+
+/* The exception for a thread that is serving no request. */
+static void oxphp_throw_no_request(void) {
+    if (oxphp_bridge_is_async_worker()) {
+        zend_throw_exception(oxphp_async_context_exc_ce,
+            "Cannot access HTTP request from async worker context", 0);
+    } else if (oxphp_bridge_is_worker_mode()) {
+        zend_throw_exception(oxphp_worker_idle_exc_ce,
+            "Cannot access HTTP request: worker is idle (waiting for next request)", 0);
+    } else {
+        zend_throw_exception(oxphp_no_active_request_ce,
+            "Cannot access HTTP request: no active request context", 0);
+    }
+}
+
+/* Whether `obj` was created in the request the thread is serving; throws when
+ * not. The accessors read whichever request that is, and the caches on the
+ * object the request they were filled in, so a kept object would hand one
+ * client's request to code serving another. */
+static bool oxphp_http_request_is_current(zend_object *obj) {
+    uint64_t current = oxphp_req_seq();
+    if (current == 0) {
+        oxphp_throw_no_request();
+        return false;
+    }
+    if (oxphp_http_request_from(obj)->request_seq != current) {
+        zend_throw_exception(oxphp_no_active_request_ce,
+            "Cannot access HTTP request: this Request object belongs to another request", 0);
+        return false;
+    }
+    return true;
+}
+
+#define OXPHP_HTTP_REQUEST_GUARD() do { \
+        if (!oxphp_http_request_is_current(Z_OBJ_P(ZEND_THIS))) { \
+            RETURN_THROWS(); \
+        } \
+    } while (0)
+
 /* ─── URI methods ─────────────────────────────────────────── */
 
 /* {{{ OxPHP\Http\Request::method(): string */
 ZEND_METHOD(OxPHP_Http_Request, method) {
     ZEND_PARSE_PARAMETERS_NONE();
+    OXPHP_HTTP_REQUEST_GUARD();
     size_t len = 0;
     const char *val = oxphp_req_method(&len);
     if (val && len > 0) {
@@ -167,6 +226,7 @@ ZEND_METHOD(OxPHP_Http_Request, method) {
 /* {{{ OxPHP\Http\Request::path(): string */
 ZEND_METHOD(OxPHP_Http_Request, path) {
     ZEND_PARSE_PARAMETERS_NONE();
+    OXPHP_HTTP_REQUEST_GUARD();
     size_t len = 0;
     const char *val = oxphp_req_path(&len);
     if (val && len > 0) {
@@ -179,6 +239,7 @@ ZEND_METHOD(OxPHP_Http_Request, path) {
 /* {{{ OxPHP\Http\Request::fullUri(): string */
 ZEND_METHOD(OxPHP_Http_Request, fullUri) {
     ZEND_PARSE_PARAMETERS_NONE();
+    OXPHP_HTTP_REQUEST_GUARD();
     size_t len = 0;
     const char *val = oxphp_req_full_uri(&len);
     if (val && len > 0) {
@@ -191,6 +252,7 @@ ZEND_METHOD(OxPHP_Http_Request, fullUri) {
 /* {{{ OxPHP\Http\Request::scheme(): string */
 ZEND_METHOD(OxPHP_Http_Request, scheme) {
     ZEND_PARSE_PARAMETERS_NONE();
+    OXPHP_HTTP_REQUEST_GUARD();
     size_t len = 0;
     const char *val = oxphp_req_scheme(&len);
     if (val && len > 0) {
@@ -203,6 +265,7 @@ ZEND_METHOD(OxPHP_Http_Request, scheme) {
 /* {{{ OxPHP\Http\Request::host(): string */
 ZEND_METHOD(OxPHP_Http_Request, host) {
     ZEND_PARSE_PARAMETERS_NONE();
+    OXPHP_HTTP_REQUEST_GUARD();
     size_t len = 0;
     const char *val = oxphp_req_host(&len);
     if (val && len > 0) {
@@ -215,6 +278,7 @@ ZEND_METHOD(OxPHP_Http_Request, host) {
 /* {{{ OxPHP\Http\Request::port(): int */
 ZEND_METHOD(OxPHP_Http_Request, port) {
     ZEND_PARSE_PARAMETERS_NONE();
+    OXPHP_HTTP_REQUEST_GUARD();
     RETURN_LONG((zend_long)oxphp_req_port());
 }
 /* }}} */
@@ -222,6 +286,7 @@ ZEND_METHOD(OxPHP_Http_Request, port) {
 /* {{{ OxPHP\Http\Request::queryString(): ?string */
 ZEND_METHOD(OxPHP_Http_Request, queryString) {
     ZEND_PARSE_PARAMETERS_NONE();
+    OXPHP_HTTP_REQUEST_GUARD();
     size_t len = 0;
     const char *val = oxphp_req_query_string(&len);
     if (val && len > 0) {
@@ -234,6 +299,7 @@ ZEND_METHOD(OxPHP_Http_Request, queryString) {
 /* {{{ OxPHP\Http\Request::isSecure(): bool */
 ZEND_METHOD(OxPHP_Http_Request, isSecure) {
     ZEND_PARSE_PARAMETERS_NONE();
+    OXPHP_HTTP_REQUEST_GUARD();
     RETURN_BOOL(oxphp_req_is_secure());
 }
 /* }}} */
@@ -244,6 +310,7 @@ ZEND_METHOD(OxPHP_Http_Request, isMethod) {
     ZEND_PARSE_PARAMETERS_START(1, 1)
         Z_PARAM_STR(method)
     ZEND_PARSE_PARAMETERS_END();
+    OXPHP_HTTP_REQUEST_GUARD();
 
     size_t len = 0;
     const char *actual = oxphp_req_method(&len);
@@ -259,6 +326,7 @@ ZEND_METHOD(OxPHP_Http_Request, isMethod) {
 /* {{{ OxPHP\Http\Request::httpProtocol(): string */
 ZEND_METHOD(OxPHP_Http_Request, httpProtocol) {
     ZEND_PARSE_PARAMETERS_NONE();
+    OXPHP_HTTP_REQUEST_GUARD();
     size_t len = 0;
     const char *ver = oxphp_req_protocol_version(&len);
     /* Build "HTTP/X.Y" */
@@ -271,6 +339,7 @@ ZEND_METHOD(OxPHP_Http_Request, httpProtocol) {
 /* {{{ OxPHP\Http\Request::httpProtocolVersion(): string */
 ZEND_METHOD(OxPHP_Http_Request, httpProtocolVersion) {
     ZEND_PARSE_PARAMETERS_NONE();
+    OXPHP_HTTP_REQUEST_GUARD();
     size_t len = 0;
     const char *val = oxphp_req_protocol_version(&len);
     if (val && len > 0) {
@@ -291,6 +360,7 @@ ZEND_METHOD(OxPHP_Http_Request, header) {
         Z_PARAM_OPTIONAL
         Z_PARAM_ZVAL_OR_NULL(def)
     ZEND_PARSE_PARAMETERS_END();
+    OXPHP_HTTP_REQUEST_GUARD();
 
     size_t len = 0;
     const char *val = oxphp_req_header(ZSTR_VAL(name), ZSTR_LEN(name), &len);
@@ -316,6 +386,7 @@ static void headers_visitor(const char *key, size_t klen,
 /* {{{ OxPHP\Http\Request::headers(): array */
 ZEND_METHOD(OxPHP_Http_Request, headers) {
     ZEND_PARSE_PARAMETERS_NONE();
+    OXPHP_HTTP_REQUEST_GUARD();
     array_init(return_value);
     oxphp_req_headers_all(headers_visitor, return_value);
 }
@@ -327,6 +398,7 @@ ZEND_METHOD(OxPHP_Http_Request, hasHeader) {
     ZEND_PARSE_PARAMETERS_START(1, 1)
         Z_PARAM_STR(name)
     ZEND_PARSE_PARAMETERS_END();
+    OXPHP_HTTP_REQUEST_GUARD();
 
     size_t len = 0;
     const char *val = oxphp_req_header(ZSTR_VAL(name), ZSTR_LEN(name), &len);
@@ -345,6 +417,7 @@ ZEND_METHOD(OxPHP_Http_Request, cookie) {
         Z_PARAM_OPTIONAL
         Z_PARAM_ZVAL_OR_NULL(def)
     ZEND_PARSE_PARAMETERS_END();
+    OXPHP_HTTP_REQUEST_GUARD();
 
     size_t len = 0;
     const char *val = oxphp_req_cookie(ZSTR_VAL(name), ZSTR_LEN(name), &len);
@@ -373,6 +446,7 @@ static void cookies_visitor(const char *key, size_t klen,
 /* {{{ OxPHP\Http\Request::cookies(): array */
 ZEND_METHOD(OxPHP_Http_Request, cookies) {
     ZEND_PARSE_PARAMETERS_NONE();
+    OXPHP_HTTP_REQUEST_GUARD();
     array_init(return_value);
     oxphp_req_cookies_all(cookies_visitor, return_value);
 }
@@ -383,6 +457,7 @@ ZEND_METHOD(OxPHP_Http_Request, cookies) {
 /* {{{ OxPHP\Http\Request::body(): string */
 ZEND_METHOD(OxPHP_Http_Request, body) {
     ZEND_PARSE_PARAMETERS_NONE();
+    OXPHP_HTTP_REQUEST_GUARD();
     size_t len = 0;
     const uint8_t *data = oxphp_req_body(&len);
     if (data && len > 0) {
@@ -395,6 +470,7 @@ ZEND_METHOD(OxPHP_Http_Request, body) {
 /* {{{ OxPHP\Http\Request::contentType(): ?string */
 ZEND_METHOD(OxPHP_Http_Request, contentType) {
     ZEND_PARSE_PARAMETERS_NONE();
+    OXPHP_HTTP_REQUEST_GUARD();
     size_t len = 0;
     const char *val = oxphp_req_content_type(&len);
     if (val && len > 0) {
@@ -409,6 +485,7 @@ ZEND_METHOD(OxPHP_Http_Request, contentType) {
 /* {{{ OxPHP\Http\Request::ip(): string */
 ZEND_METHOD(OxPHP_Http_Request, ip) {
     ZEND_PARSE_PARAMETERS_NONE();
+    OXPHP_HTTP_REQUEST_GUARD();
     size_t len = 0;
     const char *val = oxphp_req_ip(&len);
     if (val && len > 0) {
@@ -425,6 +502,7 @@ ZEND_METHOD(OxPHP_Http_Request, startTime) {
         Z_PARAM_OPTIONAL
         Z_PARAM_BOOL(as_float)
     ZEND_PARSE_PARAMETERS_END();
+    OXPHP_HTTP_REQUEST_GUARD();
 
     double t = oxphp_req_start_time();
     if (as_float) {
@@ -448,6 +526,7 @@ ZEND_METHOD(OxPHP_Http_Request, query) {
         Z_PARAM_STR_OR_NULL(key)
         Z_PARAM_ZVAL_OR_NULL(def)
     ZEND_PARSE_PARAMETERS_END();
+    OXPHP_HTTP_REQUEST_GUARD();
 
     if (key) {
         /* Single key lookup — direct bridge call, no array build */
@@ -512,6 +591,7 @@ ZEND_METHOD(OxPHP_Http_Request, payload) {
         Z_PARAM_STR_OR_NULL(key)
         Z_PARAM_ZVAL_OR_NULL(def)
     ZEND_PARSE_PARAMETERS_END();
+    OXPHP_HTTP_REQUEST_GUARD();
 
     zval *parsed_flag = zend_read_property(oxphp_http_request_ce, Z_OBJ_P(ZEND_THIS),
         "_payload_parsed", sizeof("_payload_parsed")-1, 1, NULL);
@@ -629,6 +709,7 @@ ZEND_METHOD(OxPHP_Http_Request, payload) {
 /* {{{ OxPHP\Http\Request::attributes(): AttributesInterface */
 ZEND_METHOD(OxPHP_Http_Request, attributes) {
     ZEND_PARSE_PARAMETERS_NONE();
+    OXPHP_HTTP_REQUEST_GUARD();
     /* Return cached Attributes object, or create one on first call */
     zval *cached = zend_read_property(oxphp_http_request_ce, Z_OBJ_P(ZEND_THIS),
         "_attributes", sizeof("_attributes")-1, 1, NULL);
@@ -647,6 +728,7 @@ ZEND_METHOD(OxPHP_Http_Request, attributes) {
 /* {{{ OxPHP\Http\Request::session(): ?SessionInterface */
 ZEND_METHOD(OxPHP_Http_Request, session) {
     ZEND_PARSE_PARAMETERS_NONE();
+    OXPHP_HTTP_REQUEST_GUARD();
     /* Return null if session_start() hasn't been called */
     if (PS(session_status) != php_session_active) {
         RETURN_NULL();
@@ -723,6 +805,7 @@ ZEND_METHOD(OxPHP_Http_Request, file) {
     ZEND_PARSE_PARAMETERS_START(1, 1)
         Z_PARAM_STR(name)
     ZEND_PARSE_PARAMETERS_END();
+    OXPHP_HTTP_REQUEST_GUARD();
 
     zval *files = &PG(http_globals)[TRACK_VARS_FILES];
     if (Z_TYPE_P(files) != IS_ARRAY) {
@@ -759,6 +842,7 @@ ZEND_METHOD(OxPHP_Http_Request, files) {
         Z_PARAM_OPTIONAL
         Z_PARAM_STR_OR_NULL(name)
     ZEND_PARSE_PARAMETERS_END();
+    OXPHP_HTTP_REQUEST_GUARD();
 
     array_init(return_value);
 
@@ -1226,25 +1310,15 @@ ZEND_METHOD(OxPHP_Http_UploadedFile, moveTo) {
 
 /* {{{ oxphp_http_request(): OxPHP\Http\Request
  * Returns an HTTP Request object for the current request context — a new one
- * on every call, each with caches and an attributes container of its own.
+ * on every call, each with caches and an attributes container of its own, and
+ * each belonging to that request: its methods throw while another is served.
  * Throws OxPHP\Http\Exception\* if no active request. */
 PHP_FUNCTION(oxphp_http_request)
 {
     ZEND_PARSE_PARAMETERS_NONE();
 
-    if (!oxphp_req_is_active()) {
-        if (oxphp_bridge_is_async_worker()) {
-            zend_throw_exception(oxphp_async_context_exc_ce,
-                "Cannot access HTTP request from async worker context", 0);
-            RETURN_THROWS();
-        }
-        if (oxphp_bridge_is_worker_mode()) {
-            zend_throw_exception(oxphp_worker_idle_exc_ce,
-                "Cannot access HTTP request: worker is idle (waiting for next request)", 0);
-            RETURN_THROWS();
-        }
-        zend_throw_exception(oxphp_no_active_request_ce,
-            "Cannot access HTTP request: no active request context", 0);
+    if (oxphp_req_seq() == 0) {
+        oxphp_throw_no_request();
         RETURN_THROWS();
     }
 
@@ -9813,7 +9887,9 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
         oxphp_http_request_ce->ce_flags |= ZEND_ACC_FINAL | ZEND_ACC_NOT_SERIALIZABLE;
         zend_class_implements(oxphp_http_request_ce, 1, oxphp_http_request_iface_ce);
         memcpy(&oxphp_http_request_handlers, &std_object_handlers, sizeof(zend_object_handlers));
+        oxphp_http_request_handlers.offset = XtOffsetOf(oxphp_http_request_obj, std);
         oxphp_http_request_handlers.clone_obj = NULL;
+        oxphp_http_request_ce->create_object = oxphp_http_request_create;
         oxphp_http_request_ce->default_object_handlers = &oxphp_http_request_handlers;
 
         /* Internal cache properties (hidden, used for lazy caching) */

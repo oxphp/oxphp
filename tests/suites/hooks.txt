@@ -139,6 +139,13 @@ hooks/test_superglobals_survive_suspend >> ?probe=outer&secret=outer-only
 # through both views.
 hooks/test_request_object_survives_suspend >> ?probe=outer
 
+# The converse: an object kept past its request must refuse to answer for another
+# one. The inner self-request served in the parked window calls every method of
+# this request's object, and this request then calls the object the inner one left
+# behind. Same requirement of one worker. The query, cookie and body are
+# load-bearing: the inner request sends different ones, so a leak reads as them.
+hooks/test_request_object_refuses_another_request >> ?who=outer | POST | -b "ox_who=outer" -H "Content-Type: application/json" -d '{"who":"outer"}' | |
+
 # The start time in isolation, for the two windows the test above cannot reach.
 # That one lets its neighbour finish inside the window, which erases the slot the
 # start time lives in, so it only ever proves the resumed request does not read
