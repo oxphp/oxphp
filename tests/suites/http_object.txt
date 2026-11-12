@@ -57,6 +57,16 @@ http_object/test_payload_put_form >> ?method=delete | DELETE | -H "Content-Type:
 http_object/test_payload_put_form >> ?method=query | QUERY | -H "Content-Type: application/x-www-form-urlencoded" -d "a=1&b=two&7=seven" | |
 http_object/test_payload_put_form >> ?ct=mixed-case | PUT | -H "Content-Type: Application/X-WWW-Form-Urlencoded; charset=UTF-8" -d "a=1&b=two&7=seven" | |
 http_object/test_payload_put_other_type | PUT | -H "Content-Type: application/vnd.example.long-type+xml" -d "a=1&b=two" | |
+http_object/test_payload_form_type >> ?expect=none&case=put-suffix | PUT | -H "Content-Type: application/x-www-form-urlencoded-x" -d "a=1" | |
+http_object/test_payload_form_type >> ?expect=none&case=put-multipart-suffix | PUT | -H "Content-Type: multipart/form-data-x; boundary=b" -d "a=1" | |
+http_object/test_payload_form_type >> ?expect=form&case=put-space | PUT | -H "Content-Type: application/x-www-form-urlencoded ;charset=UTF-8" -d "a=1" | |
+http_object/test_payload_form_type >> ?expect=form&case=put-comma | PUT | -H "Content-Type: application/x-www-form-urlencoded,text/plain" -d "a=1" | |
+http_object/test_payload_form_type >> ?expect=form&case=put-semicolon | PUT | -H "Content-Type: APPLICATION/X-WWW-FORM-URLENCODED;charset=UTF-8" -d "a=1" | |
+http_object/test_payload_form_type >> ?expect=none&case=post-suffix | POST | -H "Content-Type: application/x-www-form-urlencoded-x" -d "a=1" | |
+http_object/test_payload_form_type >> ?expect=none&case=post-multipart-suffix | POST | -H "Content-Type: multipart/form-data-x; boundary=b" -d "a=1" | |
+http_object/test_payload_form_type >> ?expect=form&case=post-space | POST | -H "Content-Type: application/x-www-form-urlencoded ;charset=UTF-8" -d "a=1" | |
+http_object/test_payload_form_type >> ?expect=form&case=post-comma | POST | -H "Content-Type: application/x-www-form-urlencoded,text/plain" -d "a=1" | |
+http_object/test_payload_form_type >> ?expect=form&case=post-semicolon | POST | -H "Content-Type: APPLICATION/X-WWW-FORM-URLENCODED;charset=UTF-8" -d "a=1" | |
 http_object/test_payload_form_raw_nul >> ?method=post | POST | -H "Content-Type: application/x-www-form-urlencoded" --data-binary "@$FIXTURES_DIR/form_raw_nul.bin" | |
 http_object/test_payload_form_raw_nul >> ?method=put | PUT | -H "Content-Type: application/x-www-form-urlencoded" --data-binary "@$FIXTURES_DIR/form_raw_nul.bin" | |
 http_object/test_payload_put_multipart >> ?method=put | PUT | -F "field=fieldval" -F "doc=@$FIXTURES_DIR/small.txt" | |

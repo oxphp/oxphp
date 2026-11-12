@@ -482,6 +482,17 @@ ZEND_METHOD(OxPHP_Http_Request, query) {
 
 /* ─── Payload method ──────────────────────────────────────── */
 
+/* Whether the Content-Type value `ct` names `type` the way sapi_read_post_data()
+ * picks a body handler on POST: the name ends at the first ';', ',' or ' ' and
+ * is compared whole, ignoring case. */
+static bool oxphp_content_type_is(const char *ct, size_t ct_len, const char *type, size_t type_len) {
+    size_t name_len = 0;
+    while (name_len < ct_len && ct[name_len] != ';' && ct[name_len] != ',' && ct[name_len] != ' ') {
+        name_len++;
+    }
+    return name_len == type_len && strncasecmp(ct, type, type_len) == 0;
+}
+
 /* {{{ OxPHP\Http\Request::payload(?string $key = null, mixed $default = null): mixed
  *
  * Two properties hold the cache, not one.  A JSON body decodes to any of the
@@ -516,7 +527,7 @@ ZEND_METHOD(OxPHP_Http_Request, payload) {
         ZVAL_NULL(&parsed); /* "nothing to return" */
 
         if (ct && body_data && body_len > 0) {
-            bool urlencoded = ct_len >= 33 && strncasecmp(ct, "application/x-www-form-urlencoded", 33) == 0;
+            bool urlencoded = oxphp_content_type_is(ct, ct_len, ZEND_STRL("application/x-www-form-urlencoded"));
             size_t method_len = 0;
             const char *method = oxphp_req_method(&method_len);
             bool is_post = method && method_len == 4 && memcmp(method, "POST", 4) == 0;
@@ -546,7 +557,7 @@ ZEND_METHOD(OxPHP_Http_Request, payload) {
                  * php://input and a later request_parse_body() as they were. */
                 array_init(&parsed);
                 sapi_module.treat_data(PARSE_STRING, estrndup((const char *)body_data, body_len), &parsed);
-            } else if (urlencoded || (ct_len >= 19 && strncasecmp(ct, "multipart/form-data", 19) == 0)) {
+            } else if (urlencoded || oxphp_content_type_is(ct, ct_len, ZEND_STRL("multipart/form-data"))) {
                 /* Form data — the body is not parsed here at all, $_POST is
                  * taken as PHP built it.  Not gated on SUPERGLOBALS_ENABLED:
                  * that setting is read where $_SERVER is filled and where the
