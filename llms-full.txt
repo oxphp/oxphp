@@ -12512,6 +12512,8 @@ $request->attributes()->set('user', $authenticatedUser);
 $user = $request->attributes()->get('user');
 ```
 
+A name is a key of the array `all()` returns, so a name PHP reads as an integer, such as `'7'`, is the integer key `7` there, as in any PHP array.
+
 The container belongs to the object, not to the request. `oxphp_http_request()` returns a new `Request` on every call, and the container you take from it is a new, empty one, so a write made through one call is not readable through another — the default comes back instead, with no warning and no log line:
 
 ```php

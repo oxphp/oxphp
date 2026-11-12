@@ -794,7 +794,7 @@ ZEND_METHOD(OxPHP_Http_Attributes, get) {
     zval *store = zend_read_property(oxphp_http_attributes_ce, Z_OBJ_P(ZEND_THIS),
         "_store", sizeof("_store")-1, 1, NULL);
     if (store && Z_TYPE_P(store) == IS_ARRAY) {
-        zval *found = zend_hash_find(Z_ARRVAL_P(store), key);
+        zval *found = zend_symtable_find(Z_ARRVAL_P(store), key);
         if (found) {
             RETURN_COPY(found);
         }
@@ -827,8 +827,10 @@ ZEND_METHOD(OxPHP_Http_Attributes, set) {
         array_init(&new_arr);
     }
 
+    /* all() hands this array out, so a canonical numeric name has to be the
+     * integer key PHP code looks it up by; get, has and remove key it alike. */
     Z_TRY_ADDREF_P(value);
-    zend_hash_update(Z_ARRVAL(new_arr), key, value);
+    zend_symtable_update(Z_ARRVAL(new_arr), key, value);
     zend_update_property(oxphp_http_attributes_ce, Z_OBJ_P(ZEND_THIS),
         "_store", sizeof("_store")-1, &new_arr);
     zval_ptr_dtor(&new_arr);
@@ -845,7 +847,7 @@ ZEND_METHOD(OxPHP_Http_Attributes, has) {
     zval *store = zend_read_property(oxphp_http_attributes_ce, Z_OBJ_P(ZEND_THIS),
         "_store", sizeof("_store")-1, 1, NULL);
     RETURN_BOOL(store && Z_TYPE_P(store) == IS_ARRAY &&
-        zend_hash_exists(Z_ARRVAL_P(store), key));
+        zend_symtable_exists(Z_ARRVAL_P(store), key));
 }
 /* }}} */
 
@@ -862,7 +864,7 @@ ZEND_METHOD(OxPHP_Http_Attributes, remove) {
     if (store && Z_TYPE_P(store) == IS_ARRAY) {
         zval new_arr;
         ZVAL_DUP(&new_arr, store);
-        zend_hash_del(Z_ARRVAL(new_arr), key);
+        zend_symtable_del(Z_ARRVAL(new_arr), key);
         zend_update_property(oxphp_http_attributes_ce, Z_OBJ_P(ZEND_THIS),
             "_store", sizeof("_store")-1, &new_arr);
         zval_ptr_dtor(&new_arr);
