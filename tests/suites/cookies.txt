@@ -19,3 +19,9 @@ cookies/test_cookie_mangled_plugin_prefix >> ?case=dot | GET | -H "Cookie: __oxp
 cookies/test_cookie_mangled_plugin_prefix >> ?case=space | GET | -H "Cookie: __oxp t_s=1; a=1" | |
 cookies/test_cookie_mangled_plugin_prefix >> ?case=unmatched-bracket | GET | -H "Cookie: __oxp[t_s=1; a=1" | |
 cookies/test_cookie_mangled_plugin_prefix >> ?case=leading-dots | GET | -H "Cookie: ..oxp_t_s=1; a=1" | |
+cookies/test_cookie_stray_semicolon >> ?case=trailing | GET | -H "Cookie: __oxp_t_s=1;" | |
+cookies/test_cookie_stray_semicolon >> ?case=leading | GET | -H "Cookie: ; __oxp_t_s=1" | |
+cookies/test_cookie_stray_semicolon >> ?case=two-plugin-trailing | GET | -H "Cookie: __oxp_t_s=1; __oxp_t_u=2;" | |
+cookies/test_cookie_stray_semicolon >> ?case=between | GET | -H "Cookie: __oxp_t_s=1; ; __oxp_t_u=2" | |
+cookies/test_cookie_stray_semicolon >> ?case=mangled-trailing | GET | -H "Cookie: __oxp.t_s=1;" | |
+cookies/test_cookie_stray_semicolon >> ?case=app-trailing&app=1 | GET | -H "Cookie: __oxp_t_s=1; a=1;" | |
