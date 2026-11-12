@@ -20,6 +20,10 @@ $bootInfo = [
     'request_start_time' => oxphp_http_request()->startTime(true),
 ];
 
+// A Request built at boot, for the test that it refuses inside a request: it
+// belongs to the boot, not to any request the worker serves.
+$sharedState['boot_request'] = oxphp_http_request();
+
 // An ini directive set during the worker boot phase, for the test that a
 // request's own ini_set() is undone against what boot left rather than against
 // the engine default. user_agent is PHP_INI_ALL and is read only by the http://

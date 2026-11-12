@@ -81,6 +81,12 @@ out="$(docker run --rm -v "$FIX:/cli:ro" -v "$FIX/runini.ini:/usr/local/etc/php/
 out="$(docker run --rm -v "$FIX:/cli:ro" -v "$FIX/runini.ini:/usr/local/etc/php/conf.d/zz-runini.ini:ro" "$IMAGE" oxphp run -d display_errors=stderr -d max_execution_time=5 /cli/runini.php)"
 [ "$out" = "5|stderr" ] && ok "-d over php.ini and run defaults" || bad "-d over php.ini (got '$out')"
 
+# 5f. No HTTP request under `oxphp run`: the factory throws, and so does a method
+#     of a Request built with `new` rather than answering with empty values.
+out="$(run request_object.php)"
+want='OxPHP\Http\Exception\NoActiveRequestException: Cannot access HTTP request: no active request context;'
+[ "$out" = "$want$want" ] && ok "request object refuses outside a request" || bad "request object (got '$out')"
+
 # 6. async engine available under one-shot
 out="$(run async.php)"
 printf '%s' "$out" | grep -q "async-ok" && ok "async (oxphp_sleep)" || bad "async (got '$out')"

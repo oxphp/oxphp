@@ -2155,7 +2155,7 @@ static oxphp_req_pairs_fn_t   g_req_headers_all_fn = NULL;
 static oxphp_req_pairs_fn_t   g_req_cookies_all_fn = NULL;
 static oxphp_req_pairs_fn_t   g_req_query_params_all_fn = NULL;
 static oxphp_req_body_fn_t    g_req_body_fn = NULL;
-static oxphp_req_bool_fn_t    g_req_is_active_fn = NULL;
+static oxphp_req_u64_fn_t     g_req_seq_fn = NULL;
 
 void oxphp_bridge_set_request_accessors(
     oxphp_req_str_fn_t      method_fn,
@@ -2177,7 +2177,7 @@ void oxphp_bridge_set_request_accessors(
     oxphp_req_pairs_fn_t    cookies_all_fn,
     oxphp_req_pairs_fn_t    query_params_all_fn,
     oxphp_req_body_fn_t     body_fn,
-    oxphp_req_bool_fn_t     is_active_fn
+    oxphp_req_u64_fn_t      seq_fn
 ) {
     g_req_method_fn = method_fn;
     g_req_path_fn = path_fn;
@@ -2198,7 +2198,7 @@ void oxphp_bridge_set_request_accessors(
     g_req_cookies_all_fn = cookies_all_fn;
     g_req_query_params_all_fn = query_params_all_fn;
     g_req_body_fn = body_fn;
-    g_req_is_active_fn = is_active_fn;
+    g_req_seq_fn = seq_fn;
 }
 
 /* Convenience wrappers — call through registered function pointers */
@@ -2259,8 +2259,8 @@ void oxphp_req_query_params_all(oxphp_req_pairs_cb_t cb, void *user_data) {
 const uint8_t* oxphp_req_body(size_t *out_len) {
     return g_req_body_fn ? g_req_body_fn(out_len) : NULL;
 }
-int oxphp_req_is_active(void) {
-    return g_req_is_active_fn ? g_req_is_active_fn() : 0;
+uint64_t oxphp_req_seq(void) {
+    return g_req_seq_fn ? g_req_seq_fn() : 0;
 }
 
 /* ─── Worker Mode ─── */

@@ -1123,6 +1123,7 @@ typedef const char* (*oxphp_req_str_key_fn_t)(const char *key, size_t key_len, s
 typedef double (*oxphp_req_double_fn_t)(void);
 typedef int (*oxphp_req_bool_fn_t)(void);
 typedef uint16_t (*oxphp_req_u16_fn_t)(void);
+typedef uint64_t (*oxphp_req_u64_fn_t)(void);
 
 /** Visitor callback for iterating key-value pairs. */
 typedef void (*oxphp_req_pairs_cb_t)(const char *key, size_t klen,
@@ -1154,7 +1155,7 @@ void oxphp_bridge_set_request_accessors(
     oxphp_req_pairs_fn_t    cookies_all_fn,
     oxphp_req_pairs_fn_t    query_params_all_fn,
     oxphp_req_body_fn_t     body_fn,
-    oxphp_req_bool_fn_t     is_active_fn
+    oxphp_req_u64_fn_t      seq_fn
 );
 
 /** Convenience getters — call through registered function pointers. */
@@ -1177,7 +1178,8 @@ void        oxphp_req_headers_all(oxphp_req_pairs_cb_t cb, void *user_data);
 void        oxphp_req_cookies_all(oxphp_req_pairs_cb_t cb, void *user_data);
 void        oxphp_req_query_params_all(oxphp_req_pairs_cb_t cb, void *user_data);
 const uint8_t* oxphp_req_body(size_t *out_len);
-int         oxphp_req_is_active(void);
+/** The request the thread is serving, unique in the process; 0 for none. */
+uint64_t    oxphp_req_seq(void);
 
 /* ─── Worker Mode ─────────────────────────────────────────── */
 
