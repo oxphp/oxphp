@@ -1,0 +1,4 @@
+# profile: session_functions_off
+# description: Session::id() and name() with session_id() and session_name() in disable_functions
+
+session_functions_off/test_session_id_name_disabled
