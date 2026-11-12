@@ -224,13 +224,13 @@ class RequireRole implements AttributeInterface
 
 ## Worker Mode Behavior
 
-In worker mode PHP state persists across requests, but **decorator instances do not**: the per-worker instance cache is cleared at the end of every request. This means:
+In worker mode a decorator instance lives as long as the worker. The instance cache is kept per worker and cleared only when the worker itself stops or is replaced, not between the requests it serves. In the other modes every request starts with fresh instances. In worker mode this means:
 
-- Constructor logic runs once per request per decorated function — at that function's first call within the request — not once for the worker's lifetime
-- Instance state in properties is shared by every call to a decorated function within a single request, but does **not** carry over to the next request
-- Each request starts with a fresh instance (and a fresh constructor run, re-evaluating the attribute arguments)
+- Constructor logic runs once per decorated function per worker — at that function's first call on the worker — and the attribute arguments are evaluated then
+- Instance state in properties carries over from one request to the next, and those requests can come from different clients: keep nothing that belongs to one request in a property past the call that set it
+- Do not call `oxphp_http_request()` in the constructor. That object belongs to the request the constructor ran in, so in every later request its methods throw `NoActiveRequestException`. Call it in `before()` or `after()`, which run in the request of the call they wrap
 
-Design decorators to be stateless between requests. If you need per-request state, set it in `before()` and read it in `after()`:
+Design decorators to be stateless between calls. If you need per-call state, set it in `before()` and read it in `after()`:
 
 ```php
 <?php
@@ -238,7 +238,7 @@ Design decorators to be stateless between requests. If you need per-request stat
 #[Attribute(Attribute::TARGET_METHOD)]
 class RequestTimer implements AttributeInterface
 {
-    // Per-request state: set in before(), read in after()
+    // Per-call state: set in before(), read in after()
     private float $start;
 
     public function before(Context $ctx): void
