@@ -27,6 +27,8 @@ fibers/test_shared_pool_acquire_ended_by_a_recycle >> ?action=check
 fibers/test_shared_pool_rearmed_after_its_creator_exits >> ?action=trigger
 fibers/test_shared_pool_rearmed_after_its_creator_exits >> ?action=check
 fibers/test_write_cancel_releases_frames
+fibers/test_write_cancel_release_runs_past_a_destructor_that_writes
+fibers/test_write_cancel_release_lets_a_destructor_start_a_fiber
 # Out of memory deep in a call stack, then what the worker has left. Ahead of
 # the fatals in fibers below: on a build where the worker is left with no
 # memory_limit, those run away until the kernel ends the server, and every
@@ -61,6 +63,15 @@ fibers/test_write_cancel_in_a_fiber_releases_frames
 fibers/test_fatal_while_releasing_a_held_fiber_keeps_the_request_fiber
 fibers/test_write_cancel_in_a_decorator_keeps_the_request_fiber_for_the_release
 fibers/test_fatal_in_a_released_destructor_keeps_the_request_fiber_for_its_decorator
+# Application code the worker runs while it recovers from a fatal: a decorator's
+# after() that sleeps holds the thread, one that throws an exception that fatals
+# when dropped keeps the worker, a throw with no frame to unwind into is not
+# handed to another request's exception handler, and what a session's release
+# runs after a fatal in a fiber of its save handler runs in the request's fiber.
+fibers/test_recovery_after_handler_holds_the_worker
+fibers/test_recovery_keeps_another_requests_exception_handler
+fibers/test_recovery_after_handler_throw_keeps_the_worker
+fibers/test_session_release_after_a_fiber_fatal_keeps_the_request_fiber
 fibers/test_fatal_inside_a_userland_fiber_keeps_the_worker
 fibers/test_fatal_in_a_generator_in_a_fiber_keeps_the_server | GET | | 500 |
 fibers/test_fatal_in_a_generator_in_a_fiber_keeps_the_server_probe

@@ -142,9 +142,13 @@ static oxphp_error_cb_t oxphp_next_error_cb = NULL;
  * answers with a bailout of its own, flagging every live object on the thread as
  * destructed on the way unless displaying the message ends it first — rather
  * than the report of an uncaught exception, which carries the flag and asks for
- * neither. Read only across the frame walk in oxphp_recover_from_bailout, which
- * clears it on the way in; see there. */
+ * neither. Read only while oxphp_recover() runs, which clears it on the way in
+ * and hands what it saw to the recovery it is nested in; see there. */
 static __thread bool oxphp_fatal_bailed = false;
+
+/* How many recoveries the thread is inside: see oxphp_recover() and
+ * oxphp_fiber_recovery_absorbs_writes(). */
+static __thread uint32_t oxphp_recovery_depth = 0;
 
 /* Reads engine state, writes nothing but the record and allocates nothing: this
  * runs inside the error callback, which the engine may reach with its memory
@@ -177,7 +181,7 @@ static void oxphp_record_bailout_frame(void) {
  * refuses to call anything — every shutdown function, output callback and
  * handler after it, on every request this thread serves. The engine clears it
  * as it shuts a request down, which a worker does not do, so
- * oxphp_recover_from_bailout() clears it. Some windows reach that recovery
+ * oxphp_recover() clears it. Some windows reach that recovery
  * through CG(unclean_shutdown), which the swallowed bailout still raises — a
  * request's shutdown functions do; this is asked where the recovery has to
  * start before the user code that follows: after a request's handler and the
@@ -515,7 +519,7 @@ static void oxphp_bailout_frame_cb(int type, zend_string *file, const uint32_t l
  * internal function reporting one, an opcode running out of memory — so it has
  * to be sound from every frame this records already. The chain, that is: what
  * giving those frames back runs is not always the same after a write as after a
- * fatal, and oxphp_recover_from_bailout says how.
+ * fatal, and oxphp_recover() says how.
  *
  * Recorded the way the callback records, context and all, because the bailout is
  * the same one: a write made from inside a Fiber the request is running ends
@@ -526,6 +530,17 @@ void oxphp_fiber_record_cancel_bailout_frame(void) {
     if (oxphp_current_fiber != NULL) {
         oxphp_record_bailout_frame();
     }
+}
+
+/* The writes a recovery's user code makes are the end of a request that is over,
+ * not a script that has to be stopped — so a client that has left has them
+ * dropped instead of ending the step they are made in. Not once a fatal has
+ * been raised in the recovery: displaying that fatal is a write too, and a
+ * write that returns lets the engine go on to flag every object alive on the
+ * thread as destructed, the requests multiplexed beside this one included,
+ * where one that bails out stops it short of that. */
+bool oxphp_fiber_recovery_absorbs_writes(void) {
+    return oxphp_recovery_depth > 0 && !oxphp_fatal_bailed;
 }
 
 static void oxphp_exec_timer_minit(void);
@@ -905,6 +920,29 @@ static void oxphp_gc_unprotect_after_bailout(bool protect) {
     }
 }
 
+/* Drop an exception a step of the recovery left standing, unless it is the one
+ * the recovery was entered with: that one belongs to the caller, which reads it
+ * after the recovery returns. The engine refuses every call made while one is
+ * pending, so carried out of here it would silently empty the rest of the
+ * request's teardown. Under a guard of its own, because dropping one runs its
+ * destructor — the engine's "already destructed" flag is put on the objects that
+ * existed when a fatal was raised, and an exception built afterwards is not one
+ * of them — and a fatal there would leave from a point where the step's own
+ * guard has already been unwound. Drained rather than cleared once, because a
+ * destructor that throws in its turn leaves another standing. The current fiber
+ * goes back on both sides of it: the step before may have left it cleared, and
+ * so may the destructor (see the top of oxphp_recover()). */
+static void oxphp_recovery_drop_raised(const oxphp_vm_stack_mark *mark,
+                                       const zend_object *ex_on_entry) {
+    EG(active_fiber) = mark->active_fiber;
+    if (EG(exception) && EG(exception) != ex_on_entry) {
+        zend_try {
+            oxphp_discard_pending_exception();
+        } zend_end_try();
+        EG(active_fiber) = mark->active_fiber;
+    }
+}
+
 /* Everything a worker has to undo after a bailout before it can serve anything
  * else: give back what the abandoned frames were holding, rewind the VM stack to
  * the mark, and lower the two flags the engine raised over the whole of it.
@@ -936,8 +974,12 @@ static void oxphp_gc_unprotect_after_bailout(bool protect) {
  * own — a fatal raised from inside a collection is rare enough that a counter
  * for it would say less than the one it shares. Sharing the route is why it is
  * logged: without a line here a worker retired for this reads, everywhere it
- * can be read, as an application that asked to be recycled. */
-static void oxphp_recover_from_bailout(const oxphp_vm_stack_mark *mark) {
+ * can be read, as an application that asked to be recycled.
+ *
+ * discard_pending: drop the exception standing on the way in as well, for the
+ * callers that own it — under the same protection as every other step here,
+ * since dropping it runs its destructor. */
+static void oxphp_recover(const oxphp_vm_stack_mark *mark, bool discard_pending) {
     /* First, the engine's note that it reported running out of memory — see
      * oxphp_engine_reported_oom(). Ahead of everything below because some of it
      * runs user code, which the engine would refuse to call while the note
@@ -951,11 +993,10 @@ static void oxphp_recover_from_bailout(const oxphp_vm_stack_mark *mark) {
      * The user code below asks Fiber::getCurrent(), and its collections run
      * destructors in a fiber only while there is a current one. So it is put
      * back here and again after each step below that runs user code: each can
-     * raise that bailout itself, and the next step would run without it. The
-     * observer walks are not switch-blocked, and the block around the release
-     * does not keep the engine from resuming a suspended fiber the release
-     * destroys (zend_fiber_object_destroy, PHP 8.4.27 / 8.5.12) or the
-     * collector's. */
+     * raise that bailout itself, and the next step would run without it. Parking
+     * is held off below, but the engine still resumes a suspended fiber the
+     * release destroys (zend_fiber_object_destroy, PHP 8.4.27 / 8.5.12), and the
+     * collector's, and a decorator's after() may drive a fiber of its own. */
     EG(active_fiber) = mark->active_fiber;
 
     /* The operation the fatal interrupted is over, whatever it was in the middle of:
@@ -965,6 +1006,75 @@ static void oxphp_recover_from_bailout(const oxphp_vm_stack_mark *mark) {
      * place that swallows a bailout and recovers need not remember to. */
     if (oxphp_current_fiber != NULL) {
         oxphp_fiber_forget_io_names(oxphp_current_fiber);
+    }
+
+    /* Every step from here to the rewind can run application code — a
+     * decorator's after(), a filter's onclose(), the destructor of what a frame
+     * or an exception held — and all of it runs with the thread still marked by
+     * the bailout: CG(unclean_shutdown) and the collector's guard are lowered only
+     * at the end. Those marks are the thread's, not the request's, and so is
+     * everything else held off below. Each step runs under a zend_try, so the
+     * end is reached however a step leaves.
+     *
+     * No parking. None of our suspend points parks while this is up, so code
+     * that sleeps or reads a socket here does it without leaving this frame. A
+     * park would hand the thread to another request with the marks still up, and
+     * that request would read this one's unclean shutdown as a bailout of its own
+     * and be recovered and counted for it. Not the engine's switch block, which
+     * would also make Fiber::start() throw in an after() whose client runs on
+     * fibers; a suspend of the request's own fiber is refused by the scheduler.
+     *
+     * No exception handler. The slot and the stack set_exception_handler() pushes
+     * onto belong to the thread and a worker never resets them, so what is
+     * installed is whatever the last request to call set_exception_handler()
+     * left — often not this one. A throw made here with no frame beneath it is
+     * handed to that handler, which would run another request's code inside this
+     * one and write into this one's response. Hidden, it is reported as an
+     * uncaught exception, and ends the step it was raised in.
+     * SYNC: php-src/Zend/zend_exceptions.c zend_throw_exception_internal()
+     *
+     * And no failure of the request's own from a throw here. With nothing to
+     * catch it the engine reports such a throw as an uncaught exception, an
+     * E_ERROR — which raises fatal_reported, and that flag is what turns the claim
+     * a cancelled write leaves into a failure the breaker counts. The request's
+     * outcome was decided before this ran, and a destructor's throw is an
+     * application outcome wherever it happens, so the flag is put back. Not after
+     * a fatal, though: that report goes out without E_DONT_BAIL, and unless
+     * displaying it is the write that ends it first, the engine answers it by
+     * flagging every object alive on the thread as destructed — those of the
+     * requests multiplexed beside this one included, whose destructors then
+     * never run. That is the wreckage any fatal leaves the next request, and the
+     * client having left first does not put it back, so a fatal raised in here
+     * stands and the request is filed as one — even one whose display got no
+     * further, as a fatal after a cancelled write is everywhere else. */
+    oxphp_park_blocked++;
+    oxphp_recovery_depth++;
+
+    zval saved_handler;
+    ZVAL_COPY_VALUE(&saved_handler, &EG(user_exception_handler));
+    ZVAL_UNDEF(&EG(user_exception_handler));
+    zend_stack saved_handlers = EG(user_exception_handlers);
+    zend_stack_init(&EG(user_exception_handlers), sizeof(zval));
+
+    oxphp_request_fiber *fiber = oxphp_current_fiber;
+    bool fatal_reported = fiber != NULL && fiber->fatal_reported;
+    bool outer_fatal_bailed = oxphp_fatal_bailed;
+    oxphp_fatal_bailed = false;
+
+    if (discard_pending) {
+        zend_try {
+            oxphp_discard_pending_exception();
+        } zend_end_try();
+        EG(active_fiber) = mark->active_fiber;
+    }
+
+    /* The caller's exception, held for the length of the recovery: the steps
+     * below tell a raised one from it by address, and an address is a name only
+     * while the object it names is alive — userland that drops this one and
+     * throws another can be handed the same address back. */
+    zend_object *ex_on_entry = EG(exception);
+    if (ex_on_entry != NULL) {
+        GC_ADDREF(ex_on_entry);
     }
 
     /* Close the observer handlers the fatal left open, before anything below
@@ -1002,17 +1112,7 @@ static void oxphp_recover_from_bailout(const oxphp_vm_stack_mark *mark) {
      * exist to prevent. Caught here instead, and the rest of the recovery runs.
      * The chain is safe to abandon mid-walk: the engine empties the head before
      * walking, so what a fatal drops is the ends still owed, not the loop.
-     *
-     * An exception the walk leaves standing is dropped for the same reason —
-     * this returns a worker to serving, and the engine refuses every call made
-     * while one is pending, so carrying it out of here would silently empty the
-     * rest of the request's teardown. Only one the walk itself raised: an
-     * exception already standing on the way in belongs to the caller, which
-     * reads it after this returns, and a pending one makes the engine skip the
-     * userland halves of the walk anyway. Through zend_clear_exception() for the
-     * reason the fiber loop's own discard gives: releasing the object the slot
-     * still names is a fatal error in the engine, for an exception class that
-     * declares __destruct.
+     * An after() is allowed to throw, and what it leaves standing is dropped.
      * SYNC: php-src/main/main.c php_request_shutdown() step 0 */
     if (ZEND_OBSERVER_ENABLED) {
         /* The frame the request fataled on, held across the walk. The walk sets
@@ -1025,16 +1125,11 @@ static void oxphp_recover_from_bailout(const oxphp_vm_stack_mark *mark) {
          * chain, would never reach them. Nothing in the walk reads this, so it
          * simply goes back afterwards. */
         oxphp_bailout_site bailout_frame = oxphp_bailout_frame;
-        zend_object *ex_on_entry = EG(exception);
         zend_try {
             zend_observer_fcall_end_all();
         } zend_end_try();
-        if (EG(exception) && EG(exception) != ex_on_entry) {
-            zend_clear_exception();
-        }
+        oxphp_recovery_drop_raised(mark, ex_on_entry);
         oxphp_bailout_frame = bailout_frame;
-        /* Ahead of the release: see the top of this function. */
-        EG(active_fiber) = mark->active_fiber;
     }
 
     /* Guarded for the same reason the walk above is, and it is the same code it
@@ -1061,32 +1156,10 @@ static void oxphp_recover_from_bailout(const oxphp_vm_stack_mark *mark) {
      * the flag, the display is a write to that request, and the write bails out
      * first. The interrupt's own "Request cancelled" fatal is one of those.
      *
-     * Two things follow from running that code here, and both are held off for
-     * the length of the walk.
-     *
-     * Fiber switching is blocked. None of our suspend points parks while it is,
-     * so a destructor that sleeps or reads a socket does it without leaving
-     * this frame. A park here would hand the thread to another
-     * request with both flags below still up, and they are the thread's, not
-     * the request's: that request would read this one's unclean shutdown as a
-     * bailout of its own and be recovered and counted for it.
-     *
-     * And a throw the walk reports is not the request's. A destructor that
-     * throws here has no frame to throw into, and unless the application
-     * installed an exception handler the engine reports it as an uncaught
-     * exception, an E_ERROR — which raises fatal_reported, and that flag is
-     * what turns the claim a cancelled write leaves into a failure the breaker
-     * counts. The cancellation was decided before this ran, and a destructor's
-     * throw is an application outcome wherever it happens, so the flag is put
-     * back. Not after a fatal, though: that report goes out without
-     * E_DONT_BAIL, and unless displaying it is the write that ends it first,
-     * the engine answers it by flagging every object alive on the thread as
-     * destructed — those of the requests multiplexed beside this one included,
-     * whose destructors then never run. That is the wreckage any fatal leaves
-     * the next request, and the client having left first does not put it back,
-     * so a fatal raised in here stands and the request is filed as one — even
-     * one whose display got no further, as a fatal after a cancelled write is
-     * everywhere else. The recovery carries on past it either way.
+     * Such a destructor's own writes do not end the walk: they are the request's
+     * end, and a client that has gone has them dropped — see
+     * oxphp_fiber_recovery_absorbs_writes(). A throw, a fatal or an exit() in
+     * one still does.
      *
      * The interrupted walk is not resumed. Its cursor is a local that the
      * longjmp took with it, and the frame it was in the middle of has had some
@@ -1094,46 +1167,16 @@ static void oxphp_recover_from_bailout(const oxphp_vm_stack_mark *mark) {
      * leaves no mark behind it, so a second pass over that frame would give the
      * same values up twice. What is left unreleased is the remainder of one
      * request's frames, held for the life of the worker; the worker itself, and
-     * every request multiplexed on it, is what the alternative costs. */
-    {
-        zend_object *ex_on_entry = EG(exception);
-        oxphp_request_fiber *fiber = oxphp_current_fiber;
-        bool fatal_reported = fiber != NULL && fiber->fatal_reported;
-        oxphp_fatal_bailed = false;
-        zend_fiber_switch_block();
-        zend_try {
-            oxphp_release_abandoned_frames(mark);
-        } zend_end_try();
-        zend_fiber_switch_unblock();
-        if (fiber != NULL && !oxphp_fatal_bailed) {
-            fiber->fatal_reported = fatal_reported;
-        }
-        if (EG(exception) && EG(exception) != ex_on_entry) {
-            /* Under a guard of its own, because dropping one runs a
-             * destructor. The flag that keeps a fatal's walk from running any,
-             * when the fatal gets as far as setting it, is put on the objects
-             * that existed when the fatal was raised, and an exception built
-             * afterwards is not one of them — so the engine
-             * calls its __destruct, and that would fatal from a point where the
-             * guard above has already been unwound.
-             *
-             * Defensive rather than a path that has been measured: what userland
-             * throws inside the walk does not arrive here. The calls the walk
-             * makes run with no current frame beneath them, so the engine hands
-             * such a throw to its uncaught-exception reporting, which clears the
-             * slot and releases the object there — inside the guard above, which
-             * is where a destructor of its own then fatals. What can still
-             * arrive is an Error the engine raised in C and returned with, and
-             * those carry no userland destructor. Kept because it costs one
-             * jmp_buf on a path taken once per fatal, and because what runs on
-             * this step is not this function's to know. */
-            zend_try {
-                zend_clear_exception();
-            } zend_end_try();
-        }
-        /* Ahead of the walk below: see the top of this function. */
-        EG(active_fiber) = mark->active_fiber;
-    }
+     * every request multiplexed on it, is what the alternative costs.
+     *
+     * What userland throws inside the walk is reported where it is thrown, not
+     * left standing: the calls the walk makes run with no current frame beneath
+     * them. What the drop after it can still meet is an Error the engine raised
+     * in C and returned with. */
+    zend_try {
+        oxphp_release_abandoned_frames(mark);
+    } zend_end_try();
+    oxphp_recovery_drop_raised(mark, ex_on_entry);
 
     if (ZEND_OBSERVER_ENABLED) {
         /* And close what the recovery's own calls opened. Every call the engine
@@ -1160,24 +1203,62 @@ static void oxphp_recover_from_bailout(const oxphp_vm_stack_mark *mark) {
          * power to keep this function from returning. An observer left thinking
          * a call is still open is a wrong number; a frame still named here is a
          * pointer into the stack the next request runs on. */
-        zend_object *ex_on_entry = EG(exception);
         zend_try {
             zend_observer_fcall_end_all();
         } zend_end_try();
         EG(current_observed_frame) = NULL;
-        /* And an exception this walk leaves standing goes the way the first
-         * walk's does, and for the same reason: an end handler's after() is
-         * allowed to throw, and the engine answers every call made while one is
-         * pending by not making it and reporting success. Carried out of here
-         * that reads as a request whose shutdown functions all ran, when not one
-         * of them did. Only one this walk raised, and under a guard, because
-         * dropping an exception runs its destructor. */
-        if (EG(exception) && EG(exception) != ex_on_entry) {
+        oxphp_recovery_drop_raised(mark, ex_on_entry);
+    }
+
+    /* The caller's exception back to the reference count it came in with. Gone
+     * from the slot means a step consumed it — chained it under one it then
+     * dropped, or reported it — and the reference held here can be the last;
+     * its destructor then runs under the same protection as the steps above. */
+    if (ex_on_entry != NULL) {
+        if (EG(exception) == ex_on_entry) {
+            GC_DELREF(ex_on_entry);
+        } else {
             zend_try {
-                zend_clear_exception();
+                OBJ_RELEASE(ex_on_entry);
             } zend_end_try();
+            EG(active_fiber) = mark->active_fiber;
         }
     }
+
+    /* Whatever the userland above installed as an exception handler is
+     * released before the thread's own goes back — with the slot still empty, so
+     * that a destructor throwing on the way is reported rather than handed to
+     * anything. A bailout out of one leaks the rest, as does whatever such a
+     * destructor installs in its turn; the thread's handler is put back either
+     * way. */
+    {
+        zval left;
+        ZVAL_COPY_VALUE(&left, &EG(user_exception_handler));
+        ZVAL_UNDEF(&EG(user_exception_handler));
+        zend_stack left_handlers = EG(user_exception_handlers);
+        zend_stack_init(&EG(user_exception_handlers), sizeof(zval));
+        zend_try {
+            zval_ptr_dtor(&left);
+            zend_stack_clean(&left_handlers, (void (*)(void *)) ZVAL_PTR_DTOR, true);
+        } zend_end_try();
+        ZVAL_COPY_VALUE(&EG(user_exception_handler), &saved_handler);
+        EG(user_exception_handlers) = saved_handlers;
+    }
+
+    /* The observer chain once more, for the two releases above, which come after
+     * the walk that closes it: a fatal in what they release leaves its frames on
+     * the chain, above the mark. Their ends are dropped rather than run, which
+     * would be one more round of userland with nothing after it to close what
+     * that round leaves. */
+    if (ZEND_OBSERVER_ENABLED) {
+        EG(current_observed_frame) = NULL;
+    }
+
+    if (fiber != NULL && !oxphp_fatal_bailed) {
+        fiber->fatal_reported = fatal_reported;
+    }
+    /* A fatal in here is one inside the recovery this one is nested in too. */
+    oxphp_fatal_bailed = outer_fatal_bailed || oxphp_fatal_bailed;
 
     /* And the note again, for user code above that ran out of memory in its
      * turn — an end handler's after(), a filter's onclose(). A fatal raised in
@@ -1199,9 +1280,16 @@ static void oxphp_recover_from_bailout(const oxphp_vm_stack_mark *mark) {
     oxphp_bailout_frame.context = NULL;
     oxphp_bailout_frame.frame = NULL;
 
+    oxphp_recovery_depth--;
+    oxphp_park_blocked--;
+
     oxphp_vm_stack_rewind(mark);
     CG(unclean_shutdown) = 0;
     oxphp_gc_unprotect_after_bailout(false);
+}
+
+static void oxphp_recover_from_bailout(const oxphp_vm_stack_mark *mark) {
+    oxphp_recover(mark, false);
 }
 
 /* Recovers from running out of memory in user code the worker ran with no
@@ -1221,25 +1309,16 @@ static void oxphp_recover_from_bailout(const oxphp_vm_stack_mark *mark) {
  *
  * So it is recovered from here, as those windows recover from a fatal raised in
  * them, and nothing is filed: whose code ran out is not known. The exception
- * goes first, because the recovery leaves one it finds standing in place, as
- * its caller's to read. Under a guard of its own, as the recovery's own drops
- * are: with the note up no destructor runs as it is dropped, but what stands
- * there is not this function's to know. And with switching blocked, because
- * the flags the bailout raised are still up until the recovery lowers them.
- * Called with no fiber current, because the recovery forgets the stream names
- * of the current one. True if there was one to recover from. */
+ * is the recovery's to drop, with the rest of what it undoes. Called with no
+ * fiber current, because the recovery forgets the stream names of the current
+ * one. True if there was one to recover from. */
 static bool oxphp_recover_from_reported_oom(void) {
     if (!oxphp_engine_reported_oom()) {
         return false;
     }
     oxphp_vm_stack_mark mark;
     oxphp_vm_stack_save(&mark);
-    zend_fiber_switch_block();
-    zend_try {
-        oxphp_discard_pending_exception();
-    } zend_end_try();
-    zend_fiber_switch_unblock();
-    oxphp_recover_from_bailout(&mark);
+    oxphp_recover(&mark, true);
     return true;
 }
 
@@ -2172,26 +2251,11 @@ static void oxphp_close_input_wrapper_guarded(php_stream *stream) {
     zend_try {
         php_stream_free(stream, PHP_STREAM_FREE_KEEP_RSRC | PHP_STREAM_FREE_CLOSE);
     } zend_catch {
-        /* Under a guard, like the two discards in oxphp_recover_from_bailout
-         * and for their reason: dropping an exception runs its destructor,
-         * and zend_catch has already handed EG(bailout) back to the target
-         * outside this function — a fatal from that destructor would leave
-         * the way it came and take the recovery below with it. Not every
-         * bailout caught here has been through php_error_cb: a write to a
-         * cancelled request makes a bare one, with nothing flagged, so an
-         * exception arriving here can still have a destructor to run.
-         *
-         * Switching blocked around it for the reason the recovery blocks it
-         * around its own userland step: CG(unclean_shutdown) and gc_protect
-         * are still raised at this point and only the recovery below lowers
-         * them, so a destructor that suspends would park this fiber and hand
-         * the thread to another request wearing this one's flags. */
-        zend_fiber_switch_block();
-        zend_try {
-            oxphp_discard_pending_exception();
-        } zend_end_try();
-        zend_fiber_switch_unblock();
-        oxphp_recover_from_bailout(&mark);
+        /* The exception left standing goes with the rest: not every bailout
+         * caught here has been through php_error_cb — a write to a cancelled
+         * request makes a bare one, with nothing flagged — so it can still have
+         * a destructor to run, and the recovery is what runs one safely. */
+        oxphp_recover(&mark, true);
     } zend_end_try();
 }
 
@@ -3530,12 +3594,14 @@ static void oxphp_report_late_exception(oxphp_request_fiber *fiber,
     if (!zend_is_unwind_exit(EG(exception)) && !zend_is_graceful_exit(EG(exception))) {
         fiber->handler_threw = true;
     }
+    /* The drop inside the guard as well: what the report leaves standing has a
+     * destructor to run, and a fatal there is one more bailout in the window. */
     zend_try {
         zend_exception_error(EG(exception), E_ERROR);
+        oxphp_discard_pending_exception();
     } zend_catch {
-        oxphp_recover_from_bailout(mark);
+        oxphp_recover(mark, true);
     } zend_end_try();
-    oxphp_discard_pending_exception();
 }
 
 /* Defined with the rest of the task scheduler; used by the task arm of the loop
@@ -3941,26 +4007,12 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
             if (input_switch_blocked) {
                 zend_fiber_switch_unblock();
             }
-            /* Under a guard, like the two discards in oxphp_recover_from_bailout
-             * and for their reason: dropping an exception runs its destructor,
-             * and zend_catch has already handed EG(bailout) back to the target
-             * outside this function — a fatal from that destructor would leave
-             * the way it came and take the recovery below with it. Not every
-             * bailout caught here has been through php_error_cb: a write to a
-             * cancelled request makes a bare one, with nothing flagged, so an
-             * exception arriving here can still have a destructor to run.
-             *
-             * Switching blocked around it for the reason the recovery blocks it
-             * around its own userland step: CG(unclean_shutdown) and gc_protect
-             * are still raised at this point and only the recovery below lowers
-             * them, so a destructor that suspends would park this fiber and hand
-             * the thread to another request wearing this one's flags. */
-            zend_fiber_switch_block();
-            zend_try {
-                oxphp_discard_pending_exception();
-            } zend_end_try();
-            zend_fiber_switch_unblock();
-            oxphp_recover_from_bailout(&mark);
+            /* The exception left standing goes with the rest: not every bailout
+             * caught here has been through php_error_cb — a write to a cancelled
+             * request makes a bare one, with nothing flagged — so it can still
+             * have a destructor to run, and the recovery is what runs one
+             * safely. */
+            oxphp_recover(&mark, true);
         } zend_end_try();
 
         /* Neither of the two ways a shutdown function can end badly reaches the
@@ -4884,7 +4936,7 @@ void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber) {
      * then letting go of what its frames were given runs no destructor. One a
      * user error handler took over flags nothing, and neither does one whose
      * message is displayed through a write that bails out first, as on a
-     * request already cancelled (see oxphp_recover_from_bailout()). Then a
+     * request already cancelled (see oxphp_recover()). Then a
      * destructor can run here, and a fatal it raises ends the serve loop, as
      * one raised by a stale exception's destructor does there. */
     oxphp_fatal_backtrace_release();
@@ -5465,6 +5517,12 @@ static void oxphp_forget_current_io_names(void) {
 }
 
 void oxphp_session_release_request_state(void) {
+    /* Put back in every arm below. A bailout forwarded out of a fiber the save
+     * handler started clears the engine's current fiber (zend_fiber_switch_to,
+     * PHP 8.4.27 / 8.5.12), and the steps after it run application code — the
+     * handler's own, a destructor — which asks Fiber::getCurrent(). */
+    zend_fiber *active_fiber = EG(active_fiber);
+
     /* The write first, and always, the way every other SAPI ends a request:
      * php_session_flush(1) both saves the data and closes the save handler, and
      * closing the handler is what releases the store's lock on the session.
@@ -5474,6 +5532,7 @@ void oxphp_session_release_request_state(void) {
             php_session_flush(1);
         } zend_catch {
             oxphp_forget_current_io_names();
+            EG(active_fiber) = active_fiber;
         } zend_end_try();
     }
     /* Guarded, where upstream leaves it bare. Upstream reaches this after the
@@ -5488,6 +5547,7 @@ void oxphp_session_release_request_state(void) {
             zval_ptr_dtor(&PS(http_session_vars));
         } zend_catch {
             oxphp_forget_current_io_names();
+            EG(active_fiber) = active_fiber;
         } zend_end_try();
         ZVAL_UNDEF(&PS(http_session_vars));
     }
@@ -5507,6 +5567,7 @@ void oxphp_session_release_request_state(void) {
             PS(mod)->s_close(&PS(mod_data));
         } zend_catch {
             oxphp_forget_current_io_names();
+            EG(active_fiber) = active_fiber;
         } zend_end_try();
     }
     /* What the close leaves behind when it bails out, or when the handler
@@ -5603,6 +5664,7 @@ void oxphp_session_release_request_state(void) {
         zend_delete_global_variable(session_var_name);
     } zend_catch {
         oxphp_forget_current_io_names();
+        EG(active_fiber) = active_fiber;
     } zend_end_try();
     zend_string_release(session_var_name);
 
@@ -5793,12 +5855,7 @@ static void oxphp_session_handler_release(oxphp_session_handler *h) {
         zend_try {
             zval_ptr_dtor(&held);
         } zend_catch {
-            zend_fiber_switch_block();
-            zend_try {
-                oxphp_discard_pending_exception();
-            } zend_end_try();
-            zend_fiber_switch_unblock();
-            oxphp_recover_from_bailout(&mark);
+            oxphp_recover(&mark, true);
         } zend_end_try();
     }
 #if PHP_VERSION_ID < 80600
