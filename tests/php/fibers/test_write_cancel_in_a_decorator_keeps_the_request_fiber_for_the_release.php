@@ -12,8 +12,8 @@ require_once __DIR__ . '/write_cancel_probe.php';
 // inside that fiber clears the engine's record of the current fiber. The worker
 // closes the decorated call before it gives back what the abandoned frames were
 // holding, which calls the decorator's after(): it runs in the request's fiber,
-// and then writes to the same gone client from a Fiber it starts, which ends
-// after() from inside that fiber and clears the record again. The object the
+// and then fatals inside a Fiber it starts, which ends after() from inside that
+// fiber and clears the record again. The object the
 // request held is given back after that, and its destructor runs in the
 // request's fiber too.
 //
@@ -32,9 +32,9 @@ if (write_cancel_stage($t, 'stream-decorated', '?in=stream-decorated')) {
     $t->assertSame('the write it resumed into ended it', OxphpWriteCancelProbe::$stage, 'before-write');
     $t->assertTrue('the inner request reported from its shutdown function', $reported);
     $t->assertSame(
-        "the decorator's after() ran, and its own write ended it",
+        "the decorator's after() ran, and the fatal in its fiber ended it",
         OxphpWriteCancelProbe::$afterStage,
-        'writing'
+        'fataling'
     );
     $t->assertTrue('what the request held was given back', $report['freed']);
     $t->assertNotNull('the request ran in a fiber', OxphpWriteCancelProbe::$requestFiber);

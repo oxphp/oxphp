@@ -795,12 +795,12 @@ extern __thread oxphp_request_fiber *oxphp_current_fiber;
  * the filter_input_array() guard in oxphp_sapi.c; read by the reset. */
 extern __thread uint32_t oxphp_filter_storage_readers;
 
-/* Raised while the server runs user code on a request fiber that must not park —
- * the session write at the end of a request, and the moves of its ini
- * directives, whose handlers can run a destructor. Every suspend point of ours takes
- * its blocking path while it is up, as it does under zend_fiber_switch_blocked().
- * Not the engine's switch block: that one also makes Fiber::start() and the rest
- * throw, and a save handler is free to run its store client on userland fibers. */
+/* Raised while the server runs user code on a request fiber at a point where
+ * handing the thread to another request would hand it this one's thread state
+ * as well. Every suspend point of ours takes its blocking path while it is up, as
+ * it does under zend_fiber_switch_blocked(). Not the engine's switch block: that
+ * one also makes Fiber::start() and the rest throw, and that user code is free
+ * to run a client of its own on userland fibers. */
 extern __thread uint32_t oxphp_park_blocked;
 
 /* fiber_id of the currently executing request fiber, 0 outside fiber context.
@@ -824,6 +824,12 @@ void oxphp_fiber_minit(void);
  * error preceded. Called immediately before the write path's cancellation
  * bailout. */
 void oxphp_fiber_record_cancel_bailout_frame(void);
+
+/* Whether the thread is running the user code of a recovery after a bailout —
+ * a destructor of what the abandoned frames held, a decorator's after() — with
+ * no fatal raised there yet. The write path lets such a write through when its
+ * client has left, where it would end a stream. */
+bool oxphp_fiber_recovery_absorbs_writes(void);
 
 /* Whether a bailout has gone through an internal function's frame since this
  * was last called on the thread, and lowers the answer. An internal function's

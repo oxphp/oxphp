@@ -17,7 +17,8 @@ if (!class_exists('OxphpWriteCancelProbe', false)) {
     {
         /**
          * How far the fixture got: null, 'parked', 'before-write', 'after-write';
-         * with ?in=destructor, then 'destructing' and 'destructed'.
+         * with ?in=destructor, then 'destructing' and 'destructed'; with
+         * ?in=stream-fiber-starting-destructor, then 'destructor-returned'.
          */
         public static ?string $stage = null;
 
@@ -39,9 +40,9 @@ if (!class_exists('OxphpWriteCancelProbe', false)) {
         public static ?int $fiberAtDestruct = null;
 
         /**
-         * With ?in=stream-decorated and ?in=stream-decorated-destructor, how far
-         * the decorator's after() got — 'writing', then 'wrote' — and the fiber
-         * it ran in, by id.
+         * How far the decorator's after() got — with ?in=stream-decorated
+         * 'fataling', then 'returned'; with ?in=stream-decorated-destructor
+         * 'writing', then 'wrote' — and the fiber it ran in, by id.
          */
         public static ?string $afterStage = null;
         public static ?int $fiberAtAfter = null;
@@ -52,6 +53,19 @@ if (!class_exists('OxphpWriteCancelProbe', false)) {
          * that the answer is what it stops on instead of being stopped.
          */
         public static ?int $abortedAfterWrite = null;
+
+        /**
+         * With ?in=stream-writing-destructor, whether the destructor that writes
+         * returned from its write, and whether the one due after it ran.
+         */
+        public static bool $writerReturned = false;
+        public static bool $nextDestructed = false;
+
+        /**
+         * With ?in=stream-fiber-starting-destructor, whether the Fiber its
+         * destructor starts ran.
+         */
+        public static bool $destructorFiberRan = false;
 
         public static function reset(): void
         {
@@ -64,6 +78,9 @@ if (!class_exists('OxphpWriteCancelProbe', false)) {
             self::$afterStage = null;
             self::$fiberAtAfter = null;
             self::$abortedAfterWrite = null;
+            self::$writerReturned = false;
+            self::$nextDestructed = false;
+            self::$destructorFiberRan = false;
         }
 
         /** Whether what the fixture's frame was holding is gone. */

@@ -5979,7 +5979,8 @@ static void oxphp_request_parse_body_guard_restore(void)
  * time, and the scheduler wakes it the moment the slot is free. A drain and a
  * cancellation reach it as they reach a sleep, and its deadline at the first
  * of those wakes past it. Where it cannot park —
- * under a userland fiber scheduler, or with switching blocked — it cannot wait
+ * under a userland fiber scheduler, or with switching or parking blocked
+ * (oxphp_fiber_sleep_us() refuses both) — it cannot wait
  * at all, because what it is waiting for runs on this same thread, so while
  * another request holds the session session_start() fails there the way it
  * fails when the store cannot be opened: a warning, and false.
@@ -6038,7 +6039,8 @@ static ZEND_NAMED_FUNCTION(oxphp_gated_session_start)
         php_error_docref(NULL, E_WARNING,
                          "Cannot start a session while another request on this worker has "
                          "one open, from a context that cannot wait for it to close (a "
-                         "userland fiber scheduler owns it, or switching is blocked)");
+                         "userland fiber scheduler owns it, or the request cannot be "
+                         "suspended here)");
         RETURN_FALSE;
     }
     if (zend_atomic_bool_load_ex(&EG(timed_out))) {
@@ -9221,7 +9223,16 @@ static int oxphp_mark_cancelled_bailout(oxphp_cancel_reason_t reason) {
      * taken off the thread while it is parked and put back when it finishes
      * (see oxphp_fiber_park_ini), so a call made by one request is never read
      * as another's. What still bounds such a stream is the hard phase of a
-     * drain, which ends it whatever it asked. */
+     * drain, which ends it whatever it asked.
+     *
+     * Nor once the stream has been ended, for the destructors and the rest of
+     * the user code the worker runs as it recovers from that: the loop the
+     * client bounded is over, and what runs is the request's end (see
+     * oxphp_fiber_recovery_absorbs_writes()). Its time limit bounds that end as
+     * it bounds the rest of the request — under set_time_limit(0), which a
+     * stream usually calls, only the hard phase of a drain does — so a loop in
+     * there that only a failed write would end runs on, holding the thread;
+     * connection_aborted(), raised just below, is what can tell it to stop. */
     if (reason == OXPHP_CANCEL_CLIENT_ABORT) {
         /* Before the verdict, not after it, which is also the order upstream
          * takes: connection_aborted() has to answer truthfully whichever way
@@ -9240,7 +9251,8 @@ static int oxphp_mark_cancelled_bailout(oxphp_cancel_reason_t reason) {
         && !oxphp_bridge_is_drain_hard()
         && (PG(ignore_user_abort)
             || (oxphp_bridge_is_worker_mode()
-                && !oxphp_bridge_is_streaming()))) {
+                && (!oxphp_bridge_is_streaming()
+                    || oxphp_fiber_recovery_absorbs_writes())))) {
         return 0;
     }
 

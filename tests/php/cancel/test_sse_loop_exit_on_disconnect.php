@@ -12,7 +12,9 @@ require_once __DIR__ . '/../test_helper.php';
 // it runs, so the loop condition is never evaluated with the disconnect in it and
 // `finally` does not run — while the shutdown functions and destructors that run
 // at the end of any request still do, each group up to the first one that writes
-// output: that write is stopped as well, and the rest of its group does not run. After
+// output: that write is stopped as well, and the rest of its group does not run.
+// Except the destructors in worker mode, which the worker runs as it gives back
+// what the stopped script held: there each runs to its end, writes and all. After
 // ignore_user_abort(true) the flush returns, connection_aborted() reports the
 // disconnect from then on, the loop leaves through its condition and runs its
 // `finally`, and every shutdown function and destructor runs to its end.
@@ -153,20 +155,20 @@ $test->assertSame('the destructor that writes output was entered', $destructEnte
 if ($ignore) {
     $test->assertSame('a shutdown function that writes output ran to its end', $shutdownEchoed, 'returned');
     $test->assertSame('and so did the one registered after it', $shutdownNext, 'ran');
-    $test->assertSame('every destructor ran', [$destruct, $destructEchoed, $destructNext], ['destructed', 'destructed', 'destructed']);
 } else {
     // Unlike under PHP-FPM, which discards what is written once it has found the
     // client gone, a write here still reaches the server and is stopped there.
     $test->assertNull('a shutdown function that writes output stopped at that write', $shutdownEchoed);
     $test->assertNull('and the one registered after it did not run', $shutdownNext);
+}
+
+if ($ignore || oxphp_is_worker()) {
+    $test->assertSame('every destructor ran', [$destruct, $destructEchoed, $destructNext], ['destructed', 'destructed', 'destructed']);
+} else {
     $test->assertNull('a destructor that writes output stopped at that write', $destructEchoed);
-    // Outside worker mode the script's objects go newest first, in worker mode
-    // oldest first, so which of the other two comes before the one that writes
-    // depends on the mode: one of them ran, and the one after it did not.
-    $test->assertSame(
-        'the destructor before it ran, and the one after it did not',
-        count(array_filter([$destruct, $destructNext], static fn (?string $v): bool => $v === 'destructed')),
-        1,
-    );
+    // The script's objects go newest first here, so the one after the writer in
+    // that order is the one created before it.
+    $test->assertSame('the destructor before it ran', $destruct, 'destructed');
+    $test->assertNull('and the one after it did not', $destructNext);
 }
 $test->done();
