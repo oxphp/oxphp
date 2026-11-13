@@ -18,26 +18,35 @@ require_once __DIR__ . '/argument_probe.php';
 // pending call the frame also is, so do the arguments, and the release runs on
 // along the borrowed link into the calling frame itself. Through
 // zend_call_function() the call is nobody's pending call, and its arguments are
-// its own to give back.
+// its own to give back. Made as an argument of another call, the call hides
+// that one behind the borrowed link, and its own arguments are released all the
+// same.
 
 OxphpArgumentProbe::$held ??= new stdClass();
 
+// Null when the inner request could not be sent.
+$get = static function (string $path): ?string {
+    $sock = stream_socket_client('tcp://127.0.0.1:80', $errno, $errstr, 3.0);
+    if ($sock === false) {
+        return null;
+    }
+    stream_set_timeout($sock, 10);
+    fwrite($sock, "GET /tests/fibers/{$path} HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+    // Hooked: parks this request while the worker serves the inner one.
+    $resp = (string) stream_get_contents($sock);
+    fclose($sock);
+    return $resp;
+};
+
 $t = new TestCase('fatal_in_a_default_argument_leaves_the_call_alone', 'fibers');
 
-foreach (['call', 'reflection'] as $via) {
+foreach (['call', 'nested', 'reflection'] as $via) {
     $before = OxphpArgumentProbe::refcount();
-
-    $sock = stream_socket_client('tcp://127.0.0.1:80', $errno, $errstr, 3.0);
-    $resp = null;
-    if ($sock !== false) {
-        stream_set_timeout($sock, 10);
-        fwrite($sock, "GET /tests/fibers/fixture_default_argument_fatal.php?via={$via} HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
-        // Hooked: parks this request while the worker serves the inner one.
-        $resp = (string) stream_get_contents($sock);
-        fclose($sock);
-    }
-
+    $resp = $get("fixture_default_argument_fatal.php?via={$via}");
     $after = OxphpArgumentProbe::refcount();
+    // A request that ends normally, so that three fatals in a row do not have
+    // the worker — and this request with it — replaced.
+    $get('fixture_fatal.php');
 
     $t->assertTrue("{$via}: the inner request connected", $resp !== null);
     $t->assertContains("{$via}: it fataled in the default's constructor", (string) $resp, 'OxphpDefaultArgumentFatal');

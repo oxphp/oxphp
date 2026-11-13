@@ -18,6 +18,13 @@ require_once __DIR__ . '/argument_probe.php';
 // fatal, and is freed while others still hold it. The argument stored ahead of
 // it is still released: left alone, it keeps a reference for the life of the
 // worker.
+//
+// Compiled by the tracing JIT, a call nested in the arguments of another may
+// not be linked to the frame yet when the warning fatals. Then neither call's
+// arguments are released: counted for the inner call and taken from the outer
+// one's slots, they would include the object the outer call was passed on the
+// previous turn. A fatal from the opcode that begins a call — an autoloader
+// that fatals for `new` — still has the call outside it released.
 
 OxphpArgumentProbe::$held ??= new stdClass();
 OxphpArgumentProbe::$kept ??= new stdClass();
@@ -38,7 +45,7 @@ $get = static function (string $path): ?string {
 
 $t = new TestCase('fatal_in_an_argument_warning_leaves_its_slot_alone', 'fibers');
 
-foreach (['undefined', 'array', 'unpack'] as $send) {
+foreach (['undefined', 'array', 'unpack', 'traced', 'autoload'] as $send) {
     $before = OxphpArgumentProbe::refcount();
     $keptBefore = OxphpArgumentProbe::keptRefcount();
     $resp = $get("fixture_argument_warning_fatal.php?send={$send}");
