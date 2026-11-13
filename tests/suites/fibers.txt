@@ -37,6 +37,9 @@ fibers/test_compile_error_keeps_later_warnings_reported
 # being passed, and in the default of a parameter it skipped by name.
 fibers/test_fatal_in_an_argument_warning_leaves_its_slot_alone
 fibers/test_fatal_in_a_default_argument_leaves_the_call_alone
+# A compile interrupted by its error handler, which has another compile on the
+# same thread fail: through opcache_compile_file(), and in another request.
+fibers/test_compile_error_during_a_compile_leaves_its_syntax_tree
 # Out of memory deep in a call stack, then what the worker has left. Ahead of
 # the fatals in fibers below: on a build where the worker is left with no
 # memory_limit, those run away until the kernel ends the server, and every
