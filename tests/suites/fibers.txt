@@ -175,14 +175,17 @@ fibers/test_bailout_first_stretch_keeps_the_worker | GET | | 500 |
 fibers/test_bailout_first_stretch_keeps_the_worker_probe
 
 # Objects that refer to themselves are garbage until the collector runs, and what
-# a request ended inside an internal function lets go of is not a leak when the
-# collector holds them as possible roots — it finds them before the heap is read.
-# When it does not (what the walk after a bailout lets go of is never added to its
-# buffer) nothing will free them, which is a leak, and the worker is retired.
+# a request ended inside an internal function lets go of is not a leak: the
+# collector finds it before the heap is read, whether it held the objects as
+# possible roots before the bailout or the walk after it let go of them.
 fibers/test_bailout_in_a_callback_over_buffered_cycles_keeps_the_worker | GET | | 504 |
 fibers/test_bailout_in_a_callback_over_buffered_cycles_keeps_the_worker_probe
-fibers/test_bailout_in_a_callback_over_unbuffered_cycles_retires_the_worker | GET | | 504 |
-fibers/test_bailout_in_a_callback_over_unbuffered_cycles_retires_the_worker_probe
+fibers/test_bailout_in_a_callback_over_unbuffered_cycles_keeps_the_worker | GET | | 504 |
+fibers/test_bailout_in_a_callback_over_unbuffered_cycles_keeps_the_worker_probe
+# A destructor that walk runs asks for a collection, which has destructors of
+# its own to call: it runs to its end, and the worker is kept.
+fibers/test_collection_while_releasing_frames_keeps_the_worker
+fibers/test_collection_while_releasing_frames_keeps_the_worker_probe
 
 # A stream's flush waiting for room in its queue: the stream reaches a client
 # on the same worker thread whole, another request is served while it waits, the
