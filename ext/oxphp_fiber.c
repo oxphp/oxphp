@@ -150,6 +150,91 @@ static __thread bool oxphp_fatal_bailed = false;
  * oxphp_fiber_recovery_absorbs_writes(). */
 static __thread uint32_t oxphp_recovery_depth = 0;
 
+/* The engine answers a fatal it bails out of by flagging every object alive on
+ * the thread as destructed, so that none of them runs a __destruct before the
+ * request is shut down. A worker shuts down no request: the flag reaches the
+ * objects of the requests and tasks multiplexed beside the one that failed, and
+ * those the worker keeps, which then never run a destructor again. So the error
+ * callback notes which objects the flag is about to reach — one bit per handle,
+ * set for a live object not yet destructed — and the recovery that follows the
+ * bailout takes the flag back off them once it has released the failed
+ * request's frames. Those frames are released while the flag still stands, so
+ * what freeing them frees goes without its destructor, as after a fatal
+ * anywhere. Whatever of the failed request outlives that, from anything that
+ * still references it, loses the flag too, and runs its destructor when it
+ * goes: the store does not record which request made an object.
+ * SYNC: php-src/main/main.c php_error_cb();
+ *       php-src/Zend/zend_objects_API.c zend_objects_store_mark_destructed() */
+static __thread struct {
+    uint8_t *alive;  /* malloc'd, NULL when there is no snapshot */
+    uint32_t top;
+    /* The report that took the snapshot is still running: the flag is not set
+     * yet, and is never set if a write ends the report first. */
+    bool reporting;
+} oxphp_destructed_snapshot = {NULL, 0, false};
+
+/* The types php_error_cb() bails out of, flagging every object first, unless
+ * the report carries E_DONT_BAIL. */
+#define OXPHP_DESTRUCTED_FLAG_ERROR_TYPES \
+    (E_ERROR | E_CORE_ERROR | E_RECOVERABLE_ERROR | E_PARSE | E_COMPILE_ERROR | E_USER_ERROR)
+
+/* Allocates with malloc, not emalloc: the error callback runs with the memory
+ * limit possibly spent. With no memory there is no snapshot, and the flag stays
+ * on every object, as it would with no worker. */
+static void oxphp_destructed_snapshot_take(void) {
+    zend_objects_store *store = &EG(objects_store);
+    if (oxphp_destructed_snapshot.alive != NULL || store->object_buckets == NULL) {
+        return;
+    }
+    uint32_t top = store->top;
+    uint8_t *alive = calloc((top + 7) / 8, 1);
+    if (alive == NULL) {
+        return;
+    }
+    for (uint32_t h = 1; h < top; h++) {
+        zend_object *obj = store->object_buckets[h];
+        if (IS_OBJ_VALID(obj) && !(OBJ_FLAGS(obj) & IS_OBJ_DESTRUCTOR_CALLED)) {
+            alive[h / 8] |= (uint8_t)(1u << (h % 8));
+        }
+    }
+    oxphp_destructed_snapshot.alive = alive;
+    oxphp_destructed_snapshot.top = top;
+}
+
+static void oxphp_destructed_snapshot_forget(void) {
+    free(oxphp_destructed_snapshot.alive);
+    oxphp_destructed_snapshot.alive = NULL;
+    oxphp_destructed_snapshot.top = 0;
+    oxphp_destructed_snapshot.reporting = false;
+}
+
+/* Runs no user code. A handle freed since the snapshot is skipped; one freed and
+ * taken again by an object the recovery's own user code made is not told apart,
+ * and that object loses the flag as well. */
+static void oxphp_destructed_snapshot_restore(void) {
+    zend_objects_store *store = &EG(objects_store);
+    if (oxphp_destructed_snapshot.alive == NULL) {
+        return;
+    }
+    if (store->object_buckets != NULL) {
+        uint32_t top = MIN(oxphp_destructed_snapshot.top, store->top);
+        for (uint32_t h = 1; h < top; h++) {
+            zend_object *obj = store->object_buckets[h];
+            if ((oxphp_destructed_snapshot.alive[h / 8] & (1u << (h % 8))) && IS_OBJ_VALID(obj)) {
+                GC_DEL_FLAGS(obj, IS_OBJ_DESTRUCTOR_CALLED);
+            }
+        }
+    }
+    oxphp_destructed_snapshot_forget();
+}
+
+/* A snapshot no recovery took back belongs to code that shut its request down
+ * instead — a traditional request, a worker's boot or the end of its script —
+ * where the flag is the engine's to keep. */
+void oxphp_fiber_forget_destructed_snapshot(void) {
+    oxphp_destructed_snapshot_forget();
+}
+
 /* Reads engine state, writes nothing but the record and allocates nothing: this
  * runs inside the error callback, which the engine may reach with its memory
  * limit already spent.
@@ -499,6 +584,31 @@ static void oxphp_bailout_frame_cb(int type, zend_string *file, const uint32_t l
             oxphp_current_fiber->fatal_reported = true;
         }
     }
+    if ((type & OXPHP_DESTRUCTED_FLAG_ERROR_TYPES) && !(type & E_DONT_BAIL)
+        && oxphp_destructed_snapshot.alive == NULL) {
+        oxphp_destructed_snapshot_take();
+        if (oxphp_destructed_snapshot.alive != NULL) {
+            /* Bracketed so that `reporting` ends with the report however the
+             * report ends; the bailout goes on to whoever was to catch it. The
+             * engine flags the objects only on its way into that bailout, so a
+             * report that returns flagged nothing. No parking inside: displaying
+             * the report can run an output handler, and another request run in
+             * the meantime would make objects the snapshot does not know, which
+             * the flag would then reach and the restore would not. */
+            oxphp_destructed_snapshot.reporting = true;
+            oxphp_park_blocked++;
+            zend_try {
+                oxphp_next_error_cb(type, file, line, message);
+            } zend_catch {
+                oxphp_park_blocked--;
+                oxphp_destructed_snapshot.reporting = false;
+                zend_bailout();
+            } zend_end_try();
+            oxphp_park_blocked--;
+            oxphp_destructed_snapshot_forget();
+            return;
+        }
+    }
     oxphp_next_error_cb(type, file, line, message);
 }
 
@@ -619,6 +729,13 @@ static zend_op_array *oxphp_compile_string(zend_string *source, const char *file
  * does, and leaves the request the same frames to give back along the same
  * route. */
 void oxphp_fiber_record_cancel_bailout_frame(void) {
+    /* A write that bails out in the middle of a report is the display of that
+     * fatal, which the engine makes before it flags anything: the flag is now
+     * never set, and a snapshot taken back over it would clear what the
+     * recovery's destructors set. */
+    if (oxphp_destructed_snapshot.reporting) {
+        oxphp_destructed_snapshot_forget();
+    }
     if (oxphp_current_fiber != NULL) {
         oxphp_record_bailout_frame();
     }
@@ -1713,13 +1830,11 @@ static void oxphp_recover(const oxphp_vm_stack_mark *mark, bool discard_pending)
      * outcome was decided before this ran, and a destructor's throw is an
      * application outcome wherever it happens, so the flag is put back. Not after
      * a fatal, though: that report goes out without E_DONT_BAIL, and unless
-     * displaying it is the write that ends it first, the engine answers it by
-     * flagging every object alive on the thread as destructed — those of the
-     * requests multiplexed beside this one included, whose destructors then
-     * never run. That is the wreckage any fatal leaves the next request, and the
-     * client having left first does not put it back, so a fatal raised in here
-     * stands and the request is filed as one — even one whose display got no
-     * further, as a fatal after a cancelled write is everywhere else. */
+     * displaying it is the write that ends it first, the engine answers it with
+     * a bailout of its own. That is a fatal like any other, and the client
+     * having left first does not undo it, so a fatal raised in here stands and
+     * the request is filed as one — even one whose display got no further, as a
+     * fatal after a cancelled write is everywhere else. */
     oxphp_park_blocked++;
     oxphp_recovery_depth++;
 
@@ -1961,6 +2076,13 @@ static void oxphp_recover(const oxphp_vm_stack_mark *mark, bool discard_pending)
      * returns; these are the paths where it does not. */
     oxphp_bailout_frame.context = NULL;
     oxphp_bailout_frame.frame = NULL;
+
+    /* The destructed flag off what the fatal found alive, once every step above
+     * has released what the failed request held with the flag still on it.
+     * Not in a nested recovery: the one it is nested in has steps left. */
+    if (oxphp_recovery_depth == 1) {
+        oxphp_destructed_snapshot_restore();
+    }
 
     oxphp_recovery_depth--;
     oxphp_park_blocked--;
