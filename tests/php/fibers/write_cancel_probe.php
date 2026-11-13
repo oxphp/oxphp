@@ -18,9 +18,13 @@ if (!class_exists('OxphpWriteCancelProbe', false)) {
         /**
          * How far the fixture got: null, 'parked', 'before-write', 'after-write';
          * with ?in=destructor, then 'destructing' and 'destructed'; with
-         * ?in=stream-fiber-starting-destructor, then 'destructor-returned'.
+         * ?in=stream-fiber-starting-destructor, then 'destructor-returned'; with
+         * ?in=timeout, 'spinning' only.
          */
         public static ?string $stage = null;
+
+        /** Whether the fixture had sent its headers when it parked. */
+        public static ?bool $headersSentAtPark = null;
 
         /** What the fixture's frame was holding, weakly. */
         public static ?\WeakReference $weak = null;
@@ -77,6 +81,7 @@ if (!class_exists('OxphpWriteCancelProbe', false)) {
         public static function reset(): void
         {
             self::$stage = null;
+            self::$headersSentAtPark = null;
             self::$weak = null;
             self::$report = null;
             self::$stageAtDestruct = null;

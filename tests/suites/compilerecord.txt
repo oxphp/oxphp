@@ -1,0 +1,4 @@
+# profile: compilerecord
+# description: Compile errors in worker mode in files OPcache compiles without caching while it records their errors — later errors are still reported, and a compile error raised while another compile reports its errors leaves that compile's arena alone
+
+compilerecord/test_uncached_compile_error_keeps_later_warnings_reported

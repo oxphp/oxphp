@@ -26,8 +26,8 @@ require_once __DIR__ . '/write_cancel_probe.php';
 // runs it. The reasons that still end a request where it stands — timeout,
 // drain, a supervisor giving up — still take the unwinding path, as does a
 // client leaving a request that is streaming, whose loop has no other bound.
-// The worker still has to give its frames back on that path, and the two stream
-// cases at the end of this file are what reach it.
+// The worker still has to give its frames back on that path, and the stream and
+// timeout cases at the end of this file are what reach it.
 
 $t = new TestCase('write_cancel_releases_frames', 'fibers');
 
@@ -110,6 +110,45 @@ if (write_cancel_stage($t, 'stream-throw', '?in=stream-throw')) {
         OxphpWriteCancelProbe::$stageAtDestruct,
         'before-write'
     );
+}
+
+// A stream that has sent its headers, as every real event stream has by the
+// time it parks. Its client leaving is not noticed during the park, so nothing
+// is marked there: it is the write or flush after the park that finds the
+// client gone and ends the request.
+if (write_cancel_stage($t, 'stream after headers', '?in=stream&open=1')) {
+    $freed = write_cancel_wait(static fn (): bool => OxphpWriteCancelProbe::freed(), 6.0);
+
+    $t->assertTrue('stream after headers: the headers were sent before the park', OxphpWriteCancelProbe::$headersSentAtPark);
+    $t->assertSame('stream after headers: what it resumed into ended it', OxphpWriteCancelProbe::$stage, 'before-write');
+    $t->assertTrue('stream after headers: what the abandoned frame was holding did not outlive its request', $freed);
+    // Ended where the plain stream is, by the SAPI at the write or flush, which
+    // reports nothing; an interrupt would have reported a fatal.
+    $reported = write_cancel_wait(static fn (): bool => OxphpWriteCancelProbe::$report !== null, 6.0);
+    $t->assertTrue('stream after headers: the inner request reported from its shutdown function', $reported);
+    $t->assertNull(
+        'stream after headers: ended at the write or flush, not by an interrupt',
+        (OxphpWriteCancelProbe::$report ?? ['last_error' => 'no report'])['last_error']
+    );
+}
+
+// Ended by its time limit, with its client still there. Nothing to stage: the
+// inner request spins until the engine ends it with its time-limit fatal, and
+// reports from its shutdown function as the others do.
+OxphpWriteCancelProbe::reset();
+$sock = stream_socket_client('tcp://127.0.0.1:80', $errno, $errstr, 3.0);
+$t->assertTrue('timeout: inner request socket connected', $sock !== false);
+if ($sock !== false) {
+    fwrite($sock, "GET /tests/fibers/fixture_write_cancel_release.php?in=timeout HTTP/1.0\r\n"
+        . "Host: 127.0.0.1\r\nConnection: close\r\n\r\n");
+    $reported = write_cancel_wait(static fn (): bool => OxphpWriteCancelProbe::$report !== null, 6.0);
+    fclose($sock);
+
+    $report = OxphpWriteCancelProbe::$report ?? ['stage' => null, 'freed' => false, 'last_error' => null];
+    $t->assertTrue('timeout: the inner request reported from its shutdown function', $reported);
+    $t->assertSame('timeout: its time limit ended it inside the spin', $report['stage'], 'spinning');
+    $t->assertContains('timeout: by its time limit', (string) $report['last_error'], 'Maximum execution time of 1 second exceeded');
+    $t->assertTrue('timeout: what the abandoned frame was holding did not outlive its request', $report['freed']);
 }
 
 $t->done();
