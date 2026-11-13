@@ -13,11 +13,11 @@ declare(strict_types=1);
 // here — is all that is left behind, and it is far under the threshold. The
 // collector is what tells the two apart, so it runs before the heap is read.
 //
-// It finds only what it has buffered. These objects are in its buffer because no
-// collection ran in the request before the time limit ended it, and a request that
-// built more than the collector's threshold of roots would have had one run, which
-// takes the live ones out of the buffer and leaves what is released afterwards
-// out of it: the case in the next file but one.
+// These objects are in its buffer because no collection ran in the request
+// before the time limit ended it. A request that built more than the collector's
+// threshold of roots would have had one run, which takes the live ones out of the
+// buffer, and they are offered to it again only as the walk after the bailout
+// lets go of them: the case in the next file but one.
 
 require_once __DIR__ . '/bailout_leak_probe.php';
 

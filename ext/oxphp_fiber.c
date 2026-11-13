@@ -993,6 +993,37 @@ static void oxphp_recovery_drop_raised(const oxphp_vm_stack_mark *mark,
  * logged: without a line here a worker retired for this reads, everywhere it
  * can be read, as an application that asked to be recycled.
  *
+ * The collector's guard comes down for the release of the abandoned frames,
+ * unless oxphp_gc_put_guard_back() keeps it up, and goes back up after it.
+ * Under the guard, what the release lets go of is not buffered as a possible
+ * root, so a cycle none of whose members was buffered before stays on the heap
+ * for as long as the worker lives; and a collection a destructor there asks
+ * for, when what it found has destructors to call, reads the guard only after
+ * calling them (zend_gc_collect_cycles, PHP 8.4.27 / 8.5.12) and returns still
+ * marked as running — the interrupted collection above, retiring the worker for
+ * nothing. Memory-safe there: what the frames still hold are counted
+ * references, the C frames that held uncounted ones went with the longjmp, the
+ * collector walks a fiber's frames only while it is suspended with no caller
+ * (zend_fiber_object_gc), which this one is not while it runs the release —
+ * parking is held off, see below — even once it has switched into another
+ * fiber, the collector's own for destructors or one a destructor starts, and it
+ * reads temporaries only on the frames EG(current_execute_data) leads to, which
+ * during the release leads to none of these: the bailout cleared it, or it is
+ * still the frame the mark was taken at. But the unclean-shutdown flag is still
+ * up, and a collection there frees what it finds the way an unclean shutdown
+ * does — a generator's frame kept, a user filter's flush refused — garbage
+ * other requests on the thread dropped included; and one started by the
+ * release's own C code has no frame to hand a destructor's throw to. So the
+ * automatic collection stays off for the release, unless userland there turns
+ * it back on — gc_enable(false) keeps the buffering and grows the buffer rather
+ * than collect — and only a collection userland asks for runs there, which is
+ * still better than one left marked as running. Up for the rest of the
+ * recovery: the observer walks point EG(current_execute_data) at the frames on
+ * the chain, the ones the bailout left mid-call among them, and a collection
+ * reads the temporaries of every frame that leads to
+ * (zend_gc_remove_root_tmpvars, PHP 8.4.27 / 8.5.12); with the guard up, none
+ * starts there from the threshold.
+ *
  * discard_pending: drop the exception standing on the way in as well, for the
  * callers that own it — under the same protection as every other step here,
  * since dropping it runs its destructor. */
@@ -1192,9 +1223,16 @@ static void oxphp_recover(const oxphp_vm_stack_mark *mark, bool discard_pending)
      * and returned with, or what a reported throw's __toString() threw:
      * zend_exception_error() reports that one and leaves it in the slot before
      * the bailout (8.4.27, 8.5.12). */
+    /* See the comment on this function. Left up when the bailout interrupted
+     * a collection: the end of this function retires the worker for it. */
+    bool collects_on_its_own = oxphp_gc_put_guard_back(false) && gc_enable(false);
     zend_try {
         oxphp_release_abandoned_frames(mark);
     } zend_end_try();
+    if (collects_on_its_own) {
+        gc_enable(true);
+    }
+    gc_protect(1);
     oxphp_recovery_drop_raised(mark, ex_on_entry);
 
     if (ZEND_OBSERVER_ENABLED) {

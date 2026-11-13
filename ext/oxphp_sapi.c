@@ -7083,14 +7083,16 @@ static void oxphp_serve_loop(zend_fcall_info *fci, zend_fcall_info_cache *fcc)
              * as it lives, which for a worker that runs a couple of hundred requests
              * at once is more than the threshold by itself. And objects that refer to
              * themselves, which are garbage until the collector finds them: it runs
-             * here, for such a request only, before the heap is read. It finds those
-             * it already holds as possible roots. The engine raises the collector's
-             * guard for the whole of a bailout, and while it is up what the walk after
-             * it lets go of is not buffered, so a cycle that only that walk released
-             * stays — a leak in the proper sense, which nothing frees and which is
-             * counted. The baseline can hold garbage that an earlier stretch left and
-             * this collection frees, which takes that much off the growth shown, so a
-             * leak that small can go unseen. */
+             * here, for such a request only, before the heap is read. It finds the
+             * cycles the release of the abandoned frames let go of as well as those
+             * the request dropped before it, because the recovery lowers the guard
+             * the engine raised for the bailout for the length of that release (see
+             * oxphp_recover()) — not with zend.enable_gc=0 at startup,
+             * where there is no collector to run, and not after a bailout that
+             * interrupted a collection, which retires the worker. The baseline can
+             * hold garbage that an earlier stretch left and this collection frees,
+             * which takes that much off the growth shown, so a leak that small can
+             * go unseen. */
             if (sched.fiber_count == 0) {
                 bool bailed_in_internal = oxphp_fiber_take_internal_bailout();
                 bool judged = bailed_in_internal && warmed_up && !oxphp_bridge_is_draining();
