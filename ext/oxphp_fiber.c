@@ -1171,8 +1171,10 @@ static void oxphp_recover(const oxphp_vm_stack_mark *mark, bool discard_pending)
      *
      * What userland throws inside the walk is reported where it is thrown, not
      * left standing: the calls the walk makes run with no current frame beneath
-     * them. What the drop after it can still meet is an Error the engine raised
-     * in C and returned with. */
+     * them. The drop after it can still meet an Error the engine raised in C
+     * and returned with, or what a reported throw's __toString() threw:
+     * zend_exception_error() reports that one and leaves it in the slot before
+     * the bailout (8.4.27, 8.5.12). */
     zend_try {
         oxphp_release_abandoned_frames(mark);
     } zend_end_try();
