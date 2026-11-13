@@ -518,17 +518,28 @@ static zend_op_array *(*oxphp_next_compile_string)(zend_string *source, const ch
  * non-NULL on a bailout only while an arena of this call is live — provided
  * nothing between zend_compile() returning and that restore bails out, which
  * from 8.5 compile_file() can: see below.
+ *
+ * CG(ast) goes back with the arena. The restore that would put it back is
+ * skipped by the bailout, and a compile this one interrupted can still run to
+ * its end, where zend_compile() destroys whatever CG(ast) holds: one whose error
+ * handler called opcache_compile_file(), which catches the bailout, or one
+ * parked in such a handler while another request on the thread failed to
+ * compile. Left on this compile's tree, it reads and frees memory the arena
+ * destroyed here has given back.
  * SYNC: php-src 8.4.27 / 8.5.12 Zend/zend_language_scanner.l — zend_compile(),
- *       compile_file(), compile_string(), zend_restore_lexical_state(). */
-static ZEND_COLD void oxphp_compile_abandoned(zend_arena *outer) {
+ *       compile_file(), compile_string(), zend_restore_lexical_state();
+ *       ext/opcache/zend_accelerator_module.c opcache_compile_file(). */
+static ZEND_COLD void oxphp_compile_abandoned(zend_arena *outer, zend_ast *outer_ast) {
     if (CG(ast_arena) != NULL) {
         zend_arena_destroy(CG(ast_arena));
     }
     CG(ast_arena) = outer;
+    CG(ast) = outer_ast;
 }
 
 static zend_op_array *oxphp_compile_file(zend_file_handle *file_handle, int type) {
     zend_arena *outer = CG(ast_arena);
+    zend_ast *outer_ast = CG(ast);
     zend_op_array *op_array = NULL;
 #if PHP_VERSION_ID >= 80500
     const bool recording = EG(record_errors);
@@ -560,7 +571,7 @@ static zend_op_array *oxphp_compile_file(zend_file_handle *file_handle, int type
         EG(record_errors) = false;
         zend_free_recorded_errors();
 #endif
-        oxphp_compile_abandoned(outer);
+        oxphp_compile_abandoned(outer, outer_ast);
         zend_bailout();
     } zend_end_try();
     CG(ast_arena) = outer;
@@ -570,12 +581,13 @@ static zend_op_array *oxphp_compile_file(zend_file_handle *file_handle, int type
 static zend_op_array *oxphp_compile_string(zend_string *source, const char *filename,
                                            zend_compile_position position) {
     zend_arena *outer = CG(ast_arena);
+    zend_ast *outer_ast = CG(ast);
     zend_op_array *op_array = NULL;
     CG(ast_arena) = NULL;
     zend_try {
         op_array = oxphp_next_compile_string(source, filename, position);
     } zend_catch {
-        oxphp_compile_abandoned(outer);
+        oxphp_compile_abandoned(outer, outer_ast);
         zend_bailout();
     } zend_end_try();
     CG(ast_arena) = outer;
