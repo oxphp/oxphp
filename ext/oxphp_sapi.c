@@ -7044,9 +7044,23 @@ static void oxphp_serve_loop(zend_fcall_info *fci, zend_fcall_info_cache *fcc)
                 }
             }
 
-            /* GC every N requests */
-            if (ctx->requests_done > 0 && (ctx->requests_done % WORKER_GC_INTERVAL) == 0) {
-                gc_collect_cycles();
+            /* GC every N requests, in the window the collection below runs in
+             * and for its reasons. A fatal there retires the worker through this
+             * loop, so the cleanup after it ends the requests still parked here,
+             * each with an answer, and the entry script runs on past the loop. */
+            if (ctx->requests_done > 0 && (ctx->requests_done % WORKER_GC_INTERVAL) == 0
+                && !oxphp_serve_loop_collect_cycles()) {
+                char msg[256];
+                snprintf(msg, sizeof(msg),
+                         "oxphp: worker %d retiring: a destructor ended in a fatal "
+                         "error while the periodic cycle collection ran, or while "
+                         "an exception one of them threw was dropped",
+                         oxphp_bridge_get_worker_id());
+                if (sapi_module.log_message != NULL) {
+                    sapi_module.log_message(msg, LOG_NOTICE);
+                }
+                oxphp_bridge_schedule_exit();
+                break;
             }
 
             /* A request ended with an internal function's call still on its stack
@@ -7176,9 +7190,9 @@ static void oxphp_serve_loop(zend_fcall_info *fci, zend_fcall_info_cache *fcc)
         oxphp_scheduler_destroy(&sched);
         zend_fcc_dtor(fcc);
     } zend_catch {
-        /* A fatal error raised between two requests' slices — by a destructor
-         * the cycle collector runs, say, or by an output handler the reset ends —
-         * is raised where no request is left to end, and leaves by a long jump.
+        /* A fatal error raised between two requests' slices — by an output
+         * handler the reset ends, say — is raised where no request is left to
+         * end, and leaves by a long jump.
          * What follows it is the worker script's own shutdown, which runs the
          * script's shutdown functions and the output handlers still open before
          * it stops the script's timer. (Not the destructors of the objects alive

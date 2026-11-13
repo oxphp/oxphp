@@ -8,16 +8,16 @@ use OxPHP\Server\Worker;
 use OxPHP\Shared\Counter;
 use OxPHP\Shared\Registry;
 
-// Running out of memory after a request has answered — in the destructor of an
-// object it left in $_GET, which the worker drops with no request current — is
-// not the idle-timeout eviction's that runs next on that worker: its $destroy
-// runs, and the worker is kept, as it is for the request that would have come
-// next instead.
+// Running out of memory as a request ends — in the destructor of an object it
+// left in $_GET, which the worker drops before the response is sent — is that
+// request's: it answers 500. It is not the idle-timeout eviction's that runs
+// next on that worker: its $destroy runs, and the worker is kept, as it is for
+// the request that would have come next instead.
 //
 // From PHP 8.4.27 / 8.5.12 the engine reports running out of memory itself and
 // keeps a note that it has until the request is shut down, under which it calls
-// no callback. The eviction ran under that note: its $destroy was not called,
-// and the worker was retired as if it had run out of memory there.
+// no callback. An eviction run under that note would not call its $destroy,
+// and would retire the worker as if it had run out of memory there.
 //
 // This profile runs two workers and no runtime hooks. This request blocks the
 // worker it runs on for as long as it lasts, so the fixture lands on the other
@@ -72,14 +72,14 @@ $retiredBefore = $retired();
 
 $resp = $get("case=oom_before&run=$run");
 $owner = $workerOf($resp);
-$t->assertMatch('the fixture answered', $resp, '#^HTTP/\S+ 200 #');
+$t->assertMatch('the fixture answered 500 for its own error', $resp, '#^HTTP/\S+ 500 #');
 $t->assertTrue('it ran on the other worker', $owner !== null && $owner !== $me);
 
 $calls = Registry::counter("pool-idle-before-calls-$run", static fn (): Counter => new Counter());
 $dropped = Registry::counter("pool-idle-before-dropped-$run", static fn (): Counter => new Counter());
 $waitFor(static fn (): bool => $calls->get() > 0 || $retired() > $retiredBefore, 4.0);
 
-// What the rest stands on: the destructor ran, after the response.
+// What the rest stands on: the destructor ran, as the fixture's request ended.
 $t->assertSame('the destructor of what $_GET held ran out of memory', $dropped->get(), 1);
 
 $t->assertSame('the eviction ran $destroy', $calls->get(), 1);

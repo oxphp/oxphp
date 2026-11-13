@@ -106,7 +106,7 @@ Not every failed request counts, because not every failure says the worker is un
 
 | Outcome | Effect on the count |
 |---|---|
-| Fatal error, out-of-memory, stack overflow — raised in the request handler, in a shutdown function, or in a destructor that runs as those shutdown functions are released | Counts |
+| Fatal error, out-of-memory, stack overflow — raised in the request handler, in a shutdown function, or in a destructor that runs as those shutdown functions are released or as the request lets go of what it left in a superglobal or in the closure of an `oxphp_async()` task it never awaited and that had not started | Counts |
 | The fiber the request runs in would not start — the engine could not allocate its C stack, so the handler never ran | Counts |
 | The request would not stop suspending that fiber from userland, and the server ended it | Counts |
 | Uncaught exception (answered `500`) — from the request handler or from a shutdown function | Neutral |

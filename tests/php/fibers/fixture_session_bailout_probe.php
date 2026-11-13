@@ -3,11 +3,11 @@
 declare(strict_types=1);
 
 // Served by the worker that replaces the one a fatal error between two slices
-// ended (see fixture_session_bailout_cycle.php): reports what that worker left
+// ended (see fixture_session_bailout_put_back.php): reports what that worker left
 // of the session fixture_session_held_at_a_bailout.php held open, and of the one
 // the destructor opened under ?orphan= — whether the store's lock on each is
 // still taken and what its file holds — beside what the fixtures noted on the
-// way.
+// way, and whether the code after the oxphp_worker() call ran.
 //
 // The lock is tried without waiting. The files handler locks with flock(), for
 // which two descriptors of one file contend even inside one process, so a lock
@@ -67,8 +67,13 @@ $inspect = static function (string $id) use ($dir): array {
     ];
 };
 
+require_once __DIR__ . '/after_loop_probe.php';
+clearstatcache();
+
 echo json_encode([
     'request_count' => $requestCount,
+    'armed' => is_file(OxphpAfterLoop::armed()),
+    'after_loop' => is_file(OxphpAfterLoop::ran()) ? file_get_contents(OxphpAfterLoop::ran()) : null,
     'held' => $noted('/tmp/oxphp-session-bailout-held'),
     'destructor' => $noted('/tmp/oxphp-session-bailout-destructor'),
     'session' => $inspect($id),

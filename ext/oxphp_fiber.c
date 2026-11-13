@@ -1043,7 +1043,14 @@ static void oxphp_gc_unprotect_after_bailout(bool protect) {
  * guard has already been unwound. Drained rather than cleared once, because a
  * destructor that throws in its turn leaves another standing. The current fiber
  * goes back on both sides of it: the step before may have left it cleared, and
- * so may the destructor (see the top of oxphp_recover()). */
+ * so may the destructor (see the top of oxphp_recover()). And so does the
+ * engine's note that it reported running out of memory, which the user code of
+ * the step can leave as well — see oxphp_engine_reported_oom(): standing, it
+ * would refuse every call into user code the next step makes, the onClose() of
+ * a stream filter or the stream_close() of a stream wrapper on a stream the
+ * release closes, say. Forgetting it
+ * loses nothing: the error has been reported by then, through the error
+ * callback. */
 static void oxphp_recovery_drop_raised(const oxphp_vm_stack_mark *mark,
                                        const zend_object *ex_on_entry) {
     EG(active_fiber) = mark->active_fiber;
@@ -1053,6 +1060,7 @@ static void oxphp_recovery_drop_raised(const oxphp_vm_stack_mark *mark,
         } zend_end_try();
         EG(active_fiber) = mark->active_fiber;
     }
+    oxphp_forget_reported_oom();
 }
 
 /* At a recovery site reached by CG(unclean_shutdown) rather than by a zend_catch
@@ -1489,14 +1497,14 @@ static void oxphp_recover_from_bailout(const oxphp_vm_stack_mark *mark) {
 }
 
 /* Recovers from running out of memory in user code the worker ran with no
- * request or task current — between two slices of its requests: the destructors
- * of what a finished request's superglobals held, the save handler a session
- * lets go of, a destructor an ini handler drops as it puts a parked request's
- * directive back; and in the serve loop's own windows. The engine swallowed the
- * bailout its report ended in, so no catch around that code saw it; what is
- * left is the engine's note (see oxphp_engine_reported_oom()) and, with nothing
- * but an internal frame beneath that code, the exception exit() raises, still
- * pending. The next fiber the thread switches into would find both: the
+ * request or task current — between two slices of its requests: the save
+ * handler a session lets go of, a destructor an ini handler drops as it puts a
+ * parked request's directive back; and in the serve loop's own windows. The
+ * engine swallowed the bailout its report ended in, so no catch around that
+ * code saw it; what is left is the engine's note (see
+ * oxphp_engine_reported_oom()) and, with nothing but an internal frame beneath
+ * that code, the exception exit() raises, still pending. The next fiber the
+ * thread switches into would find both: the
  * exception as if it had been resumed with it, which unwinds it, and the note,
  * under which every callback it calls after that is refused and every
  * destructor skipped — the call that would start a new fiber included. A
@@ -1638,18 +1646,19 @@ void oxphp_fatal_backtrace_release(void) {
  *
  * False means a fatal got in the way — either in the collection, which nothing
  * can restart (the recovery says so in the log and schedules the exit itself),
- * or in a destructor the discard ran — or memory ran out in either. The caller
- * retires the worker either way:
- * the engine flags every live object as destructed on its way into a fatal, so
- * what the worker holds is not what its code expects, and with no request in
- * flight that costs nothing. */
+ * or in a destructor the discard ran — or memory ran out in either. The callers
+ * retire the worker either way: the engine flags every live object as
+ * destructed on its way into a fatal, so what the worker holds is not what its
+ * code expects. With no request in flight that costs nothing; the periodic
+ * collection can run with requests parked, and the retire answers each of them
+ * on its way out. */
 bool oxphp_serve_loop_collect_cycles(void) {
     oxphp_vm_stack_mark mark;
     oxphp_vm_stack_save(&mark);
     bool completed = true;
 
     /* What the window finds standing is not its own — see
-     * oxphp_serve_loop_thread_idle(). */
+     * oxphp_serve_loop_window(). */
     oxphp_recover_from_reported_oom();
 
     zend_try {
@@ -1673,7 +1682,7 @@ bool oxphp_serve_loop_collect_cycles(void) {
     return completed;
 }
 
-/* The two steps of oxphp_serve_loop_thread_idle below that run userland only
+/* The two steps of oxphp_serve_loop_window below that run userland only
  * through the destructors of what they release, each with the recovery that
  * function gives a fatal. False: a fatal got in the way. */
 static bool oxphp_serve_loop_drop_exception(oxphp_vm_stack_mark *mark) {
@@ -1715,31 +1724,30 @@ static bool oxphp_serve_loop_free_shutdown_functions(oxphp_vm_stack_mark *mark) 
     return completed;
 }
 
-/* Raises the plugins' thread_idle event on the serve loop's own frame, for a
- * worker a plugin woke while it had no request in flight, and answers whether
- * it ran to its end.
+/* Runs a step of the serve loop that calls into PHP through Rust, on the serve
+ * loop's own frame with no request current, and answers whether it ran to its
+ * end.
  *
- * The event can call into PHP — a Shared\Pool's $destroy, from the idle-timeout
- * eviction — and what is said above of the destructors the cycle collector
- * runs holds for that userland as well: same frame, same lack of a request to
- * end. The one difference is the way a fatal arrives. The handlers run as Rust,
- * so a bailout in the PHP they called is caught on this side of their frames
- * and held back (OXPHP_SHARED_RUN_GUARDED), and comes back here as a flag
- * rather than a long jump; it is raised again inside the zend_try below and
- * gets the same recovery. Running out of memory comes back as neither, when
- * the engine swallows the bailout itself, and is looked for at the end, as the
- * collector's window looks for it. False then, and the caller retires the
- * worker for the reason the collector's caller does.
+ * What is said above of the destructors the cycle collector runs holds for that
+ * userland as well — same frame, same lack of a request to end — but for two
+ * things. Whether a false retires the worker is each caller's to decide. And a
+ * fatal arrives another way: the step runs as Rust, so a bailout in
+ * the PHP it called is caught on this side of its frames and held back
+ * (OXPHP_SHARED_RUN_GUARDED), and comes back here as a flag rather than a long
+ * jump; it is raised again inside the zend_try below and gets the same
+ * recovery. Running out of memory comes back as neither, when the engine
+ * swallows the bailout itself, and is looked for at the end, as the
+ * collector's window looks for it. False then.
  *
  * What that userland opens for a request is opened for none. An output buffer
  * it leaves open would be ended — flushed — by the reset before the next
  * request, after that request's response has been cleared, so into it; a
  * shutdown function it registers would run as that request ends, into its
- * response and over its superglobals. So the event gets an output stack and a
+ * response and over its superglobals. So the step gets an output stack and a
  * shutdown list of its own, and whatever it leaves on either is given up
  * without being run. What the worker had on them before — its boot script's,
  * until the first request — is put back as it was. */
-bool oxphp_serve_loop_thread_idle(void) {
+static bool oxphp_serve_loop_window(void (*step)(void)) {
     oxphp_vm_stack_mark mark;
     oxphp_vm_stack_save(&mark);
     bool completed = true;
@@ -1753,17 +1761,16 @@ bool oxphp_serve_loop_thread_idle(void) {
     OG(running) = NULL;
     BG(user_shutdown_function_names) = NULL;
 
-    /* Running out of memory the event finds standing — in the destructor of
-     * something the last request's superglobals held, say — is not its own,
-     * and is recovered from here, as the next request's fiber would recover
-     * from it, without counting against the event. Left standing, it would
-     * refuse every callback the event calls, and the look at the end would
-     * retire the worker for it. Past the swap above, so what that recovery's
-     * own user code opens is the event's to give up. */
+    /* Running out of memory the step finds standing is not its own, and is
+     * recovered from here, as the next request's fiber would recover from it,
+     * without counting against the step. Left standing, it would refuse every
+     * callback the step calls, and the look at the end would answer false for
+     * it. Past the swap above, so what that recovery's own user code opens is
+     * the step's to give up. */
     oxphp_recover_from_reported_oom();
 
     zend_try {
-        oxphp_bridge_thread_idle();
+        step();
         if (oxphp_bridge_take_deferred_bailout()) {
             zend_bailout();
         }
@@ -1834,6 +1841,31 @@ bool oxphp_serve_loop_thread_idle(void) {
     OG(running) = ob_running;
     BG(user_shutdown_function_names) = shutdown_functions;
     return completed;
+}
+
+/* Raises the plugins' thread_idle event, for a worker a plugin woke while it had
+ * no request in flight: a Shared\Pool's $destroy, from the idle-timeout
+ * eviction, is PHP it can call. False, and the caller retires the worker for
+ * the reason the collector's caller does. */
+bool oxphp_serve_loop_thread_idle(void) {
+    return oxphp_serve_loop_window(oxphp_bridge_thread_idle);
+}
+
+/* Releases the captures of the async tasks ended requests left running, once
+ * each task has stopped or its drain budget has run out: the closure a task was
+ * dispatched with, and what it
+ * captured, whose destructors run here. Between two slices of the requests the
+ * worker is serving, none of which they belong to. False: a fatal or running
+ * out of memory got in the way, and has been recovered from. Its caller does
+ * not retire the worker for that: the flag a fatal puts on every live object is
+ * the one a fatal in any request on the worker puts there, and the worker
+ * survives that one. Asked on every tick, so a tick with nothing deferred does
+ * not open the window. */
+static bool oxphp_serve_loop_poll_deferred_drains(void) {
+    if (!oxphp_bridge_has_deferred_drains()) {
+        return true;
+    }
+    return oxphp_serve_loop_window(oxphp_bridge_poll_deferred_drains);
 }
 
 /* ─── Stack Limit Helper ──────────────────────────────── */
@@ -3778,6 +3810,18 @@ static void oxphp_file_late_bailout(oxphp_request_fiber *fiber,
     }
 }
 
+/* File an out-of-memory error one of those windows ran into. None of them sees
+ * it: the engine reports it under a catch of its own and puts the frame back, and
+ * the mark it leaves makes the engine refuse every call into user code until
+ * something recovers from it.
+ * SYNC: php-src/Zend/zend_alloc.c zend_handle_delayed_oom();
+ *       php-src/Zend/zend_execute_API.c zend_call_function() */
+static void oxphp_file_late_oom(oxphp_request_fiber *fiber, const oxphp_vm_stack_mark *mark) {
+    if (oxphp_late_oom_reported()) {
+        oxphp_file_late_bailout(fiber, mark, "out-of-memory error after the handler");
+    }
+}
+
 /* Report an exception left standing once the handler has returned — by a
  * shutdown function, or by a save handler as the session is written — the way
  * the loop's shutdown window explains below, and mark the request as one that
@@ -3798,6 +3842,60 @@ static void oxphp_report_late_exception(oxphp_request_fiber *fiber,
     } zend_catch {
         oxphp_recover(mark, true);
     } zend_end_try();
+}
+
+/* Defined with the scheduler's finalize, which drops them too. */
+static void oxphp_end_request_superglobals(void);
+
+static void oxphp_release_request_promises(oxphp_request_fiber *fiber) {
+    oxphp_bridge_cleanup_promises_for_fiber(fiber->fiber_id);
+}
+
+static void oxphp_release_request_superglobals(oxphp_request_fiber *fiber) {
+    (void) fiber;
+    oxphp_end_request_superglobals();
+}
+
+/* A step of a request's end that lets go of what the request left behind — the
+ * closures of the async tasks it dispatched, what its superglobals hold — and
+ * runs userland only through the destructors that lets run. In the request's
+ * fiber, before its response is sent: what they throw or fatal is the
+ * request's, filed and reported as a save handler's is, as it is under FPM,
+ * where the engine runs every destructor still due inside the request's
+ * shutdown. Later than there: the engine calls the destructor of every live
+ * object before the final flush, and frees the superglobals only after the
+ * session write, which can read them; a worker cannot call the destructors of
+ * objects other requests hold, so these run as the superglobals are freed.
+ *
+ * Parking is blocked for the step, as for the session write: half of it done,
+ * the request is neither live nor ended, and a park would leave it so for
+ * whatever the worker ran meanwhile. Outside the zend_try, so a bailout cannot
+ * leave it blocked.
+ *
+ * An out-of-memory error is filed on the way in and on the way out: one the
+ * session write or the step before ran into would otherwise have the engine
+ * refuse every call into user code this step makes — a stream filter's
+ * onClose(), a stream wrapper's stream_close(), a destructor the report did not
+ * flag — and one this step ran into, the step after it.
+ * SYNC: php-src/main/main.c php_request_shutdown() steps 2 and 8 */
+static void oxphp_fiber_late_release(oxphp_request_fiber *fiber,
+                                     const oxphp_vm_stack_mark *mark,
+                                     void (*release)(oxphp_request_fiber *),
+                                     const char *source) {
+    oxphp_file_late_oom(fiber, mark);
+    volatile bool bailed = false;
+    oxphp_park_blocked++;
+    zend_try {
+        release(fiber);
+    } zend_catch {
+        bailed = true;
+    } zend_end_try();
+    oxphp_park_blocked--;
+    if (bailed) {
+        oxphp_file_late_bailout(fiber, mark, source);
+    }
+    oxphp_report_late_exception(fiber, mark);
+    oxphp_file_late_oom(fiber, mark);
 }
 
 /* Defined with the rest of the task scheduler; used by the task arm of the loop
@@ -4166,8 +4264,8 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
              * of the shutdown functions. Where the handler itself ran out, all
              * there is to let go of is the exception exit() raises, which runs
              * no user code. A report left standing by user code the worker ran
-             * outside any request's windows — a destructor of what a finished
-             * request's superglobals held, say — is not this handler's, and is
+             * outside any request's windows — the save handler of a session a
+             * finished request let go of, say — is not this handler's, and is
              * recovered from before the thread switches into a fiber, so it
              * does not get this far. One the sweep of travelling directives at
              * the top of this loop runs into is inside the fiber, and still
@@ -4469,10 +4567,24 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
          * limit leaves on the thread. The exception its report leaves pending,
          * the one exit() raises, has nothing to log and is dropped at once, so
          * no step below runs with it standing. The request is filed for the
-         * error past the last of them, with the rest. */
+         * error as the first release below begins (see
+         * oxphp_fiber_late_release()). */
         if (oxphp_report_pending_oom()) {
             oxphp_discard_pending_exception();
         }
+
+        /* What the request leaves for its end to let go of. The closure of a
+         * task that has not started goes now, and with it what the closure
+         * captured; a task already running is cancelled, and its closure is
+         * released by the tick once it has stopped. Then the superglobals, after
+         * the session write, which reads them, and before the ini directives are
+         * put back. Nothing after this point reads them for the request: not the
+         * claims' release, and not the response, which is sent from what the
+         * request wrote. */
+        oxphp_fiber_late_release(fiber, &mark, oxphp_release_request_promises,
+                                 "bailout releasing the request's async tasks");
+        oxphp_fiber_late_release(fiber, &mark, oxphp_release_request_superglobals,
+                                 "bailout releasing the request's superglobals");
 
 #if PHP_VERSION_ID >= 80500
         /* Let go of the backtrace of this request's last fatal where the engine
@@ -4547,32 +4659,25 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
         }
         oxphp_report_late_exception(fiber, &mark);
 
-        /* Running out of memory in a window above that watches for a bailout
-         * through a catch of its own or by the frame it left — an output
-         * callback on the final flush, a session save handler, the release of a
-         * fatal's backtrace, an ini handler — is seen by none of them: the
-         * engine swallows that bailout itself, and puts that frame back. (The
-         * shutdown functions are watched by the flag the bailout raises, which
-         * does see it.) Asked once, past the last of those windows, so the
-         * request that ran out is the one filed for it, and the next one on
-         * this worker is not handed an engine that refuses to call its
-         * handler.
+        /* Running out of memory in a window since the releases of what the
+         * request left behind, which file what comes before them — the release
+         * of a fatal's backtrace, an ini handler — is filed past the last of
+         * them, so the request that ran out is the one filed for it, and the
+         * next one on this worker is not handed an engine that refuses to call
+         * its handler. (The shutdown functions are watched by the flag the
+         * bailout raises, which does see it.)
          *
-         * One not reported yet is reported after the session write. What the
-         * C code of the steps since then can still leave unreported — an ini
+         * What the C code of those steps can still leave unreported — an ini
          * handler putting a directive back, the report of an exception — is
-         * reported here, before this fiber's park would hand it to whatever
-         * runs next on the thread, and filed below like the rest. */
-        if (oxphp_late_oom_reported()) {
-            oxphp_file_late_bailout(fiber, &mark, "out-of-memory error after the handler");
-        }
+         * reported here too, before this fiber's park would hand it to
+         * whatever runs next on the thread. */
+        oxphp_file_late_oom(fiber, &mark);
 
         /* The environment variables it set with putenv() end last, past every
-         * point above that can run user code — a shutdown function, a save
-         * handler, a destructor an ini handler drops. What still runs for the
-         * request after this — the destructors of what its superglobals hold,
-         * which the scheduler's finalize drops — runs with no request current,
-         * so a putenv() there has no owner and the next request to end on this
+         * point above that can run user code for the request. What runs later
+         * — the closure of a task the request left running, released by the
+         * tick once the task has stopped — runs with no request current, so a
+         * putenv() there has no owner and the next request to end on this
          * worker puts it back. */
         oxphp_fiber_end_request_putenv(fiber);
 
@@ -6817,6 +6922,56 @@ void oxphp_scheduler_resume_fiber(oxphp_fiber_scheduler *sched, oxphp_request_fi
     }
 }
 
+/* Drop the request's superglobals, the symbol-table entries included. What a
+ * worker leaves standing is what the next request reads as its own until its
+ * rebuild gets to each name, and what anything running in the gap reads too —
+ * a destructor the deferred promise drain or a GC pass reaches. None of that
+ * belongs to the request that has ended, and there is no reading of it that
+ * would be right. The next request builds its own from nothing, inside its own
+ * fiber.
+ *
+ * $_ENV keeps its entry — it describes the process rather than the request in
+ * worker mode, a .env loader writes it at a boot that never runs again — which
+ * is what the name list leaving it out is for. Its slot is skipped below for
+ * the same reason, and the rebuild leaves it alone too: while the disarm holds
+ * nothing would build it again, and ext/filter reads INPUT_ENV out of it.
+ *
+ * The slots are emptied rather than undefined. IS_UNDEF is not a resting state
+ * for these: it only rewrites the type word, so the value goes on naming the
+ * array just freed, and the engine reads two of these slots without asking the
+ * type first — php_auto_globals_create_request() merges Z_ARRVAL of GET, POST
+ * and COOKIE with no check at all. That callback is armed for the whole gap
+ * between two requests on a worker whose application never mentions $_REQUEST
+ * (the latch below stays clear), and PHP does run in that gap; anything there
+ * compiling a file that names $_REQUEST fires it. The immutable empty array is
+ * free — nothing to allocate, nothing to release, and every reader finds an
+ * array with nothing in it, which is the truth between requests.
+ *
+ * Emptied before the array is let go of, because letting go of it runs the
+ * destructors of what it holds: one that ends in a fatal leaves the slot empty
+ * rather than naming an array half destroyed, its values already freed, for
+ * whatever reads the slot before this runs again from finalize. The
+ * symbol-table entries are safe the same way: the engine clears a bucket before
+ * it destroys its value.
+ * SYNC: php-src/Zend/zend_hash.c _zend_hash_del_el_ex(), zend_array_destroy() */
+static void oxphp_end_request_superglobals(void) {
+    oxphp_latch_request_autoglobal();
+    for (size_t i = 0; i < OXPHP_SYMBOL_GLOBAL_COUNT; i++) {
+        zend_hash_str_del(&EG(symbol_table),
+                          oxphp_symbol_global_names[i].name,
+                          oxphp_symbol_global_names[i].len);
+    }
+    for (int i = 0; i < 6; i++) {
+        if (i == TRACK_VARS_ENV) {
+            continue;
+        }
+        zval held;
+        ZVAL_COPY_VALUE(&held, &PG(http_globals)[i]);
+        ZVAL_EMPTY_ARRAY(&PG(http_globals)[i]);
+        zval_ptr_dtor_nogc(&held);
+    }
+}
+
 void oxphp_scheduler_finalize_fiber(oxphp_fiber_scheduler *sched, oxphp_request_fiber *fiber) {
     /* Precondition: this fiber's coroutine is parked at the bottom of its
      * request loop. Finalize both sends the response and recycles the fiber, and
@@ -6912,7 +7067,11 @@ void oxphp_scheduler_finalize_fiber(oxphp_fiber_scheduler *sched, oxphp_request_
      * is sent. Must be per-fiber: the thread-local promise maps are shared by
      * every fiber multiplexed on this worker thread, and a thread-wide drain
      * here would steal sibling fibers' live promises (their awaits would then
-     * time out despite the tasks succeeding). */
+     * time out despite the tasks succeeding). The fiber's end has done this
+     * already, inside the fiber and where a fatal is the request's (see
+     * oxphp_fiber_late_release()); this is for a fiber that never reached its
+     * end and for a promise a destructor there dispatched, and finds nothing
+     * otherwise. */
     oxphp_bridge_cleanup_promises_for_fiber(fiber->fiber_id);
 
     /* Release what this request's body parses left behind — their uploaded-file
@@ -6929,50 +7088,9 @@ void oxphp_scheduler_finalize_fiber(oxphp_fiber_scheduler *sched, oxphp_request_
      * Must happen AFTER send_response since the response reads from RESPONSE TLS. */
     oxphp_bridge_fiber_drop_ctx(fiber->fiber_id);
 
-    /* And the request's superglobals with it, the symbol-table entries included.
-     * What a worker leaves standing here is what the next request reads as its
-     * own until its rebuild gets to each name, and what anything running in the
-     * gap reads too — a session write on the way in, a destructor a GC pass
-     * calls, a drain. None of that belongs to the request that has just ended,
-     * and there is no reading of it that would be right. The next request builds
-     * its own from nothing, inside its own fiber.
-     *
-     * After the response rather than before it: the send path is the last thing
-     * that may still be describing this request.
-     *
-     * $_ENV keeps its entry — it describes the process rather than the request
-     * in worker mode, a .env loader writes it at a boot that never runs again —
-     * which is what the name list leaving it out is for. Its slot is skipped
-     * below for the same reason, and the rebuild leaves it alone too: while the
-     * disarm holds nothing would build it again, and ext/filter reads INPUT_ENV
-     * out of it.
-     *
-     * The slots are emptied rather than undefined. IS_UNDEF is not a resting
-     * state for these: it only rewrites the type word, so the value goes on
-     * naming the array this loop has just freed, and the engine reads two of
-     * these slots without asking the type first —
-     * php_auto_globals_create_request() merges Z_ARRVAL of GET, POST and COOKIE
-     * with no check at all. That callback is armed for the whole gap between two
-     * requests on a worker whose application never mentions $_REQUEST (the latch
-     * below stays clear), and PHP does run in that gap: a session write through
-     * a userland save handler, a destructor reached by the deferred promise
-     * drain, a destructor from a GC pass. Any of them compiling a file that
-     * names $_REQUEST fires it, over three freed tables. The immutable empty
-     * array is free — nothing to allocate, nothing to release, and every reader
-     * finds an array with nothing in it, which is the truth between requests. */
-    oxphp_latch_request_autoglobal();
-    for (size_t i = 0; i < OXPHP_SYMBOL_GLOBAL_COUNT; i++) {
-        zend_hash_str_del(&EG(symbol_table),
-                          oxphp_symbol_global_names[i].name,
-                          oxphp_symbol_global_names[i].len);
-    }
-    for (int i = 0; i < 6; i++) {
-        if (i == TRACK_VARS_ENV) {
-            continue;
-        }
-        zval_ptr_dtor_nogc(&PG(http_globals)[i]);
-        ZVAL_EMPTY_ARRAY(&PG(http_globals)[i]);
-    }
+    /* Its superglobals, which its fiber has dropped already unless it never
+     * reached its end or a destructor that ran there put something back. */
+    oxphp_end_request_superglobals();
 
     /* Do NOT release the fiber — its loop is parked at the bottom, keeping the C
      * and VM stacks alive for the next request. oxphp_fiber_release runs only in
@@ -8071,11 +8189,25 @@ int oxphp_scheduler_tick(oxphp_fiber_scheduler *sched) {
         }
     }
 
-    /* 4. Drain orphaned promises of finished fibers, non-blocking. finalize
-     * moves a completed request's still-running fire-and-forget promises here
-     * instead of block_on'ing on the worker thread; this poll releases each
-     * one's frozen captures once its task settles (or its budget expires). */
-    oxphp_bridge_poll_deferred_drains();
+    /* 4. Drain orphaned promises of finished fibers, non-blocking. A request's
+     * end moves its still-running fire-and-forget promises here instead of
+     * block_on'ing on the worker thread; this poll releases each one's frozen
+     * captures once its task settles (or its budget expires).
+     *
+     * A fatal there is nobody's: the request that dispatched the task has had
+     * its answer. The window recovers from it and the worker carries on, as it
+     * does after a request's fatal, and the breaker is left alone, since it
+     * counts requests. Logged, because nothing else would say it happened. */
+    if (!oxphp_serve_loop_poll_deferred_drains()) {
+        char msg[256];
+        snprintf(msg, sizeof(msg),
+                 "oxphp: worker %d: a fatal error or an out-of-memory error ended "
+                 "the release of an async task a finished request left running",
+                 oxphp_bridge_get_worker_id());
+        if (sapi_module.log_message != NULL) {
+            sapi_module.log_message(msg, LOG_NOTICE);
+        }
+    }
 
     return work_done;
 }
@@ -8464,7 +8596,7 @@ uint64_t oxphp_async_sched_next_deadline_ns(void) {
 static void oxphp_task_window_open(oxphp_vm_stack_mark *mark) {
     oxphp_vm_stack_save(mark);
     /* What the window finds standing is not its own — see
-     * oxphp_serve_loop_thread_idle(). */
+     * oxphp_serve_loop_window(). */
     oxphp_recover_from_reported_oom();
 }
 

@@ -9,16 +9,16 @@ require_once __DIR__ . '/../test_helper.php';
 // Follows fibers/test_oom_in_a_superglobal_destructor_spares_the_next_request,
 // whose $_GET held an object that runs out of memory in its destructor, with
 // nothing else in flight on the worker. This request is the next one the worker
-// starts, and it runs as if nothing had happened: before, it was handed the
-// engine's note that it had reported running out of memory, and the exit() that
-// unwound the destructor, and never got to run.
+// starts, and it runs as if nothing had happened: it is not handed the engine's
+// note that it had reported running out of memory, nor the exit() that unwound
+// the destructor.
 
 $t = new TestCase('oom_in_a_superglobal_destructor_spares_the_next_request_probe', 'fibers');
 
 $base = sys_get_temp_dir() . '/oxphp-superglobal-oom-next';
 
-// What the rest stands on: the destructor ran after the request before this one
-// had answered.
+// What the rest stands on: the destructor ran as the request before this one
+// ended.
 $t->assertTrue('the destructor of what the request before left in $_GET ran', is_file("$base.ran"));
 
 $t->assertSame(
