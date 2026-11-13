@@ -31,6 +31,10 @@ async/test_orphans_all_cancelled_before_any_is_waited_on
 # error, is recovered from, and the worker runs the next task.
 async/test_task_payload_release_bailout
 
+# A fatal that interrupts a cycle collection in a task replaces the single async
+# worker's thread, and the next task's collector works.
+async/test_fatal_in_a_collection_replaces_the_async_thread
+
 # A task ended for suspending itself past its refusals is answered for only once
 # its unwind is over, whether a finally block parks or throws to a catch that
 # suspends again, and the next task on the single async worker runs its own

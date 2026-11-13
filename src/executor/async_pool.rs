@@ -364,6 +364,20 @@ fn async_worker_thread(
                 replace = true;
                 break;
             }
+            // Raised by the extension when a bailout left the thread in a state
+            // only a fresh one puts right; it logs the cause itself. Taken at an
+            // idle moment like the restart above, never by refusing work: a task
+            // in flight can be waiting on one still queued.
+            // SAFETY: reads this thread's bridge context, which
+            // `PhpThread::enter` initialised at the top of this function.
+            if unsafe { bindings::oxphp_bridge_is_exit_scheduled() } {
+                tracing::info!(
+                    worker = %thread_name,
+                    "Async worker thread retiring: the extension scheduled an exit"
+                );
+                replace = true;
+                break;
+            }
         }
 
         // Exit only once every in-flight fiber is drained. On shutdown we stop
