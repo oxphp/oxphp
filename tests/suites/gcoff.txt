@@ -1,0 +1,10 @@
+# profile: gcoff
+# description: Worker mode with the cycle collector switched off in php.ini — a fatal the worker recovers from leaves the collector's guard up
+
+# A request ended by its time limit inside an internal function, then two
+# requests on the same worker: the first reads the collector's state, the second
+# builds what the collector would buffer, which with the guard down is written
+# into a buffer that does not exist.
+gcoff/test_fatal_with_the_collector_off_keeps_the_server | GET | | 504 |
+gcoff/test_fatal_with_the_collector_off_keeps_the_server_probe
+gcoff/test_fatal_with_the_collector_off_keeps_the_server_after
