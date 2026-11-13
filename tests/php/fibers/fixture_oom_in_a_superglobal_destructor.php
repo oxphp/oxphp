@@ -6,10 +6,10 @@ declare(strict_types=1);
 // fibers/test_oom_in_a_superglobal_destructor_spares_a_parked_request.
 //
 // ?step=oom leaves an object in $_GET whose destructor runs out of memory. A
-// worker drops a request's superglobals after it has sent the response, with no
-// request current, so that is where the destructor runs: between two slices of
-// whatever else the worker is serving. It leaves a mark first, so the test can
-// tell a destructor that ran from one that never did.
+// worker drops a request's superglobals as the request ends, before its
+// response is sent, so that is where the destructor runs and whose error it is.
+// It leaves a mark first, so the test can tell a destructor that ran from one
+// that never did.
 //
 // ?step=probe is a request after it: it says it ran, that a callback still runs,
 // and so does its shutdown function.

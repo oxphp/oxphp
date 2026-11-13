@@ -42,7 +42,8 @@ if (!class_exists('OxphpWriteCancelProbe', false)) {
         /**
          * How far the decorator's after() got — with ?in=stream-decorated
          * 'fataling', then 'returned'; with ?in=stream-decorated-destructor
-         * 'writing', then 'wrote' — and the fiber it ran in, by id.
+         * 'writing', then 'wrote'; with ?in=stream-decorated-oom 'exhausting' —
+         * and the fiber it ran in, by id.
          */
         public static ?string $afterStage = null;
         public static ?int $fiberAtAfter = null;
@@ -67,6 +68,12 @@ if (!class_exists('OxphpWriteCancelProbe', false)) {
          */
         public static bool $destructorFiberRan = false;
 
+        /**
+         * With ?in=stream-decorated-oom, whether the onClose() of the filter on
+         * the stream the request held ran.
+         */
+        public static bool $filterClosed = false;
+
         public static function reset(): void
         {
             self::$stage = null;
@@ -81,6 +88,7 @@ if (!class_exists('OxphpWriteCancelProbe', false)) {
             self::$writerReturned = false;
             self::$nextDestructed = false;
             self::$destructorFiberRan = false;
+            self::$filterClosed = false;
         }
 
         /** Whether what the fixture's frame was holding is gone. */

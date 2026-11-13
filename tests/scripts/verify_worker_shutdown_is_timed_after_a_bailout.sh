@@ -6,12 +6,13 @@
 # While it serves, a worker keeps the thread's execution timer for the requests
 # it runs, armed only while one of them is running, so between two requests
 # nothing is armed. A fatal error raised there leaves the serve loop by a long
-# jump: a destructor run by the cycle collector the worker runs every hundredth
-# request is one way. A shutdown function that destructor registered first is
-# left on the thread for the worker script's own shutdown, and PHP runs a
-# script's shutdown functions before it stops the script's timer, so one that
-# blocks is ended by the limit — and would otherwise hold the worker's thread
-# for as long as it blocks.
+# jump: a destructor of what a request put back into a superglobal while the
+# request was letting go of them is one way, run by the worker's own end of that
+# request after its response has gone out. A shutdown function that destructor
+# registered first is left on the thread for the worker script's own shutdown,
+# and PHP runs a script's shutdown functions before it stops the script's timer,
+# so one that blocks is ended by the limit — and would otherwise hold the
+# worker's thread for as long as it blocks.
 #
 # Verified from outside the container on purpose: the code under test runs after
 # the worker's serve loop has gone, where no request is left to report on it.
@@ -47,8 +48,8 @@ bad() {
 	fail=1
 }
 
-# A worker that has served nothing yet, so that the requests below are the ones
-# it counts towards the hundredth.
+# A fresh worker, so that the one the fatal error ends is the one this check
+# armed, and the probe's count says it was replaced.
 $COMPOSE up -d --wait --force-recreate >&2
 port="$($COMPOSE port oxphp-workertimer 80 | head -1 | cut -d: -f2)"
 base="http://127.0.0.1:${port}"
@@ -61,36 +62,15 @@ try: print(json.loads(sys.stdin.read())["request_count"])
 except Exception: print("")'
 }
 
-# The cycle first, then requests that leave nothing behind until the worker has
-# served a hundred: the collector runs after the hundredth. The last one raises
-# its own limit, so a fatal that names it rather than the profile's two seconds
-# would say the worker script was left on that request's limit.
-left="$(curl -s --max-time 10 "${base}/tests/workertimer/fixture_cycle_with_a_fatal_destructor.php")"
-served="$(printf '%s' "$left" | count_of)"
-if [ "$served" = "1" ]; then
-	ok "premise: the request that leaves the cycle is the fresh worker's first"
+# The request raises its own limit, so a fatal that names it rather than the
+# profile's two seconds would say the worker script was left on that request's
+# limit. Its response goes out before the fatal error.
+left="$(curl -s --max-time 10 "${base}/tests/workertimer/fixture_fatal_destructor_after_the_response.php")"
+if [ "$(printf '%s' "$left" | count_of)" = "1" ]; then
+	ok "premise: the request that puts the object back is answered, by the fresh worker"
 else
-	bad "premise: the request that leaves the cycle is the fresh worker's first" "answered: $left"
+	bad "premise: the request that puts the object back is answered, by the fresh worker" "answered: $left"
 fi
-
-# All of them on the worker that served the first. A worker recycled in between
-# starts its count again and takes the cycle with it, so a count that does not go
-# up by one ends the wait as a failed premise rather than being waited out.
-answered=""
-for _ in $(seq 2 99); do
-	[ "$served" -lt 99 ] 2>/dev/null || break
-	answered="$(curl -s --max-time 10 "${base}/?action=count")"
-	next="$(printf '%s' "$answered" | count_of)"
-	[ "$next" = "$((served + 1))" ] || break
-	served="$next"
-done
-if [ "$served" = "99" ]; then
-	ok "premise: the worker that left the cycle served every request up to the hundredth"
-else
-	bad "premise: the worker that left the cycle served every request up to the hundredth" \
-		"after ${served:-no count} it answered: ${answered:-nothing}"
-fi
-last="$(curl -s --max-time 10 "${base}/tests/workertimer/fixture_cycle_with_a_fatal_destructor.php?action=raise_limit")"
 
 # The probe spins for 8 s; the limit, when it is armed, ends it after 2.
 log=""
@@ -107,7 +87,19 @@ if echo "$log" | grep -q 'OxphpWorkerTimerDestructorFatal' \
 	ok "premise: a fatal error between requests ended the serve loop and the worker script's shutdown ran"
 else
 	bad "premise: a fatal error between requests ended the serve loop and the worker script's shutdown ran" \
-		"hundredth request answered: ${last}; log: $(echo "$log" | grep -E 'oxphp-worker|PHP' | tail -3 | tr '\n' '|')"
+		"log: $(echo "$log" | grep -E 'oxphp-worker|PHP' | tail -3 | tr '\n' '|')"
+fi
+
+# By a long jump: the code after the oxphp_worker() call, which the request armed,
+# did not run, and left the mark standing that it takes down. Asked once the
+# shutdown function has run, which runs after that code.
+after="$(curl -s --max-time 20 "${base}/tests/workertimer/fixture_fatal_destructor_after_the_response.php?action=after_loop")"
+if [ "$(printf '%s' "$after" | count_of)" = "1" ] \
+	&& printf '%s' "$after" | grep -q '"armed":true' \
+	&& printf '%s' "$after" | grep -q '"after_loop":null'; then
+	ok "premise: the fatal error left the serve loop by a long jump, past the code after it"
+else
+	bad "premise: the fatal error left the serve loop by a long jump, past the code after it" "probe: $after"
 fi
 
 # Granted: it was not ended the moment it started.

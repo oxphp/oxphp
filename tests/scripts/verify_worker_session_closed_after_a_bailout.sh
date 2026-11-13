@@ -6,13 +6,14 @@
 # A request parked with its session open has that session taken off the thread
 # while it waits, so that the requests run beside it find none there. A fatal
 # error raised between two slices leaves the serve loop by a long jump: a
-# destructor run by the cycle collector the worker runs every hundredth request
-# is one way. What follows is the worker script's own shutdown, which writes and
-# closes a session it finds open, as the end of any script does — and finds
-# none unless the parked request's is put back first. Left off the thread, the
-# files handler's descriptor keeps its lock on that session for as long as the
-# process lives, and every later request with that cookie waits for it holding
-# a worker thread.
+# destructor of what another request put back into a superglobal while it was
+# letting go of them is one way, run by the worker's own end of that request
+# after its response has gone out. What follows is the worker script's own
+# shutdown, which writes and closes a session it finds open, as the end of any
+# script does — and finds none unless the parked request's is put back first.
+# Left off the thread, the files handler's descriptor keeps its lock on that
+# session for as long as the process lives, and every later request with that
+# cookie waits for it holding a worker thread.
 #
 # The destructor that ends in the fatal error also opens a session of its own
 # first, as PHP run outside any request can: what is standing on the thread is
@@ -53,8 +54,8 @@ bad() {
 	fail=1
 }
 
-# A worker that has served nothing yet, so that the requests below are the ones
-# it counts towards the hundredth.
+# A fresh worker, so that the one the fatal error ends is the one this check
+# armed, and the probe's count says it was replaced.
 $COMPOSE up -d --wait --force-recreate >&2
 port="$($COMPOSE port oxphp-fibers 80 | head -1 | cut -d: -f2)"
 base="http://127.0.0.1:${port}"
@@ -74,55 +75,54 @@ except Exception:
 
 sid="oxphpbailout$(date +%s)${RANDOM}"
 orphan="${sid}orphan"
+put_out="$(mktemp)"
+held_out="$(mktemp)"
+trap 'rm -f "$put_out" "$held_out"' EXIT
 
-# The cycle first, then requests that leave nothing behind until the worker has
-# served ninety-nine; the hundredth opens the session and parks with it.
-left="$(curl -s --max-time 10 "${base}/tests/fibers/fixture_session_bailout_cycle.php?orphan=${orphan}")"
-served="$(printf '%s' "$left" | field request_count)"
-if [ "$served" = "1" ]; then
-	ok "premise: the request that leaves the cycle is the fresh worker's first"
+# A worker lets nothing in beside its first request, so that one is spent on a
+# request that leaves nothing behind.
+warm="$(curl -s --max-time 10 "${base}/?action=count" | field request_count || true)"
+if [ "$warm" = "1" ]; then
+	ok "premise: the fresh worker has served its first request"
 else
-	bad "premise: the request that leaves the cycle is the fresh worker's first" "answered: $left"
+	bad "premise: the fresh worker has served its first request" "answered: ${warm:-nothing}"
 fi
 
-# All of them on the worker that served the first. A worker recycled in between
-# starts its count again and takes the cycle with it, so a count that does not go
-# up by one ends the wait as a failed premise rather than being waited out.
-answered=""
-for _ in $(seq 2 99); do
-	[ "$served" -lt 99 ] 2>/dev/null || break
-	answered="$(curl -s --max-time 10 "${base}/?action=count")"
-	next="$(printf '%s' "$answered" | field request_count)"
-	[ "$next" = "$((served + 1))" ] || break
-	served="$next"
-done
-if [ "$served" = "99" ]; then
-	ok "premise: the worker that left the cycle served every request up to the hundredth"
-else
-	bad "premise: the worker that left the cycle served every request up to the hundredth" \
-		"after ${served:-no count} it answered: ${answered:-nothing}"
-fi
+# The request whose end raises the fatal error, after its response. It parks
+# first: a worker with a session parked open on it takes in no other request, so
+# the one that ends the loop has to be in flight before the session is opened.
+curl -s --max-time 20 "${base}/tests/fibers/fixture_session_bailout_put_back.php?orphan=${orphan}" \
+	> "$put_out" 2>/dev/null &
+put_pid=$!
+sleep 0.3
+# Then the request that holds the session, taken in while the other waits: it
+# opens the session, notes it, and parks with it open.
+curl -s --max-time 20 -b "PHPSESSID=${sid}" "${base}/tests/fibers/fixture_session_held_at_a_bailout.php" \
+	> "$held_out" 2>/dev/null &
+held_pid=$!
+wait "$put_pid" || true
+wait "$held_pid" || true
+put="$(cat "$put_out")"
+held="$(cat "$held_out")"
 
-held="$(curl -s --max-time 20 -b "PHPSESSID=${sid}" "${base}/tests/fibers/fixture_session_held_at_a_bailout.php" || true)"
+if [ "$(printf '%s' "$put" | field put_back)" = "true" ]; then
+	ok "premise: the request that puts the object back is answered"
+else
+	bad "premise: the request that puts the object back is answered" "answered: $put"
+fi
 
 # Served by the worker the pool boots in place of the one the fatal error ended;
 # the queue lets it wait for the boot.
-probe="$(curl -s --max-time 20 "${base}/tests/fibers/fixture_session_bailout_probe.php?id=${sid}&orphan=${orphan}")"
+probe="$(curl -s --max-time 20 "${base}/tests/fibers/fixture_session_bailout_probe.php?id=${sid}&orphan=${orphan}" || true)"
 
-if [ "$(printf '%s' "$probe" | field held.request_count)" = "100" ] \
-	&& [ "$(printf '%s' "$probe" | field held.id)" = "$sid" ]; then
-	ok "premise: the hundredth request opened the session under the client's cookie"
+# Both edges of the window: the request holding the session had opened it under
+# the client's cookie when the destructor ran, and it never got back from its
+# park — so the fatal error came while it was parked holding the session.
+if [ "$(printf '%s' "$probe" | field destructor.held_id)" = "$sid" ]; then
+	ok "premise: the request holding the session had opened it under the client's cookie when the destructor ran"
 else
-	bad "premise: the hundredth request opened the session under the client's cookie" "probe: $probe"
-fi
-
-# Both edges of the window: the collector ran once the hundredth request was in,
-# and that request never got back from its park — so the fatal error came while
-# it was parked holding the session.
-if [ "$(printf '%s' "$probe" | field destructor.request_count)" = "100" ]; then
-	ok "premise: the collector ran the destructor once the hundredth request was in"
-else
-	bad "premise: the collector ran the destructor once the hundredth request was in" "probe: $probe"
+	bad "premise: the request holding the session had opened it under the client's cookie when the destructor ran" \
+		"probe: $probe"
 fi
 if printf '%s' "$held" | grep -q 'the end of the park'; then
 	bad "premise: the request holding the session was still parked when the fatal error ended the worker" \
@@ -139,6 +139,15 @@ if [ "$(printf '%s' "$probe" | field request_count)" = "1" ]; then
 	ok "premise: the probe is served by the worker that replaced the one the fatal error ended"
 else
 	bad "premise: the probe is served by the worker that replaced the one the fatal error ended" "probe: $probe"
+fi
+# By a long jump: the code after the oxphp_worker() call, which the request that
+# put the object back armed, did not run, and left the mark standing that it
+# takes down.
+if [ "$(printf '%s' "$probe" | field armed)" = "true" ] \
+	&& [ "$(printf '%s' "$probe" | field after_loop)" = "null" ]; then
+	ok "premise: the fatal error left the serve loop by a long jump, past the code after it"
+else
+	bad "premise: the fatal error left the serve loop by a long jump, past the code after it" "probe: $probe"
 fi
 
 free="$(printf '%s' "$probe" | field session.free)"

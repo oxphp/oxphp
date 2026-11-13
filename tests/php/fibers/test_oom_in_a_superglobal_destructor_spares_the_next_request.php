@@ -8,10 +8,11 @@ require_once __DIR__ . '/../test_helper.php';
 
 // fibers/test_oom_in_a_superglobal_destructor_spares_a_parked_request with
 // nothing else in flight on the worker: the destructor that runs out of memory
-// is the last thing the worker runs for this request, and the next thing it does
-// is start the request after it — fibers/..._spares_the_next_request_probe,
-// which says how that went. What this one leaves for it is the worker it ran on
-// and the mark the destructor leaves before it runs out.
+// runs as this request ends, which answers 500 for it — the suite line's
+// expected status — and the next thing the worker does is start the request
+// after it — fibers/..._spares_the_next_request_probe, which says how that
+// went. What this one leaves for it is the worker it ran on and the mark the
+// destructor leaves before it runs out.
 
 $t = new TestCase('oom_in_a_superglobal_destructor_spares_the_next_request', 'fibers');
 

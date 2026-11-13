@@ -118,3 +118,16 @@ oxphp_worker(function () use (&$requestCount, &$previousHeaders, &$sharedState, 
 
     echo json_encode($response, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
 });
+
+// For the tests that read what the code after the loop finds when the worker
+// leaves it (fibers/after_loop_probe.php): whether that code ran at all, and
+// whether a callback still runs there. Only once a test has armed it, so every
+// other worker exit costs one is_file().
+$afterLoopArmed = sys_get_temp_dir() . '/oxphp-entry-after-loop.armed';
+if (is_file($afterLoopArmed)) {
+    unlink($afterLoopArmed);
+    file_put_contents(
+        sys_get_temp_dir() . '/oxphp-entry-after-loop.ran',
+        json_encode(array_map(static fn (int $n): int => $n * 2, [1, 2]))
+    );
+}

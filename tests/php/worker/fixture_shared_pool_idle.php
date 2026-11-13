@@ -298,10 +298,10 @@ switch ($case) {
     case 'oom_before':
         // One idle slot, whose $destroy only counts, and an object left in $_GET
         // whose destructor runs out of memory. A worker drops a request's
-        // superglobals after it has sent the response, with no request current,
-        // so the destructor runs then: before the eviction, which waits for the
-        // slot to go stale. Anonymous: a named class declared here would be
-        // declared again by the next request on this worker to run this case.
+        // superglobals as the request ends, so the destructor runs then: before
+        // the eviction, which waits for the slot to go stale. Anonymous: a named
+        // class declared here would be declared again by the next request on
+        // this worker to run this case.
         $calls = Registry::counter("pool-idle-before-calls-$run", static fn (): Counter => new Counter());
         $dropped = Registry::counter("pool-idle-before-dropped-$run", static fn (): Counter => new Counter());
         $p = Registry::pool("pool-idle-before-$run", static fn (): Pool => new Pool(

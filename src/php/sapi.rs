@@ -3365,8 +3365,8 @@ unsafe extern "C" fn worker_send_callback() -> std::os::raw::c_int {
         }
     };
 
-    // Async promise cleanup happens before this callback runs: the fiber
-    // scheduler's finalize path drains the finishing fiber's own promises via
+    // Async promise cleanup happens before this callback runs: the finishing
+    // request fiber's end drains its own promises via
     // `cleanup_promises_for_fiber_callback`. A thread-wide drain here would
     // steal live promises from sibling fibers multiplexed on this thread.
 
@@ -3544,12 +3544,11 @@ unsafe fn record_worker_request_metrics() {
     // Read memory and requests_done from bridge.
     // The Zend allocator is per-thread under ZTS, so this is what this worker
     // thread alone is holding — every request fiber multiplexed on it included,
-    // not just the one ending here. Read at the end of a request rather than
-    // between two: the ending request's superglobals are still on the heap,
-    // being dropped by the fiber finalize only after this callback returns.
-    // Its buffered body is not — that is released just before the send. The
-    // Rust-side teardown this call leads is irrelevant either way; it frees
-    // thread-local Vecs and senders, nothing the Zend allocator counts.
+    // not just the one ending here. The ending request has let go of its
+    // superglobals by now, in its fiber's late windows, and of its buffered
+    // body just before the send. The Rust-side teardown this call leads is
+    // irrelevant either way; it frees thread-local Vecs and senders, nothing
+    // the Zend allocator counts.
     // requests_done is read BEFORE C-side increment, so add 1.
     let memory = bindings::oxphp_bridge_get_memory_usage_bytes().max(0) as u64;
     let requests_done = bindings::oxphp_bridge_get_requests_done() + 1;
@@ -5565,8 +5564,9 @@ unsafe extern "C" fn cleanup_outstanding_promises_callback() {
 
 /// Per-fiber callback: clean up promises owned by the fiber that just
 /// completed, leaving sibling fibers' live promises alone. Called via the bridge
-/// from the worker-mode scheduler's finalize path for a request fiber, and from
-/// an async pool thread's release of a task that has ended.
+/// from a worker-mode request fiber's end, inside that fiber (and again from the
+/// scheduler's finalize, for a fiber that never reached its end), and from an
+/// async pool thread's release of a task that has ended.
 ///
 /// # Safety
 /// Called from C FFI on the owning worker thread.
@@ -5611,10 +5611,11 @@ unsafe extern "C" fn cleanup_promises_for_fiber_callback(fiber_id: u64) {
             fiber_id,
             "Deferring cleanup of non-awaited async promises"
         );
-        // Defer instead of block_on'ing on the worker thread: finalize returns
-        // immediately and the scheduler tick reclaims each promise once its task
-        // settles. Worker mode keeps the request heap alive across handlers, so the
-        // unfreeze can safely happen after the response is sent. On a pool thread
+        // Defer instead of block_on'ing on the worker thread: the request's end
+        // returns immediately and the scheduler tick reclaims each promise once
+        // its task settles. Worker mode keeps the request heap alive across
+        // handlers, so the unfreeze can safely happen after the response is
+        // sent. On a pool thread
         // the task's own children can run on this thread, so blocking here would
         // wait on a task that cannot run.
         let flagged: Vec<Arc<CancelShared>> = live

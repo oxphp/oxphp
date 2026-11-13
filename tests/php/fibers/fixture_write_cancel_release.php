@@ -10,6 +10,8 @@ declare(strict_types=1);
 // fibers/test_write_cancel_in_a_decorator_keeps_the_request_fiber_for_the_release,
 // with ?in=stream-decorated-destructor for
 // fibers/test_fatal_in_a_released_destructor_keeps_the_request_fiber_for_its_decorator,
+// with ?in=stream-decorated-oom for
+// fibers/test_oom_in_a_decorator_after_keeps_the_release,
 // with ?in=stream-writing-destructor for
 // fibers/test_write_cancel_release_runs_past_a_destructor_that_writes, with
 // ?in=stream-fiber-starting-destructor for
@@ -67,6 +69,16 @@ declare(strict_types=1);
 // over — and that ending clears the engine's record of the current fiber again
 // on its way out of that fiber. The object the request held, given back after
 // it, records the fiber its destructor runs in.
+//
+// ?in=stream-decorated-oom makes the ?in=stream write from inside a function
+// whose decorator's after() runs out of memory. The worker closes that call
+// first, as above, and the engine reports the error inside after(). The object
+// the request held is given back after it; it holds a stream with a userland
+// filter, and closing the stream calls the filter's onClose(), which records
+// that it ran. Not a destructor: whether one may still run turns on whether the
+// report got as far as flagging every object as destructed before its display,
+// a write to the gone client, cut it short. A method the engine is asked to call
+// does not depend on that flag.
 //
 // ?in=stream-decorated-destructor holds an object whose decorated destructor
 // lets go of a Fiber suspended in a try whose finally fatals. The give-back runs
@@ -281,6 +293,63 @@ if (!class_exists('OxphpWriteCancelDecorator', false)) {
     oxphp_register_decorator(OxphpWriteCancelFatalDecorator::class);
 }
 
+if (!class_exists('OxphpWriteCancelRecordsCloseFilter', false)) {
+    class OxphpWriteCancelRecordsCloseFilter extends php_user_filter
+    {
+        public function onClose(): void
+        {
+            OxphpWriteCancelProbe::$filterClosed = true;
+        }
+
+        /** @param resource $in @param resource $out */
+        public function filter($in, $out, &$consumed, bool $closing): int
+        {
+            return PSFS_PASS_ON;
+        }
+    }
+
+    final class OxphpWriteCancelHoldsFilteredStream
+    {
+        /** @var resource */
+        private $stream;
+
+        public function __construct()
+        {
+            $this->stream = fopen('php://memory', 'r+');
+            // The chain takes a reference of its own, so discarding what this
+            // returns leaves the filter alive until the stream is closed.
+            stream_filter_append($this->stream, 'oxphp-write-cancel-records-close');
+        }
+    }
+}
+
+// The filter map is per thread and this worker keeps it for its whole life, so
+// once a request on this worker has registered the name it stays registered.
+if (!in_array('oxphp-write-cancel-records-close', stream_get_filters(), true)) {
+    stream_filter_register('oxphp-write-cancel-records-close', OxphpWriteCancelRecordsCloseFilter::class);
+}
+
+if (!class_exists('OxphpWriteCancelOomDecorator', false)) {
+    #[\Attribute(\Attribute::TARGET_FUNCTION | \Attribute::TARGET_METHOD)]
+    final class OxphpWriteCancelOomDecorator implements \OxPHP\Decorator\AttributeInterface
+    {
+        public function before(\OxPHP\Decorator\Context $ctx): void
+        {
+        }
+
+        public function after(\OxPHP\Decorator\Context $ctx): void
+        {
+            OxphpWriteCancelProbe::$afterStage = 'exhausting';
+            $s = 'x';
+            for (;;) {
+                $s .= $s;
+            }
+        }
+    }
+
+    oxphp_register_decorator(OxphpWriteCancelOomDecorator::class);
+}
+
 if (!class_exists('OxphpWriteCancelReleasesFatalingFiber', false)) {
     final class OxphpWriteCancelReleasesFatalingFiber
     {
@@ -314,6 +383,7 @@ if (!function_exists('oxphp_write_after_client_left')) {
             'fiber-fataling-when-destroyed' => oxphp_write_cancel_fiber_fataling_when_destroyed(),
             'releases-fataling-fiber' => new OxphpWriteCancelReleasesFatalingFiber(),
             'collects' => new OxphpWriteCancelCollects(),
+            'filtered-stream' => new OxphpWriteCancelHoldsFilteredStream(),
             default => new \ArrayObject([str_repeat('x', 1 << 16)]),
         };
         OxphpWriteCancelProbe::$weak = \WeakReference::create($held);
@@ -358,6 +428,14 @@ if (!function_exists('oxphp_write_after_client_left_decorated')) {
     }
 }
 
+if (!function_exists('oxphp_write_after_client_left_decorated_oom')) {
+    #[OxphpWriteCancelOomDecorator]
+    function oxphp_write_after_client_left_decorated_oom(): void
+    {
+        oxphp_write_after_client_left('filtered-stream', true);
+    }
+}
+
 error_clear_last();
 
 if (($_GET['in'] ?? '') === 'shutdown') {
@@ -394,6 +472,8 @@ if ($stream) {
 
 if ($in === 'stream-decorated') {
     oxphp_write_after_client_left_decorated();
+} elseif ($in === 'stream-decorated-oom') {
+    oxphp_write_after_client_left_decorated_oom();
 } else {
     oxphp_write_after_client_left(
         match ($in) {

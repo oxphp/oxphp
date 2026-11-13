@@ -6,22 +6,20 @@ declare(strict_types=1);
 // hits the same persistent worker and a bare require re-declares TestCase.
 require_once __DIR__ . '/../test_helper.php';
 
-// A destructor that runs out of memory while the worker runs it between two
-// slices of its requests — here, on what a finished request left in $_GET,
-// which the worker drops once that request's response is out — belongs to no
-// request, and the request the worker resumes next goes on as if nothing had
-// happened.
+// A destructor that runs out of memory as a request ends — here, on what the
+// request left in $_GET, which the worker drops before that request's response
+// is sent — is that request's: it answers 500. The request the worker resumes
+// next goes on as if nothing had happened.
 //
 // From PHP 8.4.27 / 8.5.12 the engine reports running out of memory from a point
 // where it can unwind the code that did, and keeps a note that it has until the
 // request is shut down; while the note stands it calls no callback and runs no
-// destructor. Left standing between two slices, the note and the exit() the
-// engine unwinds with went to the next request resumed on the thread: it was
-// unwound where it had parked, and answered with an empty body.
+// destructor. Left standing past the request's end, the note and the exit() the
+// engine unwinds with would go to the next request resumed on the thread.
 //
 // This request is that next one: the inner request runs while it is parked, so
-// it lands on the worker serving this one, and the worker resumes this one after
-// dropping the inner request's superglobals.
+// it lands on the worker serving this one, and the worker resumes this one once
+// the inner request has ended.
 
 $t = new TestCase('oom_in_a_superglobal_destructor_spares_a_parked_request', 'fibers');
 
@@ -52,10 +50,10 @@ $inner = static function (string $query) use ($t): string {
 
 $oom = $inner("step=oom&run=$run");
 
-// What the rest stands on: the inner request ran to its end and answered, and
-// the destructor of what it left in $_GET ran after that, while this request
-// was parked.
-$t->assertContains('the inner request answers 200', $oom, ' 200 OK');
+// What the rest stands on: the inner request ran its handler to the end, and the
+// destructor of what it left in $_GET ran as it ended, while this request was
+// parked.
+$t->assertMatch('the inner request answers 500 for its own error', $oom, '#^HTTP/\S+ 500 #');
 $t->assertContains('and ran its handler to the end', $oom, 'OOM-ARMED');
 $t->assertTrue('the destructor of what it left in $_GET ran', is_file($marker));
 

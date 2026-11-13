@@ -3561,9 +3561,11 @@ void oxphp_bridge_set_cleanup_promises_for_fiber(oxphp_cleanup_promises_for_fibe
  * guarded, with a bailout in them held back until the Rust callback has
  * returned (see OXPHP_SHARED_RUN_GUARDED). Raised again as soon as it has,
  * before anything else runs. It lands where a fatal raised at this point would
- * land anyway: in the zend_try of the serve loop the per-fiber cleanup and the
- * drain run in, and for the thread-wide cleanup, which runs in RSHUTDOWN, in
- * the one zend_deactivate_modules() puts around each module's RSHUTDOWN. */
+ * land anyway: in the zend_try of the window each of these runs in — a request
+ * fiber's end for the per-fiber cleanup, the serve loop's for the drain and
+ * for the per-fiber cleanup the scheduler's finalize repeats — and for the
+ * thread-wide cleanup, which runs in RSHUTDOWN, in the one
+ * zend_deactivate_modules() puts around each module's RSHUTDOWN. */
 static void oxphp_bridge_raise_held_back_bailout(void) {
     if (oxphp_bridge_take_deferred_bailout()) {
         zend_bailout();
@@ -7242,8 +7244,9 @@ int oxphp_shared_wrapper_new(zval *out, uint8_t type_tag, const void *entry_ptr)
  * zend_catch; taken — read and cleared — once the Rust code between the
  * guarded helper and the C that called into it has returned: by the plugin
  * dispatch stubs (oxphp_method_dispatch, oxphp_native_dispatch), which
- * re-raise it, by the serve loop's idle point (oxphp_serve_loop_thread_idle),
- * which re-raises it into its own zend_try and recovers, and by the C that
+ * re-raise it, by the serve loop's window around the plugins' thread_idle
+ * event (oxphp_serve_loop_window), which re-raises it into its own zend_try
+ * and recovers, and by the C that
  * the Rust code letting go of a Shared\Pool or of a promise returns to,
  * which re-raises it: the plugin objects' free_obj handler
  * (oxphp_plugin_free_object), the worker scheduler's promise cleanup and

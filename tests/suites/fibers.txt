@@ -47,8 +47,21 @@ fibers/test_oom_before_a_park_stays_with_its_request >> ?park=any
 fibers/test_oom_before_a_park_stays_with_its_request >> ?park=task
 fibers/test_oom_in_the_session_write_stays_with_its_request
 fibers/test_oom_in_a_superglobal_destructor_spares_a_parked_request
-fibers/test_oom_in_a_superglobal_destructor_spares_the_next_request
+fibers/test_oom_in_a_superglobal_destructor_spares_the_next_request | GET | | 500 |
 fibers/test_oom_in_a_superglobal_destructor_spares_the_next_request_probe
+fibers/test_oom_before_a_scheduled_exit_spares_the_entry_after_the_loop | GET | | 500 |
+fibers/test_oom_before_a_scheduled_exit_spares_the_entry_after_the_loop_probe
+# What a request leaves for its end to let go of — the closure of an async task
+# it never awaited, an object in $_GET — runs destructors that throw or fatal:
+# the request answers 500 when it was still ending, and the worker keeps serving.
+fibers/test_fatal_releasing_what_a_request_left_keeps_the_worker >> ?case=unstarted
+fibers/test_fatal_releasing_what_a_request_left_keeps_the_worker >> ?case=started
+fibers/test_fatal_releasing_what_a_request_left_keeps_the_worker >> ?case=superglobal-throw
+fibers/test_fatal_releasing_what_a_request_left_keeps_the_worker >> ?case=superglobal-fatal
+# Out of memory in a step of a request's end ahead of the release of its
+# superglobals: the request fails, and that release still closes a filter.
+fibers/test_oom_before_the_superglobals_are_released_spares_their_callbacks >> ?case=task
+fibers/test_oom_before_the_superglobals_are_released_spares_their_callbacks >> ?case=session
 fibers/test_oom_at_the_end_of_a_task_spares_the_next_task >> ?case=handled
 fibers/test_oom_at_the_end_of_a_task_spares_the_next_task >> ?case=pending
 fibers/test_oom_in_a_filter_close_after_a_fatal_runs_the_shutdown_functions
@@ -63,6 +76,7 @@ fibers/test_write_cancel_in_a_fiber_releases_frames
 fibers/test_fatal_while_releasing_a_held_fiber_keeps_the_request_fiber
 fibers/test_write_cancel_in_a_decorator_keeps_the_request_fiber_for_the_release
 fibers/test_fatal_in_a_released_destructor_keeps_the_request_fiber_for_its_decorator
+fibers/test_oom_in_a_decorator_after_keeps_the_release
 # Application code the worker runs while it recovers from a fatal: a decorator's
 # after() that sleeps holds the thread, one that throws an exception that fatals
 # when dropped keeps the worker, a throw with no frame to unwind into is not
@@ -186,6 +200,11 @@ fibers/test_bailout_in_a_callback_over_unbuffered_cycles_keeps_the_worker_probe
 # its own to call: it runs to its end, and the worker is kept.
 fibers/test_collection_while_releasing_frames_keeps_the_worker
 fibers/test_collection_while_releasing_frames_keeps_the_worker_probe
+# A fatal in a destructor the collection every hundredth request runs retires
+# the worker through its loop: the request parked on it is answered, and the
+# entry script runs on past oxphp_worker().
+fibers/test_fatal_in_the_periodic_gc_retires_through_the_loop | GET | | 503 |
+fibers/test_fatal_in_the_periodic_gc_retires_through_the_loop_probe
 
 # A stream's flush waiting for room in its queue: the stream reaches a client
 # on the same worker thread whole, another request is served while it waits, the
