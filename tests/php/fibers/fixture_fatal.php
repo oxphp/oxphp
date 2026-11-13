@@ -2,20 +2,19 @@
 
 declare(strict_types=1);
 
-// Inner self-request for fibers/test_vm_stack_rewound_after_fatal. Two of these
-// run inside one suspended window, so the second lands on the fiber the first
-// returned to the free list.
+// The request tests/scripts/verify_worker_does_not_grow.sh measures a fatal by.
 //
 // ?fatal=1 raises a fatal from a distinctively named frame several calls deep.
 // The fiber loop catches the bailout and carries on, but the bailout is a longjmp
-// out of that frame: nothing rewinds the VM stack behind it unless the loop does.
+// out of that frame: nothing rewinds the VM stack behind it or releases what its
+// frames held unless the loop does.
 //
-// Otherwise: report the call chain this request is standing on. If the previous
-// request's abandoned frames were left on the stack, they are what this one's
-// frames chain onto, and they show up here.
+// ?compile=1 fatals in a compile error instead, which abandons a compile partway:
+// of eval'd code, or with ?compile=include of an included file.
 //
-// Must not suspend — no await, no sleep, no socket read — or the second request
-// gets a fresh fiber and the test covers nothing.
+// Otherwise the request ends normally, which makes it the control the fatals are
+// measured against — and, sent between two fatals, it is what keeps the worker
+// from being retired as one that fails every request.
 
 // Declared conditionally on purpose: the worker keeps this process across
 // requests, and a second unconditional declaration of the same name would fail
@@ -55,6 +54,14 @@ if (!function_exists('oxphp_probe_frame_c')) {
 if (isset($_GET['fatal'])) {
     oxphp_probe_frame_a();
     exit; // not reached
+}
+
+if (isset($_GET['compile'])) {
+    if ($_GET['compile'] === 'include') {
+        include __DIR__ . '/fixture_compile_error.inc';
+    }
+    require_once __DIR__ . '/../engine_fatal.php';
+    engine_fatal('OxphpProbeCompileFatal');
 }
 
 $names = array_map(

@@ -502,6 +502,86 @@ static void oxphp_bailout_frame_cb(int type, zend_string *file, const uint32_t l
     oxphp_next_error_cb(type, file, line, message);
 }
 
+static zend_op_array *(*oxphp_next_compile_file)(zend_file_handle *file_handle, int type) = NULL;
+static zend_op_array *(*oxphp_next_compile_string)(zend_string *source, const char *filename,
+                                                   zend_compile_position position) = NULL;
+
+/* A compile error bails out of zend_compile() ahead of the end where it destroys
+ * the arena the syntax tree was built in — 32 KiB at the least — and a worker
+ * keeps the heap that would otherwise take it back at request end. Only the
+ * arena is given back: the op_array being built and what it declared may already
+ * be reachable from the function and class tables.
+ *
+ * zend_compile() destroys its arena without clearing CG(ast_arena), and the
+ * lexical state compile_file() and compile_string() restore after it puts back
+ * what the pointer held on entry. Cleared on entry, the pointer is therefore
+ * non-NULL on a bailout only while an arena of this call is live — provided
+ * nothing between zend_compile() returning and that restore bails out, which
+ * from 8.5 compile_file() can: see below.
+ * SYNC: php-src 8.4.27 / 8.5.12 Zend/zend_language_scanner.l — zend_compile(),
+ *       compile_file(), compile_string(), zend_restore_lexical_state(). */
+static ZEND_COLD void oxphp_compile_abandoned(zend_arena *outer) {
+    if (CG(ast_arena) != NULL) {
+        zend_arena_destroy(CG(ast_arena));
+    }
+    CG(ast_arena) = outer;
+}
+
+static zend_op_array *oxphp_compile_file(zend_file_handle *file_handle, int type) {
+    zend_arena *outer = CG(ast_arena);
+    zend_op_array *op_array = NULL;
+#if PHP_VERSION_ID >= 80500
+    const bool recording = EG(record_errors);
+#endif
+    CG(ast_arena) = NULL;
+    zend_try {
+        op_array = oxphp_next_compile_file(file_handle, type);
+    } zend_catch {
+#if PHP_VERSION_ID >= 80500
+        /* From 8.5 compile_file() records the errors of a compile when nothing
+         * records yet, and reports them after zend_compile() has destroyed its
+         * arena — through the user's error handler, which can bail out, and can
+         * compile another file that starts a recording of its own. A bailout from
+         * there leaves the destroyed arena in CG(ast_arena). The recording flag
+         * would tell it from a live one only if every recording a bailout cuts
+         * short were ended before the bailout gets here — true of this hook's
+         * own catch, not promised of everything that can start one. So with no
+         * recording on at entry, the arena is not given back.
+         * The recording a bailout leaves on is ended whoever started it:
+         * compile_file() and OPcache's paths that compile without caching end
+         * theirs only on return, nothing resumes a compile a bailout left, and a
+         * worker would record every later error instead of reporting it.
+         * SYNC: php-src 8.5.12 Zend/zend_language_scanner.l compile_file();
+         *       ext/opcache/ZendAccelerator.c persistent_compile_file(),
+         *       opcache_compile_file() */
+        if (!recording) {
+            CG(ast_arena) = NULL;
+        }
+        EG(record_errors) = false;
+        zend_free_recorded_errors();
+#endif
+        oxphp_compile_abandoned(outer);
+        zend_bailout();
+    } zend_end_try();
+    CG(ast_arena) = outer;
+    return op_array;
+}
+
+static zend_op_array *oxphp_compile_string(zend_string *source, const char *filename,
+                                           zend_compile_position position) {
+    zend_arena *outer = CG(ast_arena);
+    zend_op_array *op_array = NULL;
+    CG(ast_arena) = NULL;
+    zend_try {
+        op_array = oxphp_next_compile_string(source, filename, position);
+    } zend_catch {
+        oxphp_compile_abandoned(outer);
+        zend_bailout();
+    } zend_end_try();
+    CG(ast_arena) = outer;
+    return op_array;
+}
+
 /* The one bailout the callback above never sees: a write to a request that has
  * been cancelled ends the request with zend_bailout() directly, with no error
  * reported ahead of it. Left unrecorded, the release walk has no frame to start
@@ -567,6 +647,16 @@ void oxphp_fiber_minit(void) {
          * registering it costs nothing anywhere else, and in particular does not
          * turn on the observation of calls. */
         zend_observer_fiber_destroy_register(oxphp_fiber_hand_on_bailout_frame);
+    }
+
+    if (!oxphp_next_compile_file) {
+        /* At MINIT, ahead of OPcache's post-startup install: OPcache then wraps
+         * zend_compile_file and calls it for every file it does not serve from
+         * cache. */
+        oxphp_next_compile_file = zend_compile_file;
+        zend_compile_file = oxphp_compile_file;
+        oxphp_next_compile_string = zend_compile_string;
+        zend_compile_string = oxphp_compile_string;
     }
 
     oxphp_exec_timer_minit();
@@ -692,9 +782,12 @@ uint64_t oxphp_fiber_pool_heap_bytes(void) {
  *     owns it, and that frame is then the one release they get.
  *   - the variables of the functions the fatal was inside, which are the whole
  *     cost when a request fatals holding something large.
+ *   - what those frames held in flight rather than in a variable, and the calls
+ *     they had begun — see oxphp_release_frame_temporaries().
  *   - the arguments of the internal calls it was inside, and the objects those
  *     were called on, which a PHP-level frame does not account for: the fatal
- *     is usually raised from inside one of them.
+ *     is usually raised from inside one of them. And the result such a call was
+ *     building — see oxphp_release_internal_result().
  *   - the closures any of those frames were running, which are a fresh object
  *     per request whenever a script declares one — see the helper above.
  *
@@ -744,6 +837,295 @@ static void oxphp_hand_symbol_table_down(zend_execute_data *ex, zend_execute_dat
     }
 }
 
+/* The calls a frame had begun and not made yet: the arguments already passed to
+ * each, the object it was to run on, its closure or its trampoline. A copy of
+ * what the engine releases when an exception leaves the frame from the same
+ * opcode, without the step that frees each call's frame: that one gives back the
+ * VM stack page a call opened, asserting it is the top page, which for a frame
+ * below the innermost one it is not. The rewind gives the pages back instead.
+ * SYNC: php-src 8.4.27 / 8.5.12 Zend/zend_execute.c cleanup_unfinished_calls() */
+static void oxphp_release_unfinished_calls(zend_execute_data *execute_data, uint32_t op_num) {
+    zend_execute_data *call = EX(call);
+    if (call == NULL) {
+        return;
+    }
+    const zend_op *const bailed = EX(func)->op_array.opcodes + op_num;
+    const zend_op *opline = bailed;
+    int level;
+    int do_exit;
+
+    if (opline->opcode == ZEND_INIT_FCALL || opline->opcode == ZEND_INIT_FCALL_BY_NAME ||
+        opline->opcode == ZEND_INIT_NS_FCALL_BY_NAME || opline->opcode == ZEND_INIT_DYNAMIC_CALL ||
+        opline->opcode == ZEND_INIT_USER_CALL || opline->opcode == ZEND_INIT_METHOD_CALL ||
+        opline->opcode == ZEND_INIT_STATIC_METHOD_CALL ||
+        opline->opcode == ZEND_INIT_PARENT_PROPERTY_HOOK_CALL || opline->opcode == ZEND_NEW) {
+        ZEND_ASSERT(op_num);
+        opline--;
+    }
+
+    do {
+        /* How many arguments this call has been passed so far. */
+        level = 0;
+        do_exit = 0;
+        do {
+            switch (opline->opcode) {
+                case ZEND_DO_FCALL:
+                case ZEND_DO_ICALL:
+                case ZEND_DO_UCALL:
+                case ZEND_DO_FCALL_BY_NAME:
+                case ZEND_CALLABLE_CONVERT:
+                    level++;
+                    break;
+                case ZEND_INIT_FCALL:
+                case ZEND_INIT_FCALL_BY_NAME:
+                case ZEND_INIT_NS_FCALL_BY_NAME:
+                case ZEND_INIT_DYNAMIC_CALL:
+                case ZEND_INIT_USER_CALL:
+                case ZEND_INIT_METHOD_CALL:
+                case ZEND_INIT_STATIC_METHOD_CALL:
+                case ZEND_INIT_PARENT_PROPERTY_HOOK_CALL:
+                case ZEND_NEW:
+                    if (level == 0) {
+                        ZEND_CALL_NUM_ARGS(call) = 0;
+                        do_exit = 1;
+                    }
+                    level--;
+                    break;
+                case ZEND_SEND_VAL:
+                case ZEND_SEND_VAL_EX:
+                case ZEND_SEND_VAR:
+                case ZEND_SEND_VAR_EX:
+                case ZEND_SEND_FUNC_ARG:
+                case ZEND_SEND_REF:
+                case ZEND_SEND_VAR_NO_REF:
+                case ZEND_SEND_VAR_NO_REF_EX:
+                case ZEND_SEND_USER:
+                    if (level == 0) {
+                        /* A named argument has kept the count up to date. */
+                        if (opline->op2_type != IS_CONST) {
+                            ZEND_CALL_NUM_ARGS(call) = opline->op2.num;
+                        }
+                        /* The send the fatal came out of may not have stored its
+                         * argument: an undefined variable is warned about before
+                         * its null is written, and the warning can bail. The slot
+                         * then holds whatever the stack held there, so it is left
+                         * out — the last one, also where a named argument puts a
+                         * slot it adds. Unlike an exception, which the handler
+                         * raises only after the store. */
+                        if (opline == bailed && ZEND_CALL_NUM_ARGS(call) > 0) {
+                            ZEND_CALL_NUM_ARGS(call)--;
+                        }
+                        do_exit = 1;
+                    }
+                    break;
+                case ZEND_SEND_ARRAY:
+                case ZEND_SEND_UNPACK:
+                    if (level == 0) {
+                        /* A named argument unpacked here is counted before it
+                         * is stored, and the warning about passing it by
+                         * reference comes between: the same last slot. A fatal
+                         * from anywhere else in the unpacking leaves the last
+                         * argument stored allocated instead. */
+                        if (opline == bailed && ZEND_CALL_NUM_ARGS(call) > 0) {
+                            ZEND_CALL_NUM_ARGS(call)--;
+                        }
+                        do_exit = 1;
+                    }
+                    break;
+                case ZEND_CHECK_UNDEF_ARGS:
+                    if (level == 0) {
+                        do_exit = 1;
+                    }
+                    break;
+            }
+            if (!do_exit) {
+                opline--;
+            }
+        } while (!do_exit);
+        if (call->prev_execute_data) {
+            /* Skip this call's own opcodes on the way to the next one out. */
+            level = 0;
+            do_exit = 0;
+            do {
+                switch (opline->opcode) {
+                    case ZEND_DO_FCALL:
+                    case ZEND_DO_ICALL:
+                    case ZEND_DO_UCALL:
+                    case ZEND_DO_FCALL_BY_NAME:
+                    case ZEND_CALLABLE_CONVERT:
+                        level++;
+                        break;
+                    case ZEND_INIT_FCALL:
+                    case ZEND_INIT_FCALL_BY_NAME:
+                    case ZEND_INIT_NS_FCALL_BY_NAME:
+                    case ZEND_INIT_DYNAMIC_CALL:
+                    case ZEND_INIT_USER_CALL:
+                    case ZEND_INIT_METHOD_CALL:
+                    case ZEND_INIT_STATIC_METHOD_CALL:
+                    case ZEND_INIT_PARENT_PROPERTY_HOOK_CALL:
+                    case ZEND_NEW:
+                        if (level == 0) {
+                            do_exit = 1;
+                        }
+                        level--;
+                        break;
+                }
+                opline--;
+            } while (!do_exit);
+        }
+
+        zend_vm_stack_free_args(call);
+
+        if (ZEND_CALL_INFO(call) & ZEND_CALL_RELEASE_THIS) {
+            OBJ_RELEASE(Z_OBJ(call->This));
+        }
+        if (ZEND_CALL_INFO(call) & ZEND_CALL_HAS_EXTRA_NAMED_PARAMS) {
+            zend_free_extra_named_params(call->extra_named_params);
+        }
+        if (call->func->common.fn_flags & ZEND_ACC_CLOSURE) {
+            zend_object_release(ZEND_CLOSURE_OBJECT(call->func));
+        } else if (call->func->common.fn_flags & ZEND_ACC_CALL_VIA_TRAMPOLINE) {
+            zend_string_release_ex(call->func->common.function_name, 0);
+            zend_free_trampoline(call->func);
+        }
+
+        /* A call whose defaults were being evaluated links back to this frame
+         * rather than to the call outside it: the engine keeps that link in a
+         * C local until the evaluation ends. The calls outside it keep what
+         * they hold. */
+        if (call->prev_execute_data == execute_data) {
+            EX(call) = NULL;
+            break;
+        }
+        EX(call) = call->prev_execute_data;
+        call = EX(call);
+    } while (call);
+}
+
+/* What a PHP frame held in flight at the opcode the bailout left it on: the calls
+ * it had begun, and the temporaries the engine tracks by live range — the subject
+ * of a foreach, an operand waiting for the other one, an object whose constructor
+ * has not returned, the pieces of an interpolated string. The engine releases
+ * them when an exception leaves a frame from that opcode, which a bailout skips.
+ *
+ * That release is sound only at an opcode that was running, with every temporary
+ * in range of it live, and the engine's exception unwinding depends on the same:
+ * a handler saves its opline before anything that can raise an error, and the
+ * JIT stores the opline, the calls it had begun and every temporary that may need
+ * releasing before any such point. A fatal is raised from those same points.
+ * SYNC: php-src 8.4.27 / 8.5.12 Zend/zend_execute.c cleanup_live_vars();
+ *       ext/opcache/jit/zend_jit.c ZREG_STORE for live-range temporaries;
+ *       ext/opcache/jit/zend_jit_ir.c zend_jit_set_ip() */
+static void oxphp_release_frame_temporaries(zend_execute_data *ex) {
+    const zend_op_array *op_array = &ex->func->op_array;
+    /* A trampoline runs one opcode of the engine's own, with no live ranges. */
+    if ((op_array->fn_flags & ZEND_ACC_CALL_VIA_TRAMPOLINE) || ex->opline < op_array->opcodes ||
+        ex->opline >= op_array->opcodes + op_array->last) {
+        return;
+    }
+    const zend_op *opline = ex->opline;
+    const uint32_t op_num = (uint32_t)(opline - op_array->opcodes);
+
+    /* An interpolated string is built as a row of pieces, and the opcode that
+     * adds a piece converts the value first and writes the piece after: one the
+     * fatal stopped holds no piece at its own index yet. The live range releases
+     * every piece up to that index, so the slot is filled with the empty string,
+     * which is interned and never freed. ROPE_END stands past the range's end:
+     * its pieces are released here, as ROPE_END releases them on an exception. */
+    switch (opline->opcode) {
+        case ZEND_ROPE_INIT:
+            ((zend_string **) ZEND_CALL_VAR(ex, opline->result.var))[0] = ZSTR_EMPTY_ALLOC();
+            break;
+        case ZEND_ROPE_ADD:
+            ((zend_string **) ZEND_CALL_VAR(ex, opline->result.var))[opline->extended_value] =
+                ZSTR_EMPTY_ALLOC();
+            break;
+        case ZEND_ROPE_END: {
+            zend_string **rope = (zend_string **) ZEND_CALL_VAR(ex, opline->op1.var);
+            rope[opline->extended_value] = ZSTR_EMPTY_ALLOC();
+            for (uint32_t i = 0; i <= opline->extended_value; i++) {
+                zend_string_release_ex(rope[i], 0);
+            }
+            break;
+        }
+    }
+
+    /* Calls before temporaries: an object whose constructor had not returned is
+     * held by both, and the temporary's release is the last one. */
+    oxphp_release_unfinished_calls(ex, op_num);
+    zend_cleanup_unfinished_execution(ex, op_num, 0);
+}
+
+/* The result an internal function was building when the fatal came. The call
+ * opcode hands it a slot of the calling frame, and a call that never returns
+ * leaves there what it had built — array_map() the array it was filling. The
+ * slot lies past the live ranges of that opcode, so no other release reaches it.
+ *
+ * Only a call the caller's own call opcode made: a call made by
+ * zend_call_function() is flagged ZEND_CALL_TOP and builds its result in a C
+ * local of whoever called it. And only a call that no observer's begin handler
+ * watches: the VM nulls the slot before it runs those, but the JIT runs them
+ * first, so a fatal raised in one leaves the slot as an earlier opcode left it.
+ * SYNC: php-src 8.4.27 / 8.5.12 Zend/zend_vm_def.h ZEND_DO_ICALL, ZEND_DO_FCALL,
+ *       ZEND_DO_FCALL_BY_NAME; ext/opcache/jit/zend_jit_ir.c zend_jit_do_fcall();
+ *       Zend/zend_observer.c zend_observer_fcall_install() */
+static void oxphp_release_internal_result(zend_execute_data *call, zend_execute_data *caller) {
+    if ((ZEND_CALL_INFO(call) & ZEND_CALL_TOP) || caller == NULL || caller->func == NULL ||
+        !ZEND_USER_CODE(caller->func->type)) {
+        return;
+    }
+    const zend_op_array *op_array = &caller->func->op_array;
+    const zend_op *opline = caller->opline;
+    if ((op_array->fn_flags & ZEND_ACC_CALL_VIA_TRAMPOLINE) || opline < op_array->opcodes ||
+        opline >= op_array->opcodes + op_array->last || opline->result_type == IS_UNUSED ||
+        (opline->opcode != ZEND_DO_ICALL && opline->opcode != ZEND_DO_FCALL &&
+         opline->opcode != ZEND_DO_FCALL_BY_NAME)) {
+        return;
+    }
+    if (ZEND_OBSERVER_ENABLED &&
+        (RUN_TIME_CACHE(&call->func->common) == NULL ||
+         *ZEND_OBSERVER_DATA(call->func) != ZEND_OBSERVER_NONE_OBSERVED)) {
+        return;
+    }
+    zval *result = ZEND_CALL_VAR(caller, opline->result.var);
+    zval_ptr_dtor(result);
+    ZVAL_UNDEF(result);
+}
+
+/* Whether `ex` is a call the engine made the current frame without entering it,
+ * to evaluate a default its caller did not pass: a named argument that skips a
+ * parameter whose default is a constant expression — `new Dep()`, a class
+ * constant to autoload — runs PHP that way. The call is linked to the frame
+ * that was current as if it had been entered, until the evaluation ends.
+ *
+ * Either the frame below was making the call, from the opcode that fills in its
+ * defaults, or zend_call_function() was, and left it on the parameter whose
+ * default it is evaluating, with that slot still undefined. A call that was
+ * entered stands on that opcode only for a parameter it was passed, or one past
+ * its argument count.
+ * SYNC: php-src 8.4.27 / 8.5.12 Zend/zend_execute.c zend_handle_undef_args(),
+ *       start_fake_frame(); Zend/zend_execute_API.c zend_call_function() */
+static bool oxphp_frame_evaluating_defaults(zend_execute_data *ex, zend_execute_data *prev) {
+    if (prev != NULL && prev->func != NULL && ZEND_USER_CODE(prev->func->type) && prev->call == ex) {
+        const zend_op_array *caller = &prev->func->op_array;
+        if (prev->opline >= caller->opcodes && prev->opline < caller->opcodes + caller->last &&
+            prev->opline->opcode == ZEND_CHECK_UNDEF_ARGS) {
+            return true;
+        }
+    }
+    if (!(ZEND_CALL_INFO(ex) & ZEND_CALL_TOP) || !ZEND_USER_CODE(ex->func->type)) {
+        return false;
+    }
+    const zend_op_array *op_array = &ex->func->op_array;
+    const zend_op *opline = ex->opline;
+    if (opline < op_array->opcodes || opline >= op_array->opcodes + op_array->last ||
+        (opline->opcode != ZEND_RECV && opline->opcode != ZEND_RECV_INIT)) {
+        return false;
+    }
+    uint32_t arg = (uint32_t)(opline - op_array->opcodes);
+    return arg < ZEND_CALL_NUM_ARGS(ex) && Z_ISUNDEF_P(ZEND_CALL_VAR_NUM(ex, arg));
+}
+
 static void oxphp_release_abandoned_frames(const oxphp_vm_stack_mark *mark) {
     /* The frame the bailout left this mark's context from: the one the fatal was
      * raised in when that was here, and the call that entered the fiber it was
@@ -786,6 +1168,24 @@ static void oxphp_release_abandoned_frames(const oxphp_vm_stack_mark *mark) {
         uint32_t info = ZEND_CALL_INFO(ex);
 
         if (ex->func == NULL) {
+            ex = prev;
+            continue;
+        }
+
+        if (oxphp_frame_evaluating_defaults(ex, prev)) {
+            /* A call that was never entered: only its arguments are set up, and
+             * its variables, temporaries and pending calls are whatever the
+             * stack held there. A function's or an include's frame below
+             * releases it as the call it was about to make; a generator's
+             * releases no pending call, and its arguments are left. One
+             * zend_call_function() was making owns its arguments alone: it
+             * takes the closure only once the defaults are in, and never This. */
+            if (info & ZEND_CALL_TOP) {
+                zend_vm_stack_free_args(ex);
+                if (info & ZEND_CALL_HAS_EXTRA_NAMED_PARAMS) {
+                    zend_free_extra_named_params(ex->extra_named_params);
+                }
+            }
             ex = prev;
             continue;
         }
@@ -852,6 +1252,7 @@ static void oxphp_release_abandoned_frames(const oxphp_vm_stack_mark *mark) {
              * top-level script. Its variables are not its own — they belong to
              * the frame that included it, which oxphp_hand_symbol_table_down()
              * gives the symbol table back to before the release below. */
+            oxphp_release_frame_temporaries(ex);
 
             /* A frame the engine had already begun leaving when a bailout stopped
              * it: a static variable's destructor fataled while zend_leave_helper
@@ -901,12 +1302,9 @@ static void oxphp_release_abandoned_frames(const oxphp_vm_stack_mark *mark) {
             destroy_op_array(&ex->func->op_array);
             efree_size(ex->func, sizeof(zend_op_array));
         } else if (ZEND_USER_CODE(ex->func->type)) {
-            /* A function the fatal was inside. Its variables are released the
-             * way the engine releases a generator's when it has to abandon one
-             * mid-run — and only as far: past this point zend_generator_close
-             * stops too when a bailout has been through, because the temporaries
-             * a frame was holding and the calls it had half pushed cannot be
-             * walked safely once the VM left the way it did. */
+            /* A function the fatal was inside: what it held in flight, then its
+             * variables, the order an exception leaving it releases them in. */
+            oxphp_release_frame_temporaries(ex);
             if ((info & ZEND_CALL_HAS_SYMBOL_TABLE) && ex->symbol_table != &EG(symbol_table)) {
                 /* Never the globals: those outlive every request the worker
                  * serves. */
@@ -972,6 +1370,9 @@ static void oxphp_release_abandoned_frames(const oxphp_vm_stack_mark *mark) {
             if (info & ZEND_CALL_HAS_EXTRA_NAMED_PARAMS) {
                 zend_free_extra_named_params(ex->extra_named_params);
             }
+            /* Before the owner: it reads ex->func, which a closure of an
+             * internal function holds inside itself. */
+            oxphp_release_internal_result(ex, prev);
             oxphp_release_frame_owner(ex, info);
         }
 

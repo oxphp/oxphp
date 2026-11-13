@@ -29,6 +29,14 @@ fibers/test_shared_pool_rearmed_after_its_creator_exits >> ?action=check
 fibers/test_write_cancel_releases_frames
 fibers/test_write_cancel_release_runs_past_a_destructor_that_writes
 fibers/test_write_cancel_release_lets_a_destructor_start_a_fiber
+# Compiles OPcache leaves to the engine, one ending in a compile error and one
+# in a fatal while its errors are reported, then a warning on the same thread:
+# from PHP 8.5 the engine records a compile's errors and reports them after it.
+fibers/test_compile_error_keeps_later_warnings_reported
+# Fatals while a call is being set up: in a warning about an argument it is
+# being passed, and in the default of a parameter it skipped by name.
+fibers/test_fatal_in_an_argument_warning_leaves_its_slot_alone
+fibers/test_fatal_in_a_default_argument_leaves_the_call_alone
 # Out of memory deep in a call stack, then what the worker has left. Ahead of
 # the fatals in fibers below: on a build where the worker is left with no
 # memory_limit, those run away until the kernel ends the server, and every

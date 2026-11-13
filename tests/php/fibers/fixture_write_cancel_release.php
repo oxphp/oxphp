@@ -44,7 +44,13 @@ declare(strict_types=1);
 // bound — so these are the requests that take the path where the worker gives
 // back what the abandoned frames were holding. stream-throw holds an object
 // whose destructor throws: it runs during that give-back, and the throw must end
-// nothing but itself.
+// nothing but itself. With ?open=1 the stream sends its headers before the park,
+// as a real event stream does: its client leaving is then not noticed during
+// the park, and it is found by the write or flush after it.
+//
+// ?in=timeout holds the same object and spins until its time limit ends it,
+// with its client still there: another way a request is ended where it
+// stands, and one it can bring on itself.
 //
 // ?in=stream-fiber makes the same write from inside a Fiber the request starts
 // after it resumes. The engine catches the ending inside that fiber and destroys
@@ -388,6 +394,7 @@ if (!function_exists('oxphp_write_after_client_left')) {
         };
         OxphpWriteCancelProbe::$weak = \WeakReference::create($held);
 
+        OxphpWriteCancelProbe::$headersSentAtPark = headers_sent();
         OxphpWriteCancelProbe::$stage = 'parked';
         // Hooked: parks this request. The test takes the client away meanwhile.
         sleep(2);
@@ -417,6 +424,21 @@ if (!function_exists('oxphp_write_after_client_left')) {
             }
         }
         OxphpWriteCancelProbe::$stage = 'after-write';
+    }
+}
+
+if (!function_exists('oxphp_spin_until_time_limit')) {
+    function oxphp_spin_until_time_limit(): void
+    {
+        $held = new \ArrayObject([str_repeat('x', 1 << 16)]);
+        OxphpWriteCancelProbe::$weak = \WeakReference::create($held);
+
+        OxphpWriteCancelProbe::$stage = 'spinning';
+        set_time_limit(1);
+        $spin = 0;
+        while (true) {
+            $spin++;
+        }
     }
 }
 
@@ -464,13 +486,19 @@ $in = $_GET['in'] ?? '';
 $stream = str_starts_with($in, 'stream');
 if ($stream) {
     // The header alone is what makes the request a stream. Nothing is sent
-    // before the park: a stream that has already sent its headers is no longer
-    // watched for its client leaving until its next flush, which is a
-    // different path out (see the test).
+    // before the park unless ?open=1 asks for it: a stream that has already
+    // sent its headers is no longer watched for its client leaving until its
+    // next flush, which is a different path out (see the test).
     header('Content-Type: text/event-stream');
+    if (($_GET['open'] ?? '') === '1') {
+        echo ": open\n\n";
+        oxphp_stream_flush();
+    }
 }
 
-if ($in === 'stream-decorated') {
+if ($in === 'timeout') {
+    oxphp_spin_until_time_limit();
+} elseif ($in === 'stream-decorated') {
     oxphp_write_after_client_left_decorated();
 } elseif ($in === 'stream-decorated-oom') {
     oxphp_write_after_client_left_decorated_oom();
