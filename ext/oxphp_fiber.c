@@ -547,11 +547,25 @@ static void oxphp_exec_timer_minit(void);
 
 void oxphp_fiber_minit(void) {
     if (!oxphp_next_error_cb) {
+        /* Installed from MINIT, not from a later hook. A zend_extension that
+         * replaces zend_error_cb — Xdebug — does it in its own RINIT, every
+         * request, after any post-startup install of ours, so no install point of
+         * ours can wrap it. What decides whether the recorder is reached is only
+         * what zend_error_cb held when that extension ran its MINIT: the extension
+         * saves that callback and, outside its develop mode, chains to it.
+         * Installing at MINIT puts the recorder in that slot before the extension's
+         * MINIT records it. Under Xdebug's develop mode the extension chains to no
+         * one, so a fatal there is never recorded and its abandoned frames leak
+         * rather than being released — a safe degradation under a dev-only
+         * extension, not corruption.
+         * SYNC: xdebug 3.5.3 src/base/base.c — xdebug_base_minit saves the current
+         *       cb, xdebug_base_rinit installs xdebug's, xdebug_error_cb skips the
+         *       chain to the saved cb in develop mode. */
         oxphp_next_error_cb = zend_error_cb;
         zend_error_cb = oxphp_bailout_frame_cb;
         /* Its own list, walked only when the engine destroys a fiber context —
-         * registering it costs nothing anywhere else, and in particular does
-         * not turn on the observation of calls. */
+         * registering it costs nothing anywhere else, and in particular does not
+         * turn on the observation of calls. */
         zend_observer_fiber_destroy_register(oxphp_fiber_hand_on_bailout_frame);
     }
 
@@ -686,6 +700,50 @@ uint64_t oxphp_fiber_pool_heap_bytes(void) {
  *
  * A generator that was running is in this chain too, and is the one thing in it
  * that must be handled rather than released — see below. */
+
+/* Hand a nested code frame's symbol table to the frame below that shares it, the
+ * way zend_leave_helper does when it leaves such a frame (php-src/Zend/zend_vm_def.h,
+ * generated into zend_vm_execute.h): an include runs on the table of the frame that included
+ * it, and entering one points the table's entries at this frame's CV slots while
+ * the including frame keeps copies of the values it has stopped owning. Detaching
+ * alone gives the values to the table; the release then gives up both the table's
+ * copy and the including frame's, one too many for every name they share. Pairing
+ * the detach with a reattach to the frame below turns its copies back into the one
+ * owner and the table's entries back into references to them.
+ *
+ * Which frame that is need not be the one just below: a script with no variables
+ * of its own is never handed the table (the engine skips the attach), so the
+ * reattach carries past it, marked on that frame for its own exit to pass on —
+ * honoured here so a chain of such scripts ends where the variables came from.
+ * Only to a frame the table is actually shared with: a chain a bailout abandoned
+ * is not one this code built, so the share is checked rather than assumed.
+ *
+ * `already_detached` is set for a frame the engine had already detached before a
+ * bailout interrupted its leave: its CV slots are all IS_UNDEF, and detaching a
+ * second time would zend_hash_del live entries out of the shared table. The
+ * reattach-down is still owed in that case — the engine bails out between the
+ * detach and the reattach — so it is the one half done here. */
+static void oxphp_hand_symbol_table_down(zend_execute_data *ex, zend_execute_data *prev,
+                                         bool already_detached) {
+    uint32_t info = ZEND_CALL_INFO(ex);
+    zend_array *symbol_table = ex->symbol_table;
+    bool hand_table_down = (info & ZEND_CALL_NEEDS_REATTACH) != 0;
+    if (ex->func->op_array.last_var > 0) {
+        if (!already_detached) {
+            zend_detach_symbol_table(ex);
+        }
+        hand_table_down = true;
+    }
+    if (hand_table_down && prev != NULL && prev->func != NULL && ZEND_USER_CODE(prev->func->type) &&
+        (ZEND_CALL_INFO(prev) & ZEND_CALL_HAS_SYMBOL_TABLE) && prev->symbol_table == symbol_table) {
+        if (prev->func->op_array.last_var > 0) {
+            zend_attach_symbol_table(prev);
+        } else {
+            ZEND_ADD_CALL_FLAG(prev, ZEND_CALL_NEEDS_REATTACH);
+        }
+    }
+}
+
 static void oxphp_release_abandoned_frames(const oxphp_vm_stack_mark *mark) {
     /* The frame the bailout left this mark's context from: the one the fatal was
      * raised in when that was here, and the call that entered the fiber it was
@@ -791,53 +849,54 @@ static void oxphp_release_abandoned_frames(const oxphp_vm_stack_mark *mark) {
 
         if ((info & ZEND_CALL_CODE) && !(info & ZEND_CALL_TOP)) {
             /* An include: code rather than a function, nested rather than the
-             * top-level script. Its variables are not its own — an include runs
-             * on the symbol table of the frame that included it, and entering
-             * one points that table's entries at this frame's slots while
-             * leaving the including frame holding copies of the values it has
-             * just stopped owning (zend_attach_symbol_table copies the value
-             * without a reference and moves the entry).
+             * top-level script. Its variables are not its own — they belong to
+             * the frame that included it, which oxphp_hand_symbol_table_down()
+             * gives the symbol table back to before the release below. */
+
+            /* A frame the engine had already begun leaving when a bailout stopped
+             * it: a static variable's destructor fataled while zend_leave_helper
+             * was in zend_destroy_static_vars for this frame. The engine runs that
+             * after zend_detach_symbol_table and before the reattach-down, so by
+             * here the symbol table is already detached and the static-var table
+             * is mid-destruction. Re-detaching would zend_hash_del still-live
+             * references out of the symbol table, and re-destroying would re-enter
+             * zend_array_destroy on a table in HT_IS_DESTROYING, a double free.
+             * zend_array_destroy sets GC_TYPE_INFO to GC_NULL before it runs any
+             * destructor, and zend_destroy_static_vars NULLs the map-ptr only once
+             * it returns, so a static-var table still mapped but no longer IS_ARRAY
+             * is that interrupted state — or a sibling include frame of the same
+             * file, which shares the one per-process static-var slot and so sees
+             * the same mid-destruction; both want the handling below, not a second
+             * destroy.
              *
-             * So detaching alone is only half of it: it hands the values to the
-             * table, and the release below then gives up both the table's copy
-             * and the including frame's, which is one release too many for every
-             * variable the two share by name. What the engine pairs the detach
-             * with, and this does too, is handing the table back to that frame —
-             * which turns its copies into the one owner again and the table's
-             * entries back into references to them.
-             *
-             * Which frame that is need not be the one below. A script with no
-             * variables of its own is never given the table to hold (the engine
-             * skips the attach for it), so it has nothing to hand back and the
-             * handing-back has to carry on past it — `require 'bootstrap.php';`
-             * is a whole file of exactly that shape. The engine carries it by
-             * marking the frame below and letting that frame's own exit pass it
-             * on; the same mark is honoured here, so a chain of such scripts
-             * ends where the variables actually came from. */
-            zend_array *symbol_table = ex->symbol_table;
-            bool hand_table_down = (info & ZEND_CALL_NEEDS_REATTACH) != 0;
-            if (ex->func->op_array.last_var > 0) {
-                zend_detach_symbol_table(ex);
-                hand_table_down = true;
+             * Only the reattach-down the engine had not reached is finished for
+             * such a frame. Its static-var table and op_array are left to the
+             * destroy that owns them — nothing here can re-enter it safely — so
+             * they leak rather than being freed a second time.
+             * SYNC: php-src/Zend/zend_vm_def.h zend_leave_helper (generated into
+             *       zend_vm_execute.h);
+             *       php-src/Zend/zend_opcode.c zend_destroy_static_vars;
+             *       php-src/Zend/zend_hash.c zend_array_destroy */
+            zend_array *static_vars = NULL;
+            if (ZEND_MAP_PTR(ex->func->op_array.static_variables_ptr)) {
+                static_vars = ZEND_MAP_PTR_GET(ex->func->op_array.static_variables_ptr);
             }
-            /* Only to a frame the table is actually shared with. The engine
-             * hands a nested include's table to the frame below without asking,
-             * because that frame is the one that included it and so always has
-             * the table; asked here because a chain a bailout abandoned is not
-             * one this code built. */
-            if (hand_table_down && prev != NULL && prev->func != NULL && ZEND_USER_CODE(prev->func->type) &&
-                (ZEND_CALL_INFO(prev) & ZEND_CALL_HAS_SYMBOL_TABLE) && prev->symbol_table == symbol_table) {
-                if (prev->func->op_array.last_var > 0) {
-                    zend_attach_symbol_table(prev);
-                } else {
-                    /* Nothing to hand back into here, so the mark goes on to
-                     * whoever leaves this frame — this walk when the frame is one
-                     * of these, and the engine itself when it is above the mark.
-                     * Either way the table keeps the values until it reaches a
-                     * frame that can take them, or gives them up itself. */
-                    ZEND_ADD_CALL_FLAG(prev, ZEND_CALL_NEEDS_REATTACH);
-                }
+            if (static_vars != NULL && GC_TYPE(static_vars) != IS_ARRAY) {
+                oxphp_hand_symbol_table_down(ex, prev, /* already_detached */ true);
+                /* The one step of the interrupted destroy that is still safe and
+                 * must still happen: NULL the map-ptr, as zend_destroy_static_vars
+                 * does once zend_array_destroy returns. With OPcache the op_array
+                 * lives in shared memory and the worker keeps its static-var map-ptr
+                 * slot across requests, so leaving it pointing at the half-destroyed
+                 * table would have the next request's ZEND_BIND_STATIC bind against
+                 * freed memory and destroy it a second time. The table itself is the
+                 * leak this variant accepts. */
+                ZEND_MAP_PTR_SET(ex->func->op_array.static_variables_ptr, NULL);
+                ex = prev;
+                continue;
             }
+
+            oxphp_hand_symbol_table_down(ex, prev, /* already_detached */ false);
             zend_destroy_static_vars(&ex->func->op_array);
             destroy_op_array(&ex->func->op_array);
             efree_size(ex->func, sizeof(zend_op_array));
@@ -851,7 +910,44 @@ static void oxphp_release_abandoned_frames(const oxphp_vm_stack_mark *mark) {
             if ((info & ZEND_CALL_HAS_SYMBOL_TABLE) && ex->symbol_table != &EG(symbol_table)) {
                 /* Never the globals: those outlive every request the worker
                  * serves. */
-                zend_clean_and_cache_symbol_table(ex->symbol_table);
+                if ((info & ZEND_CALL_CODE) && prev != NULL && prev->func != NULL &&
+                    ZEND_USER_CODE(prev->func->type) &&
+                    (ZEND_CALL_INFO(prev) & ZEND_CALL_HAS_SYMBOL_TABLE) &&
+                    prev->symbol_table == ex->symbol_table) {
+                    /* An include frame an execute_ex override (Xdebug) tagged
+                     * ZEND_CALL_TOP: code sharing the including frame's symbol
+                     * table, which misses the include gate above because of the
+                     * flag and lands here. Cleaning and caching the table would
+                     * free it while the including frame still holds it — hand it
+                     * down instead, as the include branch does, then destroy its
+                     * static-var table the same way.
+                     *
+                     * The static-var table must be destroyed: a top-level
+                     * `static $x` in the included file lives in a per-process slot
+                     * that, left populated, has the next request skip the
+                     * initializer (ZEND_BIND_INIT_STATIC_OR_JMP) and inherit this
+                     * crashed request's statics. zend_destroy_static_vars NULLs the
+                     * map-ptr so the next request re-initializes, and it acts on the
+                     * per-process static-var copy whether or not the op_array itself
+                     * is the OPcache SHM copy.
+                     *
+                     * The op_array is left alone — a TOP-code frame's op_array is
+                     * not freed on the engine's leave path either (zend_leave_helper's
+                     * ZEND_CALL_TOP_CODE arm frees none; the creator owns it). For an
+                     * override include the creator is ZEND_INCLUDE_OR_EVAL, which
+                     * frees its copy only after zend_execute_ex returns — the step
+                     * this bailout skipped. destroy_op_array here would also be wrong
+                     * when that copy is the SHM one. So the op_array leaks, one per
+                     * abandoned frame.
+                     * SYNC: php-src/Zend/zend_vm_def.h ZEND_INCLUDE_OR_EVAL,
+                     *       ZEND_BIND_INIT_STATIC_OR_JMP;
+                     *       php-src/Zend/zend_vm_def.h zend_leave_helper (generated
+                     *       into zend_vm_execute.h) */
+                    oxphp_hand_symbol_table_down(ex, prev, /* already_detached */ false);
+                    zend_destroy_static_vars(&ex->func->op_array);
+                } else {
+                    zend_clean_and_cache_symbol_table(ex->symbol_table);
+                }
             }
             zend_free_compiled_variables(ex);
             if (info & ZEND_CALL_HAS_EXTRA_NAMED_PARAMS) {
@@ -959,6 +1055,31 @@ static void oxphp_recovery_drop_raised(const oxphp_vm_stack_mark *mark,
     }
 }
 
+/* At a recovery site reached by CG(unclean_shutdown) rather than by a zend_catch
+ * of ours, drop a recorded frame the recovery must not walk. The flag is raised
+ * by every bailout and lowered by every recovery, so when one of these sites
+ * finds it up a bailout happened in the window — but a frame recorded there is
+ * this window's to walk only if the bailout longjmped out of it. _zend_bailout
+ * clears EG(current_execute_data) (php-src 8.4.27/8.5.12 Zend/zend.c, read), and
+ * nothing between it and the site resumes a VM to set it again, so a NULL value
+ * is a bailout that reached here and a non-NULL one is a window that returned
+ * normally after an engine zend_try below it swallowed every bailout it took —
+ * a shutdown function's session close() caught by the session module's try, say.
+ * The frame such a swallow recorded names frames it has already left, and the
+ * walk would follow them into memory given back. Dropped so the recovery walks
+ * only a frame a window freshly fataled on; the abandoned frames of a swallowed
+ * bailout leak instead, which is the safe side — a double free crashes the
+ * worker and every request it is multiplexing, a leak costs it memory until the
+ * pool recycles it. (EG(current_execute_data) is observed equal to the mark's at
+ * such a site, never some third frame, so a plain NULL test is enough and errs
+ * toward the leak if it ever were.) */
+static void oxphp_drop_swallowed_bailout_frame(void) {
+    if (EG(current_execute_data) != NULL) {
+        oxphp_bailout_frame.context = NULL;
+        oxphp_bailout_frame.frame = NULL;
+    }
+}
+
 /* Everything a worker has to undo after a bailout before it can serve anything
  * else: give back what the abandoned frames were holding, rewind the VM stack to
  * the mark, and lower the two flags the engine raised over the whole of it.
@@ -1028,6 +1149,24 @@ static void oxphp_recovery_drop_raised(const oxphp_vm_stack_mark *mark,
  * callers that own it — under the same protection as every other step here,
  * since dropping it runs its destructor. */
 static void oxphp_recover(const oxphp_vm_stack_mark *mark, bool discard_pending) {
+    /* A recovery entered while the engine's out-of-memory note still stands was
+     * reached on the delayed-OOM path — the re-bailout after a handler or task
+     * that ran out of memory (oxphp_recover_from_reported_oom and the task/handler
+     * arms that re-raise on it), where the unwind-exit zend_handle_delayed_oom threw
+     * has by now freed every frame above the mark. A frame recorded by this point is
+     * therefore not one of them: it is the stale record a bailout swallowed earlier
+     * in the same context left behind (a session close() that fatals, say), which the
+     * walk below would otherwise follow into memory the unwind already gave back.
+     * Dropped here, before the note is forgotten just below so the state can still
+     * be read. The one record this discards that was not stale is a genuine
+     * bailout raised between the note and this call — a timeout during the unwind
+     * — whose abandoned frames then leak rather than being freed twice.
+     * SYNC: php-src/Zend/zend_alloc.c zend_handle_delayed_oom() */
+    if (oxphp_engine_reported_oom()) {
+        oxphp_bailout_frame.context = NULL;
+        oxphp_bailout_frame.frame = NULL;
+    }
+
     /* First, the engine's note that it reported running out of memory — see
      * oxphp_engine_reported_oom(). Ahead of everything below because some of it
      * runs user code, which the engine would refuse to call while the note
@@ -3838,6 +3977,7 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
              * so the flag is asked after it, as at the end of a request. */
             php_free_shutdown_functions();
             if (CG(unclean_shutdown)) {
+                oxphp_drop_swallowed_bailout_frame();
                 oxphp_recover_from_bailout(&mark);
             }
 
@@ -3853,6 +3993,7 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
                     oxphp_fatal_backtrace_release();
                 } zend_end_try();
                 if (CG(unclean_shutdown)) {
+                    oxphp_drop_swallowed_bailout_frame();
                     oxphp_recover_from_bailout(&mark);
                 }
             }
@@ -4143,6 +4284,7 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
             if (!came_apart) {
                 fiber->failure_source = "bailout in a shutdown function";
             }
+            oxphp_drop_swallowed_bailout_frame();
             oxphp_recover_from_bailout(&mark);
         }
         came_apart = fiber->handler_failed;
@@ -4155,6 +4297,7 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
             if (!came_apart) {
                 fiber->failure_source = "bailout freeing the shutdown functions";
             }
+            oxphp_drop_swallowed_bailout_frame();
             oxphp_recover_from_bailout(&mark);
         }
 
