@@ -232,6 +232,24 @@ fibers/test_task_fatal_keeps_a_parked_tasks_destructors
 fibers/test_fatal_report_runs_no_other_request
 fibers/test_fatal_releasing_a_tasks_closure_keeps_other_destructors
 
+# A request ended inside a cURL transfer, by a fatal or its time limit raised in
+# one of the transfer's callbacks, retires the worker; one that fails after the
+# transfer returned does not. Each pair is a trigger and the probe after it.
+fibers/test_curl_bailout_in_a_callback_retires_the_worker | GET | | 500 |
+fibers/test_curl_bailout_in_a_callback_retires_the_worker_probe
+fibers/test_curl_bailout_in_a_callback_retires_the_worker >> ?via=multi | GET | | 500 |
+fibers/test_curl_bailout_in_a_callback_retires_the_worker_probe >> ?via=multi
+fibers/test_curl_bailout_in_a_callback_retires_the_worker >> ?via=pause | GET | | 500 |
+fibers/test_curl_bailout_in_a_callback_retires_the_worker_probe >> ?via=pause
+fibers/test_curl_bailout_in_a_callback_retires_the_worker >> ?via=remove | GET | | 500 |
+fibers/test_curl_bailout_in_a_callback_retires_the_worker_probe >> ?via=remove
+fibers/test_curl_bailout_in_a_callback_retires_the_worker >> ?via=close | GET | | 500 |
+fibers/test_curl_bailout_in_a_callback_retires_the_worker_probe >> ?via=close
+fibers/test_curl_bailout_in_a_callback_retires_the_worker >> ?via=timeout | GET | | 504 |
+fibers/test_curl_bailout_in_a_callback_retires_the_worker_probe >> ?via=timeout
+fibers/test_curl_bailout_in_a_callback_retires_the_worker >> ?via=after | GET | | 500 |
+fibers/test_curl_bailout_in_a_callback_retires_the_worker_probe >> ?via=after
+
 # A stream's flush waiting for room in its queue: the stream reaches a client
 # on the same worker thread whole, another request is served while it waits, the
 # wait ends at its client leaving and at its time limit, and what is left of a

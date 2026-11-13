@@ -6167,6 +6167,123 @@ static void oxphp_define_hook_restore(void)
     oxphp_orig_define = NULL;
 }
 
+/* ─── cURL transfers a bailout went through ──────────────
+ * libcurl calls the PHP callbacks of a transfer — CURLOPT_WRITEFUNCTION and the
+ * rest — from inside the call that runs it, and ext/curl calls them with no
+ * zend_try in between. Anything that ends the request from inside one — a
+ * fatal, a time limit, output written in a streamed response to a client that
+ * has left — longjmps out through libcurl in the middle of the transfer, past
+ * the code that records the callback's and the call's end. The handle keeps
+ * ext/curl's in-callback mark, so curl_reset() and curl_close() throw, and
+ * libcurl keeps both on its own call stack, so it refuses every later transfer
+ * on the handle with CURLE_RECURSIVE_API_CALL, and every later curl_multi_exec()
+ * on a multi handle with CURLM_RECURSIVE_API_CALL (libcurl 8.23.0 lib/api.c
+ * Curl_eapi_enter(), Curl_mapi_enter()). Neither offers a way to undo that, and
+ * a handle can outlive the request in the worker's state, so the worker is
+ * retired instead, at the next moment it has no request in flight.
+ *
+ * The functions below are the calls that run a transfer or end it: running or
+ * unpausing it, and ending one that has connected but not finished, as removing
+ * its handle from a multi handle does — libcurl then reports the transfer's
+ * progress once more (lib/multi.c multi_done(), Curl_pgrsDone()). A callback
+ * libcurl runs outside them is not covered: the destruction of a handle also
+ * ends what it has not finished, and with CURLOPT_VERBOSE on, curl_setopt()
+ * can pass a message to CURLOPT_DEBUGFUNCTION (lib/setopt.c curl_easy_setopt(),
+ * lib/curl_trc.c trc_write()). A time limit that expires after one of these
+ * has returned leaves nothing behind and retires nothing.
+ * SYNC: php-src/ext/curl/interface.c php_curl_call_callback(),
+ *       PHP_FUNCTION(curl_exec), PHP_FUNCTION(curl_pause);
+ *       php-src/ext/curl/multi.c PHP_FUNCTION(curl_multi_exec),
+ *       PHP_FUNCTION(curl_multi_remove_handle), PHP_FUNCTION(curl_multi_close) */
+static zif_handler oxphp_orig_curl_exec = NULL;
+static zif_handler oxphp_orig_curl_multi_exec = NULL;
+static zif_handler oxphp_orig_curl_pause = NULL;
+static zif_handler oxphp_orig_curl_multi_remove_handle = NULL;
+static zif_handler oxphp_orig_curl_multi_close = NULL;
+
+/* Raised by a bailout out of one of those calls; read and lowered by the serve
+ * loop. On a thread that runs no serve loop it is raised for nobody to read. */
+static __thread bool oxphp_curl_bailout_pending = false;
+
+static bool oxphp_curl_take_bailout(void)
+{
+    bool pending = oxphp_curl_bailout_pending;
+    oxphp_curl_bailout_pending = false;
+    return pending;
+}
+
+/* A callback can park the request while the zend_try below is current: the
+ * engine saves and restores EG(bailout) with every fiber switch.
+ * SYNC: php-src/Zend/zend_fibers.c zend_fiber_capture_vm_state() */
+static void oxphp_curl_transfer(zif_handler orig, INTERNAL_FUNCTION_PARAMETERS)
+{
+    zend_try {
+        orig(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+    } zend_catch {
+        oxphp_curl_bailout_pending = true;
+        zend_bailout();
+    } zend_end_try();
+}
+
+static ZEND_NAMED_FUNCTION(oxphp_curl_exec_hook)
+{
+    oxphp_curl_transfer(oxphp_orig_curl_exec, INTERNAL_FUNCTION_PARAM_PASSTHRU);
+}
+
+static ZEND_NAMED_FUNCTION(oxphp_curl_multi_exec_hook)
+{
+    oxphp_curl_transfer(oxphp_orig_curl_multi_exec, INTERNAL_FUNCTION_PARAM_PASSTHRU);
+}
+
+static ZEND_NAMED_FUNCTION(oxphp_curl_pause_hook)
+{
+    oxphp_curl_transfer(oxphp_orig_curl_pause, INTERNAL_FUNCTION_PARAM_PASSTHRU);
+}
+
+static ZEND_NAMED_FUNCTION(oxphp_curl_multi_remove_handle_hook)
+{
+    oxphp_curl_transfer(oxphp_orig_curl_multi_remove_handle, INTERNAL_FUNCTION_PARAM_PASSTHRU);
+}
+
+static ZEND_NAMED_FUNCTION(oxphp_curl_multi_close_hook)
+{
+    oxphp_curl_transfer(oxphp_orig_curl_multi_close, INTERNAL_FUNCTION_PARAM_PASSTHRU);
+}
+
+/* Swapped on the startup thread, as the session gate is. A build without
+ * ext/curl has none of these functions, and nothing is installed. */
+static void oxphp_curl_hooks_install(void)
+{
+    oxphp_hook_swap("curl_exec", sizeof("curl_exec") - 1,
+                    oxphp_curl_exec_hook, &oxphp_orig_curl_exec);
+    oxphp_hook_swap("curl_multi_exec", sizeof("curl_multi_exec") - 1,
+                    oxphp_curl_multi_exec_hook, &oxphp_orig_curl_multi_exec);
+    oxphp_hook_swap("curl_pause", sizeof("curl_pause") - 1,
+                    oxphp_curl_pause_hook, &oxphp_orig_curl_pause);
+    oxphp_hook_swap("curl_multi_remove_handle", sizeof("curl_multi_remove_handle") - 1,
+                    oxphp_curl_multi_remove_handle_hook,
+                    &oxphp_orig_curl_multi_remove_handle);
+    oxphp_hook_swap("curl_multi_close", sizeof("curl_multi_close") - 1,
+                    oxphp_curl_multi_close_hook, &oxphp_orig_curl_multi_close);
+}
+
+static void oxphp_curl_hooks_restore(void)
+{
+    oxphp_hook_restore("curl_exec", sizeof("curl_exec") - 1, oxphp_orig_curl_exec);
+    oxphp_hook_restore("curl_multi_exec", sizeof("curl_multi_exec") - 1,
+                       oxphp_orig_curl_multi_exec);
+    oxphp_hook_restore("curl_pause", sizeof("curl_pause") - 1, oxphp_orig_curl_pause);
+    oxphp_hook_restore("curl_multi_remove_handle", sizeof("curl_multi_remove_handle") - 1,
+                       oxphp_orig_curl_multi_remove_handle);
+    oxphp_hook_restore("curl_multi_close", sizeof("curl_multi_close") - 1,
+                       oxphp_orig_curl_multi_close);
+    oxphp_orig_curl_exec = NULL;
+    oxphp_orig_curl_multi_exec = NULL;
+    oxphp_orig_curl_pause = NULL;
+    oxphp_orig_curl_multi_remove_handle = NULL;
+    oxphp_orig_curl_multi_close = NULL;
+}
+
 /* Publishing the set is what makes an enabled RUNTIME_HOOKS confirmable at all:
  * a misspelled variable name, RUNTIME_HOOKS=0 and a correctly enabled build
  * otherwise serve byte-identical responses and log nothing. The flags are
@@ -6888,6 +7005,7 @@ static void oxphp_serve_loop(zend_fcall_info *fci, zend_fcall_info_cache *fcc)
      * set up for it, so what it was when this loop began is what to compare
      * with. */
     (void)oxphp_fiber_take_internal_bailout();
+    (void)oxphp_curl_take_bailout();
     uint64_t quiet_heap = zend_memory_usage(0);
     uint64_t quiet_pool = oxphp_fiber_pool_heap_bytes();
     uint64_t served_at_start = ctx->requests_done;
@@ -7135,6 +7253,22 @@ static void oxphp_serve_loop(zend_fcall_info *fci, zend_fcall_info_cache *fcc)
                              "oxphp: worker %d retiring: more than memory_limit is still "
                              "in use after an error reported past the limit, so the "
                              "limit cannot be put back in force",
+                             oxphp_bridge_get_worker_id());
+                    if (sapi_module.log_message != NULL) {
+                        sapi_module.log_message(msg, LOG_NOTICE);
+                    }
+                    oxphp_bridge_schedule_exit();
+                    break;
+                }
+                /* Ahead of the collection below, whose destructors would find
+                 * the handle refused. Not judged, as the checks below are: the
+                 * handle is refused from the worker's first request. */
+                if (oxphp_curl_take_bailout() && !oxphp_bridge_is_draining()) {
+                    snprintf(msg, sizeof(msg),
+                             "oxphp: worker %d retiring: a request was ended inside a "
+                             "cURL transfer, from one of the transfer's callbacks, "
+                             "after which libcurl refuses another transfer on that "
+                             "handle",
                              oxphp_bridge_get_worker_id());
                     if (sapi_module.log_message != NULL) {
                         sapi_module.log_message(msg, LOG_NOTICE);
@@ -10121,6 +10255,7 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
     oxphp_putenv_hook_install();
 #endif
     oxphp_define_hook_install();
+    oxphp_curl_hooks_install();
     oxphp_runtime_hooks_install();
     oxphp_request_body_hook_install();
 
@@ -10148,6 +10283,7 @@ PHP_MSHUTDOWN_FUNCTION(oxphp_sapi)
     oxphp_request_body_hook_restore();
     oxphp_runtime_hooks_restore();
     oxphp_session_gate_restore();
+    oxphp_curl_hooks_restore();
     oxphp_define_hook_restore();
 #ifdef HAVE_PUTENV
     oxphp_putenv_hook_restore();
