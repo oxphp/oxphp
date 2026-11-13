@@ -904,19 +904,35 @@ static inline void oxphp_vm_stack_rewind(const oxphp_vm_stack_mark *mark) {
     EG(current_execute_data) = mark->execute_data;
 }
 
-/* Put the collector's guard back to `protect` after a bailout raised it, or
- * retire the worker when the bailout interrupted a collection — see the second
- * flag in the comment below. */
-static void oxphp_gc_unprotect_after_bailout(bool protect) {
+/* Put the collector's guard back to `protect` after a bailout raised it; false,
+ * leaving it up, when the bailout interrupted a collection — see the second flag
+ * in the comment below.
+ *
+ * Never down over a collector with no buffer of possible roots. With
+ * zend.enable_gc=0 at startup the engine allocates none, and only the guard
+ * keeps gc_possible_root() from writing into it once a collection has moved the
+ * next free slot to the buffer's first (gc_compact(), PHP 8.4.27 / 8.5.12) — a
+ * write into memory the buffer does not have, which ends the process. Keyed on
+ * the buffer, not on gc_enabled(): gc_disable() at run time keeps the buffer it
+ * has. */
+static bool oxphp_gc_put_guard_back(bool protect) {
     zend_gc_status gc_status;
     zend_gc_get_status(&gc_status);
     if (gc_status.active) {
+        return false;
+    }
+    gc_protect(protect || gc_status.buf_size == 0);
+    return true;
+}
+
+/* The same, retiring the worker when a collection the bailout interrupted
+ * keeps the guard up. */
+static void oxphp_gc_unprotect_after_bailout(bool protect) {
+    if (!oxphp_gc_put_guard_back(protect)) {
         php_log_err("oxphp: a fatal interrupted a cycle collection — the "
                     "collector cannot be restarted in this process, so this "
                     "worker is retiring and the pool will replace it");
         oxphp_bridge_schedule_exit();
-    } else {
-        gc_protect(protect);
     }
 }
 
@@ -955,8 +971,9 @@ static void oxphp_recovery_drop_raised(const oxphp_vm_stack_mark *mark,
  * Lowered once the request is off that state.
  *
  * The second flag is the cycle collector's, raised by zend_bailout beside the
- * first. Only zend_activate lowers it, and a worker runs that once for the whole
- * worker rather than once per request — so left alone, the first fatal is the
+ * first. Only zend_activate lowers it (and gc_enable(), when it allocates the
+ * buffer), and a worker runs zend_activate once for the whole worker rather than
+ * once per request — so left alone, the first fatal is the
  * last moment this worker ever buffers a possible root: gc_possible_root()
  * returns immediately, nothing reaches the collector, and no cycle any later
  * request builds is ever collected. Not lowered while a collection is what the
