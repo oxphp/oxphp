@@ -40,4 +40,23 @@ if (!class_exists('OxphpArgumentProbe', false)) {
             return (int) preg_replace('/^.*?refcount\((\d+)\).*$/s', '$1', (string) ob_get_clean());
         }
     }
+
+    // Functions, not static methods: the tracing JIT compiles a function call
+    // itself, and leaves a static method call to the interpreter.
+    function oxphp_argument_outer(mixed $a, mixed $b): void
+    {
+    }
+
+    function oxphp_argument_inner(mixed $a, mixed $b, mixed $c): object
+    {
+        return OxphpArgumentProbe::$held;
+    }
+
+    // Named, so that registering it again on a later request adds nothing.
+    function oxphp_argument_autoload(string $class): void
+    {
+        if ($class === 'OxphpArgumentUnloaded') {
+            engine_fatal('OxphpArgumentWarningFatal');
+        }
+    }
 }

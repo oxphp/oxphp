@@ -837,6 +837,44 @@ static void oxphp_hand_symbol_table_down(zend_execute_data *ex, zend_execute_dat
     }
 }
 
+/* How many calls a frame's opcodes have begun and not made at op_num, paired as
+ * cleanup_unfinished_calls() pairs them. A begin the fatal came out of has not
+ * linked its call. */
+static uint32_t oxphp_calls_open_at(const zend_op_array *op_array, uint32_t op_num) {
+    uint32_t open = 0;
+    uint32_t level = 0;
+    for (uint32_t n = op_num + 1; n-- > 0;) {
+        switch (op_array->opcodes[n].opcode) {
+            case ZEND_DO_FCALL:
+            case ZEND_DO_ICALL:
+            case ZEND_DO_UCALL:
+            case ZEND_DO_FCALL_BY_NAME:
+            case ZEND_CALLABLE_CONVERT:
+                level++;
+                break;
+            case ZEND_INIT_FCALL:
+            case ZEND_INIT_FCALL_BY_NAME:
+            case ZEND_INIT_NS_FCALL_BY_NAME:
+            case ZEND_INIT_DYNAMIC_CALL:
+            case ZEND_INIT_USER_CALL:
+            case ZEND_INIT_METHOD_CALL:
+            case ZEND_INIT_STATIC_METHOD_CALL:
+            case ZEND_INIT_PARENT_PROPERTY_HOOK_CALL:
+            case ZEND_NEW:
+                if (n == op_num) {
+                    break;
+                }
+                if (level == 0) {
+                    open++;
+                } else {
+                    level--;
+                }
+                break;
+        }
+    }
+    return open;
+}
+
 /* The calls a frame had begun and not made yet: the arguments already passed to
  * each, the object it was to run on, its closure or its trampoline. A copy of
  * what the engine releases when an exception leaves the frame from the same
@@ -849,6 +887,32 @@ static void oxphp_release_unfinished_calls(zend_execute_data *execute_data, uint
     if (call == NULL) {
         return;
     }
+
+    /* Only a chain that links exactly the calls the opcodes have open, since the
+     * release sets each call's argument count from the opcodes. The tracing JIT
+     * links a call it begins only once an opcode after the begin needs the link,
+     * and it judges that passing an argument never does, nor anything the begin
+     * opcode itself cannot throw from; yet an undefined variable passed is
+     * warned about. A fatal from that warning finds the frame naming the call
+     * outside, and the inner call's count would release the outer call's slots.
+     * Both keep what they hold instead. A call evaluating defaults links back to
+     * this frame, out of sight of the calls outside it, and is released alone.
+     * SYNC: php-src 8.4.27 / 8.5.12 ext/opcache/jit/zend_jit.c
+     *       zend_jit_needs_call_chain(); zend_jit_ir.c zend_jit_send_var() */
+    uint32_t linked = 0;
+    bool borrowed = false;
+    for (const zend_execute_data *c = call; c != NULL; c = c->prev_execute_data) {
+        linked++;
+        if (c->prev_execute_data == execute_data) {
+            borrowed = true;
+            break;
+        }
+    }
+    if (!borrowed && linked != oxphp_calls_open_at(&EX(func)->op_array, op_num)) {
+        EX(call) = NULL;
+        return;
+    }
+
     const zend_op *const bailed = EX(func)->op_array.opcodes + op_num;
     const zend_op *opline = bailed;
     int level;
@@ -1011,8 +1075,9 @@ static void oxphp_release_unfinished_calls(zend_execute_data *execute_data, uint
  * That release is sound only at an opcode that was running, with every temporary
  * in range of it live, and the engine's exception unwinding depends on the same:
  * a handler saves its opline before anything that can raise an error, and the
- * JIT stores the opline, the calls it had begun and every temporary that may need
- * releasing before any such point. A fatal is raised from those same points.
+ * JIT stores the opline and every temporary that may need releasing before any
+ * such point — though not always the calls it had begun, which the release of
+ * calls checks for itself. A fatal is raised from those same points.
  * SYNC: php-src 8.4.27 / 8.5.12 Zend/zend_execute.c cleanup_live_vars();
  *       ext/opcache/jit/zend_jit.c ZREG_STORE for live-range temporaries;
  *       ext/opcache/jit/zend_jit_ir.c zend_jit_set_ip() */

@@ -7,8 +7,8 @@ declare(strict_types=1);
 // constructor fatals. The call has not been entered, but the engine evaluates
 // the default with the call standing as the current frame, so the frames the
 // fatal leaves behind include one whose arguments are all that is set up. The
-// call is made from the calling frame, or through zend_call_function() with
-// ?via=reflection.
+// call is made from the calling frame, as an argument of another call there
+// with ?via=nested, or through zend_call_function() with ?via=reflection.
 // See test_fatal_in_a_default_argument_leaves_the_call_alone.php.
 
 require_once __DIR__ . '/../engine_fatal.php';
@@ -41,14 +41,14 @@ if (!class_exists('OxphpDefaultArgumentDep', false)) {
     }
 }
 
-(static function (bool $reflection): void {
+(static function (string $via): void {
     $o = OxphpArgumentProbe::$held;
     oxphp_default_argument_spread($o);
-    if ($reflection) {
-        (new ReflectionFunction('oxphp_default_argument_take'))->invokeArgs(['o' => $o]);
-    } else {
-        oxphp_default_argument_take(o: $o);
-    }
-})(($_GET['via'] ?? '') === 'reflection');
+    match ($via) {
+        'reflection' => (new ReflectionFunction('oxphp_default_argument_take'))->invokeArgs(['o' => $o]),
+        'nested' => OxphpArgumentProbe::take(oxphp_default_argument_take(o: $o)),
+        default => oxphp_default_argument_take(o: $o),
+    };
+})((string) ($_GET['via'] ?? 'call'));
 
 echo "NOT-REACHED\n";
