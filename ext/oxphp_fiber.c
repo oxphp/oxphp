@@ -168,10 +168,7 @@ static __thread uint32_t oxphp_recovery_depth = 0;
 static __thread struct {
     uint8_t *alive;  /* malloc'd, NULL when there is no snapshot */
     uint32_t top;
-    /* The report that took the snapshot is still running: the flag is not set
-     * yet, and is never set if a write ends the report first. */
-    bool reporting;
-} oxphp_destructed_snapshot = {NULL, 0, false};
+} oxphp_destructed_snapshot = {NULL, 0};
 
 /* The types php_error_cb() bails out of, flagging every object first, unless
  * the report carries E_DONT_BAIL. */
@@ -205,7 +202,34 @@ static void oxphp_destructed_snapshot_forget(void) {
     free(oxphp_destructed_snapshot.alive);
     oxphp_destructed_snapshot.alive = NULL;
     oxphp_destructed_snapshot.top = 0;
-    oxphp_destructed_snapshot.reporting = false;
+}
+
+/* Whether the engine's flag landed on what the snapshot saw alive. It lands on
+ * every live object at once, so it landed when each of them still alive has
+ * it: a report can also end in a bailout that flags nothing — its display write
+ * cancelled, or an extension's error callback ending it on its own (a
+ * SoapClient turning the error into a SoapFault). An object made after the flag
+ * in a slot freed since the snapshot reads as unflagged, and the snapshot is
+ * then dropped: the neighbours lose their destructors, as they do in PHP, which
+ * is the safer error than clearing flags set since.
+ * SYNC: php-src/ext/soap/soap.c soap_real_error_handler() */
+static bool oxphp_destructed_snapshot_marked(void) {
+    zend_objects_store *store = &EG(objects_store);
+    if (oxphp_destructed_snapshot.alive == NULL || store->object_buckets == NULL) {
+        return false;
+    }
+    bool seen = false;
+    uint32_t top = MIN(oxphp_destructed_snapshot.top, store->top);
+    for (uint32_t h = 1; h < top; h++) {
+        zend_object *obj = store->object_buckets[h];
+        if ((oxphp_destructed_snapshot.alive[h / 8] & (1u << (h % 8))) && IS_OBJ_VALID(obj)) {
+            if (!(OBJ_FLAGS(obj) & IS_OBJ_DESTRUCTOR_CALLED)) {
+                return false;
+            }
+            seen = true;
+        }
+    }
+    return seen;
 }
 
 /* Runs no user code. A handle freed since the snapshot is skipped; one freed and
@@ -588,20 +612,24 @@ static void oxphp_bailout_frame_cb(int type, zend_string *file, const uint32_t l
         && oxphp_destructed_snapshot.alive == NULL) {
         oxphp_destructed_snapshot_take();
         if (oxphp_destructed_snapshot.alive != NULL) {
-            /* Bracketed so that `reporting` ends with the report however the
-             * report ends; the bailout goes on to whoever was to catch it. The
+            /* Bracketed so that the snapshot outlives the report only when its
+             * bailout flagged what the snapshot saw. A stale one would be
+             * restored over flags set after it — a failed constructor's among
+             * them — and would stand in for the next fatal's snapshot. The
              * engine flags the objects only on its way into that bailout, so a
-             * report that returns flagged nothing. No parking inside: displaying
-             * the report can run an output handler, and another request run in
-             * the meantime would make objects the snapshot does not know, which
-             * the flag would then reach and the restore would not. */
-            oxphp_destructed_snapshot.reporting = true;
+             * report that returns flagged nothing. No parking inside:
+             * displaying the report can run an output handler, and another
+             * request run in the meantime would make objects the snapshot does
+             * not know, which the flag would then reach and the restore would
+             * not. */
             oxphp_park_blocked++;
             zend_try {
                 oxphp_next_error_cb(type, file, line, message);
             } zend_catch {
                 oxphp_park_blocked--;
-                oxphp_destructed_snapshot.reporting = false;
+                if (!oxphp_destructed_snapshot_marked()) {
+                    oxphp_destructed_snapshot_forget();
+                }
                 zend_bailout();
             } zend_end_try();
             oxphp_park_blocked--;
@@ -729,13 +757,6 @@ static zend_op_array *oxphp_compile_string(zend_string *source, const char *file
  * does, and leaves the request the same frames to give back along the same
  * route. */
 void oxphp_fiber_record_cancel_bailout_frame(void) {
-    /* A write that bails out in the middle of a report is the display of that
-     * fatal, which the engine makes before it flags anything: the flag is now
-     * never set, and a snapshot taken back over it would clear what the
-     * recovery's destructors set. */
-    if (oxphp_destructed_snapshot.reporting) {
-        oxphp_destructed_snapshot_forget();
-    }
     if (oxphp_current_fiber != NULL) {
         oxphp_record_bailout_frame();
     }
