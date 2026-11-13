@@ -821,9 +821,8 @@ int oxphp_fiber_current_task_code_in_request_memory(void);
 void oxphp_fiber_minit(void);
 
 /* Record where the running request is, for the cleanup after a bailout that no
- * error preceded, and drop the destructed-flag snapshot of a fatal whose display
- * that bailout cuts short. Called immediately before the write path's
- * cancellation bailout. */
+ * error preceded. Called immediately before the write path's cancellation
+ * bailout. */
 void oxphp_fiber_record_cancel_bailout_frame(void);
 
 /* Drop a destructed-flag snapshot that no recovery took back: the request it
