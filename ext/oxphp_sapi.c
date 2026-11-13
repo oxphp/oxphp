@@ -10222,6 +10222,8 @@ PHP_RSHUTDOWN_FUNCTION(oxphp_sapi)
         zval_ptr_dtor(&worker);
     }
 
+    oxphp_fiber_forget_destructed_snapshot();
+
     return SUCCESS;
 }
 /* }}} */

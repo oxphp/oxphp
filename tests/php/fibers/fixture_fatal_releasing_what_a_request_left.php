@@ -2,7 +2,8 @@
 
 declare(strict_types=1);
 
-// Inner self-request for fibers/test_fatal_releasing_what_a_request_left_keeps_the_worker.
+// Inner self-request for fibers/test_fatal_releasing_what_a_request_left_keeps_the_worker
+// and fibers/test_fatal_releasing_a_tasks_closure_keeps_other_destructors.
 //
 // Each step leaves behind something whose release, once the handler has
 // returned, runs a destructor that throws or raises a fatal error. The

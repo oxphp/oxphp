@@ -217,6 +217,21 @@ fibers/test_collection_while_releasing_frames_keeps_the_worker_probe
 fibers/test_fatal_in_the_periodic_gc_retires_through_the_loop | GET | | 503 |
 fibers/test_fatal_in_the_periodic_gc_retires_through_the_loop_probe
 
+# A fatal in one request or task takes the destructors of what releasing its
+# variables frees, and of nothing else: what a request or task parked beside it
+# holds, what the worker holds, and what of the failed request outlives that
+# release are destructed when they are let go of, as they would be with no
+# fatal. The second line fails the inner request by running out of memory, the
+# third by running out of time; the last has it display its fatal through an
+# output handler that sleeps. The same holds for a fatal raised where no request
+# runs, as the worker lets go of a stopped task's closure between requests.
+fibers/test_fatal_keeps_a_parked_requests_destructors
+fibers/test_fatal_keeps_a_parked_requests_destructors >> ?oom=1
+fibers/test_fatal_keeps_a_parked_requests_destructors >> ?timeout=1
+fibers/test_task_fatal_keeps_a_parked_tasks_destructors
+fibers/test_fatal_report_runs_no_other_request
+fibers/test_fatal_releasing_a_tasks_closure_keeps_other_destructors
+
 # A stream's flush waiting for room in its queue: the stream reaches a client
 # on the same worker thread whole, another request is served while it waits, the
 # wait ends at its client leaving and at its time limit, and what is left of a
