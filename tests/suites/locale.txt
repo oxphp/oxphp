@@ -1,0 +1,19 @@
+# profile: locale
+# description: setlocale() changes the locale of the request that calls it — not of requests on other workers — and only until that request ends
+
+# A request running at the same time on the other worker keeps its own locale,
+# by name and in what locale-dependent functions return.
+locale/test_setlocale_not_seen_by_other_worker
+
+# The end of a request that changed its locale resets that request's thread
+# only: a request still running on another worker keeps its locale, and the
+# next request on the same thread starts from the server's.
+locale/test_setlocale_survives_other_workers_request_end
+
+# A session written at shutdown is written under the server's locale, as with
+# PHP, and a locale its save handler sets ends with the request.
+locale/test_setlocale_reset_before_session_shutdown_write
+
+# Within its own request setlocale() returns what PHP's does, and the locale it
+# sets is the one locale-dependent functions use.
+locale/test_setlocale_applies_to_own_request
