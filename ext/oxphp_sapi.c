@@ -34,6 +34,7 @@
 #endif
 #include <inttypes.h>
 #include <limits.h>
+#include <locale.h>
 #include <stdlib.h>
 #include <strings.h>
 #include <stdatomic.h>
@@ -6109,6 +6110,426 @@ static void oxphp_putenv_hook_restore(void)
 }
 #endif
 
+/* setlocale() per PHP thread. libc's setlocale() changes the locale of the
+ * whole process, and outside Windows PHP's setlocale() calls it as it is
+ * (try_setlocale_str, ext/standard/string.c, 8.4.27 and 8.5.12): a request's
+ * change applies to the requests running on every other thread, and the end of
+ * a request that made one puts the process back to "C", LC_CTYPE "C.UTF-8",
+ * under them (basic RSHUTDOWN, on BG(locale_changed)). Here every PHP thread
+ * runs under a locale object of its own (uselocale()), and setlocale() replaces
+ * that object.
+ *
+ * The names setlocale() returns, and the LC_ALL name a later call has to take
+ * back, are libc's own: glibc and musl spell them differently, and "" means
+ * whatever the environment names. So libc's setlocale() still makes the change,
+ * on the process locale used as scratch under oxphp_locale_lock: load this
+ * thread's names, apply the change, read every category back, put back the
+ * server's names. Only libc runs under the lock — PHP's conversions and warnings
+ * happen before it is taken — so neither user code nor a bailout can leave it
+ * held.
+ *
+ * A C extension that calls libc's setlocale() itself — intl's
+ * NumberFormatter::parse() does, for LC_NUMERIC — bypasses the lock. It changes
+ * the process locale, which a PHP thread no longer runs under once its first
+ * request has started, but which is the scratch: a change landing while
+ * another thread holds it can end up in that thread's names, and on glibc,
+ * which frees a category's name when it changes, can free a name being copied.
+ * A query from such an extension answers the server's names, not its thread's. */
+static zif_handler oxphp_orig_setlocale = NULL;
+static pthread_mutex_t oxphp_locale_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Every category setlocale() takes besides LC_ALL; glibc has six musl lacks. */
+static const int oxphp_locale_cat[] = {
+    LC_CTYPE, LC_NUMERIC, LC_TIME, LC_COLLATE, LC_MONETARY, LC_MESSAGES,
+#ifdef LC_IDENTIFICATION
+    LC_PAPER, LC_NAME, LC_ADDRESS, LC_TELEPHONE, LC_MEASUREMENT, LC_IDENTIFICATION,
+#endif
+};
+static const int oxphp_locale_mask[] = {
+    LC_CTYPE_MASK, LC_NUMERIC_MASK, LC_TIME_MASK, LC_COLLATE_MASK, LC_MONETARY_MASK,
+    LC_MESSAGES_MASK,
+#ifdef LC_IDENTIFICATION
+    LC_PAPER_MASK, LC_NAME_MASK, LC_ADDRESS_MASK, LC_TELEPHONE_MASK, LC_MEASUREMENT_MASK,
+    LC_IDENTIFICATION_MASK,
+#endif
+};
+#define OXPHP_LOCALE_NCAT (sizeof(oxphp_locale_cat) / sizeof(oxphp_locale_cat[0]))
+_Static_assert(sizeof(oxphp_locale_cat) == sizeof(oxphp_locale_mask),
+               "one mask per locale category");
+
+/* A locale as libc names it: the LC_ALL name and one per category. */
+typedef struct {
+    const char *all;
+    const char *cat[OXPHP_LOCALE_NCAT];
+    char buf[];
+} oxphp_locale_names;
+
+/* The process locale every request starts from: the one the startup of all
+ * modules has left, copied at the first request. Never freed: any PHP thread
+ * may be running under it. Read only by a thread that has passed
+ * oxphp_locale_base_once, in oxphp_locale_thread_activate(). */
+static pthread_once_t oxphp_locale_base_once = PTHREAD_ONCE_INIT;
+static locale_t oxphp_locale_base;
+static oxphp_locale_names *oxphp_locale_base_names;
+
+/* This thread's locale once a request has changed it; (locale_t) 0 and NULL
+ * while the thread runs under oxphp_locale_base. */
+static __thread locale_t oxphp_locale_own;
+static __thread oxphp_locale_names *oxphp_locale_own_names;
+static __thread bool oxphp_locale_thread_on = false;
+
+static const oxphp_locale_names *oxphp_locale_current_names(void)
+{
+    return oxphp_locale_own_names ? oxphp_locale_own_names : oxphp_locale_base_names;
+}
+
+static const char *oxphp_locale_name_of(const oxphp_locale_names *names, int cat)
+{
+    if (cat == LC_ALL) {
+        return names->all;
+    }
+    for (size_t i = 0; i < OXPHP_LOCALE_NCAT; i++) {
+        if (oxphp_locale_cat[i] == cat) {
+            return names->cat[i];
+        }
+    }
+    return NULL;
+}
+
+/* The process locale's names, copied. The strings setlocale(..., NULL) returns
+ * stay valid until the process locale next changes, which the caller rules out
+ * — against every setlocale() but a C extension's own — by holding
+ * oxphp_locale_lock or by running before the scratch is first used. */
+static oxphp_locale_names *oxphp_locale_read_names(void)
+{
+    const char *src[1 + OXPHP_LOCALE_NCAT];
+    size_t len[1 + OXPHP_LOCALE_NCAT];
+    size_t total = 0;
+
+    src[0] = setlocale(LC_ALL, NULL);
+    for (size_t i = 0; i < OXPHP_LOCALE_NCAT; i++) {
+        src[i + 1] = setlocale(oxphp_locale_cat[i], NULL);
+    }
+    for (size_t i = 0; i <= OXPHP_LOCALE_NCAT; i++) {
+        if (!src[i]) {
+            return NULL;
+        }
+        len[i] = strlen(src[i]) + 1;
+        total += len[i];
+    }
+
+    oxphp_locale_names *names = malloc(sizeof(*names) + total);
+    if (!names) {
+        return NULL;
+    }
+    char *p = names->buf;
+    for (size_t i = 0; i <= OXPHP_LOCALE_NCAT; i++) {
+        memcpy(p, src[i], len[i]);
+        if (i == 0) {
+            names->all = p;
+        } else {
+            names->cat[i - 1] = p;
+        }
+        p += len[i];
+    }
+    return names;
+}
+
+/* Category by category: newlocale() gives every category of its mask the one
+ * name it is passed, and musl's does not split an LC_ALL name. */
+static locale_t oxphp_locale_build(const oxphp_locale_names *names)
+{
+    locale_t loc = newlocale(LC_ALL_MASK, "C", (locale_t) 0);
+    for (size_t i = 0; loc && i < OXPHP_LOCALE_NCAT; i++) {
+        /* A newlocale() that fails leaves the object it was to modify intact. */
+        locale_t next = newlocale(oxphp_locale_mask[i], names->cat[i], loc);
+        if (!next) {
+            freelocale(loc);
+            return (locale_t) 0;
+        }
+        loc = next;
+    }
+    return loc;
+}
+
+/* Category by category, not through the LC_ALL name: libc does not escape the
+ * separator of its LC_ALL name inside a category's name, and musl keeps any
+ * name it is given for a category it has no data for. */
+static bool oxphp_locale_load(const oxphp_locale_names *names)
+{
+    for (size_t i = 0; i < OXPHP_LOCALE_NCAT; i++) {
+        if (!setlocale(oxphp_locale_cat[i], names->cat[i])) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* setlocale(cat, name) applied to this thread's names. NULL when libc refuses
+ * the change or this thread's names, or the copy cannot be allocated. */
+static oxphp_locale_names *oxphp_locale_change(int cat, const char *name)
+{
+    const oxphp_locale_names *own = oxphp_locale_current_names();
+    oxphp_locale_names *changed = NULL;
+
+    pthread_mutex_lock(&oxphp_locale_lock);
+    if (oxphp_locale_load(own) && setlocale(cat, name)) {
+        changed = oxphp_locale_read_names();
+    }
+    oxphp_locale_load(oxphp_locale_base_names);
+    pthread_mutex_unlock(&oxphp_locale_lock);
+    return changed;
+}
+
+/* Puts this thread under the locale names describes and takes ownership of
+ * names; NULL, or the server's names, put it back under oxphp_locale_base.
+ * False, with names freed and the thread left as it was, when libc cannot build
+ * that locale. */
+static bool oxphp_locale_switch(oxphp_locale_names *names)
+{
+    locale_t loc = (locale_t) 0;
+
+    if (names && strcmp(names->all, oxphp_locale_base_names->all) == 0) {
+        free(names);
+        names = NULL;
+    }
+    if (names && !(loc = oxphp_locale_build(names))) {
+        free(names);
+        return false;
+    }
+    /* Before the free: freeing the locale a thread is running under is
+     * undefined. */
+    uselocale(loc ? loc : oxphp_locale_base);
+    if (oxphp_locale_own) {
+        freelocale(oxphp_locale_own);
+    }
+    free(oxphp_locale_own_names);
+    oxphp_locale_own = loc;
+    oxphp_locale_own_names = names;
+    return true;
+}
+
+/* Without a copy of the startup locale the hook hands every call to PHP's own
+ * setlocale(), which changes the process locale. */
+static void oxphp_locale_capture_base(void)
+{
+    oxphp_locale_names *names = oxphp_locale_read_names();
+    locale_t base = names ? oxphp_locale_build(names) : (locale_t) 0;
+
+    if (!base) {
+        free(names);
+        php_log_err("oxphp: could not copy the startup locale; setlocale() in one "
+                    "request changes the locale of the requests on other threads");
+        return;
+    }
+    oxphp_locale_base_names = names;
+    oxphp_locale_base = base;
+}
+
+/* Before any PHP code runs on the thread: until then it runs under the process
+ * locale, which another thread may be holding as scratch. */
+static void oxphp_locale_thread_activate(void)
+{
+    if (oxphp_locale_thread_on || !oxphp_orig_setlocale) {
+        return;
+    }
+    pthread_once(&oxphp_locale_base_once, oxphp_locale_capture_base);
+    if (oxphp_locale_base) {
+        uselocale(oxphp_locale_base);
+    }
+    oxphp_locale_thread_on = true;
+}
+
+/* try_setlocale_str() (ext/standard/string.c, 8.4.27 and 8.5.12) on this
+ * thread's locale. Everything but the libc calls is PHP's, except that
+ * BG(locale_changed) stays unset — basic RSHUTDOWN would answer it by resetting
+ * the process locale, and oxphp_locale_request_end() resets this thread's —
+ * and that BG(ctype_string) is never left released. */
+static zend_string *oxphp_try_setlocale_str(zend_long cat, zend_string *loc)
+{
+    if (zend_string_equals_literal(loc, "0")) {
+        loc = NULL;
+    } else if (ZSTR_LEN(loc) >= 255) {
+        php_error_docref(NULL, E_WARNING, "Specified locale name is too long");
+        return NULL;
+    }
+
+    if (loc) {
+        oxphp_locale_names *changed = oxphp_locale_change((int) cat, ZSTR_VAL(loc));
+        if (!changed || !oxphp_locale_switch(changed)) {
+            return NULL;
+        }
+    }
+    /* What libc's setlocale() returns, for a change as for a query, is the
+     * category's name afterwards. */
+    const char *retval = oxphp_locale_name_of(oxphp_locale_current_names(), (int) cat);
+    if (!retval) {
+        return NULL;
+    }
+
+    if (loc) {
+        size_t len = strlen(retval);
+
+        if (cat == LC_CTYPE || cat == LC_ALL) {
+            zend_update_current_locale();
+            if (BG(ctype_string)) {
+                zend_string_release_ex(BG(ctype_string), 0);
+                /* Unlike PHP: zend_string_init() below can hit memory_limit,
+                 * and oxphp_locale_request_end() releases what is left here. */
+                BG(ctype_string) = NULL;
+            }
+            if (len == 1 && *retval == 'C') {
+                /* C locale is represented as NULL. */
+                BG(ctype_string) = NULL;
+                return ZSTR_CHAR('C');
+            } else if (zend_string_equals_cstr(loc, retval, len)) {
+                BG(ctype_string) = zend_string_copy(loc);
+                return zend_string_copy(BG(ctype_string));
+            } else {
+                BG(ctype_string) = zend_string_init(retval, len, 0);
+                return zend_string_copy(BG(ctype_string));
+            }
+        } else if (zend_string_equals_cstr(loc, retval, len)) {
+            return zend_string_copy(loc);
+        }
+    }
+    return zend_string_init(retval, strlen(retval), 0);
+}
+
+static zend_string *oxphp_try_setlocale_zval(zend_long cat, zval *loc_zv)
+{
+    zend_string *tmp_loc_str;
+    zend_string *loc_str = zval_try_get_tmp_string(loc_zv, &tmp_loc_str);
+    if (UNEXPECTED(loc_str == NULL)) {
+        return NULL;
+    }
+    zend_string *result = oxphp_try_setlocale_str(cat, loc_str);
+    zend_tmp_string_release(tmp_loc_str);
+    return result;
+}
+
+/* PHP_FUNCTION(setlocale) of the PHP version built against, around
+ * oxphp_try_setlocale_str(). */
+static ZEND_NAMED_FUNCTION(oxphp_setlocale_hook)
+{
+    zend_long cat;
+    zval *args = NULL;
+    uint32_t num_args;
+
+    oxphp_locale_thread_activate();
+    if (!oxphp_locale_base) {
+        oxphp_orig_setlocale(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+        return;
+    }
+
+    ZEND_PARSE_PARAMETERS_START(2, -1)
+        Z_PARAM_LONG(cat)
+        Z_PARAM_VARIADIC('+', args, num_args)
+    ZEND_PARSE_PARAMETERS_END();
+
+#if PHP_VERSION_ID >= 80500
+    ALLOCA_FLAG(use_heap);
+    zend_string **strings = do_alloca(sizeof(zend_string *) * num_args, use_heap);
+
+    for (uint32_t i = 0; i < num_args; i++) {
+        if (UNEXPECTED(Z_TYPE(args[i]) != IS_ARRAY
+                       && !zend_parse_arg_str(&args[i], &strings[i], true, i + 2))) {
+            zend_wrong_parameter_type_error(i + 2, Z_EXPECTED_ARRAY_OR_STRING_OR_NULL, &args[i]);
+            goto out;
+        }
+    }
+
+    for (uint32_t i = 0; i < num_args; i++) {
+        zend_string *result;
+        if (Z_TYPE(args[i]) == IS_ARRAY) {
+            zval *elem;
+            ZEND_HASH_FOREACH_VAL(Z_ARRVAL(args[i]), elem) {
+                result = oxphp_try_setlocale_zval(cat, elem);
+                if (EG(exception)) {
+                    goto out;
+                }
+                if (result) {
+                    RETVAL_STR(result);
+                    goto out;
+                }
+            } ZEND_HASH_FOREACH_END();
+            continue;
+        } else if (Z_ISNULL(args[i])) {
+            result = oxphp_try_setlocale_str(cat, ZSTR_EMPTY_ALLOC());
+        } else {
+            result = oxphp_try_setlocale_str(cat, strings[i]);
+        }
+        if (EG(exception)) {
+            goto out;
+        }
+        if (result) {
+            RETVAL_STR(result);
+            goto out;
+        }
+    }
+
+    RETVAL_FALSE;
+
+out:
+    free_alloca(strings, use_heap);
+#else
+    for (uint32_t i = 0; i < num_args; i++) {
+        if (Z_TYPE(args[i]) == IS_ARRAY) {
+            zval *elem;
+            ZEND_HASH_FOREACH_VAL(Z_ARRVAL(args[i]), elem) {
+                zend_string *result = oxphp_try_setlocale_zval(cat, elem);
+                if (EG(exception)) {
+                    RETURN_THROWS();
+                }
+                if (result) {
+                    RETURN_STR(result);
+                }
+            } ZEND_HASH_FOREACH_END();
+        } else {
+            zend_string *result = oxphp_try_setlocale_zval(cat, &args[i]);
+            if (EG(exception)) {
+                RETURN_THROWS();
+            }
+            if (result) {
+                RETURN_STR(result);
+            }
+        }
+    }
+
+    RETURN_FALSE;
+#endif
+}
+
+/* Swapped on the startup thread, as the putenv() hook is. */
+static void oxphp_setlocale_hook_install(void)
+{
+    oxphp_hook_swap("setlocale", sizeof("setlocale") - 1,
+                    oxphp_setlocale_hook, &oxphp_orig_setlocale);
+}
+
+static void oxphp_setlocale_hook_restore(void)
+{
+    oxphp_hook_restore("setlocale", sizeof("setlocale") - 1, oxphp_orig_setlocale);
+    oxphp_orig_setlocale = NULL;
+}
+
+/* Back to the server's locale, as basic RSHUTDOWN puts the process back when
+ * PHP's own setlocale() has changed it. A second call does nothing more. */
+static void oxphp_locale_request_end(void)
+{
+    if (!oxphp_locale_thread_on || !oxphp_locale_base) {
+        return;
+    }
+    if (oxphp_locale_own_names) {
+        oxphp_locale_switch(NULL);
+    }
+    if (BG(ctype_string)) {
+        zend_string_release_ex(BG(ctype_string), 0);
+        BG(ctype_string) = NULL;
+    }
+    zend_update_current_locale();
+}
+
 /* define() on an async worker, whose constants outlive the requests whose code
  * its tasks run. define() copies an array only when it is counted and keeps an
  * uncounted one, given or nested, by pointer (copy_constant_array,
@@ -10254,6 +10675,7 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
 #ifdef HAVE_PUTENV
     oxphp_putenv_hook_install();
 #endif
+    oxphp_setlocale_hook_install();
     oxphp_define_hook_install();
     oxphp_curl_hooks_install();
     oxphp_runtime_hooks_install();
@@ -10285,6 +10707,7 @@ PHP_MSHUTDOWN_FUNCTION(oxphp_sapi)
     oxphp_session_gate_restore();
     oxphp_curl_hooks_restore();
     oxphp_define_hook_restore();
+    oxphp_setlocale_hook_restore();
 #ifdef HAVE_PUTENV
     oxphp_putenv_hook_restore();
 #endif
@@ -10299,6 +10722,7 @@ PHP_MSHUTDOWN_FUNCTION(oxphp_sapi)
 PHP_RINIT_FUNCTION(oxphp_sapi)
 {
     oxphp_apm_install_on_thread();  /* no-op after first call per thread */
+    oxphp_locale_thread_activate();
 
     if (oxphp_net_installed) {
         pthread_once(&oxphp_net_probe_once, oxphp_net_capture_tables);
@@ -10360,6 +10784,13 @@ PHP_RSHUTDOWN_FUNCTION(oxphp_sapi)
 
     oxphp_fiber_forget_destructed_snapshot();
 
+    /* Here, not only in post-deactivate: with PHP (8.4.27, 8.5.12) basic's
+     * RSHUTDOWN resets the locale before session's writes the session, and
+     * this module, registered by extension= after the built-in session, shuts
+     * down before it too. After the Worker release, so that destructors it
+     * runs keep the request's locale. */
+    oxphp_locale_request_end();
+
     return SUCCESS;
 }
 /* }}} */
@@ -10376,6 +10807,10 @@ ZEND_MODULE_POST_ZEND_DEACTIVATE_D(oxphp_sapi)
      * one — PHP holds a reference of its own to each object it left in the
      * store, so that they show up as leaks — see oxphp_worker_singleton. */
     ZVAL_UNDEF(&oxphp_worker_singleton);
+
+    /* Again, for a setlocale() from PHP code that ran after RSHUTDOWN reset the
+     * locale — a session save handler — so that it ends with the request. */
+    oxphp_locale_request_end();
 
     return SUCCESS;
 }
