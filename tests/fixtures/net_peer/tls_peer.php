@@ -11,6 +11,10 @@ declare(strict_types=1);
 //   4434  waits one second, then completes the handshake and sends "tls-done"
 //   4435  completes the handshake at once and never sends anything
 //   4436  accepts the TCP connection and never starts the handshake
+//   8080  HTTP: answers the request after the number of milliseconds its path
+//         starts with — `GET /2000/name` waits two seconds — one second for a
+//         path with no number, with the body "curl-done:" followed by the path
+//   8443  the same over TLS, the handshake completed at once
 //
 // The certificate is made here, at start-up, so nothing has to be generated or
 // mounted from outside and the peer runs from the stock PHP image.
@@ -32,7 +36,7 @@ $context = stream_context_create(['ssl' => [
 ]]);
 
 $listeners = [];
-foreach ([4433, 4434, 4435, 4436] as $port) {
+foreach ([4433, 4434, 4435, 4436, 8080, 8443] as $port) {
     $server = stream_socket_server("tcp://0.0.0.0:{$port}", $errno, $errstr, STREAM_SERVER_BIND | STREAM_SERVER_LISTEN, $context);
     if ($server === false) {
         fwrite(STDERR, "net peer: cannot listen on {$port}: {$errstr}\n");
@@ -45,6 +49,8 @@ foreach ([4433, 4434, 4435, 4436] as $port) {
 $pending = [];
 /** @var list<resource> $open */
 $open = [];
+/** @var list<array{conn: resource, accepted: float, request: string}> $http */
+$http = [];
 
 function handshake($conn): bool
 {
@@ -79,6 +85,14 @@ while (true) {
                         $open[] = $conn;
                     }
                     break;
+                case 8080:
+                    $http[] = ['conn' => $conn, 'accepted' => $now, 'request' => ''];
+                    break;
+                case 8443:
+                    if (handshake($conn)) {
+                        $http[] = ['conn' => $conn, 'accepted' => $now, 'request' => ''];
+                    }
+                    break;
                 default:
                     $open[] = $conn;
             }
@@ -96,6 +110,34 @@ while (true) {
         }
         fwrite($p['conn'], 'tls-done');
         $open[] = $p['conn'];
+    }
+
+    // An HTTP request is read as it arrives; its delay counts from the accept, and
+    // the answer goes out once both the request is complete and the delay is over.
+    foreach ($http as $i => $h) {
+        stream_set_blocking($h['conn'], false);
+        $data = @fread($h['conn'], 8192);
+        if (is_string($data)) {
+            $h['request'] .= $data;
+            $http[$i] = $h;
+        }
+        if (!str_contains($h['request'], "\r\n\r\n")) {
+            if (feof($h['conn'])) {
+                fclose($h['conn']);
+                unset($http[$i]);
+            }
+            continue;
+        }
+        $path = explode(' ', $h['request'], 3)[1] ?? '/';
+        $delayMs = preg_match('#^/(\d+)#', $path, $m) ? (int) $m[1] : 1000;
+        if ($h['accepted'] + $delayMs / 1000 > $now) {
+            continue;
+        }
+        unset($http[$i]);
+        $body = 'curl-done:' . $path;
+        fwrite($h['conn'], "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: " . strlen($body)
+            . "\r\nConnection: close\r\n\r\n" . $body);
+        $open[] = $h['conn'];
     }
 
     // Connections stay open until the client lets go of them, so a test that closes

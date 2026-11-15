@@ -1,5 +1,6 @@
 # The hooksdb setup (RUNTIME_HOOKS=1, one PHP worker, MySQL and Redis alongside)
-# with APM auto-instrumentation switched on as well.
+# with APM auto-instrumentation switched on as well, and the TLS peer the cURL
+# tests transfer from.
 #
 # APM wraps some of the same database methods the runtime hooks guard —
 # PDO::__construct/query/exec/prepare, mysqli::query/prepare and a handful of
@@ -27,6 +28,12 @@ services:
       file: compose.hooksdb.yml
       service: hooksdb-redis
 
+  # The peer the cURL tests transfer from; see compose.hooks.yml.
+  hooksdbapm-netpeer:
+    extends:
+      file: compose.hooks.yml
+      service: hooks-netpeer
+
   oxphp-hooksdbapm:
     extends:
       file: compose.hooksdb.yml
@@ -36,7 +43,10 @@ services:
         condition: service_healthy
       hooksdb-redis:
         condition: service_healthy
+      hooksdbapm-netpeer:
+        condition: service_healthy
     environment:
+      NET_PEER: hooksdbapm-netpeer
       OTEL_ENABLED: "true"
       OTEL_APM_ENABLED: "true"
       OTEL_EXPORTER_OTLP_ENDPOINT: http://localhost:4317
