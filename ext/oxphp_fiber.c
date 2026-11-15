@@ -8081,6 +8081,13 @@ void oxphp_fiber_wake_io(oxphp_request_fiber *fiber) {
     }
 }
 
+void oxphp_fiber_expire_io(oxphp_request_fiber *fiber) {
+    if (fiber == NULL || fiber->suspend_reason != OXPHP_SUSPEND_IO_WAIT) return;
+    /* 0 means no deadline; 1 is past for oxphp_io_collect_ready() and for the task
+     * driver's oxphp_async_sched_next_deadline_ns() alike. */
+    fiber->suspend_data.io.deadline_ns = 1;
+}
+
 /* ─── Which fiber a connection belongs to ─────────────────
  *
  * A client protocol on a socket is a sequence of exchanges — write a command,
@@ -8262,19 +8269,88 @@ bool oxphp_claim_tagged_held_by_other(oxphp_request_fiber *self) {
     return false;
 }
 
+/* ─── The order cURL calls get a shared handle in ───────────────
+ *
+ * A waiting fiber polls only while the holder is suspended, and a loop of
+ * curl_multi_exec() and curl_multi_select() suspends only inside a call holding the
+ * multi handle; so a call that finds its handles free still lets in an earlier
+ * waiting call on one of them. Only one that could have all of its handles, or the
+ * loop stalls behind a waiter held up elsewhere; only an earlier one, or two waiters
+ * step aside for each other. Connection claims need none of this: they are held to
+ * the end of the request. */
+static __thread oxphp_request_fiber *oxphp_curl_waiters = NULL;
+static __thread uint64_t oxphp_curl_tickets = 0;
+
+void oxphp_curl_wait_enter(oxphp_request_fiber *self, void *const *keys, uint32_t take,
+                           uint32_t total) {
+    self->curl_wait.keys = keys;
+    self->curl_wait.take = take;
+    self->curl_wait.total = total;
+    if (self->curl_wait.ticket != 0) return;
+
+    self->curl_wait.ticket = ++oxphp_curl_tickets;
+    self->curl_wait.next = oxphp_curl_waiters;
+    oxphp_curl_waiters = self;
+}
+
+void oxphp_curl_wait_leave(oxphp_request_fiber *self) {
+    if (self->curl_wait.ticket == 0) return;
+
+    for (oxphp_request_fiber **link = &oxphp_curl_waiters; *link != NULL;
+         link = &(*link)->curl_wait.next) {
+        if (*link == self) {
+            *link = self->curl_wait.next;
+            break;
+        }
+    }
+    self->curl_wait = (oxphp_curl_wait) {0};
+}
+
+static bool oxphp_curl_wait_could_go(const oxphp_request_fiber *waiter) {
+    for (uint32_t i = 0; i < waiter->curl_wait.total; i++) {
+        const oxphp_request_fiber *owner = oxphp_claim_owner(waiter->curl_wait.keys[i]);
+        if (owner != NULL && owner != waiter) return false;
+    }
+    return true;
+}
+
+bool oxphp_curl_turn_is_anothers(const oxphp_request_fiber *self, void *const *keys,
+                                 uint32_t take) {
+    uint64_t mine = self->curl_wait.ticket != 0 ? self->curl_wait.ticket : UINT64_MAX;
+    for (const oxphp_request_fiber *waiter = oxphp_curl_waiters; waiter != NULL;
+         waiter = waiter->curl_wait.next) {
+        if (waiter->curl_wait.ticket >= mine) continue;
+
+        bool shared = false;
+        for (uint32_t i = 0; i < take && !shared; i++) {
+            for (uint32_t j = 0; j < waiter->curl_wait.take && !shared; j++) {
+                shared = keys[i] == waiter->curl_wait.keys[j];
+            }
+        }
+        if (shared && oxphp_curl_wait_could_go(waiter)) return true;
+    }
+    return false;
+}
+
 /* What an operation on a stream or a connect leaves on the fiber while it runs: the
  * group in `io_op` — the stream it is inside, whether that stream was freed under
- * it, whether it is a TLS loop, whether a connect is going on — and the count of
- * holds on the thread. Each is put back by the frame that set it, and a bailout
- * walks past those frames without running them — so every place that recovers from
- * one has to do it, or the shutdown functions and destructors that follow see an
- * operation that is over, the name of a stream that may be freed by then included.
+ * it, whether it is a TLS loop, whether a connect is going on — the cURL call in
+ * `curl_op`, its place among the calls waiting for a cURL handle, and the count of
+ * holds on the thread. Each is put back by the frame
+ * that set it, and a bailout walks past those frames without running them — so
+ * every place that recovers from one has to do it, or the shutdown functions and
+ * destructors that follow see an operation that is over, the name of a stream that
+ * may be freed by then included.
  * The recovery does it for all of them; the two arms of the loop do it again before
  * anything else, because what they run next is userland. `net_park_off` is not
  * among them: it says what has happened to the fiber and not what it is in the
  * middle of. */
 static void oxphp_fiber_forget_io_names(oxphp_request_fiber *fiber) {
     fiber->io_op = (oxphp_io_op) {0};
+    fiber->curl_op = (oxphp_curl_op) {0};
+    /* Its keys point into the frame the bailout left: out of the list before any
+     * other fiber runs and reads them. */
+    oxphp_curl_wait_leave(fiber);
     fiber->net_park_hold = 0;
 }
 

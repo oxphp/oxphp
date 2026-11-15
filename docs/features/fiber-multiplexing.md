@@ -126,13 +126,13 @@ Fiber multiplexing is **cooperative, not preemptive**. A fiber that calls a bloc
 ### Functions That Block the Worker
 
 - `file_get_contents()`, `fopen()`, `fread()`
-- `curl_exec()`, `curl_multi_exec()`
+- `curl_exec()`, `curl_multi_select()` (or enable `RUNTIME_HOOKS=curl`)
 - PDO queries, `mysqli_query()`
 - PHP's `sleep()`, `usleep()` (use `oxphp_sleep()` instead, or enable `RUNTIME_HOOKS=sleep` — within the limits given under [Suspension Points](#suspension-points))
 - DNS resolution (`gethostbyname()`)
 - Any synchronous network or disk I/O
 
-Socket **reads** and **`stream_select()`** are the exception once `RUNTIME_HOOKS=streams` is enabled: both suspend the fiber instead of the thread, which covers clients that block on a PHP stream read (mysqlnd, phpredis, the HTTP stream wrappers) as well as loops waiting on several sockets at once. Writes, `socket_select()`, ext/curl, connecting and DNS resolution still block under `streams` alone; the `net` category also suspends connecting (persistent connects excepted), TLS handshakes and reads, reads on `unix://`, `udp://` and `udg://` sockets, socket pairs and the streams exported from sockets that are not TCP, and writes that wait for room, while `socket_select()`, ext/curl and DNS resolution still block. Whether the categories were installed at all is reported as `runtime_hooks` by `oxphp_server_info()` and by `/config`. See [Configuration](../operations/configuration.md#runtime-hooks).
+Socket **reads** and **`stream_select()`** are the exception once `RUNTIME_HOOKS=streams` is enabled: both suspend the fiber instead of the thread, which covers clients that block on a PHP stream read (mysqlnd, phpredis, the HTTP stream wrappers) as well as loops waiting on several sockets at once. Writes, `socket_select()`, ext/curl, connecting and DNS resolution still block under `streams` alone; the `net` category also suspends connecting (persistent connects excepted), TLS handshakes and reads, reads on `unix://`, `udp://` and `udg://` sockets, socket pairs and the streams exported from sockets that are not TCP, and writes that wait for room, while `socket_select()` and DNS resolution still block. The `curl` category suspends the waits of a cURL transfer, in `curl_exec()` and `curl_multi_select()`. Whether the categories were installed at all is reported as `runtime_hooks` by `oxphp_server_info()` and by `/config`. See [Configuration](../operations/configuration.md#runtime-hooks).
 
 ### How to Avoid Blocking
 

@@ -128,6 +128,45 @@ typedef struct oxphp_io_op {
     struct oxphp_io_op *outer;
 } oxphp_io_op;
 
+/* The cURL call a fiber is inside (RUNTIME_HOOKS category "curl"). `frame` is the
+ * engine's frame of that call, the only frame a libcurl wait is parked from: a
+ * callback's wait is on a deeper frame, and a handle destroyed outside every such
+ * call waits on the thread (one the call itself frees, or a collection it sets off,
+ * is parked with it). Compared, never dereferenced.
+ * `cancelled` answers every later wait of the call at once, once libcurl has been
+ * told a wait failed — on a cancellation or a drain kill, or on a cancellation one
+ * of the transfer's callbacks took while it waited; what libcurl does on the way
+ * out, closing the connection, is not waited for. `after_cancel` marks a call begun
+ * after the fiber took its cancellation, a finally block's: its waits stay on the
+ * thread, as without the hook. `in_wait` is up while a wait is parked, so that a
+ * drain kill fails the wait instead of bailing through libcurl, which would leave
+ * the handle marked as inside the call for good; the outermost call bails once it
+ * is out, and a call the kill never failed, one that did not wait, does not.
+ * `select` marks curl_multi_select(), whose parked wait a call from another fiber
+ * may end early (oxphp_curl_end_selects).
+ * A call made from inside another keeps the outer one in its C frame and puts it
+ * back on the way out. */
+typedef struct oxphp_curl_op {
+    const zend_execute_data *frame;
+    bool cancelled;
+    bool after_cancel;
+    bool in_wait;
+    bool select;
+} oxphp_curl_op;
+
+/* A cURL call waiting for its handles, and its place in the order such calls get
+ * them in (oxphp_curl_turn_is_anothers). `keys` is the call's array on its own C
+ * stack, read by other fibers only while this one is suspended in the wait: the
+ * first `take` are the handles the call claims, the rest up to `total` are only
+ * waited for. `ticket` is 0 while the fiber is not waiting. */
+typedef struct oxphp_curl_wait {
+    void *const *keys;
+    uint32_t take;
+    uint32_t total;
+    uint64_t ticket;
+    struct _oxphp_request_fiber *next;
+} oxphp_curl_wait;
+
 /* Written on suspend only (oxphp_fiber_save_php_state) and read only while that
  * fiber is suspended — see oxphp_scheduler_start_fiber for why handing a fiber a
  * NEW request restores none of it. Holds no Zend VM state: zend_fiber_switch_context
@@ -466,6 +505,8 @@ typedef struct _oxphp_request_fiber {
      * all, so there the callback raises a flag in the bridge for the rest of the
      * connect instead: see oxphp_bridge_net_set_abort. */
     oxphp_io_op io_op;
+    oxphp_curl_op curl_op;
+    oxphp_curl_wait curl_wait;
 
     /* libc-level waits (RUNTIME_HOOKS category "net"). `net_park_off` keeps the
      * fiber from parking in them, and from parking in the reads the category adds
@@ -957,6 +998,10 @@ void oxphp_io_unpark(oxphp_request_fiber *fiber);
  * with mysqlnd's default. A no-op on a fiber suspended for any other reason. */
 void oxphp_fiber_wake_io(oxphp_request_fiber *fiber);
 
+/* End an IO_WAIT-suspended fiber's wait on the next tick as its deadline would, so
+ * the wait reports a timeout. A no-op on a fiber suspended for any other reason. */
+void oxphp_fiber_expire_io(oxphp_request_fiber *fiber);
+
 /* ─── Which fiber a connection belongs to ─────────────────
  * Keeps one fiber's exchange on a connection out of another's while the first is
  * parked mid-exchange — see the block comment on the implementation for why a
@@ -987,6 +1032,18 @@ void oxphp_claim_forget(void *key);
  * how a constructor with no source of its own asks whether any source is taken.
  * A walk of the whole table, for a caller that is about to wait anyway. */
 bool oxphp_claim_tagged_held_by_other(oxphp_request_fiber *self);
+
+/* A cURL call that waits for its handles, from its first round of waiting to the
+ * end of the last: `enter` again after re-reading the keys keeps its place. */
+void oxphp_curl_wait_enter(oxphp_request_fiber *self, void *const *keys, uint32_t take,
+                           uint32_t total);
+void oxphp_curl_wait_leave(oxphp_request_fiber *self);
+
+/* Whether a call that would claim the first `take` of `keys` must let a waiting
+ * call go first: one that came before it (any waiting call, if `self` is not
+ * waiting), claims one of the same handles, and could have all of its handles now. */
+bool oxphp_curl_turn_is_anothers(const oxphp_request_fiber *self, void *const *keys,
+                                 uint32_t take);
 
 /* Run one tick of the event loop: check try_recv, timers, await results. */
 int oxphp_scheduler_tick(oxphp_fiber_scheduler *sched);

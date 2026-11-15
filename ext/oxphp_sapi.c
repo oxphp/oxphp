@@ -9,6 +9,7 @@
 #include "Zend/zend_attributes.h"
 #include "Zend/zend_interfaces.h"
 #include "Zend/zend_enum.h"
+#include "Zend/zend_weakrefs.h"
 #include "main/php_output.h"
 #include "main/php_main.h"
 #include "main/php_ini.h"
@@ -1639,14 +1640,16 @@ static int oxphp_fiber_sleep_us(uint64_t duration_us)
  *
  * timeout_ns < 0 waits indefinitely. Returns 1 when a descriptor is ready,
  * 0 when not called from a fiber (or the set is unusable, or the scheduler
- * cannot watch it), -1 when the fiber was cancelled, and -2 when the deadline
- * elapsed first.
+ * cannot watch it), -1 when the fiber was cancelled, -2 when the deadline
+ * elapsed first, and OXPHP_FIBER_DRAINED for a drain kill of a wait libcurl
+ * makes (see oxphp_curl_op), which every other wait bails for.
  *
  * A 0 means the caller must do the wait itself, blocking its thread — so the
  * set being unusable has to stay a caller's bug rather than a size a real
  * program reaches: OXPHP_MAX_WAIT_FDS is set at the ceiling PHP's own
  * multiplexed wait enforces, and a wider set is one PHP would have rejected
  * before ever calling a hook. */
+#define OXPHP_FIBER_DRAINED (-10)
 static int oxphp_fiber_io_wait(struct pollfd *fds, struct oxphp_io_owner *owners,
                                uint32_t nfds, int64_t timeout_ns)
 {
@@ -1695,7 +1698,8 @@ static int oxphp_fiber_io_wait(struct pollfd *fds, struct oxphp_io_owner *owners
      * the suspension, as zend_objects_destroy_object() sets it aside around a
      * userland __destruct, and put back on every way out that goes on running
      * this code. It is dropped on the three that do not: the fiber torn down
-     * while parked and a drain kill end the request or the task, and a resume
+     * while parked and a drain kill of any wait but libcurl's end the request or
+     * the task, and a resume
      * that comes with an exception already pending — left on the thread by PHP
      * run outside any request or task — unwinds it with that one instead. */
     zend_object *pending = EG(exception);
@@ -1713,7 +1717,7 @@ static int oxphp_fiber_io_wait(struct pollfd *fds, struct oxphp_io_owner *owners
     /* --- RESUMED once one descriptor is ready or the deadline passed, OR
      * force-resumed by the scheduler when the task was cancelled (awaiter gave
      * up) or the server is draining. */
-    if (self->drain_kill) {
+    if (self->drain_kill && !self->curl_op.in_wait) {
         if (pending != NULL) OBJ_RELEASE(pending);
         oxphp_fiber_drain_bail();
     }
@@ -1722,6 +1726,8 @@ static int oxphp_fiber_io_wait(struct pollfd *fds, struct oxphp_io_owner *owners
         EG(exception) = pending;
         EG(opline_before_exception) = pending_opline;
     }
+    /* libcurl ends the transfer before the call bails (oxphp_curl_guarded). */
+    if (self->drain_kill) return OXPHP_FIBER_DRAINED;
     if (oxphp_fiber_take_cancel(self)) {
         return -1; /* cancelled */
     }
@@ -2799,6 +2805,40 @@ static int oxphp_hooked_sockop_close(php_stream *stream, int close_handle)
  * second time by a loop that has already been told. */
 #define OXPHP_NET_INLINE_FDS 8
 
+/* The wait itself, on a private copy of the caller's set. The wait rewrites the
+ * set it is given — it mutes an entry nobody asked to hear about — and the
+ * caller's array has to reach the real poll() untouched. The copy also asks for
+ * errors and hangups by name, which turns the wait's select-style readiness into
+ * poll()'s: there, a dead connection ends the wait rather than being ignored.
+ * The arrays live in this frame, which outlives the suspension; past the inline
+ * size they come from the request arena, which is what an unwound fiber is
+ * cleaned up with anyway. Answers as oxphp_fiber_io_wait() does. */
+static int oxphp_net_wait_copy(const struct pollfd *fds, unsigned long nfds, int timeout_ms)
+{
+    struct pollfd inline_fds[OXPHP_NET_INLINE_FDS];
+    struct oxphp_io_owner inline_owners[OXPHP_NET_INLINE_FDS];
+    struct pollfd *copy = inline_fds;
+    struct oxphp_io_owner *owners = inline_owners;
+    if (nfds > OXPHP_NET_INLINE_FDS) {
+        copy = emalloc(sizeof(*copy) * nfds);
+        owners = emalloc(sizeof(*owners) * nfds);
+    }
+    for (unsigned long i = 0; i < nfds; i++) {
+        copy[i] = fds[i];
+        copy[i].events |= POLLERR | POLLHUP;
+        copy[i].revents = 0;
+    }
+
+    int rc = oxphp_fiber_io_wait(copy, owners, (uint32_t) nfds,
+                                 timeout_ms < 0 ? -1 : (int64_t) timeout_ms * 1000000);
+
+    if (copy != inline_fds) {
+        efree(copy);
+        efree(owners);
+    }
+    return rc;
+}
+
 static int oxphp_net_park(struct pollfd *fds, unsigned long nfds, int timeout_ms)
 {
     oxphp_request_fiber *self = oxphp_current_fiber;
@@ -2842,35 +2882,7 @@ static int oxphp_net_park(struct pollfd *fds, unsigned long nfds, int timeout_ms
         }
     }
 
-    /* Parked on a private copy. The wait rewrites the set it is given — it mutes
-     * an entry nobody asked to hear about — and the caller's array has to reach
-     * the real poll() untouched. The copy also asks for errors and hangups by
-     * name, which turns the wait's select-style readiness into poll()'s: there,
-     * a dead connection ends the wait rather than being ignored. The arrays live
-     * in this frame, which outlives the suspension; past the inline size they
-     * come from the request arena, which is what an unwound fiber is cleaned up
-     * with anyway. */
-    struct pollfd inline_fds[OXPHP_NET_INLINE_FDS];
-    struct oxphp_io_owner inline_owners[OXPHP_NET_INLINE_FDS];
-    struct pollfd *copy = inline_fds;
-    struct oxphp_io_owner *owners = inline_owners;
-    if (nfds > OXPHP_NET_INLINE_FDS) {
-        copy = emalloc(sizeof(*copy) * nfds);
-        owners = emalloc(sizeof(*owners) * nfds);
-    }
-    for (unsigned long i = 0; i < nfds; i++) {
-        copy[i] = fds[i];
-        copy[i].events |= POLLERR | POLLHUP;
-        copy[i].revents = 0;
-    }
-
-    int rc = oxphp_fiber_io_wait(copy, owners, (uint32_t) nfds,
-                                 timeout_ms < 0 ? -1 : (int64_t) timeout_ms * 1000000);
-
-    if (copy != inline_fds) {
-        efree(copy);
-        efree(owners);
-    }
+    int rc = oxphp_net_wait_copy(fds, nfds, timeout_ms);
 
     /* First, as in the read hook and for the same reason: if the stream this
      * wait was on was closed in the meantime, the caller's frames are about to
@@ -3587,11 +3599,74 @@ static void oxphp_net_capture_tables(void)
  * raises a RedisException instead — which is the class phpredis itself raises when
  * a connection cannot carry a command. */
 
-/* Wait for the fiber holding this connection to give it up.
+/* How a wait for claimed keys ended. */
+typedef enum {
+    OXPHP_CLAIM_WAIT_FREE,          /* no other fiber holds any of the keys */
+    OXPHP_CLAIM_WAIT_CANCELLED,     /* the task was cancelled; nothing thrown yet */
+    OXPHP_CLAIM_WAIT_UNWOUND,       /* the fiber is being unwound; its exception is pending */
+    OXPHP_CLAIM_WAIT_UNSUSPENDABLE, /* this context cannot be suspended */
+    OXPHP_CLAIM_WAIT_DEADLOCK,      /* the holder waits in session_start() for this fiber */
+    OXPHP_CLAIM_WAIT_BUDGET,        /* the holder kept a key past oxphp_claim_budget_ns() */
+} oxphp_claim_wait_end;
+
+/* Wait, without holding any of them, until no fiber but `self` holds any of
+ * `keys`, for at most `budget_ns` (oxphp_claim_budget_ns(), read by the caller so
+ * that what it reports is what was waited for). `*held` is written only with a key
+ * a poll found held, so on DEADLOCK and BUDGET it is the key that was still held,
+ * and it is left as it was when no poll found one. `on_held`, when given, runs on
+ * each poll that finds a key held. Takes nothing: the caller acquires, on FREE.
  *
- * The key is only ever hashed, never dereferenced, so unlike the socket wait this
- * one cannot be left holding freed memory: a connection destroyed while a fiber
- * waits for it makes the wait pointless, not unsafe, and the bound below ends it.
+ * The keys are only ever hashed, never dereferenced, so unlike the socket wait
+ * this one cannot be left holding freed memory: an object destroyed while a fiber
+ * waits for it makes the wait pointless, not unsafe, and the bound ends it. */
+static oxphp_claim_wait_end oxphp_claim_await(void *const *keys, size_t nkeys,
+                                              oxphp_request_fiber *self, int64_t budget_ns,
+                                              void **held, void (*on_held)(void *ctx),
+                                              void *ctx)
+{
+    struct timespec started;
+    clock_gettime(CLOCK_MONOTONIC, &started);
+
+    uint64_t step_us = OXPHP_STREAM_CLAIM_POLL_US;
+    for (;;) {
+        int rc = oxphp_fiber_sleep_us(step_us);
+        /* Nothing to suspend into — outside a fiber, or under a userland fiber
+         * scheduler whose context ours cannot resume. Blocking the thread would
+         * deadlock against the holder, which needs it. */
+        if (rc == 0) return OXPHP_CLAIM_WAIT_UNSUSPENDABLE;
+        if (rc == OXPHP_FIBER_UNWIND) return OXPHP_CLAIM_WAIT_UNWOUND;
+        if (rc < 0) return OXPHP_CLAIM_WAIT_CANCELLED;
+
+        oxphp_request_fiber *owner = NULL;
+        for (size_t i = 0; i < nkeys && owner == NULL; i++) {
+            oxphp_request_fiber *o = oxphp_claim_owner(keys[i]);
+            if (o != NULL && o != self) {
+                owner = o;
+                *held = keys[i];
+            }
+        }
+        if (owner == NULL) return OXPHP_CLAIM_WAIT_FREE;
+        if (on_held != NULL) on_held(ctx);
+
+        /* A wait neither side can end: the fiber holding the key is waiting in
+         * session_start() for the session this one has open. Given up now rather
+         * than when the bound runs out, with the same outcome. */
+        if (oxphp_session_slot_waits_for(owner, self)) return OXPHP_CLAIM_WAIT_DEADLOCK;
+
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        int64_t spent_ns = (int64_t)(now.tv_sec - started.tv_sec) * 1000000000
+                           + (int64_t)(now.tv_nsec - started.tv_nsec);
+        if (spent_ns >= budget_ns) return OXPHP_CLAIM_WAIT_BUDGET;
+
+        step_us *= 2;
+        if (step_us > OXPHP_STREAM_CLAIM_POLL_MAX_US) {
+            step_us = OXPHP_STREAM_CLAIM_POLL_MAX_US;
+        }
+    }
+}
+
+/* Wait for the fiber holding this connection to give it up.
  *
  * OK      — the holder released it, and the caller may take it.
  * REFUSED — the holder never released, or this context cannot be suspended at
@@ -3604,79 +3679,58 @@ static void oxphp_net_capture_tables(void)
 static oxphp_stream_claim_result oxphp_db_await_owner(void *key, oxphp_request_fiber *self)
 {
     int64_t budget_ns = oxphp_claim_budget_ns();
-    struct timespec started;
-    clock_gettime(CLOCK_MONOTONIC, &started);
-
-    uint64_t step_us = OXPHP_STREAM_CLAIM_POLL_US;
-    for (;;) {
-        int rc = oxphp_fiber_sleep_us(step_us);
-        if (rc == 0) {
-            /* Nothing to suspend into — outside a fiber, or under a userland
-             * fiber scheduler whose context ours cannot resume. Blocking the
-             * thread would deadlock against the holder, which needs it. */
-            static __thread int64_t last_ns = 0;
-            if (oxphp_contended_log_ready(&last_ns)) {
-                char msg[400];
-                snprintf(msg, sizeof(msg),
-                         "oxphp: database call on connection %p, which another fiber holds, ran "
-                         "anyway because this context cannot be suspended cooperatively (a "
-                         "userland fiber scheduler owns it). The client answers for itself, "
-                         "which on a shared connection is the error it raises for a reused "
-                         "connection (logged at most once a second on this thread)", key);
-                php_log_err(msg);
-            }
-            return OXPHP_CLAIM_REFUSED;
+    void *held = key;
+    switch (oxphp_claim_await(&key, 1, self, budget_ns, &held, NULL, NULL)) {
+    case OXPHP_CLAIM_WAIT_FREE:
+        return OXPHP_CLAIM_OK;
+    case OXPHP_CLAIM_WAIT_CANCELLED:
+    case OXPHP_CLAIM_WAIT_UNWOUND:
+        oxphp_throw_exception("OxPHP\\Async\\AsyncException",
+                              "Async task cancelled", 0);
+        return OXPHP_CLAIM_THREW;
+    case OXPHP_CLAIM_WAIT_UNSUSPENDABLE: {
+        static __thread int64_t last_ns = 0;
+        if (oxphp_contended_log_ready(&last_ns)) {
+            char msg[400];
+            snprintf(msg, sizeof(msg),
+                     "oxphp: database call on connection %p, which another fiber holds, ran "
+                     "anyway because this context cannot be suspended cooperatively (a "
+                     "userland fiber scheduler owns it). The client answers for itself, "
+                     "which on a shared connection is the error it raises for a reused "
+                     "connection (logged at most once a second on this thread)", key);
+            php_log_err(msg);
         }
-        if (rc < 0) {
-            oxphp_throw_exception("OxPHP\\Async\\AsyncException",
-                                  "Async task cancelled", 0);
-            return OXPHP_CLAIM_THREW;
+        return OXPHP_CLAIM_REFUSED;
+    }
+    case OXPHP_CLAIM_WAIT_DEADLOCK: {
+        static __thread int64_t last_ns = 0;
+        if (oxphp_contended_log_ready(&last_ns)) {
+            char msg[400];
+            snprintf(msg, sizeof(msg),
+                     "oxphp: gave up waiting for connection %p at once because the fiber "
+                     "holding it is itself waiting in session_start() for the session this "
+                     "request has open, so neither could go on. One connection is shared "
+                     "between concurrent fibers (logged at most once a second on this "
+                     "thread)", key);
+            php_log_err(msg);
         }
-
-        oxphp_request_fiber *owner = oxphp_claim_owner(key);
-        if (owner == NULL || owner == self) return OXPHP_CLAIM_OK;
-
-        /* A wait neither side can end: the fiber holding the connection is
-         * waiting in session_start() for the session this one has open. Given
-         * up now rather than when the bound runs out, with the same outcome. */
-        if (oxphp_session_slot_waits_for(owner, self)) {
-            static __thread int64_t last_ns = 0;
-            if (oxphp_contended_log_ready(&last_ns)) {
-                char msg[400];
-                snprintf(msg, sizeof(msg),
-                         "oxphp: gave up waiting for connection %p at once because the fiber "
-                         "holding it is itself waiting in session_start() for the session this "
-                         "request has open, so neither could go on. One connection is shared "
-                         "between concurrent fibers (logged at most once a second on this "
-                         "thread)", key);
-                php_log_err(msg);
-            }
-            return OXPHP_CLAIM_REFUSED;
+        return OXPHP_CLAIM_REFUSED;
+    }
+    case OXPHP_CLAIM_WAIT_BUDGET:
+    default: {
+        static __thread int64_t last_ns = 0;
+        if (oxphp_contended_log_ready(&last_ns)) {
+            char msg[400];
+            snprintf(msg, sizeof(msg),
+                     "oxphp: gave up waiting for connection %p after %lld s because the "
+                     "fiber holding it did not release it in time. One connection is "
+                     "shared between concurrent fibers and one of them held it for longer "
+                     "than this call's own deadline (logged at most once a second on this "
+                     "thread)", key, (long long) (budget_ns / 1000000000));
+            php_log_err(msg);
         }
-
-        struct timespec now;
-        clock_gettime(CLOCK_MONOTONIC, &now);
-        int64_t spent_ns = (int64_t)(now.tv_sec - started.tv_sec) * 1000000000
-                           + (int64_t)(now.tv_nsec - started.tv_nsec);
-        if (spent_ns >= budget_ns) {
-            static __thread int64_t last_ns = 0;
-            if (oxphp_contended_log_ready(&last_ns)) {
-                char msg[400];
-                snprintf(msg, sizeof(msg),
-                         "oxphp: gave up waiting for connection %p after %lld s because the "
-                         "fiber holding it did not release it in time. One connection is "
-                         "shared between concurrent fibers and one of them held it for longer "
-                         "than this call's own deadline (logged at most once a second on this "
-                         "thread)", key, (long long) (budget_ns / 1000000000));
-                php_log_err(msg);
-            }
-            return OXPHP_CLAIM_REFUSED;
-        }
-
-        step_us *= 2;
-        if (step_us > OXPHP_STREAM_CLAIM_POLL_MAX_US) {
-            step_us = OXPHP_STREAM_CLAIM_POLL_MAX_US;
-        }
+        return OXPHP_CLAIM_REFUSED;
+    }
     }
 }
 
@@ -5724,7 +5778,7 @@ done:
     free_alloca(fds, use_heap);
 }
 
-static const char *const oxphp_hook_categories[] = { "sleep", "streams", "net" };
+static const char *const oxphp_hook_categories[] = { "sleep", "streams", "net", "curl" };
 
 /* A category name that matches nothing disables the hook the operator asked
  * for, silently and identically to not setting the variable at all. Name the
@@ -5776,7 +5830,7 @@ static void oxphp_hooks_report_unknown_categories(void)
             char msg[256];
             snprintf(msg, sizeof(msg),
                      "oxphp: RUNTIME_HOOKS lists an unknown category \"%.*s\", which enables "
-                     "nothing; known categories are sleep, streams and net", (int) len, tok);
+                     "nothing; known categories are sleep, streams, net and curl", (int) len, tok);
             php_log_err(msg);
         }
     }
@@ -6705,6 +6759,607 @@ static void oxphp_curl_hooks_restore(void)
     oxphp_orig_curl_multi_close = NULL;
 }
 
+/* ─── cURL waits and the handles they run on (category "curl") ──
+ * libcurl waits for a transfer in its own poll(), which returns into libcurl and
+ * not into libphp, so the "net" category never sees it. The bridge hands those
+ * waits to oxphp_curl_park(), which parks them on the same terms as a net wait,
+ * but only from the frame of one of the calls in the table below.
+ *
+ * Parking inside such a call lets other fibers run while a handle is in the
+ * middle of libcurl, and in worker mode a handle kept in a static or in a
+ * container is shared between requests. A second call on that handle meanwhile is
+ * refused by libcurl (CURLE_RECURSIVE_API_CALL, CURLM_RECURSIVE_API_CALL), or does
+ * worse: ext/curl empties the handle's CURLOPT_RETURNTRANSFER buffer before
+ * curl_exec() and curl_multi_add_handle() reach libcurl, and curl_setopt() frees
+ * the value it replaces (a CURLOPT_POSTFIELDS body the transfer may be sending,
+ * for one). So each call in the table claims its handles for its length, and the
+ * same call from another fiber waits for them, as a database call waits for its
+ * connection.
+ * An easy handle in a multi handle is in a transfer between the calls on the multi
+ * handle too, and whoever drives that may be another fiber. A call on such a
+ * handle also waits for the multi handle, and, but for the few calls made for a
+ * transfer under way, for the fiber that added it to take it out: libcurl leaves
+ * changing the options of a transfer under way undefined
+ * (docs/libcurl/curl_easy_setopt.md, 8.23.0).
+ * SYNC: php-src/ext/curl/interface.c PHP_FUNCTION(curl_exec),
+ *       _php_curl_cleanup_handle(); php-src/ext/curl/multi.c
+ *       PHP_FUNCTION(curl_multi_add_handle), PHP_FUNCTION(curl_multi_remove_handle),
+ *       PHP_FUNCTION(curl_multi_close), curl_multi_free_obj();
+ *       php-src/Zend/zend_weakrefs.c; libcurl 8.23.0 lib/setopt.c
+ *       setopt_copypostfields(), lib/easy.c curl_easy_perform() */
+
+/* The callback the bridge hands a libcurl wait to: see oxphp_net_park_result. A
+ * wait of a callback the transfer runs is on a deeper frame than the call's, and
+ * one made outside every call in the table — a handle destroyed there — has no
+ * call around it; both are left on the thread. A handle destroyed inside one of
+ * them waits on that call's frame and is parked with it. */
+static int oxphp_curl_park(struct pollfd *fds, unsigned long nfds, int timeout_ms)
+{
+    oxphp_request_fiber *self = oxphp_current_fiber;
+    if (self == NULL || self->curl_op.frame == NULL
+        || EG(current_execute_data) != self->curl_op.frame) {
+        return OXPHP_NET_PARK_DECLINED;
+    }
+    if (self->curl_op.cancelled) return OXPHP_NET_PARK_CANCELLED;
+    if (self->drain_kill) {
+        self->curl_op.cancelled = true;
+        return OXPHP_NET_PARK_CANCELLED;
+    }
+    if (self->net_park_off && !self->curl_op.after_cancel) {
+        self->curl_op.cancelled = true;
+        return OXPHP_NET_PARK_CANCELLED;
+    }
+    if (self->net_park_off || self->net_park_hold != 0 || nfds > OXPHP_MAX_WAIT_FDS) {
+        return OXPHP_NET_PARK_DECLINED;
+    }
+
+    self->curl_op.in_wait = true;
+    int rc = oxphp_net_wait_copy(fds, nfds, timeout_ms);
+    self->curl_op.in_wait = false;
+    if (rc == OXPHP_FIBER_DRAINED) {
+        /* The bail is the call's to make, once libcurl is out (oxphp_curl_guarded). */
+        self->curl_op.cancelled = true;
+        self->net_park_off = true;
+        return OXPHP_NET_PARK_CANCELLED;
+    }
+    if (rc == OXPHP_FIBER_UNWIND || rc == -1) {
+        self->curl_op.cancelled = true;
+        self->net_park_off = true;
+        /* An unwind has its exception already. */
+        if (rc == -1) {
+            oxphp_throw_exception("OxPHP\\Async\\AsyncException", "Async task cancelled", 0);
+        }
+        return OXPHP_NET_PARK_CANCELLED;
+    }
+    if (rc == -2) return OXPHP_NET_PARK_DEADLINE;
+    if (rc == 0) return OXPHP_NET_PARK_DECLINED;
+    return OXPHP_NET_PARK_WOKE;
+}
+
+/* The calls that are claimed, how many of their leading arguments are handles to
+ * claim — the easy handle, the multi handle, or both — and which of them is the
+ * easy handle, 0 for none. Left out are the calls that only read a handle —
+ * curl_getinfo(), curl_errno(), curl_error(), curl_multi_getcontent(),
+ * curl_multi_info_read() and the like — which change nothing a parked transfer
+ * depends on, curl_close(), which does nothing, and the share-handle calls. */
+#define OXPHP_CURL_GUARDS(X)           \
+    X(curl_exec, 1, 1)                 \
+    X(curl_setopt, 1, 1)               \
+    X(curl_setopt_array, 1, 1)         \
+    X(curl_reset, 1, 1)                \
+    X(curl_pause, 1, 1)                \
+    X(curl_upkeep, 1, 1)               \
+    X(curl_multi_exec, 1, 0)           \
+    X(curl_multi_select, 1, 0)         \
+    X(curl_multi_setopt, 1, 0)         \
+    X(curl_multi_close, 1, 0)          \
+    X(curl_multi_add_handle, 2, 2)     \
+    X(curl_multi_remove_handle, 2, 2)
+
+typedef struct {
+    const char *name;
+    size_t name_len;
+    uint32_t nkeys;
+    uint32_t easy_arg;
+    zif_handler orig;
+} oxphp_curl_guard;
+
+enum {
+#define X(fname, nkeys, easy_arg) OXPHP_CURL_GUARD_##fname,
+    OXPHP_CURL_GUARDS(X)
+#undef X
+    OXPHP_CURL_GUARD_COUNT
+};
+
+/* Written on the startup thread, as the session gate is. */
+static oxphp_curl_guard oxphp_curl_guards[OXPHP_CURL_GUARD_COUNT] = {
+#define X(fname, nkeys, easy_arg) { #fname, sizeof(#fname) - 1, nkeys, easy_arg, NULL },
+    OXPHP_CURL_GUARDS(X)
+#undef X
+};
+
+/* An easy handle's place in a multi handle, from the curl_multi_add_handle() that
+ * put it there until it is taken out. `claim` is what the fiber that added it holds
+ * meanwhile, and a call on the handle from elsewhere waits for: the handle's address
+ * with bit 1 set, apart from the call claim on the handle and from the odd keys of
+ * the PDO constructor gate. A waiter holds the handle as its argument, so the key
+ * cannot pass to another object while it waits, as the address of an entry freed
+ * on removal and handed out again by the allocator could. */
+typedef struct {
+    zend_object *multi;
+    void *claim;
+} oxphp_curl_member;
+
+/* Easy handle → oxphp_curl_member, weakly keyed by the easy handle, so that an
+ * entry goes in the handle's own destruction, before its object number and memory
+ * are handed out again: ext/curl lets go of a multi handle's easy handles before
+ * their entries are removed — inside curl_multi_close(), and in
+ * curl_multi_free_obj() ahead of the multi handle's weak notification (8.4.27 and
+ * 8.5.12) — and a destructor run in between can build a handle in their place.
+ * Weakly keyed by multi handle, the second table removes the entries of a multi
+ * handle closed or freed, which takes its easy handles out without a call on any
+ * of them. Both live in the request's arena. */
+static __thread HashTable *oxphp_curl_members = NULL;
+static __thread HashTable *oxphp_curl_multis = NULL;
+
+static void oxphp_curl_member_dtor(zval *zv)
+{
+    oxphp_curl_member *member = Z_PTR_P(zv);
+    oxphp_claim_forget(member->claim);
+    efree(member);
+}
+
+static void oxphp_curl_multi_gone(zval *zv)
+{
+    zend_ulong key;
+    oxphp_curl_member *member;
+    ZEND_HASH_FOREACH_NUM_KEY_PTR(oxphp_curl_members, key, member) {
+        if (member->multi == Z_PTR_P(zv)) {
+            zend_weakrefs_hash_del(oxphp_curl_members, zend_weakref_key_to_object(key));
+        }
+    } ZEND_HASH_FOREACH_END();
+}
+
+static oxphp_curl_member *oxphp_curl_member_find(const zend_object *easy)
+{
+    if (oxphp_curl_members == NULL) return NULL;
+    return zend_hash_index_find_ptr(oxphp_curl_members, zend_object_to_weakref_key(easy));
+}
+
+static void oxphp_curl_member_add(zend_object *easy, zend_object *multi,
+                                  oxphp_request_fiber *self)
+{
+    if (oxphp_curl_members == NULL) {
+        ALLOC_HASHTABLE(oxphp_curl_members);
+        zend_hash_init(oxphp_curl_members, 8, NULL, oxphp_curl_member_dtor, 0);
+        ALLOC_HASHTABLE(oxphp_curl_multis);
+        zend_hash_init(oxphp_curl_multis, 8, NULL, oxphp_curl_multi_gone, 0);
+    }
+    oxphp_curl_member *member = emalloc(sizeof(*member));
+    member->multi = multi;
+    member->claim = (void *) ((uintptr_t) easy | 2);
+    /* zend_weakrefs_hash_add() does not replace an entry. */
+    (void) zend_weakrefs_hash_del(oxphp_curl_members, easy);
+    (void) zend_weakrefs_hash_add_ptr(oxphp_curl_members, easy, member);
+    /* NULL when the multi handle is already in: one registration covers it. */
+    (void) zend_weakrefs_hash_add_ptr(oxphp_curl_multis, multi, multi);
+    if (self != NULL) (void) oxphp_claim_acquire(member->claim, self);
+}
+
+/* Before the executor frees the objects: an entry left in a weak table past it
+ * would be reached from its object's destruction after the table is gone.
+ * zend_weakrefs_hash_clean() is 8.5 only. */
+static void oxphp_curl_members_destroy(void)
+{
+    if (oxphp_curl_multis == NULL) return;
+
+    zend_object *multi;
+    ZEND_HASH_FOREACH_PTR(oxphp_curl_multis, multi) {
+        zend_weakrefs_hash_del(oxphp_curl_multis, multi);
+    } ZEND_HASH_FOREACH_END();
+    zend_hash_destroy(oxphp_curl_multis);
+    FREE_HASHTABLE(oxphp_curl_multis);
+    oxphp_curl_multis = NULL;
+
+    zend_ulong key;
+    ZEND_HASH_FOREACH_NUM_KEY(oxphp_curl_members, key) {
+        zend_weakrefs_hash_del(oxphp_curl_members, zend_weakref_key_to_object(key));
+    } ZEND_HASH_FOREACH_END();
+    zend_hash_destroy(oxphp_curl_members);
+    FREE_HASHTABLE(oxphp_curl_members);
+    oxphp_curl_members = NULL;
+}
+
+/* Keep the tables in step with a call that has returned, by what it returned and
+ * not by whether an exception is pending: ext/curl adds, removes and closes past a
+ * warning an error handler throws for, and past an exception a progress callback
+ * throws as libcurl ends a transfer under way (multi.c, 8.4.27 and 8.5.12).
+ * curl_multi_add_handle() and curl_multi_remove_handle() change ext/curl's list on
+ * CURLM_OK alone, which they return only once their arguments have passed. A
+ * handle a server push brings in is added inside curl_multi_exec() and is not
+ * tracked. */
+static void oxphp_curl_track(const oxphp_curl_guard *g, zend_execute_data *execute_data,
+                             const zval *return_value, oxphp_request_fiber *self)
+{
+    const oxphp_curl_guard *add = &oxphp_curl_guards[OXPHP_CURL_GUARD_curl_multi_add_handle];
+    const oxphp_curl_guard *remove = &oxphp_curl_guards[OXPHP_CURL_GUARD_curl_multi_remove_handle];
+    if (g == add || g == remove) {
+        if (Z_TYPE_P(return_value) != IS_LONG || Z_LVAL_P(return_value) != 0 /* CURLM_OK */) {
+            return;
+        }
+        zend_object *multi = Z_OBJ_P(ZEND_CALL_ARG(execute_data, 1));
+        zend_object *easy = Z_OBJ_P(ZEND_CALL_ARG(execute_data, 2));
+        if (g == add) {
+            oxphp_curl_member_add(easy, multi, self);
+            return;
+        }
+        oxphp_curl_member *member = oxphp_curl_member_find(easy);
+        if (member != NULL && member->multi == multi) {
+            (void) zend_weakrefs_hash_del(oxphp_curl_members, easy);
+        }
+    } else if (g == &oxphp_curl_guards[OXPHP_CURL_GUARD_curl_multi_close]) {
+        /* It returns nothing either way. Only a multi handle is in the table, so
+         * an object the call refused finds nothing to remove. */
+        zval *multi = ZEND_NUM_ARGS() == 1 ? ZEND_CALL_ARG(execute_data, 1) : NULL;
+        if (oxphp_curl_multis != NULL && multi != NULL && Z_TYPE_P(multi) == IS_OBJECT) {
+            (void) zend_weakrefs_hash_del(oxphp_curl_multis, Z_OBJ_P(multi));
+        }
+    }
+}
+
+/* libcurl's option numbers, which ext/curl passes to PHP unchanged and libcurl
+ * keeps as ABI; curl.h is not among the headers this file is built against. */
+#define OXPHP_CURLOPT_VERBOSE 41
+#define OXPHP_CURLOPT_PRIVATE 10103
+
+/* The calls that do not wait for the fiber that added the handle to take it out.
+ * curl_multi_remove_handle() is how it comes out. The rest are made on a transfer
+ * under way, and HTTP clients make them on other requests' transfers in a multi
+ * handle they share: curl_pause() (libcurl 8.23.0 curl_easy_pause.md: it marks "a
+ * running connection"), and curl_setopt() of CURLOPT_PRIVATE, which ext/curl keeps
+ * to itself (interface.c, 8.4 and 8.5), or of CURLOPT_VERBOSE, a flag libcurl
+ * only reads to log (lib/setopt.c). */
+static bool oxphp_curl_skips_membership(const oxphp_curl_guard *g,
+                                        zend_execute_data *execute_data)
+{
+    if (g == &oxphp_curl_guards[OXPHP_CURL_GUARD_curl_multi_remove_handle]
+        || g == &oxphp_curl_guards[OXPHP_CURL_GUARD_curl_pause]) {
+        return true;
+    }
+    if (g != &oxphp_curl_guards[OXPHP_CURL_GUARD_curl_setopt] || ZEND_NUM_ARGS() < 2) {
+        return false;
+    }
+    zval *option = ZEND_CALL_ARG(execute_data, 2);
+    return Z_TYPE_P(option) == IS_LONG
+        && (Z_LVAL_P(option) == OXPHP_CURLOPT_PRIVATE
+            || Z_LVAL_P(option) == OXPHP_CURLOPT_VERBOSE);
+}
+
+/* The keys a call waits for: its handle arguments and, for an easy handle in a
+ * multi handle, that multi handle and the membership, which comes last and is only
+ * waited for, never taken. A fiber that holds the multi handle is driving it, and
+ * its call comes from a callback of the transfer, which libcurl allows. Returns the
+ * count of keys to take; `*total` adds the membership. */
+#define OXPHP_CURL_MAX_KEYS 4
+static size_t oxphp_curl_keys(const oxphp_curl_guard *g, zend_execute_data *execute_data,
+                              oxphp_request_fiber *self, void **keys, size_t *total)
+{
+    size_t n = 0;
+    for (uint32_t i = 1; i <= g->nkeys && i <= ZEND_NUM_ARGS(); i++) {
+        zval *arg = ZEND_CALL_ARG(execute_data, i);
+        if (Z_TYPE_P(arg) == IS_OBJECT) keys[n++] = Z_OBJ_P(arg);
+    }
+    *total = n;
+
+    zval *easy = g->easy_arg != 0 && g->easy_arg <= ZEND_NUM_ARGS()
+                     ? ZEND_CALL_ARG(execute_data, g->easy_arg) : NULL;
+    oxphp_curl_member *member = easy != NULL && Z_TYPE_P(easy) == IS_OBJECT
+                                    ? oxphp_curl_member_find(Z_OBJ_P(easy)) : NULL;
+    if (member == NULL || oxphp_claim_owner(member->multi) == self) return n;
+
+    /* The multi handle argument of curl_multi_remove_handle() is usually this one. */
+    if (keys[0] != member->multi) keys[n++] = member->multi;
+    *total = n;
+    if (!oxphp_curl_skips_membership(g, execute_data)) keys[(*total)++] = member->claim;
+    return n;
+}
+
+/* A call that could not have its handles is not made: run inside another fiber's
+ * call, or inside its transfer, it is the corruption the claim exists to prevent.
+ * Thrown rather than returned as false, which every caller would read as a failed
+ * transfer. */
+static void oxphp_curl_guard_refuse(const oxphp_curl_guard *g, oxphp_claim_wait_end end,
+                                    const void *held, bool transfer, int64_t budget_ns)
+{
+    if (end == OXPHP_CLAIM_WAIT_UNWOUND) return; /* its exception is pending */
+    if (end == OXPHP_CLAIM_WAIT_CANCELLED) {
+        oxphp_throw_exception("OxPHP\\Async\\AsyncException", "Async task cancelled", 0);
+        return;
+    }
+
+    char why[160];
+    if (end == OXPHP_CLAIM_WAIT_UNSUSPENDABLE) {
+        snprintf(why, sizeof(why),
+                 "waiting for it means suspending, which cannot be done here (a userland "
+                 "Fiber is running, or the server does not switch fibers at this point)");
+    } else if (end == OXPHP_CLAIM_WAIT_DEADLOCK) {
+        snprintf(why, sizeof(why),
+                 "that fiber is itself waiting in session_start() for the session this "
+                 "request has open");
+    } else {
+        snprintf(why, sizeof(why), "%s within %lld s",
+                 transfer ? "it was not taken out" : "that call did not return",
+                 (long long) (budget_ns / 1000000000));
+    }
+
+    char msg[512];
+    if (transfer) {
+        snprintf(msg, sizeof(msg),
+                 "oxphp: %s() was not called: another fiber added the handle to a multi "
+                 "handle, and %s. Made now, the call would change that fiber's transfer "
+                 "while it is under way", g->name, why);
+    } else {
+        snprintf(msg, sizeof(msg),
+                 "oxphp: %s() was not called: another fiber is in the middle of a cURL call "
+                 "on the same handle, and %s. Made now, the call would land inside that "
+                 "fiber's transfer", g->name, why);
+    }
+
+    static __thread int64_t last_ns = 0;
+    if (oxphp_contended_log_ready(&last_ns)) {
+        /* A membership claim is its easy handle's address with bit 1 set. */
+        const void *handle = transfer ? (const void *) ((uintptr_t) held & ~(uintptr_t) 2) : held;
+        char line[640];
+        snprintf(line, sizeof(line),
+                 "%s (cURL handle %p; logged at most once a second on this thread)", msg, handle);
+        php_log_err(line);
+    }
+    oxphp_throw_exception("OxPHP\\Async\\AsyncException", msg, 0);
+}
+
+/* A waiting call other than a loop's own ends the curl_multi_select() in which
+ * another fiber holds one of its handles, as the select's timeout would, so that it
+ * gets in at the holder's next call rather than after the timeout. The select
+ * returns 0, which its callers loop on: libcurl returns 0 early on EINTR too
+ * (lib/select.c Curl_poll(), 8.23.0).
+ * It does so when it becomes able to go ahead but for those selects, not before and
+ * not again: ended while a handle of the call is still held elsewhere, the select
+ * would only be followed by the holder's next one, which the call would then wait
+ * out; and a select run from a callback of a call that holds another of its handles
+ * looks like all that keeps it waiting, but its loop cannot let it in, and would
+ * have every select ended.
+ * Not for a loop's own calls: the select under way returns on data for any transfer
+ * in the handle, and the next curl_multi_exec() moves them all; and two loops that
+ * suspend between their calls, while callbacks wait on I/O say, would end each
+ * other's selects in turn, neither waiting for data. */
+typedef struct oxphp_curl_select_ender {
+    void *const *keys;
+    size_t nkeys;
+    size_t total;
+    const oxphp_request_fiber *self;
+    bool could_go;
+} oxphp_curl_select_ender;
+
+static void oxphp_curl_end_selects(void *ctx)
+{
+    oxphp_curl_select_ender *e = ctx;
+    bool go = true;
+    for (size_t i = 0; i < e->total && go; i++) {
+        const oxphp_request_fiber *owner = oxphp_claim_owner(e->keys[i]);
+        go = owner == NULL || owner == e->self
+             || (i < e->nkeys && owner->curl_op.select && owner->curl_op.in_wait);
+    }
+    if (go && !e->could_go) {
+        for (size_t i = 0; i < e->nkeys; i++) {
+            oxphp_request_fiber *owner = oxphp_claim_owner(e->keys[i]);
+            if (owner != NULL && owner != e->self) oxphp_fiber_expire_io(owner);
+        }
+    }
+    e->could_go = go;
+}
+
+static void oxphp_curl_guarded(const oxphp_curl_guard *g, INTERNAL_FUNCTION_PARAMETERS)
+{
+    oxphp_request_fiber *self = oxphp_current_fiber;
+    if (self == NULL) {
+        g->orig(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+        oxphp_curl_track(g, execute_data, return_value, NULL);
+        return;
+    }
+
+    /* Read without touching them: the original handler is still the one that
+     * validates and consumes the arguments. */
+    void *keys[OXPHP_CURL_MAX_KEYS];
+    size_t total;
+    size_t nkeys = oxphp_curl_keys(g, execute_data, self, keys, &total);
+
+    int64_t budget_ns = 0; /* the bound is never 0: unread until the first wait */
+    struct timespec started;
+    bool loop_call = g == &oxphp_curl_guards[OXPHP_CURL_GUARD_curl_multi_exec]
+                     || g == &oxphp_curl_guards[OXPHP_CURL_GUARD_curl_multi_select];
+    oxphp_curl_select_ender ender = { .keys = keys, .self = self };
+    for (;;) {
+        void *held = NULL;
+        for (size_t i = 0; i < total && held == NULL; i++) {
+            oxphp_request_fiber *owner = oxphp_claim_owner(keys[i]);
+            if (owner != NULL && owner != self) held = keys[i];
+        }
+        if (held == NULL && !oxphp_curl_turn_is_anothers(self, keys, (uint32_t) nkeys)) break;
+
+        /* One bound for the whole call, however many rounds it takes. */
+        if (budget_ns == 0) {
+            budget_ns = oxphp_claim_budget_ns();
+            clock_gettime(CLOCK_MONOTONIC, &started);
+        }
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        int64_t left_ns = budget_ns - ((int64_t) (now.tv_sec - started.tv_sec) * 1000000000
+                                       + (now.tv_nsec - started.tv_nsec));
+        oxphp_curl_wait_enter(self, keys, (uint32_t) nkeys, (uint32_t) total);
+        ender.nkeys = nkeys;
+        ender.total = total;
+        ender.could_go = false;
+        oxphp_claim_wait_end end = left_ns > 0
+            ? oxphp_claim_await(keys, total, self, left_ns, &held,
+                                loop_call ? NULL : oxphp_curl_end_selects, &ender)
+            : OXPHP_CLAIM_WAIT_BUDGET;
+        /* Still no one holds the handles (the await names a key only when it finds
+         * it held): this call was only letting an earlier one in, and goes ahead
+         * when it cannot wait for that, as it would if no one were waiting. Refusing
+         * it would turn the holder's courtesy into a failure of its own transfer. */
+        if (held == NULL
+            && (end == OXPHP_CLAIM_WAIT_UNSUSPENDABLE || end == OXPHP_CLAIM_WAIT_BUDGET)) {
+            break;
+        }
+        if (end != OXPHP_CLAIM_WAIT_FREE) {
+            oxphp_curl_wait_leave(self);
+            oxphp_curl_guard_refuse(g, end, held, total > nkeys && held == keys[nkeys], budget_ns);
+            return;
+        }
+        /* Other fibers ran meanwhile, and may have moved the handle between multi
+         * handles. */
+        nkeys = oxphp_curl_keys(g, execute_data, self, keys, &total);
+    }
+    oxphp_curl_wait_leave(self);
+
+    /* A handle this fiber already holds is in a call further out — this one runs
+     * from a callback of it — and that call gives it back. */
+    bool acquired[OXPHP_CURL_MAX_KEYS] = { false };
+    for (size_t i = 0; i < nkeys; i++) {
+        if (oxphp_claim_owner(keys[i]) == NULL) acquired[i] = oxphp_claim_acquire(keys[i], self);
+    }
+
+    oxphp_curl_op outer = self->curl_op;
+    self->curl_op = (oxphp_curl_op) {
+        .frame = execute_data,
+        .after_cancel = self->net_park_off,
+        .select = g == &oxphp_curl_guards[OXPHP_CURL_GUARD_curl_multi_select],
+    };
+
+    g->orig(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+
+    /* A drain kill oxphp_curl_park() answered as a failed wait, rather than
+     * bailing through libcurl. A call that never waited, a shutdown function's
+     * curl_setopt() say, is not one. */
+    bool drained = self->drain_kill && self->curl_op.cancelled;
+
+    /* A bailout skips this; recovering from one clears `curl_op`, and the end of
+     * the request or task releases the claims. */
+    self->curl_op = outer;
+    for (size_t i = 0; i < nkeys; i++) {
+        if (acquired[i]) oxphp_claim_forget(keys[i]);
+    }
+    oxphp_curl_track(g, execute_data, return_value, self);
+
+    if (drained) {
+        if (outer.frame == NULL) {
+            /* Dropped, as the kill drops it at every other wait: a fatal raised
+             * with it pending would report it as uncaught, by its __toString(). */
+            oxphp_discard_pending_exception();
+            oxphp_fiber_drain_bail();
+        }
+        /* A call further out is still inside libcurl: it fails its next wait, and
+         * bails once it returns, whether it waits again or not. */
+        self->curl_op.cancelled = true;
+    }
+}
+
+#define X(fname, nkeys, easy_arg)                                                    \
+    static ZEND_NAMED_FUNCTION(oxphp_curl_guard_##fname)                             \
+    {                                                                                \
+        oxphp_curl_guarded(&oxphp_curl_guards[OXPHP_CURL_GUARD_##fname],             \
+                           INTERNAL_FUNCTION_PARAM_PASSTHRU);                        \
+    }
+OXPHP_CURL_GUARDS(X)
+#undef X
+
+static const zif_handler oxphp_curl_guard_handlers[OXPHP_CURL_GUARD_COUNT] = {
+#define X(fname, nkeys, easy_arg) oxphp_curl_guard_##fname,
+    OXPHP_CURL_GUARDS(X)
+#undef X
+};
+
+/* Whether ext/curl is a shared extension that Zend loaded with RTLD_DEEPBIND,
+ * which makes the libcurl it brings in bind poll() to libc's ahead of the
+ * bridge's; the bridge checks only the global binding and cannot see that. The
+ * condition is DL_LOAD's own (Zend/zend_portability.h, 8.4.27 and 8.5.12): glibc,
+ * always on 8.4, on 8.5 when the SAPI that loaded PHP asked for it. */
+static bool oxphp_curl_bound_deep(void)
+{
+#if defined(RTLD_DEEPBIND) && !defined(__SANITIZE_ADDRESS__) && !__has_feature(memory_sanitizer)
+    const zend_module_entry *curl = zend_hash_str_find_ptr(&module_registry, "curl",
+                                                           sizeof("curl") - 1);
+    if (curl == NULL || curl->handle == NULL) return false;
+# if PHP_VERSION_ID >= 80500 && defined(LM_ID_NEWLM)
+    return zend_dl_use_deepbind;
+# else
+    return true;
+# endif
+#else
+    return false;
+#endif
+}
+
+/* Over the wrappers oxphp_curl_hooks_install() put on some of the same functions,
+ * which MSHUTDOWN takes off after these. Without ext/curl there is nothing to
+ * park and nothing is installed or said. Returns whether the category is in
+ * effect. */
+static bool oxphp_curl_category_install(void)
+{
+    if (!zend_hash_str_exists(CG(function_table), "curl_exec", sizeof("curl_exec") - 1)) {
+        return false;
+    }
+
+    /* libphp's address is what tells the PHP CLI binary apart, as for "net". */
+    int armed = oxphp_bridge_set_curl_park_fn(oxphp_curl_park,
+                    (const void *) php_network_connect_socket_to_host);
+    if (armed == -3) {
+        /* The PHP CLI binary: not said, for the reason given for "net". */
+        return false;
+    }
+    /* After the CLI binary is told apart: 8.4 on glibc loads every shared ext/curl
+     * this way, and each php process would say it. */
+    if (oxphp_curl_bound_deep()) {
+        if (armed == 0) (void) oxphp_bridge_set_curl_park_fn(NULL, NULL);
+        php_log_err("oxphp: curl hooks unavailable (ext/curl is a shared extension loaded "
+                    "with RTLD_DEEPBIND, so its libcurl does not call the poll() the bridge "
+                    "library defines); cURL transfers stay blocking");
+        return false;
+    }
+    if (armed == -2) {
+        php_log_err("oxphp: curl hooks unavailable (libcurl's poll() is not the one the bridge "
+                    "library defines, so nothing can be intercepted); cURL transfers stay "
+                    "blocking");
+        return false;
+    }
+    if (armed == -4) {
+        php_log_err("oxphp: curl hooks unavailable (libcurl is not a shared library of its "
+                    "own, so its waits cannot be told apart); cURL transfers stay blocking");
+        return false;
+    }
+    if (armed != 0) {
+        php_log_err("oxphp: curl hooks unavailable (libcurl's waits can only be intercepted on "
+                    "Linux); cURL transfers stay blocking");
+        return false;
+    }
+
+    for (size_t i = 0; i < OXPHP_CURL_GUARD_COUNT; i++) {
+        oxphp_hook_swap(oxphp_curl_guards[i].name, oxphp_curl_guards[i].name_len,
+                        oxphp_curl_guard_handlers[i], &oxphp_curl_guards[i].orig);
+    }
+    return true;
+}
+
+static void oxphp_curl_category_restore(void)
+{
+    oxphp_bridge_set_curl_park_fn(NULL, NULL);
+    for (size_t i = 0; i < OXPHP_CURL_GUARD_COUNT; i++) {
+        oxphp_hook_restore(oxphp_curl_guards[i].name, oxphp_curl_guards[i].name_len,
+                           oxphp_curl_guards[i].orig);
+        oxphp_curl_guards[i].orig = NULL;
+    }
+}
+
 /* Publishing the set is what makes an enabled RUNTIME_HOOKS confirmable at all:
  * a misspelled variable name, RUNTIME_HOOKS=0 and a correctly enabled build
  * otherwise serve byte-identical responses and log nothing. The flags are
@@ -6731,6 +7386,7 @@ static void oxphp_runtime_hooks_install(void)
     bool sleep_installed = false;
     bool streams_installed = false;
     bool net_installed = false;
+    bool curl_installed = false;
 
     oxphp_hooks_report_unknown_categories();
 
@@ -6807,6 +7463,9 @@ static void oxphp_runtime_hooks_install(void)
         zend_post_startup_cb = oxphp_hooks_post_startup;
         streams_installed = true;
     }
+    if (oxphp_hooks_category_enabled("curl")) {
+        curl_installed = oxphp_curl_category_install();
+    }
 
     /* Category order here is the order oxphp_hook_categories[] declares, so the
      * published value is a canonical set: "all", "1" and "streams, sleep" are
@@ -6820,19 +7479,24 @@ static void oxphp_runtime_hooks_install(void)
      * vocabulary does grow between releases — that is why the grammar forgives
      * names it does not recognise — so that growth has to break a build rather
      * than a field. */
-    char installed[sizeof("sleep,streams,net")];
-    _Static_assert(sizeof(oxphp_hook_categories) / sizeof(oxphp_hook_categories[0]) == 3,
+    char installed[sizeof("sleep,streams,net,curl")];
+    _Static_assert(sizeof(oxphp_hook_categories) / sizeof(oxphp_hook_categories[0]) == 4,
                    "a hook category was added: give it a flag and a branch above, "
                    "and add its name to the size literal of installed[]");
     _Static_assert(sizeof(installed) <= OXPHP_BRIDGE_RUNTIME_HOOKS_MAX,
                    "installed[] outgrew the bridge's published slot, which would "
                    "move the silent truncation there instead of removing it");
-    snprintf(installed, sizeof(installed), "%s%s%s%s%s",
-             sleep_installed ? "sleep" : "",
-             (sleep_installed && streams_installed) ? "," : "",
-             streams_installed ? "streams" : "",
-             ((sleep_installed || streams_installed) && net_installed) ? "," : "",
-             net_installed ? "net" : "");
+    const bool flags[] = { sleep_installed, streams_installed, net_installed, curl_installed };
+    _Static_assert(sizeof(flags) / sizeof(flags[0])
+                       == sizeof(oxphp_hook_categories) / sizeof(oxphp_hook_categories[0]),
+                   "one flag per category, in the order oxphp_hook_categories[] declares");
+    size_t len = 0;
+    installed[0] = '\0';
+    for (size_t i = 0; i < sizeof(flags) / sizeof(flags[0]); i++) {
+        if (!flags[i]) continue;
+        len += (size_t) snprintf(installed + len, sizeof(installed) - len, "%s%s",
+                                 len > 0 ? "," : "", oxphp_hook_categories[i]);
+    }
     oxphp_bridge_set_runtime_hooks(installed);
 }
 
@@ -6856,6 +7520,7 @@ static void oxphp_runtime_hooks_restore(void)
     oxphp_bridge_set_net_park_fn(NULL, NULL);
     oxphp_net_installed = false;
     oxphp_restore_socket_ops();
+    oxphp_curl_category_restore();
 }
 
 /* ─── Worker Mode: soft reset between requests ─────────────── */
@@ -10766,6 +11431,8 @@ PHP_RSHUTDOWN_FUNCTION(oxphp_sapi)
     /* Cleanup any outstanding promises not awaited by user code. */
     oxphp_bridge_cleanup_outstanding_promises();
 
+    oxphp_curl_members_destroy();
+
     /* Clear decorator instance cache — zvals are dtor'd by the HT's
      * registered destructor, we just need to empty the table. */
     if (decorator_instance_cache_initialized) {
@@ -10811,6 +11478,12 @@ ZEND_MODULE_POST_ZEND_DEACTIVATE_D(oxphp_sapi)
     /* Again, for a setlocale() from PHP code that ran after RSHUTDOWN reset the
      * locale — a session save handler — so that it ends with the request. */
     oxphp_locale_request_end();
+
+    /* Tables a cURL call made after RSHUTDOWN — from a session save handler, say,
+     * whose module shuts down after this one — opened: the arena they are in goes
+     * with the heap reset. */
+    oxphp_curl_members = NULL;
+    oxphp_curl_multis = NULL;
 
     return SUCCESS;
 }

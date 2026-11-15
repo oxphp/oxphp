@@ -223,6 +223,72 @@ hooks/test_net_connect_made_in_warning_handler_keeps_outer_connect_parked
 # without a word on stderr.
 hooks/test_net_cli_binary_stays_quiet
 
+# The curl category: libcurl waits for its answer inside its own poll(), below
+# anything the net category sees. Two transfers on one async worker, each kept a
+# second by the peer, over plain HTTP and over TLS, through curl_exec() and through
+# a curl_multi_exec()/curl_multi_select() loop. Each asserts the two waits overlap.
+hooks/test_curl_exec_task_multiplex >> ?scheme=http
+hooks/test_curl_exec_task_multiplex >> ?scheme=https
+hooks/test_curl_multi_select_task_multiplex
+
+# What parking inside a transfer must not do to a handle the worker shares. A second
+# request on the CurlHandle or CurlMultiHandle another one is parked on waits for
+# that call to return, also after the holder's own callback has made a call on the
+# handle; a CurlShareHandle is not held at all; and the same wait from a userland
+# Fiber, which cannot be suspended, is refused with an exception. Each hands the
+# handle over through the worker's shared state, which PHP_WORKERS=1 makes the only
+# way two requests can meet.
+hooks/test_curl_shared_handle_waits_for_the_holder
+hooks/test_curl_nested_call_keeps_the_handle
+hooks/test_curl_shared_multi_waits_for_the_holder
+hooks/test_curl_shared_share_handle
+hooks/test_curl_guard_refuses_from_a_userland_fiber
+
+# A loop of curl_multi_exec() and curl_multi_select() on a shared multi handle holds
+# it through every call, so a request waiting for it is let in between two of the
+# loop's calls rather than after the whole loop: the waiting requests in the order
+# they came, only one that could then have all its handles, and a holder that
+# cannot be suspended to let one in carries on rather than being refused.
+hooks/test_curl_shared_multi_waiter_gets_in_between_the_holders_calls
+hooks/test_curl_shared_multi_waiters_get_in_one_after_another
+hooks/test_curl_waiter_held_up_elsewhere_does_not_hold_up_the_multi_handle
+hooks/test_curl_holder_in_a_userland_fiber_is_not_refused_for_a_waiter
+
+# Such a call, unless it is itself one of a loop's calls, ends the curl_multi_select()
+# the holding loop is parked in once that select is all it waits for, and the select
+# returns 0 as on its timeout, and does not end each select of a loop that cannot
+# let it in; two loops on one multi handle wait for each other's select instead of
+# ending it.
+hooks/test_curl_shared_multi_waiter_ends_the_holders_select_early
+hooks/test_curl_shared_multi_loops_on_one_handle_do_not_end_each_others_selects
+hooks/test_curl_shared_multi_loops_on_one_handle_do_not_end_each_others_selects >> ?arrive=select
+hooks/test_curl_shared_multi_waiter_held_up_elsewhere_ends_the_select_once_it_can_go
+hooks/test_curl_waiter_held_up_by_the_holders_outer_call_does_not_end_each_select
+
+# An easy handle in a multi handle is the adding request's until it is taken out: a
+# call on it from another request waits that long, also when the driving loop is
+# suspended between its calls. The transfer's own callbacks, run by whichever
+# request drives the multi handle, are not held back, nor are the calls HTTP
+# clients make on a transfer under way (curl_pause(), curl_setopt() of
+# CURLOPT_PRIVATE or CURLOPT_VERBOSE), and every way out ends the wait at once —
+# curl_multi_remove_handle() from another request, closing or freeing the multi
+# handle, the adding request ending. An add that leaves an exception behind,
+# as one under a throwing error handler does, holds the handle all the same, and
+# a new handle put into the same multi handle right after does not hold the call.
+# Nor does a handle a destructor builds while a multi handle is being freed, on
+# the number or memory of one it has just let go, pass for that one.
+hooks/test_curl_easy_in_a_shared_multi_waits_for_its_removal
+hooks/test_curl_easy_added_under_an_exception_is_held
+hooks/test_curl_easy_waiter_is_not_held_by_the_next_handle_added
+hooks/test_curl_transfer_callback_runs_in_the_driving_request
+hooks/test_curl_calls_made_on_a_transfer_under_way_do_not_wait
+hooks/test_curl_easy_handle_out_of_its_multi_is_not_held >> ?how=remove
+hooks/test_curl_easy_handle_out_of_its_multi_is_not_held >> ?how=close
+hooks/test_curl_easy_handle_out_of_its_multi_is_not_held >> ?how=drop
+hooks/test_curl_easy_handle_out_of_its_multi_is_not_held >> ?how=end
+hooks/test_curl_handle_built_where_a_freed_handle_was_is_not_taken_for_it >> ?then=park
+hooks/test_curl_handle_built_where_a_freed_handle_was_is_not_taken_for_it >> ?then=add
+
 # Three POSTs, one worker: the request body is a stream resource, and worker mode
 # has no per-request resource list to close it. Listed three times because the
 # assertion is about the delta between two consecutive requests, not about any

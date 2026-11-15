@@ -17,6 +17,10 @@ hooksdb/test_shared_pdo_attribute_filter
 hooksdb/test_shared_redis_wait_gives_up
 hooksdb/test_shared_mysqli_close_under_parked_reader
 
+# APM wraps curl_setopt() and curl_exec() too, which the curl category claims a
+# shared handle in. Fails if the wrapper calls around the claim.
+hooks/test_curl_shared_handle_waits_for_the_holder
+
 # Persistent PDO constructors are serialised per data source by a hook on
 # PDO::__construct, which APM wraps too.
 hooksdb/test_persistent_ctor_race_one_connection

@@ -250,6 +250,16 @@ fibers/test_curl_bailout_in_a_callback_retires_the_worker_probe >> ?via=timeout
 fibers/test_curl_bailout_in_a_callback_retires_the_worker >> ?via=after | GET | | 500 |
 fibers/test_curl_bailout_in_a_callback_retires_the_worker_probe >> ?via=after
 
+# A worker retired with a request parked inside curl_exec() kills that request
+# once libcurl has ended the transfer and returned, not from inside libcurl's
+# wait, which would leave the handle inside the call for good. With ?throw=1 the
+# wait is killed with an exception a write callback threw pending, and that
+# exception comes back out of the wait with the transfer.
+fibers/test_curl_transfer_ended_by_a_retire_leaves_its_handle_usable | GET | | 200 |
+fibers/test_curl_transfer_ended_by_a_retire_leaves_its_handle_usable_probe
+fibers/test_curl_transfer_ended_by_a_retire_leaves_its_handle_usable >> ?throw=1 | GET | | 200 |
+fibers/test_curl_transfer_ended_by_a_retire_leaves_its_handle_usable_probe >> ?throw=1
+
 # A stream's flush waiting for room in its queue: the stream reaches a client
 # on the same worker thread whole, another request is served while it waits, the
 # wait ends at its client leaving and at its time limit, and what is left of a

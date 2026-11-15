@@ -1098,7 +1098,7 @@ size_t oxphp_bridge_max_input_vars(void);
 
 /** Publish the runtime-hook categories this process installed, as a
  *  comma-separated list of category names in a canonical order
- *  ("sleep,streams,net"). Called once from the PHP extension's MINIT, on the
+ *  ("sleep,streams,net,curl"). Called once from the PHP extension's MINIT, on the
  *  startup thread, before any worker thread exists; the value is a property of
  *  the process rather than of a request, so it is a plain global and not
  *  __thread. Values longer than the buffer are truncated.
@@ -1736,6 +1736,19 @@ typedef enum {
 struct pollfd;
 typedef int (*oxphp_net_park_fn_t)(struct pollfd *fds, unsigned long nfds, int timeout_ms);
 int oxphp_bridge_set_net_park_fn(oxphp_net_park_fn_t fn, const void *libphp_anchor);
+
+/* The same interposition for the waits libcurl makes inside a transfer
+ * (RUNTIME_HOOKS category "curl"): a poll() returning into the shared object
+ * that exports curl_easy_perform is handed to `fn`, on the same terms as above.
+ * A wait `fn` answers as cancelled fails, to libcurl, with ENOMEM, which ends
+ * the libcurl call it is in — curl_easy_perform() with the transfer, a
+ * curl_multi_wait() with CURLM_UNRECOVERABLE_POLL — where a timeout would be one
+ * more turn of its loop.
+ *
+ * NULL uninstalls. Returns 0 on success, -2 and -3 as above (`libphp_anchor` is
+ * what tells the PHP CLI binary apart), and -4 when there is no libcurl to tell
+ * apart: none is loaded, or it is linked into libphp itself. */
+int oxphp_bridge_set_curl_park_fn(oxphp_net_park_fn_t fn, const void *libphp_anchor);
 
 /* While raised, every poll() libphp makes to wait (a timeout of zero is not one),
  * on this thread, is answered at once as a timeout, whether or not a fiber is running. Meant for one

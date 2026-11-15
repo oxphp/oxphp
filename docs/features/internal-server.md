@@ -134,7 +134,7 @@ curl -s http://localhost:9090/config | jq .
   "rate_window_seconds": 60,
   "response_buffer_bytes": 1048576,
   "response_spool_max_bytes": 1073741824,
-  "runtime_hooks": ["sleep", "streams", "net"],
+  "runtime_hooks": ["sleep", "streams", "net", "curl"],
   "static_max_age": 2592000,
   "static_revalidate": false,
   "superglobals_enabled": true,
@@ -149,7 +149,7 @@ curl -s http://localhost:9090/config | jq .
 }
 ```
 
-`runtime_hooks` lists the runtime-hook categories the process installed at startup, as a parsed set rather than the raw `RUNTIME_HOOKS` value, so `all`, `1` and `sleep, streams, net` all read as `["sleep","streams","net"]` and a scraper needs no copy of that grammar. An empty list means no hook is installed, which is also the answer for a misspelled variable name. It reports what was installed, not what is in effect: where there are no fibers at all the hooks delegate to the builtins they replaced, so a traditional-mode server reports the categories it set up while behaving natively. See [Runtime Hooks](../operations/configuration.md#runtime-hooks).
+`runtime_hooks` lists the runtime-hook categories the process installed at startup, as a parsed set rather than the raw `RUNTIME_HOOKS` value, so `all`, `1` and `sleep, streams, net, curl` all read as `["sleep","streams","net","curl"]` and a scraper needs no copy of that grammar. An empty list means no hook is installed, which is also the answer for a misspelled variable name. It reports what was installed, not what is in effect: where there are no fibers at all the hooks delegate to the builtins they replaced, so a traditional-mode server reports the categories it set up while behaving natively. See [Runtime Hooks](../operations/configuration.md#runtime-hooks).
 
 `deny_file` summarizes the [`.oxphpdeny`](../security/oxphpdeny.md) file read from `DOCUMENT_ROOT` at startup: the number of rules, split by action — `deny`, `entry` for `>` rules, `allow` for `!` rules — and what a deny rule answers with, the `PHP_DENY_FALLBACK` status code or `"script"` without the script's path. The rules themselves are left out: on an internal server reachable from outside, they would be a map of exactly the paths the file protects. To see how each rule was read, start with `LOG_LEVEL=debug` and look for the `oxphpdeny rule` lines. Without the file the entry is `{"loaded": false}`.
 

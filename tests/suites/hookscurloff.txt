@@ -1,0 +1,5 @@
+# profile: hookscurloff
+# description: Runtime hooks without the curl category — the control for the curl tests: libcurl waits must hold the thread
+
+hooks/test_curl_off_holds_thread
+hooks/test_net_tls_read_task_multiplex
