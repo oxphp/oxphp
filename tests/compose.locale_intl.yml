@@ -1,0 +1,40 @@
+# manual: true
+#
+# setlocale() per request against intl, whose NumberFormatter::parse() calls
+# libc's setlocale() for LC_NUMERIC itself — on the process locale, from
+# whichever thread runs it.
+#
+# Marked manual because it compiles intl at image build time and what it
+# checks is a race: a pass is a run in which the race never showed, not a proof
+# that it cannot. The sweep skips it; run it on demand:
+#   ./tests/run_all.sh --profile=locale_intl
+#
+# Traditional routing with two PHP workers, as in the locale profile: the test
+# holds one worker and sends the request that calls intl to the other.
+#
+# Standalone usage:
+#   docker compose -f compose.yml -f compose.locale_intl.yml up
+services:
+  oxphp-locale_intl:
+    build:
+      context: ./fixtures/locale_intl
+      dockerfile: Dockerfile
+      args:
+        BASE_IMAGE: ${OXPHP_BASE_IMAGE:-oxphp-oxphp:latest}
+    ports:
+      - "80"
+    networks: [test-net]
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    environment:
+      LOG_LEVEL: error
+      INTERNAL_ADDR: 0.0.0.0:9090
+      PHP_WORKERS: 2
+    volumes:
+      - ../www:/var/www/html
+      - ./php:/var/www/html/public/tests

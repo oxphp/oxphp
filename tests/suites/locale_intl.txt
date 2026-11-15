@@ -1,0 +1,6 @@
+# profile: locale_intl
+# description: setlocale() per request keeps its own names while intl, on another worker, changes libc's LC_NUMERIC on the process locale
+
+# A request changing its locale over and over reads back only names it set,
+# while a request on the other worker calls NumberFormatter::parse() in a loop.
+locale/test_setlocale_survives_intl_on_other_worker
