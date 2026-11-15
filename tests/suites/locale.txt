@@ -17,3 +17,7 @@ locale/test_setlocale_reset_before_session_shutdown_write
 # Within its own request setlocale() returns what PHP's does, and the locale it
 # sets is the one locale-dependent functions use.
 locale/test_setlocale_applies_to_own_request
+
+# The same series of setlocale() calls answers, call by call, what it answers in
+# the PHP CLI: the name returned, the LC_ALL name after it, and which calls fail.
+locale/test_setlocale_matches_php_cli

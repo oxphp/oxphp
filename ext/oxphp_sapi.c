@@ -33,6 +33,7 @@
 #  endif
 #endif
 #include <inttypes.h>
+#include <langinfo.h>
 #include <limits.h>
 #include <locale.h>
 #include <stdlib.h>
@@ -6120,25 +6121,18 @@ static void oxphp_putenv_hook_restore(void)
  * that object.
  *
  * The names setlocale() returns, and the LC_ALL name a later call has to take
- * back, are libc's own: glibc and musl spell them differently, and "" means
- * whatever the environment names. So libc's setlocale() still makes the change,
- * on the process locale used as scratch under oxphp_locale_lock: load this
- * thread's names, apply the change, read every category back, put back the
- * server's names. Only libc runs under the lock — PHP's conversions and warnings
- * happen before it is taken — so neither user code nor a bailout can leave it
- * held.
- *
- * A C extension that calls libc's setlocale() itself — intl's
- * NumberFormatter::parse() does, for LC_NUMERIC — bypasses the lock. It changes
- * the process locale, which a PHP thread no longer runs under once its first
- * request has started, but which is the scratch: a change landing while
- * another thread holds it can end up in that thread's names, and on glibc,
- * which frees a category's name when it changes, can free a name being copied.
- * A query from such an extension answers the server's names, not its thread's. */
+ * back, are libc's own: "" means whatever the environment names, and glibc and
+ * musl resolve and spell names differently. So newlocale() resolves each
+ * category's name, nl_langinfo_l() reads it back, and the LC_ALL name is put
+ * together from them as libc puts it together. Once the server's names are
+ * copied at the first request, setlocale() in a request neither reads nor
+ * changes the process locale: a C extension may change that from any thread at
+ * any moment — intl's NumberFormatter::parse() does, for LC_NUMERIC. A query
+ * from such an extension answers the process locale, not its thread's. */
 static zif_handler oxphp_orig_setlocale = NULL;
-static pthread_mutex_t oxphp_locale_lock = PTHREAD_MUTEX_INITIALIZER;
 
-/* Every category setlocale() takes besides LC_ALL; glibc has six musl lacks. */
+/* Every category setlocale() takes besides LC_ALL, in libc's order, which its
+ * LC_ALL name follows; glibc has six musl lacks. */
 static const int oxphp_locale_cat[] = {
     LC_CTYPE, LC_NUMERIC, LC_TIME, LC_COLLATE, LC_MONETARY, LC_MESSAGES,
 #ifdef LC_IDENTIFICATION
@@ -6156,6 +6150,28 @@ static const int oxphp_locale_mask[] = {
 #define OXPHP_LOCALE_NCAT (sizeof(oxphp_locale_cat) / sizeof(oxphp_locale_cat[0]))
 _Static_assert(sizeof(oxphp_locale_cat) == sizeof(oxphp_locale_mask),
                "one mask per locale category");
+_Static_assert(LC_CTYPE == 0 && LC_NUMERIC == 1 && LC_TIME == 2 && LC_COLLATE == 3
+               && LC_MONETARY == 4 && LC_MESSAGES == 5 && LC_ALL == 6,
+               "oxphp_locale_cat is in libc's category order");
+#ifdef LC_IDENTIFICATION
+_Static_assert(LC_PAPER == 7 && LC_NAME == 8 && LC_ADDRESS == 9 && LC_TELEPHONE == 10
+               && LC_MEASUREMENT == 11 && LC_IDENTIFICATION == 12,
+               "oxphp_locale_cat is in libc's category order");
+#endif
+
+#ifdef __GLIBC__
+static const char *const oxphp_locale_cat_name[] = {
+    "LC_CTYPE", "LC_NUMERIC", "LC_TIME", "LC_COLLATE", "LC_MONETARY", "LC_MESSAGES",
+    "LC_PAPER", "LC_NAME", "LC_ADDRESS", "LC_TELEPHONE", "LC_MEASUREMENT",
+    "LC_IDENTIFICATION",
+};
+_Static_assert(sizeof(oxphp_locale_cat_name) / sizeof(oxphp_locale_cat_name[0])
+                   == OXPHP_LOCALE_NCAT,
+               "one name per locale category");
+#else
+/* LOCALE_NAME_MAX of musl's src/internal/locale_impl.h, 1.2.6. */
+#define OXPHP_MUSL_LOCALE_NAME_MAX 23
+#endif
 
 /* A locale as libc names it: the LC_ALL name and one per category. */
 typedef struct {
@@ -6183,39 +6199,31 @@ static const oxphp_locale_names *oxphp_locale_current_names(void)
     return oxphp_locale_own_names ? oxphp_locale_own_names : oxphp_locale_base_names;
 }
 
+static int oxphp_locale_index(int cat)
+{
+    for (size_t i = 0; i < OXPHP_LOCALE_NCAT; i++) {
+        if (oxphp_locale_cat[i] == cat) {
+            return (int) i;
+        }
+    }
+    return -1;
+}
+
 static const char *oxphp_locale_name_of(const oxphp_locale_names *names, int cat)
 {
     if (cat == LC_ALL) {
         return names->all;
     }
-    for (size_t i = 0; i < OXPHP_LOCALE_NCAT; i++) {
-        if (oxphp_locale_cat[i] == cat) {
-            return names->cat[i];
-        }
-    }
-    return NULL;
+    int i = oxphp_locale_index(cat);
+    return i < 0 ? NULL : names->cat[i];
 }
 
-/* The process locale's names, copied. The strings setlocale(..., NULL) returns
- * stay valid until the process locale next changes, which the caller rules out
- * — against every setlocale() but a C extension's own — by holding
- * oxphp_locale_lock or by running before the scratch is first used. */
-static oxphp_locale_names *oxphp_locale_read_names(void)
+/* One allocation holding a copy of every name. */
+static oxphp_locale_names *oxphp_locale_names_new(const char *all, const char *const cat[])
 {
-    const char *src[1 + OXPHP_LOCALE_NCAT];
-    size_t len[1 + OXPHP_LOCALE_NCAT];
-    size_t total = 0;
-
-    src[0] = setlocale(LC_ALL, NULL);
+    size_t total = strlen(all) + 1;
     for (size_t i = 0; i < OXPHP_LOCALE_NCAT; i++) {
-        src[i + 1] = setlocale(oxphp_locale_cat[i], NULL);
-    }
-    for (size_t i = 0; i <= OXPHP_LOCALE_NCAT; i++) {
-        if (!src[i]) {
-            return NULL;
-        }
-        len[i] = strlen(src[i]) + 1;
-        total += len[i];
+        total += strlen(cat[i]) + 1;
     }
 
     oxphp_locale_names *names = malloc(sizeof(*names) + total);
@@ -6223,16 +6231,68 @@ static oxphp_locale_names *oxphp_locale_read_names(void)
         return NULL;
     }
     char *p = names->buf;
-    for (size_t i = 0; i <= OXPHP_LOCALE_NCAT; i++) {
-        memcpy(p, src[i], len[i]);
-        if (i == 0) {
-            names->all = p;
-        } else {
-            names->cat[i - 1] = p;
-        }
-        p += len[i];
+    names->all = p;
+    p = stpcpy(p, all) + 1;
+    for (size_t i = 0; i < OXPHP_LOCALE_NCAT; i++) {
+        names->cat[i] = p;
+        p = stpcpy(p, cat[i]) + 1;
     }
     return names;
+}
+
+/* These categories' names, with the LC_ALL name libc gives them: the one name
+ * when every category has it, else every category's in order —
+ * "LC_CTYPE=name;..." on glibc (new_composite_name(), locale/setlocale.c, 2.41),
+ * "name;..." on musl (setlocale(), src/locale/setlocale.c, 1.2.6). */
+static oxphp_locale_names *oxphp_locale_names_compose(const char *const cat[])
+{
+    bool same = true;
+    size_t len = 0;
+
+    for (size_t i = 0; i < OXPHP_LOCALE_NCAT; i++) {
+        same = same && strcmp(cat[i], cat[0]) == 0;
+        len += strlen(cat[i]) + 1;
+#ifdef __GLIBC__
+        len += strlen(oxphp_locale_cat_name[i]) + 1;
+#endif
+    }
+    if (same) {
+        return oxphp_locale_names_new(cat[0], cat);
+    }
+
+    char *all = malloc(len);
+    if (!all) {
+        return NULL;
+    }
+    char *p = all;
+    for (size_t i = 0; i < OXPHP_LOCALE_NCAT; i++) {
+#ifdef __GLIBC__
+        p = stpcpy(p, oxphp_locale_cat_name[i]);
+        *p++ = '=';
+#endif
+        p = stpcpy(p, cat[i]);
+        *p++ = ';';
+    }
+    p[-1] = '\0';
+
+    oxphp_locale_names *names = oxphp_locale_names_new(all, cat);
+    free(all);
+    return names;
+}
+
+/* The process locale's names, copied: the server's, read before any request's
+ * setlocale() has run. */
+static oxphp_locale_names *oxphp_locale_read_names(void)
+{
+    const char *all = setlocale(LC_ALL, NULL);
+    const char *cat[OXPHP_LOCALE_NCAT];
+
+    for (size_t i = 0; i < OXPHP_LOCALE_NCAT; i++) {
+        if (!(cat[i] = setlocale(oxphp_locale_cat[i], NULL))) {
+            return NULL;
+        }
+    }
+    return all ? oxphp_locale_names_new(all, cat) : NULL;
 }
 
 /* Category by category: newlocale() gives every category of its mask the one
@@ -6252,32 +6312,93 @@ static locale_t oxphp_locale_build(const oxphp_locale_names *names)
     return loc;
 }
 
-/* Category by category, not through the LC_ALL name: libc does not escape the
- * separator of its LC_ALL name inside a category's name, and musl keeps any
- * name it is given for a category it has no data for. */
-static bool oxphp_locale_load(const oxphp_locale_names *names)
+/* newlocale(mask, name, loc), with loc freed when that fails. */
+static locale_t oxphp_locale_apply(locale_t loc, int mask, const char *name)
 {
-    for (size_t i = 0; i < OXPHP_LOCALE_NCAT; i++) {
-        if (!setlocale(oxphp_locale_cat[i], names->cat[i])) {
-            return false;
-        }
+    locale_t next = newlocale(mask, name, loc);
+    if (!next) {
+        freelocale(loc);
     }
-    return true;
+    return next;
 }
 
+#ifndef __GLIBC__
+/* musl's newlocale() gives every category of its mask the one name it is
+ * passed, where its setlocale() splits an LC_ALL name (src/locale/setlocale.c,
+ * 1.2.6): one part per category, in order, between ';'. A part longer than a
+ * locale name can be is never passed: it and every later category get the part
+ * before it. Past the last part, the last one repeats. */
+static locale_t oxphp_locale_apply_all(locale_t loc, const char *name)
+{
+    char part[OXPHP_MUSL_LOCALE_NAME_MAX + 1] = "C.UTF-8";
+    const char *p = name;
+
+    for (size_t i = 0; loc && i < OXPHP_LOCALE_NCAT; i++) {
+        size_t len = strcspn(p, ";");
+        if (len <= OXPHP_MUSL_LOCALE_NAME_MAX) {
+            memcpy(part, p, len);
+            part[len] = '\0';
+            if (p[len]) {
+                p += len + 1;
+            }
+        }
+        loc = oxphp_locale_apply(loc, oxphp_locale_mask[i], part);
+    }
+    return loc;
+}
+#endif
+
 /* setlocale(cat, name) applied to this thread's names. NULL when libc refuses
- * the change or this thread's names, or the copy cannot be allocated. */
+ * the change or the copy cannot be allocated. newlocale() and setlocale()
+ * resolve a name through the same function — glibc's _nl_find_locale()
+ * (locale/findlocale.c, 2.41), musl's __get_locale() (src/locale/locale_map.c,
+ * 1.2.6) — and newlocale() puts the result into an object of its own, whose
+ * names nl_langinfo_l() reads. */
 static oxphp_locale_names *oxphp_locale_change(int cat, const char *name)
 {
-    const oxphp_locale_names *own = oxphp_locale_current_names();
-    oxphp_locale_names *changed = NULL;
+    const char *next[OXPHP_LOCALE_NCAT];
+    bool all = cat == LC_ALL;
+    int one = all ? -1 : oxphp_locale_index(cat);
 
-    pthread_mutex_lock(&oxphp_locale_lock);
-    if (oxphp_locale_load(own) && setlocale(cat, name)) {
-        changed = oxphp_locale_read_names();
+    if (!all && one < 0) {
+        return NULL;
     }
-    oxphp_locale_load(oxphp_locale_base_names);
-    pthread_mutex_unlock(&oxphp_locale_lock);
+#ifdef __GLIBC__
+    /* For a single category glibc's newlocale() takes a name with ';' as a
+     * composite, which setlocale() does not: "LC_NUMERIC=C;LC_TIME=C" has to
+     * fail. A name with ';' that setlocale() resolves by dropping its territory,
+     * codeset or modifier ("C.UTF-8@a;b" to Debian's C.utf8, intl/l10nflist.c,
+     * 2.41) is refused too. */
+    if (!all && strchr(name, ';')) {
+        return NULL;
+    }
+#endif
+    /* Not from (locale_t) 0: musl would give the categories outside the mask
+     * the environment's names, one more getenv() a request's putenv() can race.
+     * libc reads the environment elsewhere too; this removes only that read. */
+    locale_t loc = newlocale(LC_ALL_MASK, "C", (locale_t) 0);
+    if (!loc) {
+        return NULL;
+    }
+#ifdef __GLIBC__
+    loc = oxphp_locale_apply(loc, all ? LC_ALL_MASK : oxphp_locale_mask[one], name);
+#else
+    loc = all ? oxphp_locale_apply_all(loc, name)
+              : oxphp_locale_apply(loc, oxphp_locale_mask[one], name);
+#endif
+    if (!loc) {
+        return NULL;
+    }
+
+    memcpy(next, oxphp_locale_current_names()->cat, sizeof(next));
+    for (size_t i = 0; i < OXPHP_LOCALE_NCAT; i++) {
+        if (all || (size_t) one == i) {
+            next[i] = nl_langinfo_l(_NL_LOCALE_NAME(oxphp_locale_cat[i]), loc);
+        }
+    }
+    /* Before the free: glibc keeps the names in the object. */
+    oxphp_locale_names *changed = oxphp_locale_names_compose(next);
+    freelocale(loc);
     return changed;
 }
 
@@ -6327,7 +6448,7 @@ static void oxphp_locale_capture_base(void)
 }
 
 /* Before any PHP code runs on the thread: until then it runs under the process
- * locale, which another thread may be holding as scratch. */
+ * locale, which a setlocale() on another thread can change under it. */
 static void oxphp_locale_thread_activate(void)
 {
     if (oxphp_locale_thread_on || !oxphp_orig_setlocale) {
