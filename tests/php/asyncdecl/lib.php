@@ -250,6 +250,10 @@ final class AsyncDeclPreNamedCounter
 // thread has this class, so a task can resolve the call the way a request can.
 class AsyncDeclPreForwarder
 {
+    // Count what a subclass's helper() catches and the generators iterated() makes.
+    public static int $caught = 0;
+    public static int $made = 0;
+
     public static function forwarded(): object
     {
         return forward_static_call([self::class, 'target']);
@@ -277,9 +281,32 @@ class AsyncDeclPreForwarder
         return static::helper();
     }
 
+    // array_map() enters the called class's helper() from native code, through
+    // zend_call_function().
+    public static function forwardedNatively(): object
+    {
+        return \array_map(static::helper(...), [0])[0];
+    }
+
+    public static function iterated(): object
+    {
+        $numbers = static::numbers();
+        self::$made++;
+        $v = 0;
+        foreach ($numbers as $n) {
+            $v += $n;
+        }
+        return (object) ['v' => $v];
+    }
+
     public static function helper(): object
     {
         return (object) ['v' => 0];
+    }
+
+    public static function numbers(): \Generator
+    {
+        yield 0;
     }
 }
 
@@ -303,6 +330,32 @@ class AsyncDeclPreScopeBase
     {
         self::$started = true;
         return new \stdClass();
+    }
+
+    // Counts the catch and finally bodies below that ran.
+    public static int $unwound = 0;
+
+    // Each starts inside a try: an Error its frame is pushed with would land in
+    // its own catch or finally if the frame unwound from its first opcode.
+    public static function tryMake(): object
+    {
+        try {
+            return (object) ['v' => static::helper()];
+        } catch (\Error $e) {
+            self::$unwound++;
+            return (object) ['v' => static::helper()];
+        }
+    }
+
+    public static function finallyMake(): object
+    {
+        try {
+            $v = 0;
+        } finally {
+            self::$unwound++;
+            $v = static::helper();
+        }
+        return (object) ['v' => $v];
     }
 
     // Its first opcode is a ROPE_INIT: an untyped parameter starts the frame past

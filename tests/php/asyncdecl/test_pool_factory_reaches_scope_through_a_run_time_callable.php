@@ -390,6 +390,43 @@ final class AsyncDeclRunTimeNamedChild extends AsyncDeclPreScopeMiddle
         }, destroy: null, maxSize: 1);
     }
 
+    // A pool whose factory calls $method of the base class, which starts inside a
+    // try, through filter_var(), and throws how many of the base class's catch and
+    // finally bodies ran. The factory captures the name ROT13-encoded: a captured
+    // value naming self:: would have the check before the callback starts refuse it.
+    public static function unwoundPool(string $method): \OxPHP\Shared\Pool
+    {
+        $rot13 = \str_rot13($method);
+        return new \OxPHP\Shared\Pool(factory: static function () use ($rot13): object {
+            \set_error_handler(static fn (): bool => true, E_DEPRECATED);
+            $unwound = AsyncDeclPreScopeBase::$unwound;
+            try {
+                return \filter_var('x', FILTER_CALLBACK, ['options' => [AsyncDeclPreScopeBase::class, \str_rot13($rot13)]]);
+            } catch (\Error $e) {
+                throw new \RuntimeException('unwound: ' . (AsyncDeclPreScopeBase::$unwound - $unwound), 0, $e);
+            } finally {
+                \restore_error_handler();
+            }
+        }, destroy: null, maxSize: 1);
+    }
+
+    // ob_start() keeps the callable it resolved, the called class of this code
+    // with it, and calls it as the buffer is discarded without resolving it again.
+    public static function throughObStart(): object
+    {
+        \set_error_handler(static fn (): bool => true, E_DEPRECATED);
+        try {
+            try {
+                \ob_start([AsyncDeclPreScopeBase::class, \str_rot13(\array_rand(['frys::znxr' => true]))]);
+            } catch (\Error) {
+            }
+            \ob_end_clean();
+            return new \stdClass();
+        } finally {
+            \restore_error_handler();
+        }
+    }
+
     public static function throughArrayMap(): object
     {
         \set_error_handler(static fn (): bool => true, E_DEPRECATED);
@@ -425,8 +462,8 @@ final class AsyncDeclRunTimeNamedChild extends AsyncDeclPreScopeMiddle
         }
     }
 
-    // The frame unwinds at the method's first opcode, which builds a string that
-    // unwinding releases.
+    // The method's first opcode builds a string: unwinding from that opcode, not
+    // before it, would release one not written yet.
     public static function quotedThroughFilterVar(): object
     {
         \set_error_handler(static fn (): bool => true, E_DEPRECATED);
@@ -688,6 +725,24 @@ $t->assertSame('that array through filter_var(): the method does not start', asy
     [\RuntimeException::class, 'started: false'],
     $namedRefused,
 ]);
+
+// Unwinding before the method's first opcode passes its own try, so neither its
+// catch nor its finally runs on the thread that lacks the called class.
+foreach (['self::tryMake' => 'a catch', 'self::finallyMake' => 'a finally'] as $method => $what) {
+    $pool = AsyncDeclRunTimeNamedChild::unwoundPool($method);
+    $t->assertSame("that array through filter_var(), the method starting in a try with $what: in a task", asyncdecl_run_time_thrown_in_task($pool), [
+        [\RuntimeException::class, 'unwound: 0'],
+        $namedRefused,
+    ]);
+    $h = $pool->acquire();
+    $t->assertSame("that array through filter_var(), the method starting in a try with $what: on the worker thread the factory runs", $h->get()->v, 2);
+    $h->release();
+}
+
+// The method ob_start() calls later starts; the method of the called class it
+// calls in turn is refused as it is entered.
+$pool = new \OxPHP\Shared\Pool(factory: [AsyncDeclRunTimeNamedChild::class, 'throughObStart'], destroy: null, maxSize: 1);
+$t->assertSame('that array kept by ob_start(): in a task', asyncdecl_run_time_thrown_in_task($pool), [$namedRefused]);
 
 $pool = new \OxPHP\Shared\Pool(
     factory: [AsyncDeclRunTimeNamedChild::class, 'quotedThroughFilterVar'],
