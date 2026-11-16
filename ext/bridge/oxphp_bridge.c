@@ -5382,6 +5382,10 @@ static zend_string *oxphp_op_array_missing_here(const zend_op_array *op, uint32_
     return NULL;
 }
 
+zend_string *oxphp_bridge_function_missing_here(const zend_op_array *op) {
+    return oxphp_op_array_missing_here(op, NULL);
+}
+
 /* Record `p` in `seen`. Returns false when it already was there. */
 static bool oxphp_first_visit(HashTable *seen, const void *p) {
     return zend_hash_index_add_empty_element(seen, (zend_ulong)(uintptr_t)p) != NULL;

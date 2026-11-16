@@ -1938,6 +1938,11 @@ int oxphp_reconstruct_async_closure(
     char **exc_message
 );
 
+/* The message of the Error refusing to run `op` on this thread, for a function
+ * or class it names that this thread's tables lack, or NULL. The caller
+ * releases the string. */
+zend_string *oxphp_bridge_function_missing_here(const zend_op_array *op);
+
 /* ─── Custom Object for Plugin Classes ──────────────────────── */
 
 /**

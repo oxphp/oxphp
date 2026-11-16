@@ -6,6 +6,7 @@
 #include "Zend/zend_closures.h"
 #include "Zend/zend_exceptions.h"
 #include "Zend/zend_observer.h"
+#include "Zend/zend_extensions.h"
 #include "Zend/zend_attributes.h"
 #include "Zend/zend_interfaces.h"
 #include "Zend/zend_enum.h"
@@ -10169,6 +10170,145 @@ static zend_object *oxphp_worker_clone_object(zend_object *object) {
     return zend_objects_new(oxphp_worker_ce);
 }
 
+/* ── Entry check on async pool threads ──
+ * An async pool thread never ran the script, so a user function reached there
+ * along a path the dispatch-time check does not follow can name a function or
+ * class only that script declares, and INIT_FCALL / DECLARE_CLASS dereference
+ * NULL for it (oxphp_bridge_function_missing_here()). So each user function is
+ * checked as it is entered on such a thread. An exception thrown from an
+ * observer's begin handler does not stop the function, and pointing EX(opline)
+ * elsewhere from there is not seen either: ZEND_DO_UCALL enters with the opline
+ * it loaded before begin ran, held in the global register with
+ * HAVE_GCC_GLOBAL_REGS (gcc on x86_64 and aarch64) and in a local on 8.5
+ * without it; only 8.4 without it reads EX(opline) again (zend_vm_execute.h,
+ * 8.4.27, 8.5.12). So begin marks the frame and raises vm_interrupt, which the
+ * VM and the JIT check right after begin; the interrupt handler throws from
+ * inside the frame. */
+static __thread zend_execute_data *oxphp_entry_refused_frame = NULL;
+static __thread zend_function *oxphp_entry_refused_func = NULL;
+static __thread zend_string *oxphp_entry_refused_msg = NULL;
+
+/* Drops the mark. One no interrupt took is left when the VM answers the
+ * interrupt begin raised with a timeout or a pending out-of-memory error, which
+ * it handles without calling the interrupt function (zend_interrupt_helper,
+ * 8.4.27, 8.5.12). */
+static void oxphp_entry_refusal_drop(void)
+{
+    if (oxphp_entry_refused_msg) {
+        zend_string_release_ex(oxphp_entry_refused_msg, 0);
+    }
+    oxphp_entry_refused_msg = NULL;
+    oxphp_entry_refused_frame = NULL;
+    oxphp_entry_refused_func = NULL;
+}
+
+static void oxphp_entry_refuse_begin(zend_execute_data *execute_data)
+{
+    /* Init's choice is kept in the function's run-time cache, which code outside
+     * OPcache's shared memory shares between threads. */
+    if (!oxphp_bridge_is_async_worker()) {
+        return;
+    }
+    /* A mark a timeout or an out-of-memory error left behind would match a later
+     * call of this function in the same stack slot, mid-body. An async thread
+     * runs one request for its whole life, so no RSHUTDOWN comes in between. */
+    oxphp_entry_refusal_drop();
+    /* NULL once this thread has loaded what was missing. The handler stays
+     * installed then: removing it would also stop the check on the threads that
+     * share a run-time cache with this one (code outside OPcache's shared
+     * memory). */
+    zend_string *missing = oxphp_bridge_function_missing_here(&execute_data->func->op_array);
+    if (!missing) {
+        return;
+    }
+    oxphp_entry_refused_frame = execute_data;
+    oxphp_entry_refused_func = execute_data->func;
+    oxphp_entry_refused_msg = missing;
+    zend_atomic_bool_store_ex(&EG(vm_interrupt), true);
+}
+
+/* The decision is kept in the function's run-time cache: a thread's own for code
+ * in OPcache's shared memory, so an async thread's tables, which only grow over
+ * its single long request, keep a function that passed once passing. Code outside
+ * it shares one cache between threads and is checked or not as the first thread
+ * to run it decided. */
+static zend_observer_fcall_handlers oxphp_entry_check_observer_init(zend_execute_data *execute_data)
+{
+    zend_function *func = execute_data->func;
+    if (!func || func->type != ZEND_USER_FUNCTION || !oxphp_bridge_is_async_worker()) {
+        return (zend_observer_fcall_handlers){NULL, NULL};
+    }
+    zend_string *missing = oxphp_bridge_function_missing_here(&func->op_array);
+    if (!missing) {
+        return (zend_observer_fcall_handlers){NULL, NULL};
+    }
+    zend_string_release_ex(missing, 0);
+    return (zend_observer_fcall_handlers){oxphp_entry_refuse_begin, NULL};
+}
+
+/* PHP starts zend_extensions after every module, in the order they were
+ * registered, and observers are fixed once they have all started
+ * (php_module_startup(), 8.4.27, 8.5.12). Registered from this module's startup,
+ * this one comes after every zend_extension php.ini loads, so the entry check's
+ * begin runs after the begin of every observer the modules and those
+ * zend_extensions register. Begin handlers run in slot order, and two kinds come
+ * after it: those of a zend_extension that a module started after this one
+ * registers, and those added to a function at run time, which
+ * zend_observer_add_begin_handler() puts in the first free slot
+ * (zend_observer.c, 8.4.27, 8.5.12). Either can run PHP before the interrupt
+ * begin raises. */
+static int oxphp_entry_check_startup(zend_extension *extension)
+{
+    (void) extension;
+    zend_observer_fcall_register(oxphp_entry_check_observer_init);
+    return SUCCESS;
+}
+
+/* php -v and php -m list it under its name. */
+static zend_extension oxphp_entry_check_extension = {
+    .name = "OxPHP",
+    .version = PHP_OXPHP_SAPI_VERSION,
+    .author = "OxPHP",
+    .URL = "https://github.com/oxphp/oxphp",
+    .copyright = "Copyright (c) OxPHP",
+    .startup = oxphp_entry_check_startup,
+    .resource_number = -1,
+};
+
+/* Unwinds a frame that has run no opcode yet, the exception already thrown. With
+ * no opline before the exception, HANDLE_EXCEPTION leaves the function through
+ * none of its try or finally blocks and releases none of its temporaries
+ * (op_num -1; zend_vm_def.h, 8.4.27, 8.5.12). A rethrow would unwind from the
+ * first opcode instead: into a try the body starts with, and releasing the string
+ * a ROPE_INIT there has not written. */
+static void oxphp_unwind_unstarted_frame(zend_execute_data *execute_data)
+{
+    execute_data->opline = EG(exception_op);
+    EG(opline_before_exception) = NULL;
+}
+
+/* Throws the refusal when execute_data is the frame oxphp_entry_refuse_begin()
+ * marked. The first interrupt after begin is that frame's, before its first
+ * opcode, unless PHP code ran in between: a begin handler that runs after this
+ * one (oxphp_entry_check_startup()), or an interrupt function installed after
+ * this module's that runs PHP first. A mark that interrupt finds on another frame is dropped, and the
+ * function it was made for runs unchecked. */
+static void oxphp_entry_refuse_in_frame(zend_execute_data *execute_data)
+{
+    if (!oxphp_entry_refused_msg) {
+        return;
+    }
+    bool here = execute_data == oxphp_entry_refused_frame
+        && execute_data->func == oxphp_entry_refused_func;
+    if (here && !EG(exception)) {
+        zend_throw_error(NULL, "%s", ZSTR_VAL(oxphp_entry_refused_msg));
+    }
+    oxphp_entry_refusal_drop();
+    if (here) {
+        oxphp_unwind_unstarted_frame(execute_data);
+    }
+}
+
 /* ── Sub-design A: zend_interrupt_function override ──
  * Centralised cancellation bailout. When a CancelReason is set on
  * the active request and EG(vm_interrupt) becomes 1, Zend calls
@@ -10206,14 +10346,18 @@ static void oxphp_zend_interrupt_handler(zend_execute_data *execute_data)
      * that reaches the handler is an answer, whoever raised it. */
     oxphp_bridge_tick();
 
+    if (execute_data) {
+        oxphp_entry_refuse_in_frame(execute_data);
+    }
+
     /* zend_call_function() pushes the frame of a callable it resolves itself when
      * resolving it threw yet found it valid, and the frame then runs with the
      * exception pending (8.4.27, 8.5.12). The scope-callable check raises the
      * interrupt when it throws, so such a frame meets it before its first opcode
-     * (execute_ex()) and unwinds from there. Only a frame that has not started:
-     * the VM also checks the interrupt as it jumps to a catch with the exception
-     * still pending, and unwinding from that catch would skip it. A frame starts
-     * at most num_args opcodes in, past the RECVs it skips
+     * (execute_ex()) and leaves from there, past its own try. Only a frame that
+     * has not started: the VM also checks the interrupt as it jumps to a catch
+     * with the exception still pending, and unwinding from that catch would skip
+     * it. A frame starts at most num_args opcodes in, past the RECVs it skips
      * (i_init_func_execute_data()). zend_call_function() also calls this with the
      * frame of an internal function, which keeps no opline. */
     if (EG(exception) && execute_data && execute_data->func
@@ -10233,15 +10377,7 @@ static void oxphp_zend_interrupt_handler(zend_execute_data *execute_data)
             }
         } else if (execute_data->opline >= op_array->opcodes
                 && execute_data->opline <= op_array->opcodes + op_array->num_args) {
-            /* A rope's live range starts at the ROPE_INIT that makes it, unlike any other
-             * (zend_calc_live_ranges(), 8.4.27, 8.5.12), so unwinding from that opcode
-             * releases a first string it has not written yet. An interned one is never
-             * freed. */
-            if (execute_data->opline->opcode == ZEND_ROPE_INIT) {
-                *(zend_string **) ZEND_CALL_VAR(execute_data, execute_data->opline->result.var) =
-                    ZSTR_EMPTY_ALLOC();
-            }
-            zend_rethrow_exception(execute_data);
+            oxphp_unwind_unstarted_frame(execute_data);
         }
     }
 
@@ -11406,6 +11542,10 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
     }
 #endif
 
+    /* Its startup registers the entry check's observer, after those of the
+     * modules and of the zend_extensions php.ini loads. */
+    zend_register_extension(&oxphp_entry_check_extension, NULL);
+
     /* Register fiber-await callback so Rust can call it via the bridge. */
     oxphp_bridge_set_fiber_await(oxphp_fiber_suspend_for_await);
     oxphp_bridge_set_in_fiber_check(oxphp_in_oxphp_fiber);
@@ -11572,6 +11712,8 @@ PHP_RSHUTDOWN_FUNCTION(oxphp_sapi)
 
     oxphp_fiber_forget_destructed_snapshot();
 
+    oxphp_entry_refusal_drop();
+
     /* Here, not only in post-deactivate: with PHP (8.4.27, 8.5.12) basic's
      * RSHUTDOWN resets the locale before session's writes the session, and
      * this module, registered by extension= after the built-in session, shuts
@@ -11605,6 +11747,10 @@ ZEND_MODULE_POST_ZEND_DEACTIVATE_D(oxphp_sapi)
      * with the heap reset. */
     oxphp_curl_members = NULL;
     oxphp_curl_multis = NULL;
+
+    /* A mark PHP code made after RSHUTDOWN. The heap reset comes after this
+     * (php_request_shutdown(), 8.4.27, 8.5.12). */
+    oxphp_entry_refusal_drop();
 
     return SUCCESS;
 }
