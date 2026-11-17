@@ -207,6 +207,11 @@ typedef struct {
     char *sapi_mimetype;
     int http_response_code;
     bool headers_sent;
+    /* Whether the engine still owes this response its default Content-Type: set
+     * as a request starts, cleared by a type of its own or by the headers going
+     * out. Left on the thread, a parked request would resume to whichever
+     * request ran last — losing its type, or getting a second one. */
+    unsigned char send_default_content_type;
 
     /* What php://input reads: the buffered body stream the engine opened for
      * this request, the number of body bytes the SAPI has handed over so far,
@@ -312,6 +317,15 @@ typedef struct {
     zend_stack ob_handlers;
     php_output_handler *ob_active;
     php_output_handler *ob_running;
+    /* With them, the rest of the output state that is the request's: its bits of
+     * OG(flags) (OXPHP_OUTPUT_REQUEST_FLAGS — ob_implicit_flush(), and whether
+     * its output has been written and sent), and where its output started,
+     * which headers_sent($file, $line) reports. The engine records the latter
+     * once per request and never replaces it. The file name is owned while
+     * parked. */
+    int output_flags;
+    zend_string *output_start_filename;
+    int output_start_lineno;
 
     /* What PHP's URL rewriter appends to this request's links and forms — the
      * variables output_add_rewrite_var() added, and the session's id when it is
@@ -375,6 +389,16 @@ typedef struct {
      * when there is none. The engine's cache of how to call it stays behind,
      * since the engine fills it again on every call. */
     zval header_callback;
+
+    /* What http_get_last_response_headers() answers and the string strtok()
+     * carries on with. The engine keeps both per thread for a whole request,
+     * so they travel the same way. The array (strings only) and the string are
+     * owned while parked; IS_UNDEF and NULL when there are none. strtok_last
+     * points into strtok_string. */
+    zval last_http_headers;
+    zend_string *strtok_string;
+    char *strtok_last;
+    size_t strtok_len;
 
     /* The ini directives this request changed, name to value, taken off the
      * thread while it is parked. The engine keeps every directive's live value
@@ -1132,14 +1156,22 @@ void oxphp_supersede_request_body_parse(void);
 void oxphp_keep_request_body_parse_files(void);
 
 /* Targeted per-fiber request init (safe to call while other fibers are suspended).
- * Unlike oxphp_soft_reset(), this does NOT touch global OB or other thread-wide state.
- * It only initializes fresh superglobals and SAPI headers for the new request. */
+ * Unlike oxphp_soft_reset(), this does not tear down the output layer: it resets
+ * only the per-request cells standing on the thread. */
 void oxphp_fiber_init_request_state(void);
 
 /* Let go of a header callback that a request which has ended left registered,
  * before the next request starts or a parked one resumes. Letting go of it can
  * run a destructor. */
 void oxphp_fiber_release_header_callback(void);
+
+/* Give back the request cells a worker would otherwise carry from one request
+ * into the next — the headers of the last http:// fetch, strtok()'s string,
+ * where output started and the request's bits of OG(flags) — which PHP resets
+ * as a request starts up, and a worker starts up once. On the fast path,
+ * php_output_activate() has already cleared the output ones. Called as a
+ * request starts, on either path into one. Runs no PHP. */
+void oxphp_reset_request_cells(void);
 
 /* Give back what the URL rewriter holds for a request, as the engine's request
  * shutdown does. Only once no output handler is left that reads it — see

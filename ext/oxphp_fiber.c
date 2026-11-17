@@ -2825,6 +2825,37 @@ void oxphp_fiber_release_header_callback(void) {
     }
 }
 
+/* The bits of OG(flags) that belong to a request rather than the thread, which
+ * upstream's php_output_activate() clears for every request: ob_implicit_flush(),
+ * and whether output has been written and sent. zlib reads the last and refuses
+ * a change to zlib.output_compression once it is set — the change a
+ * Content-Length header makes too (PHP 8.4, 8.5). */
+#define OXPHP_OUTPUT_REQUEST_FLAGS \
+    (PHP_OUTPUT_IMPLICITFLUSH | PHP_OUTPUT_WRITTEN | PHP_OUTPUT_SENT)
+
+void oxphp_reset_request_cells(void) {
+    /* _nogc: a collection started here would run destructors of garbage in the
+     * middle of putting a request in place, and an array of strings cannot be
+     * part of a cycle. */
+    zval_ptr_dtor_nogc(&BG(last_http_headers));
+    ZVAL_UNDEF(&BG(last_http_headers));
+    if (BG(strtok_string)) {
+        zend_string_release(BG(strtok_string));
+        BG(strtok_string) = NULL;
+    }
+    BG(strtok_last) = NULL;
+    BG(strtok_len) = 0;
+    if (OG(output_start_filename)) {
+        zend_string_release(OG(output_start_filename));
+        OG(output_start_filename) = NULL;
+    }
+    OG(output_start_lineno) = 0;
+    /* All off, as the fast path's php_output_activate() leaves them; implicit
+     * flush too, rather than set from the implicit_flush directive: the engine
+     * applies that one in the request startup a worker runs once, at boot. */
+    OG(flags) &= ~OXPHP_OUTPUT_REQUEST_FLAGS;
+}
+
 typedef struct {
     unsigned serialize_lock;
     struct php_serialize_data *serialize_data;
@@ -3550,16 +3581,44 @@ static void oxphp_fiber_free_task_payload(oxphp_request_fiber *fiber) {
         efree(fiber->php_state.sapi_mimetype);
         fiber->php_state.sapi_mimetype = NULL;
     }
+    /* With the header list and the engine's copies of its superglobals, both
+     * moved off the thread by the park. A fiber that resumed holds an empty
+     * list and IS_UNDEF slots, which these leave as they are. */
+    zend_llist_destroy(&fiber->php_state.sapi_headers);
+    for (int i = 0; i < 6; i++) {
+        zval *parked = &fiber->php_state.http_globals[i];
+        /* The park left the thread's slot IS_UNDEF yet still naming this array,
+         * and the engine merges GET, POST and COOKIE into $_REQUEST without
+         * asking their type: emptied, as a request's end leaves it, before the
+         * array goes. */
+        if (Z_TYPE_P(parked) == IS_ARRAY && Z_ISUNDEF(PG(http_globals)[i])
+                && Z_ARR(PG(http_globals)[i]) == Z_ARR_P(parked)) {
+            ZVAL_EMPTY_ARRAY(&PG(http_globals)[i]);
+        }
+        zval_ptr_dtor_nogc(parked);
+        ZVAL_UNDEF(parked);
+    }
     /* And the output buffers it parked, with everything written into them and
      * any handler a script installed over them. A fiber torn down while parked
      * has no response left for them to be ended into. */
     oxphp_output_stack_free(&fiber->php_state.ob_handlers);
     fiber->php_state.ob_active = NULL;
     fiber->php_state.ob_running = NULL;
+    if (fiber->php_state.output_start_filename) {
+        zend_string_release(fiber->php_state.output_start_filename);
+        fiber->php_state.output_start_filename = NULL;
+    }
     oxphp_url_rewriter_drop(fiber);
     /* And the header callback it parked, for headers that will not be sent. */
     zval_ptr_dtor(&fiber->php_state.header_callback);
     ZVAL_UNDEF(&fiber->php_state.header_callback);
+    zval_ptr_dtor_nogc(&fiber->php_state.last_http_headers);
+    ZVAL_UNDEF(&fiber->php_state.last_http_headers);
+    if (fiber->php_state.strtok_string) {
+        zend_string_release(fiber->php_state.strtok_string);
+        fiber->php_state.strtok_string = NULL;
+        fiber->php_state.strtok_last = NULL;
+    }
 
     if (fiber->php_state.last_error_message) {
         zend_string_release(fiber->php_state.last_error_message);
@@ -5838,22 +5897,24 @@ void oxphp_fiber_save_php_state(oxphp_request_fiber *fiber) {
      * sent — and through any handler the script installed, called with half of
      * what it was given to transform. The bytes stay where the request put them
      * and reach ub_write when it flushes or ends, with this fiber's Rust ctx
-     * installed, since a resume restores that before returning to PHP.
-     *
-     * The rest of the output globals stay with the worker. OG(flags) is mostly
-     * the thread's — PHP_OUTPUT_ACTIVATED says the stack exists at all — and
-     * output_start_filename/lineno name whichever file wrote first, which the
-     * "headers already sent by" warning quotes. Those two are per-request state
-     * a worker on this path carries from one request into the next whether or
-     * not anything suspends, since nothing resets them between requests here;
-     * parking them would close the half of that a suspension opens and leave the
-     * other half exactly as it is. */
+     * installed, since a resume restores that before returning to PHP. */
     fiber->php_state.ob_handlers = OG(handlers);
     fiber->php_state.ob_active = OG(active);
     fiber->php_state.ob_running = OG(running);
     zend_stack_init(&OG(handlers), sizeof(php_output_handler *));
     OG(active) = NULL;
     OG(running) = NULL;
+    /* With where its output started and its own bits of OG(flags). The other
+     * bits are the thread's: PHP_OUTPUT_ACTIVATED says the stack exists at all,
+     * and PHP_OUTPUT_DISABLED comes only from a HEAD boot request, a failed
+     * header send or an aborted connection, none of which a worker's requests
+     * reach. */
+    fiber->php_state.output_start_filename = OG(output_start_filename);
+    fiber->php_state.output_start_lineno = OG(output_start_lineno);
+    fiber->php_state.output_flags = OG(flags) & OXPHP_OUTPUT_REQUEST_FLAGS;
+    OG(output_start_filename) = NULL;
+    OG(output_start_lineno) = 0;
+    OG(flags) &= ~OXPHP_OUTPUT_REQUEST_FLAGS;
     /* With what the URL rewriter among them appends. */
     oxphp_url_rewriter_park(fiber);
 
@@ -5897,6 +5958,15 @@ void oxphp_fiber_save_php_state(oxphp_request_fiber *fiber) {
     /* Step 1f: and the header callback it registered, by the same move. */
     ZVAL_COPY_VALUE(&fiber->php_state.header_callback, &SG(callback_func));
     ZVAL_UNDEF(&SG(callback_func));
+    /* With the headers of its last http:// fetch and its strtok() string. */
+    ZVAL_COPY_VALUE(&fiber->php_state.last_http_headers, &BG(last_http_headers));
+    ZVAL_UNDEF(&BG(last_http_headers));
+    fiber->php_state.strtok_string = BG(strtok_string);
+    fiber->php_state.strtok_last = BG(strtok_last);
+    fiber->php_state.strtok_len = BG(strtok_len);
+    BG(strtok_string) = NULL;
+    BG(strtok_last) = NULL;
+    BG(strtok_len) = 0;
 
     /* Step 1e: and the ini directives it changed. Ahead of step 2, so that
      * anything a handler reports on the way is logged against this request. */
@@ -5958,6 +6028,8 @@ void oxphp_fiber_save_php_state(oxphp_request_fiber *fiber) {
                     (void(*)(void*))sapi_free_header, 0);
     fiber->php_state.sapi_mimetype = SG(sapi_headers).mimetype;
     SG(sapi_headers).mimetype = NULL;
+    fiber->php_state.send_default_content_type = SG(sapi_headers).send_default_content_type;
+    SG(sapi_headers).send_default_content_type = 1;
     fiber->php_state.http_response_code = SG(sapi_headers).http_response_code;
     fiber->php_state.headers_sent = SG(headers_sent);
     fiber->php_state.connection_status = PG(connection_status);
@@ -6120,6 +6192,7 @@ void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber) {
     }
     SG(sapi_headers).mimetype = fiber->php_state.sapi_mimetype;
     fiber->php_state.sapi_mimetype = NULL;
+    SG(sapi_headers).send_default_content_type = fiber->php_state.send_default_content_type;
     SG(sapi_headers).http_response_code = fiber->php_state.http_response_code;
     SG(headers_sent) = fiber->php_state.headers_sent;
     PG(connection_status) = fiber->php_state.connection_status;
@@ -6164,6 +6237,15 @@ void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber) {
     zend_stack_init(&fiber->php_state.ob_handlers, sizeof(php_output_handler *));
     fiber->php_state.ob_active = NULL;
     fiber->php_state.ob_running = NULL;
+    if (OG(output_start_filename)) {
+        zend_string_release(OG(output_start_filename));
+    }
+    OG(output_start_filename) = fiber->php_state.output_start_filename;
+    OG(output_start_lineno) = fiber->php_state.output_start_lineno;
+    fiber->php_state.output_start_filename = NULL;
+    fiber->php_state.output_start_lineno = 0;
+    OG(flags) = (OG(flags) & ~OXPHP_OUTPUT_REQUEST_FLAGS) | fiber->php_state.output_flags;
+    fiber->php_state.output_flags = 0;
     /* And what the URL rewriter among them appends — after the stack, so no
      * handler that reads what this gives up is left to run. */
     oxphp_url_rewriter_unpark(fiber);
@@ -6225,6 +6307,22 @@ void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber) {
     /* And its header callback. */
     ZVAL_COPY_VALUE(&SG(callback_func), &fiber->php_state.header_callback);
     ZVAL_UNDEF(&fiber->php_state.header_callback);
+
+    /* And the headers of its last fetch and its strtok() string, giving up what
+     * stands: strings and an array of strings, which run no destructor, and
+     * _nogc for the reason oxphp_reset_request_cells() gives. */
+    zval_ptr_dtor_nogc(&BG(last_http_headers));
+    ZVAL_COPY_VALUE(&BG(last_http_headers), &fiber->php_state.last_http_headers);
+    ZVAL_UNDEF(&fiber->php_state.last_http_headers);
+    if (BG(strtok_string)) {
+        zend_string_release(BG(strtok_string));
+    }
+    BG(strtok_string) = fiber->php_state.strtok_string;
+    BG(strtok_last) = fiber->php_state.strtok_last;
+    BG(strtok_len) = fiber->php_state.strtok_len;
+    fiber->php_state.strtok_string = NULL;
+    fiber->php_state.strtok_last = NULL;
+    fiber->php_state.strtok_len = 0;
 
     oxphp_stream_errors_unpark(fiber);
 }
@@ -7223,10 +7321,10 @@ static bool oxphp_session_slot_hand_off(oxphp_fiber_scheduler *sched) {
 /* ─── Targeted per-fiber request init ──────────────────── */
 
 void oxphp_fiber_init_request_state(void) {
-    /* Unlike oxphp_soft_reset(), this does NOT touch global OB or other
-     * thread-wide state. It only initializes the SAPI headers and error state
-     * for the new request. Safe to call while other fibers are suspended with
-     * their state saved.
+    /* Unlike oxphp_soft_reset(), this does not tear down the output layer: it
+     * resets only the per-request cells standing on the thread, which every
+     * parked request has taken its own share of. Safe to call while other
+     * fibers are suspended with their state saved.
      *
      * The request's input — its superglobals and its body — is not built here:
      * that runs inside the request's own fiber, because reading the body runs
@@ -7284,6 +7382,9 @@ void oxphp_fiber_init_request_state(void) {
     if (UNEXPECTED(EG(exception))) {
         zend_clear_exception();
     }
+    /* After that discard: the exception's destructor is user code, and what it
+     * leaves in these cells is not the arriving request's. */
+    oxphp_reset_request_cells();
 
     /* Reset error state. The last error is part of it: error_get_last() is what
      * a shutdown function reads to decide whether the request it is closing died,
@@ -8860,7 +8961,8 @@ int oxphp_scheduler_tick(oxphp_fiber_scheduler *sched) {
          *
          * Instead, prepare_request handles Rust TLS setup, and
          * oxphp_fiber_init_request_state() does a targeted per-fiber init
-         * (fresh superglobals, clean SAPI headers) without touching global OB. */
+         * (fresh superglobals, clean SAPI headers) without tearing down the
+         * output layer. */
         /* Session state is the one thing prepare_request and the targeted init
          * below both leave alone, and it is thread-wide. No request's own can
          * be standing here — each is taken off the thread as its request

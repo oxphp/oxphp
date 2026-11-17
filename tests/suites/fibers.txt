@@ -279,12 +279,23 @@ fibers/test_stream_backpressure_handler_throw_reaches_catch
 
 # What the engine keeps per thread for the request on it goes with the request
 # when it parks: its header callback, its open unserialize() table, its sort
-# comparator. A fatal inside unserialize() leaves the next call on the worker a
-# table of its own, on either way a request starts. Resuming a request runs
-# nothing a finished request left behind while the resumed one is in place.
+# comparator, whether it is still owed its default Content-Type, the headers of
+# its last http:// fetch, its strtok() string, where its output started, whether
+# that output has gone out and its ob_implicit_flush(). A request that leaves
+# the last five on the thread does not hand them to the next. A fatal inside
+# unserialize() leaves the next call on the worker a table of its own, on either
+# way a request starts. Resuming a request runs nothing a finished request left
+# behind while the resumed one is in place.
 fibers/test_header_callback_stays_with_its_request
 fibers/test_header_callback_stays_with_its_request >> ?action=trigger
 fibers/test_header_callback_stays_with_its_request >> ?action=check | GET | | 200 | X-Header-Callback:missing
+fibers/test_default_content_type_stays_with_its_request
+fibers/test_last_http_headers_and_strtok_stay_with_their_request
+fibers/test_last_http_headers_and_strtok_stay_with_their_request >> ?action=trigger
+fibers/test_last_http_headers_and_strtok_stay_with_their_request >> ?action=check
+fibers/test_output_start_stays_with_its_request
+fibers/test_output_sent_stays_with_its_request
+fibers/test_implicit_flush_stays_with_its_request
 fibers/test_unserialize_state_after_a_fatal
 fibers/test_unserialize_state_after_a_fatal >> ?action=trigger
 fibers/test_unserialize_state_after_a_fatal >> ?action=check
