@@ -7953,6 +7953,15 @@ static void oxphp_soft_reset(void) {
     }
 #endif
 
+    /* And a header callback that the request which ended left registered: one
+     * registered while its headers were being sent, which the engine keeps
+     * until a request starts, and a worker does not start one per request.
+     * Here and under zend_try for the reason the backtrace above is: letting
+     * go of it can run a destructor. */
+    zend_try {
+        oxphp_fiber_release_header_callback();
+    } zend_end_try();
+
     /* memory_limit is the one directive that restore cannot finish on its own.
      * Lowering the allocator's ceiling is refused outright while more than the
      * restored value is mapped, and at the deactivate stage that refusal is

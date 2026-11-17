@@ -28,6 +28,7 @@
 #include "Zend/zend_generators.h" /* zend_generator: a frame a fatal abandons can be one */
 #include "Zend/zend_gc.h"         /* gc_protect: a bailout raises the collector's guard too */
 #include "Zend/zend_observer.h"   /* fcall_end_all: a bailout leaves observed calls open */
+#include "Zend/zend_extensions.h" /* zend_get_resource_handle: a slot in each fiber context */
 #include "Zend/zend_modules.h"    /* module_registry: ext/filter's own RSHUTDOWN resets its input storage */
 #include "main/php_main.h"
 #include "main/php_output.h"
@@ -774,6 +775,7 @@ bool oxphp_fiber_recovery_absorbs_writes(void) {
 }
 
 static void oxphp_exec_timer_minit(void);
+static void oxphp_call_cells_minit(void);
 
 void oxphp_fiber_minit(void) {
     if (!oxphp_next_error_cb) {
@@ -797,6 +799,7 @@ void oxphp_fiber_minit(void) {
          * registering it costs nothing anywhere else, and in particular does not
          * turn on the observation of calls. */
         zend_observer_fiber_destroy_register(oxphp_fiber_hand_on_bailout_frame);
+        oxphp_call_cells_minit();
     }
 
     if (!oxphp_next_compile_file) {
@@ -2319,6 +2322,28 @@ static bool oxphp_serve_loop_drop_exception(oxphp_vm_stack_mark *mark) {
     return completed;
 }
 
+/* Give up the output handlers standing on the thread, the way
+ * php_output_deactivate() releases them. A destructor run by one may start
+ * another buffer, which makes it the active one, so no handler is left active
+ * while it is freed, and the loop frees what was started. That buffer's handler
+ * goes into the slot just taken off the stack, so each handler is read out of
+ * its slot before its destructor runs. */
+static void oxphp_output_handlers_release(void) {
+    php_output_handler **slot;
+
+    OG(running) = NULL;
+    while ((slot = zend_stack_top(&OG(handlers))) != NULL) {
+        php_output_handler *handler = *slot;
+
+        zend_stack_del_top(&OG(handlers));
+        OG(active) = NULL;
+        if (handler != NULL) {
+            php_output_handler_dtor(handler);
+            efree(handler);
+        }
+    }
+}
+
 /* What php_free_shutdown_functions() does, with the list taken off the thread
  * before it is destroyed. That function destroys it in place, which is safe
  * where it is called — at the end of a request, after every destructor has
@@ -2407,16 +2432,9 @@ static bool oxphp_serve_loop_window(void (*step)(void)) {
     /* Giving them up releases callables and their arguments, and a destructor
      * that runs is userland as well, which can throw, start a buffer or
      * register a shutdown function in its turn. The shutdown list goes first.
-     * Then the handlers, the way php_output_deactivate() releases them: a
-     * destructor run by one may start another buffer, which makes it the active
-     * one, so no handler is left active while it is freed, and the loop frees
-     * what was started. That buffer's handler goes into the slot just taken off
-     * the stack, so each handler is read out of its slot before it is freed and
-     * freed here, as php_output_handler_free() does from PHP 8.4.17 and 8.5.2
-     * on: before that it reads the slot again after the destructor, and frees
-     * the new handler in place of the old. Then the list again, for what a
-     * destructor run by either step registered. The exception goes last: left
-     * standing, it would make the
+     * Then the handlers, see oxphp_output_handlers_release(). Then the list
+     * again, for what a destructor run by either step registered. The
+     * exception goes last: left standing, it would make the
      * next call into PHP on this thread — the $destroy of the next eviction —
      * return without running, and the serve loop's caller return with it once
      * the loop ends. A buffer or a shutdown function a destructor run by that
@@ -2429,19 +2447,7 @@ static bool oxphp_serve_loop_window(void (*step)(void)) {
         completed = false;
     }
     zend_try {
-        php_output_handler **slot;
-
-        OG(running) = NULL;
-        while ((slot = zend_stack_top(&OG(handlers))) != NULL) {
-            php_output_handler *handler = *slot;
-
-            zend_stack_del_top(&OG(handlers));
-            OG(active) = NULL;
-            if (handler != NULL) {
-                php_output_handler_dtor(handler);
-                efree(handler);
-            }
-        }
+        oxphp_output_handlers_release();
     } zend_catch {
         completed = false;
         oxphp_recover_from_bailout(&mark);
@@ -2767,10 +2773,9 @@ void oxphp_scheduler_init(oxphp_fiber_scheduler *sched) {
 /* Give up an output handler stack outright — the handlers, the buffers holding
  * what was written into them, and the stack itself — without running one of
  * them. What php_output_deactivate does at the end of a request, minus the
- * header flush, and the shape both callers need: a stack whose request is gone
- * (a fiber torn down while parked) or one a finished request left standing where
- * a resuming request's own has to go. Ending them instead would mean writing a
- * dead request's content into whatever response is current.
+ * header flush, for a stack whose request is gone: a fiber torn down while
+ * parked. Ending them instead would mean writing a dead request's content into
+ * whatever response is current.
  *
  * A zeroed stack — a fiber that never parked one — passes through untouched. */
 static void oxphp_output_stack_free(zend_stack *handlers) {
@@ -2782,6 +2787,152 @@ static void oxphp_output_stack_free(zend_stack *handlers) {
     }
     zend_stack_destroy(handlers);
     zend_stack_init(handlers, sizeof(php_output_handler *));
+}
+
+/* ─── The engine's cells for a call in progress ────────────
+ *
+ * SG(callback_func) belongs to a request: the engine runs it in the headers of
+ * whichever request is sending them. A request takes it with it when it parks
+ * and gets it back as it resumes; see header_callback in oxphp_fiber_php_state.
+ *
+ * BG(serialize_lock) with BG(serialize) and BG(unserialize), and
+ * BG(user_compare_fci) with its cache, belong to a stack. In them the engine
+ * counts the serialize() and unserialize() calls open on the running stack,
+ * with the table those calls share, and keeps the comparator of the sort in
+ * progress, which it reads for every comparison. There is one set per thread,
+ * and every fiber — a request's, a task's, or one the application started — is
+ * a stack of its own, so each fiber keeps its set while it is switched out.
+ * Left to what runs in the meantime, the set of a fiber suspended inside such a
+ * call would be read as that code's own: a call that finds a count open and no
+ * lock held shares the suspended call's table and resolves back-references
+ * against its values, a sort resumed while another is suspended in the middle
+ * of its own compares with that one's comparator, and the suspended call,
+ * ending on a count that is not its own, can take it below zero, after which
+ * the next call gets no table at all.
+ * SYNC: php-src/ext/standard/var.c php_var_serialize_init(),
+ *       ext/standard/var_unserializer.re php_var_unserialize_init(),
+ *       ext/standard/array.c PHP_ARRAY_CMP_FUNC_BACKUP() */
+
+/* Let go of a header callback still registered. Taken off the thread first: a
+ * destructor that letting go of it runs may register another. */
+void oxphp_fiber_release_header_callback(void) {
+    if (!Z_ISUNDEF(SG(callback_func))) {
+        zval held;
+
+        ZVAL_COPY_VALUE(&held, &SG(callback_func));
+        ZVAL_UNDEF(&SG(callback_func));
+        zval_ptr_dtor(&held);
+    }
+}
+
+typedef struct {
+    unsigned serialize_lock;
+    struct php_serialize_data *serialize_data;
+    unsigned serialize_level;
+    struct php_unserialize_data *unserialize_data;
+    unsigned unserialize_level;
+    zend_fcall_info user_compare_fci;
+    zend_fcall_info_cache user_compare_fci_cache;
+} oxphp_call_cells;
+
+/* The index into zend_fiber_context.reserved where a fiber switched out with a
+ * call open keeps its set; -1 when the engine had no index left to give. */
+static int oxphp_call_cells_slot = -1;
+
+/* Leave the running stack counting no serialize() or unserialize() call open
+ * and running no sort: a stack switched in with no set kept, or one whose calls
+ * will never return, as a fatal inside one leaves them — kept, their count
+ * would make a later call on that stack look like one made inside them. Their
+ * tables are not destroyed, because destroying the unserialize() one runs the
+ * __unserialize() and __wakeup() calls it deferred; they are given up, and stay
+ * until the thread exits. Without an index every fiber shares the thread's
+ * cells, so what stands can be a suspended fiber's call, still open: left as
+ * PHP leaves it. */
+static void oxphp_call_cells_reset(void) {
+    if (oxphp_call_cells_slot < 0) {
+        return;
+    }
+    BG(serialize_lock) = 0;
+    BG(serialize).data = NULL;
+    BG(serialize).level = 0;
+    BG(unserialize).data = NULL;
+    BG(unserialize).level = 0;
+    BG(user_compare_fci) = empty_fcall_info;
+    BG(user_compare_fci_cache) = empty_fcall_info_cache;
+}
+
+static bool oxphp_call_cells_open(void) {
+    return BG(serialize_lock) != 0
+        || BG(serialize).data != NULL || BG(serialize).level != 0
+        || BG(unserialize).data != NULL || BG(unserialize).level != 0
+        || BG(user_compare_fci).size != 0
+        || BG(user_compare_fci_cache).function_handler != NULL;
+}
+
+/* The engine does not promise to zero the memory a context is made in. */
+static void oxphp_call_cells_init(zend_fiber_context *context) {
+    context->reserved[oxphp_call_cells_slot] = NULL;
+}
+
+/* The set of the stack switched out goes with it, and the set of the one
+ * switched in comes back: none, for a fiber never switched out with a call
+ * open. Kept outside the request heap, so memory_limit cannot bail out of the
+ * middle of a switch. */
+static void oxphp_call_cells_switch(zend_fiber_context *from, zend_fiber_context *to) {
+    oxphp_call_cells *kept;
+
+    ZEND_ASSERT(from->reserved[oxphp_call_cells_slot] == NULL);
+    if (oxphp_call_cells_open()) {
+        kept = pemalloc(sizeof(*kept), 1);
+        kept->serialize_lock = BG(serialize_lock);
+        kept->serialize_data = BG(serialize).data;
+        kept->serialize_level = BG(serialize).level;
+        kept->unserialize_data = BG(unserialize).data;
+        kept->unserialize_level = BG(unserialize).level;
+        kept->user_compare_fci = BG(user_compare_fci);
+        kept->user_compare_fci_cache = BG(user_compare_fci_cache);
+        from->reserved[oxphp_call_cells_slot] = kept;
+    }
+
+    kept = to->reserved[oxphp_call_cells_slot];
+    if (kept == NULL) {
+        oxphp_call_cells_reset();
+        return;
+    }
+    to->reserved[oxphp_call_cells_slot] = NULL;
+    BG(serialize_lock) = kept->serialize_lock;
+    BG(serialize).data = kept->serialize_data;
+    BG(serialize).level = kept->serialize_level;
+    BG(unserialize).data = kept->unserialize_data;
+    BG(unserialize).level = kept->unserialize_level;
+    BG(user_compare_fci) = kept->user_compare_fci;
+    BG(user_compare_fci_cache) = kept->user_compare_fci_cache;
+    pefree(kept, 1);
+}
+
+/* A set still kept here is that of a fiber that died inside a call — a fatal
+ * in it — and was switched out one last time with the call open. Given up as
+ * oxphp_call_cells_reset() gives one up. A fiber freed without being destroyed,
+ * its unwind skipped as after a fatal, never reaches here, and its set stays
+ * allocated. */
+static void oxphp_call_cells_destroy(zend_fiber_context *context) {
+    oxphp_call_cells *kept = context->reserved[oxphp_call_cells_slot];
+
+    if (kept != NULL) {
+        context->reserved[oxphp_call_cells_slot] = NULL;
+        pefree(kept, 1);
+    }
+}
+
+/* Without an index the cells stay the thread's, shared by every fiber on it, as
+ * PHP itself keeps them. */
+static void oxphp_call_cells_minit(void) {
+    oxphp_call_cells_slot = zend_get_resource_handle("oxphp");
+    if (oxphp_call_cells_slot >= 0) {
+        zend_observer_fiber_init_register(oxphp_call_cells_init);
+        zend_observer_fiber_switch_register(oxphp_call_cells_switch);
+        zend_observer_fiber_destroy_register(oxphp_call_cells_destroy);
+    }
 }
 
 /* ─── Ownership of the request body ────────────────────────────
@@ -3406,6 +3557,9 @@ static void oxphp_fiber_free_task_payload(oxphp_request_fiber *fiber) {
     fiber->php_state.ob_active = NULL;
     fiber->php_state.ob_running = NULL;
     oxphp_url_rewriter_drop(fiber);
+    /* And the header callback it parked, for headers that will not be sent. */
+    zval_ptr_dtor(&fiber->php_state.header_callback);
+    ZVAL_UNDEF(&fiber->php_state.header_callback);
 
     if (fiber->php_state.last_error_message) {
         zend_string_release(fiber->php_state.last_error_message);
@@ -4570,6 +4724,11 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
          * once on entry; the loop needs it per iteration. */
         EG(jit_trace_num) = 0;
 
+        /* With no serialize(), unserialize() or sort call counted on this
+         * stack: what the previous request or task on this fiber called has
+         * returned, or ended in a fatal and never will. */
+        oxphp_call_cells_reset();
+
         /* With nothing of anyone else's in the travelling directives. A resume
          * sweeps on its way in (see oxphp_fiber_unpark_ini()); a fiber's first
          * request is not entered through one. Not for a task: the task
@@ -4672,6 +4831,8 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
             } zend_catch {
                 oxphp_fiber_forget_io_names(fiber);
                 task_capture_fatal(fiber);
+                /* As in the request's catch below. */
+                oxphp_call_cells_reset();
                 oxphp_recover_from_bailout(&mark);
             } zend_end_try();
 
@@ -4924,6 +5085,11 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
             if (input_switch_blocked) {
                 zend_fiber_switch_unblock();
             }
+            /* A fatal inside serialize() or unserialize() leaves the call
+             * counted open on this stack, and a call that the shutdown
+             * functions below or the destructors the recovery runs make can be
+             * taken for one made inside it. */
+            oxphp_call_cells_reset();
             /* The exception left standing goes with the rest: not every bailout
              * caught here has been through php_error_cb — a write to a cancelled
              * request makes a bare one, with nothing flagged — so it can still
@@ -5728,6 +5894,10 @@ void oxphp_fiber_save_php_state(oxphp_request_fiber *fiber) {
     fiber->php_state.shutdown_functions = BG(user_shutdown_function_names);
     BG(user_shutdown_function_names) = NULL;
 
+    /* Step 1f: and the header callback it registered, by the same move. */
+    ZVAL_COPY_VALUE(&fiber->php_state.header_callback, &SG(callback_func));
+    ZVAL_UNDEF(&SG(callback_func));
+
     /* Step 1e: and the ini directives it changed. Ahead of step 2, so that
      * anything a handler reports on the way is logged against this request. */
     oxphp_fiber_park_ini(fiber);
@@ -5846,28 +6016,12 @@ void oxphp_fiber_save_php_state(oxphp_request_fiber *fiber) {
     fiber->php_state.filter_storage_gen = oxphp_filter_storage_gen;
 }
 
+/* Installs a parked request's state over what stands on the thread, which
+ * oxphp_fiber_release_what_stands() has let go of. Nothing here lets go of a
+ * value that can run a destructor: such a slot is overwritten, not released.
+ * The one exception is a claim on a request body, which should never be
+ * standing here; see where it is given back. */
 void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber) {
-#if PHP_VERSION_ID >= 80500
-    /* A fatal's backtrace standing on the thread here belongs to no request
-     * that is still running: every request takes its own with it when it parks
-     * and lets go of it as it ends, so this one was raised after that — late in
-     * a request's own end, or by PHP the worker ran outside any request, such as
-     * a destructor the deferred promise drain at the end of a tick reached. Let
-     * go of before anything of this request is installed, so that whatever its
-     * release runs does not run as part of this request.
-     *
-     * Unguarded, as the discard of a stale exception in
-     * oxphp_fiber_init_request_state() is, and with the same exposure. A fatal
-     * usually flags every live object as destructed before it bails out, and
-     * then letting go of what its frames were given runs no destructor. One a
-     * user error handler took over flags nothing, and neither does one whose
-     * message is displayed through a write that bails out first, as on a
-     * request already cancelled (see oxphp_recover()). Then a
-     * destructor can run here, and a fatal it raises ends the serve loop, as
-     * one raised by a stale exception's destructor does there. */
-    oxphp_fatal_backtrace_release();
-#endif
-
     /* Restore Rust TLS first (so ub_write goes to the right buffer) */
     oxphp_bridge_fiber_restore_ctx(fiber->fiber_id);
 
@@ -5904,14 +6058,13 @@ void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber) {
         oxphp_reset_filter_input_storage();
     }
 
-    /* Restore superglobals. TRACK_VARS_ENV was never taken (see the save), so
-     * what stands in that slot is the worker's own array, and the free below
-     * would destroy it. */
+    /* Restore superglobals. TRACK_VARS_ENV was never taken (see the save): the
+     * worker's own array stands in that slot, and the fiber has nothing to put
+     * there. */
     for (int i = 0; i < 6; i++) {
         if (i == TRACK_VARS_ENV) {
             continue;
         }
-        zval_ptr_dtor_nogc(&PG(http_globals)[i]); /* free current */
         ZVAL_COPY_VALUE(&PG(http_globals)[i], &fiber->php_state.http_globals[i]);
         ZVAL_UNDEF(&fiber->php_state.http_globals[i]);
     }
@@ -5927,26 +6080,29 @@ void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber) {
      * The slots are the wrong source: they hold the engine's pre-write copy of
      * each array, so restoring from them would also roll back every write the
      * request itself made before suspending, including when nothing else ran.
-     * zend_hash_update transfers our reference to the table, which releases
-     * whatever it was holding.
+     * The table takes our reference over. Absent at suspend stays absent.
      *
      * _ENV is deliberately not in this set: it describes the process rather than
      * the request, so the table must keep what it already has. */
     for (size_t i = 0; i < OXPHP_SYMBOL_GLOBAL_COUNT; i++) {
-        if (Z_ISUNDEF(fiber->php_state.symbol_globals[i])) {
-            /* Absent at suspend must stay absent: an entry this request never
-             * had can only have come from the request served in the window, and
-             * $_REQUEST reaches that state whenever the window is what first
-             * materializes it on this worker. */
+        zval *standing = zend_hash_str_find(&EG(symbol_table),
+                                            oxphp_symbol_global_names[i].name,
+                                            oxphp_symbol_global_names[i].len);
+        if (standing != NULL) {
+            /* Written since the release by PHP that ran in between; given up,
+             * not released, as the comment above this function says. */
+            ZVAL_NULL(standing);
             zend_hash_str_del(&EG(symbol_table),
                               oxphp_symbol_global_names[i].name,
                               oxphp_symbol_global_names[i].len);
+        }
+        if (Z_ISUNDEF(fiber->php_state.symbol_globals[i])) {
             continue;
         }
-        zend_hash_str_update(&EG(symbol_table),
-                             oxphp_symbol_global_names[i].name,
-                             oxphp_symbol_global_names[i].len,
-                             &fiber->php_state.symbol_globals[i]);
+        zend_hash_str_add_new(&EG(symbol_table),
+                              oxphp_symbol_global_names[i].name,
+                              oxphp_symbol_global_names[i].len,
+                              &fiber->php_state.symbol_globals[i]);
         ZVAL_UNDEF(&fiber->php_state.symbol_globals[i]);
     }
 
@@ -5992,21 +6148,16 @@ void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber) {
     fiber->php_state.post_read = 0;
     fiber->php_state.rfc1867_uploaded_files = NULL;
 
-    /* Give this request its output buffers back, and give up what stands in
-     * their place. It belongs to a request that has already ended its own, and
-     * ending is not the same as emptying: php_output_end() answers FAILURE for a
-     * handler that cannot be removed, and the loop that ends a request stops on
-     * the first of those. Whatever is left standing that way is nobody's — the
-     * request it belonged to is gone, and this one has its own — so it is freed
-     * rather than overwritten, which the empty case needs too, since the
-     * allocation behind an empty stack is still an allocation.
+    /* Give this request its output buffers back. The handlers that stood here
+     * were released before the resume; the stack's own allocation is what is
+     * left to give up.
      *
      * That the save takes the whole stack while the end of a request only ends
      * down to the level it started at says the same thing twice as long as a
      * request starts at level zero, which is what every path into one leaves:
      * the reset before a worker's first request flattens the stack, and no later
      * request opens a default buffer for the next one to stand on. */
-    oxphp_output_stack_free(&OG(handlers));
+    zend_stack_destroy(&OG(handlers));
     OG(handlers) = fiber->php_state.ob_handlers;
     OG(active) = fiber->php_state.ob_active;
     OG(running) = fiber->php_state.ob_running;
@@ -6016,16 +6167,6 @@ void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber) {
     /* And what the URL rewriter among them appends — after the stack, so no
      * handler that reads what this gives up is left to run. */
     oxphp_url_rewriter_unpark(fiber);
-
-#if PHP_VERSION_ID >= 80500
-    /* The top let go of the fatal's backtrace that stood here, but the steps
-     * since can run destructors — the output handlers and the superglobals
-     * given up above — and a fatal a user error handler took over in one of
-     * them leaves one of its own. Let go of that too, before the last error
-     * goes back, so that an error its release raises does not stand in its
-     * place. */
-    oxphp_fatal_backtrace_release();
-#endif
 
     /* And its last error back, giving up whatever stands in its place on the
      * same terms as the two above. */
@@ -6044,24 +6185,13 @@ void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber) {
     fiber->php_state.last_error_message = NULL;
     fiber->php_state.last_error_file = NULL;
 #if PHP_VERSION_ID >= 80500
-    /* And the backtrace of its last fatal, into the slot let go of above. */
+    /* And the backtrace of its last fatal, into the slot let go of before the
+     * resume. */
     ZVAL_COPY_VALUE(&EG(last_fatal_error_backtrace), &fiber->php_state.last_fatal_error_backtrace);
     ZVAL_UNDEF(&fiber->php_state.last_fatal_error_backtrace);
 #endif
 
-    /* And the shutdown functions it registered. Unlike the three above, nothing
-     * stands in their place to be given up: a request on this thread has either
-     * ended, which runs its registrations and frees the registry, or parked,
-     * which takes the registry with it, so an empty registry is what every path
-     * into a resume leaves behind. Task registrations cannot reach here either —
-     * they belong to the threads that run tasks, and those run no requests.
-     *
-     * Asserted rather than freed. Freeing a registry means destroying the
-     * entries, which runs the destructors of everything they held, and this is
-     * the middle of a restore — half of this request's state installed, half of
-     * it not yet — which is the worst place on the worker to be running user
-     * code, for an invariant that holds. */
-    ZEND_ASSERT(BG(user_shutdown_function_names) == NULL);
+    /* And the shutdown functions it registered. */
     BG(user_shutdown_function_names) = fiber->php_state.shutdown_functions;
     fiber->php_state.shutdown_functions = NULL;
 
@@ -6091,6 +6221,10 @@ void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber) {
     /* And its ini directives: the Rust ctx restored above is what a handler's
      * report is logged against. */
     oxphp_fiber_unpark_ini(fiber);
+
+    /* And its header callback. */
+    ZVAL_COPY_VALUE(&SG(callback_func), &fiber->php_state.header_callback);
+    ZVAL_UNDEF(&fiber->php_state.header_callback);
 
     oxphp_stream_errors_unpark(fiber);
 }
@@ -7117,6 +7251,11 @@ void oxphp_fiber_init_request_state(void) {
     }
     SG(sapi_headers).http_response_code = 200;
     SG(sapi_headers).send_default_content_type = 1;
+    /* A header callback a destructor or save handler registered after the
+     * release ahead of this one, with the headers of a parked request standing
+     * unsent, is nobody's: dropped unrun, as a resume's install drops one, and
+     * what it holds stays until the worker exits. */
+    ZVAL_UNDEF(&SG(callback_func));
 
     /* Re-read cookies from the new request data */
     if (sapi_module.read_cookies) {
@@ -7487,21 +7626,61 @@ void oxphp_scheduler_start_fiber(oxphp_fiber_scheduler *sched, oxphp_request_fib
     oxphp_fiber_save_php_state(fiber);
 }
 
+/* Let go of what stands on the thread before a resume installs the state of
+ * the request it brings back. What stands belongs to no request that is still
+ * running — one that parked took its own with it — but ending a request does
+ * not always empty a slot: php_output_end() answers FAILURE for a handler that
+ * cannot be removed, and the loop that ends a request stops on the first of
+ * those.
+ *
+ * Every step can run a destructor. Run here, with nothing of the
+ * resumed request installed, what one writes or sends lands in no request's
+ * response; run during the install, it would land in the resumed request's,
+ * its headers sent ahead of its own code. What these destructors leave — a
+ * buffer they start, a shutdown function or a header callback they register —
+ * the install overwrites without running, and what it holds stays until the
+ * worker exits. The shutdown list goes last, so it takes the registrations made
+ * by the destructors the steps before it ran.
+ *
+ * Unguarded, as the discard of a stale exception in
+ * oxphp_fiber_init_request_state() is, and with the same exposure: a fatal a
+ * destructor raises here ends the serve loop, as one raised by a stale
+ * exception's destructor does there. */
+static void oxphp_fiber_release_what_stands(void) {
+    oxphp_fiber_release_header_callback();
+    oxphp_end_request_superglobals();
+    oxphp_output_handlers_release();
+#if PHP_VERSION_ID >= 80500
+    oxphp_fatal_backtrace_release();
+#endif
+    HashTable *shutdown_functions = BG(user_shutdown_function_names);
+    if (shutdown_functions != NULL) {
+        /* Off the thread first; oxphp_serve_loop_free_shutdown_functions()
+         * says why. */
+        BG(user_shutdown_function_names) = NULL;
+        zend_hash_destroy(shutdown_functions);
+        FREE_HASHTABLE(shutdown_functions);
+    }
+}
+
 void oxphp_scheduler_resume_fiber(oxphp_fiber_scheduler *sched, oxphp_request_fiber *fiber, zval *value) {
     /* The fiber's session back on the thread, which holds no request's session
      * between two slices. Anything standing there is given back first, before
      * sched->current is set, so a save handler it calls writes into no
      * request. */
     oxphp_session_release_orphan();
+    /* The rest of what stands, for the same reason. */
+    oxphp_fiber_release_what_stands();
+    /* A destructor that ran can have opened a session, which belongs to nobody
+     * either. */
+    oxphp_session_release_orphan();
 #if PHP_VERSION_ID >= 80500
-    /* And PHP 8.5's backtrace of the last fatal, for the reason the admission
-     * in oxphp_scheduler_tick() lets go of it beside the release: what letting
-     * go of it runs belongs to nobody only before this fiber's state — its
-     * session included — is installed. The release at the top of
-     * oxphp_fiber_restore_php_state() then finds the slot empty. */
+    /* Giving it back runs PHP, and an error of the fatal class raised there can
+     * leave a backtrace even when an error handler takes the error over. The
+     * install drops what stands unreleased, so the backtrace would keep what
+     * its frames were given until the worker exits. A session that a destructor
+     * run by letting go of it opens is given back after it, as on admission. */
     oxphp_fatal_backtrace_release();
-    /* A destructor that letting go of it ran can have opened a session, which
-     * belongs to nobody either. */
     oxphp_session_release_orphan();
 #endif
     oxphp_session_restore(fiber);
@@ -8702,6 +8881,11 @@ int oxphp_scheduler_tick(oxphp_fiber_scheduler *sched) {
          * to read them as its own. */
         oxphp_session_release_orphan();
 
+        /* And a header callback that a request which has ended left
+         * registered. Here for the reason the release above is: letting go of
+         * it can run a destructor. */
+        oxphp_fiber_release_header_callback();
+
 #if PHP_VERSION_ID >= 80500
         /* And the backtrace PHP 8.5 keeps of the last fatal, which
          * error_get_last() reports beside the last error. Every request lets go
@@ -8711,13 +8895,13 @@ int oxphp_scheduler_tick(oxphp_fiber_scheduler *sched) {
          * is: letting go of it can run a destructor, and what that writes or
          * answers belongs to nobody only before prepare_request. The init below
          * then clears the header, the exception and the last error one can
-         * leave. Unguarded, as the release at the top of
-         * oxphp_fiber_restore_php_state() is, and for the same reason. */
+         * leave. Unguarded, as oxphp_fiber_release_what_stands() is, and for
+         * the same reason. */
         oxphp_fatal_backtrace_release();
-        /* A destructor that letting go of it ran can have opened a session,
-         * which belongs to nobody either. */
-        oxphp_session_release_orphan();
 #endif
+        /* A destructor that either step ran can have opened a session, which
+         * belongs to nobody either. */
+        oxphp_session_release_orphan();
 
         oxphp_bridge_prepare_request();
 

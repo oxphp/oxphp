@@ -369,6 +369,13 @@ typedef struct {
      * the engine's own empty state is. */
     HashTable *shutdown_functions;
 
+    /* The header callback it registered, which the engine keeps on the thread
+     * until its headers go out: left standing, it would run in the headers of
+     * the request the worker serves in the window. Owned while parked; IS_UNDEF
+     * when there is none. The engine's cache of how to call it stays behind,
+     * since the engine fills it again on every call. */
+    zval header_callback;
+
     /* The ini directives this request changed, name to value, taken off the
      * thread while it is parked. The engine keeps every directive's live value
      * on the thread, and ignore_user_abort, error_reporting, precision and the
@@ -1128,6 +1135,11 @@ void oxphp_keep_request_body_parse_files(void);
  * Unlike oxphp_soft_reset(), this does NOT touch global OB or other thread-wide state.
  * It only initializes fresh superglobals and SAPI headers for the new request. */
 void oxphp_fiber_init_request_state(void);
+
+/* Let go of a header callback that a request which has ended left registered,
+ * before the next request starts or a parked one resumes. Letting go of it can
+ * run a destructor. */
+void oxphp_fiber_release_header_callback(void);
 
 /* Give back what the URL rewriter holds for a request, as the engine's request
  * shutdown does. Only once no output handler is left that reads it — see
