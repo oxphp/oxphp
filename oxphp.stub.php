@@ -208,10 +208,11 @@ function oxphp_stream_flush(): bool {}
  * leaving the current frame would be unsafe — among them inside a
  * declare(ticks) handler, inside pcntl's signal dispatch, while the request's
  * input is being built, inside a FILTER_CALLBACK reached from
- * filter_input_array() given a definitions array, and inside the teardown walks
- * that run destructors after a request has come apart — and one made inside a
- * fiber a userland scheduler started (AMPHP, Revolt, a bare new Fiber), whose
- * context OxPHP's scheduler cannot resume.
+ * filter_input_array() given a definitions array, inside array_multisort() (in
+ * the code it runs as it compares, such as a __toString()), and inside the
+ * teardown walks that run destructors after a request has come apart — and
+ * one made inside a fiber a userland scheduler started (AMPHP, Revolt, a bare
+ * new Fiber), whose context OxPHP's scheduler cannot resume.
  *
  * @param float $seconds Duration to sleep in seconds (e.g. 0.5 for 500ms)
  * @return void
@@ -1561,7 +1562,16 @@ namespace OxPHP\Shared {
         /** Non-blocking receive. Returns Ok / Empty / Closed. */
         public function tryRecv(): Channel\RecvResult {}
 
-        /** Block until a value arrives or the channel closes. */
+        /**
+         * Block until a value arrives or the channel closes.
+         *
+         * @throws SharedException If the channel is empty and open and the call is made
+         *         where a worker-mode request or an `oxphp_async()` task cannot
+         *         be suspended — where a fiber switch is refused, or in the
+         *         cleanup a worker runs as a request ends. A wait there would
+         *         hold the thread, and the other end could be a request parked
+         *         on it; use `recvTimeout()` there.
+         */
         public function recv(): Channel\RecvResult {}
 
         /**
@@ -1587,6 +1597,9 @@ namespace OxPHP\Shared {
          *
          * @throws ValueTooLargeException If `$value`'s serialised size exceeds
          *         the per-value cap (`SHARED_MAX_VALUE_SIZE`, default 1 MiB).
+         * @throws SharedException If the channel is full and the call is made
+         *         where a worker-mode request or an `oxphp_async()` task cannot
+         *         be suspended, as for {@see recv()}; use `sendTimeout()` there.
          */
         public function send(mixed $value): Channel\SendResult {}
 

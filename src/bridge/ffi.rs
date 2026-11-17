@@ -14,6 +14,14 @@ use std::os::raw::{c_char, c_int, c_void};
 /// synthetic one.
 pub const OXPHP_FIBER_UNWIND: c_int = -9;
 
+/// What `oxphp_bridge_in_fiber()` answers (`OXPHP_IN_FIBER_*` in
+/// `oxphp_bridge.h`) while a fiber the server runs a request or task on is
+/// running: the caller is on its context and can be suspended there, or fiber
+/// switching or the server's parking is blocked, on that context or one nested
+/// in it. Otherwise it answers 0. Only `CAN_PARK` may suspend.
+pub const OXPHP_IN_FIBER_CAN_PARK: c_int = 1;
+pub const OXPHP_IN_FIBER_PARK_REFUSED: c_int = 2;
+
 #[allow(dead_code)]
 extern "C" {
     // ── Value reading ──

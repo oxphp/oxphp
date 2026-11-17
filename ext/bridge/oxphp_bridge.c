@@ -3187,9 +3187,9 @@ void oxphp_bridge_set_fiber_fd_wait(oxphp_fiber_fd_wait_fn_t fn) {
  * stream offers one, and otherwise — or where the scheduler cannot watch it —
  * the fiber sleep for `duration_us`. Called from C, with none of the flush's
  * Rust frames between it and the engine.
- * Not with an exception pending in a request fiber: an output handler that
- * threw on the way here, whose output PHP then hands on without it and
- * flushes. Zend does not carry EG(exception) across a fiber switch, and the
+ * Not with an exception pending in a request fiber that can park: an output
+ * handler that threw on the way here, whose output PHP then hands on without it
+ * and flushes. Zend does not carry EG(exception) across a fiber switch, and the
  * scheduler clears what it finds pending once the fiber has parked. The wait
  * on `room_fd` sets the exception aside for the suspension and puts it back;
  * the fiber sleep does not, and a flush that slept would come back with the
@@ -3213,7 +3213,7 @@ void oxphp_bridge_set_fiber_fd_wait(oxphp_fiber_fd_wait_fn_t fn) {
  * Returns what the wait returns, 0 where it does not park, and -1 where the
  * flush is not to wait. */
 static int oxphp_flush_park(int room_fd, uint64_t duration_us) {
-    if (EG(exception) != NULL && oxphp_bridge_in_fiber()) {
+    if (EG(exception) != NULL && oxphp_bridge_in_fiber() == OXPHP_IN_FIBER_CAN_PARK) {
         return -1;
     }
     if (zend_is_compiling()) {
@@ -3237,11 +3237,11 @@ void oxphp_bridge_set_in_fiber_check(oxphp_in_fiber_check_fn_t fn) {
 int oxphp_bridge_in_fiber(void) {
     /* The only authoritative answer lives in the SAPI: it owns the
      * `oxphp_current_fiber` __thread pointer that `oxphp_bridge_fiber_await`
-     * keys off. Bridge-only callers (unit tests, bare CLI) get 0. */
+     * keys off. */
     if (sapi_in_fiber_check != NULL) {
         return sapi_in_fiber_check();
     }
-    return 0;
+    return OXPHP_IN_FIBER_NO;
 }
 
 static oxphp_request_end_check_fn_t sapi_request_end_check = NULL;

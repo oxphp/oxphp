@@ -6023,6 +6023,54 @@ static void oxphp_request_parse_body_guard_restore(void)
     oxphp_orig_request_parse_body = NULL;
 }
 
+/* ─── array_multisort() must not switch fibers mid-call ──
+ *
+ * Its comparisons call through ARRAYG(multisort_func), one per thread, which
+ * the call points at its own table once its arguments are checked, and each
+ * call puts back, as it returns, what it found there (php-src 8.4.27 / 8.5.12
+ * ext/standard/array.c). Two sorts on one thread that suspend in a comparison —
+ * two parked requests or tasks, or two userland Fibers — and return in another
+ * order than they started leave the one still comparing calling through
+ * another call's table, NULL, or a table already freed. Stock PHP crashes on
+ * the userland case as well (GH-25519). The cell cannot travel with the fiber
+ * instead, because array_globals_id is not exported from libphp.
+ *
+ * So switching is blocked for every call, in every mode: our suspend points
+ * take their blocking path, and every userland Fiber method that switches
+ * throws FiberError where stock PHP lets it through. Not oxphp_park_blocked:
+ * that leaves userland fibers free, and a Fiber suspended in a comparison and
+ * kept in a static would carry the raised counter past the end of the request,
+ * and the worker would never park again. */
+static zif_handler oxphp_orig_array_multisort = NULL;
+
+static ZEND_NAMED_FUNCTION(oxphp_guarded_array_multisort)
+{
+    zend_fiber_switch_block();
+    zend_try {
+        oxphp_orig_array_multisort(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+    } zend_catch {
+        /* A bailout out of a comparison skips the unblock below, and the counter
+         * is the thread's: left up, it would keep a worker from ever parking or
+         * switching fibers again. */
+        zend_fiber_switch_unblock();
+        zend_bailout();
+    } zend_end_try();
+    zend_fiber_switch_unblock();
+}
+
+static void oxphp_array_multisort_guard_install(void)
+{
+    oxphp_hook_swap("array_multisort", sizeof("array_multisort") - 1,
+                    oxphp_guarded_array_multisort, &oxphp_orig_array_multisort);
+}
+
+static void oxphp_array_multisort_guard_restore(void)
+{
+    oxphp_hook_restore("array_multisort", sizeof("array_multisort") - 1,
+                       oxphp_orig_array_multisort);
+    oxphp_orig_array_multisort = NULL;
+}
+
 /* ─── session_start() and the session slot ───────────────
  *
  * One session at a time is open on a worker: the files handler locks the session
@@ -9332,9 +9380,20 @@ static int oxphp_async_io_backoff_bridge(uint64_t ns) {
     return oxphp_async_sched_io_backoff((int64_t) ns) ? 1 : 0;
 }
 
-/* SAPI-side predicate for `oxphp_bridge_in_fiber`. Returns 1 iff the calling
- * code is running on an oxphp scheduler fiber's own context — i.e. one that
- * `oxphp_fiber_suspend_for_await` can actually suspend.
+/* SAPI-side predicate for `oxphp_bridge_in_fiber`. While an oxphp scheduler
+ * fiber runs on this thread, OXPHP_IN_FIBER_PARK_REFUSED where fiber switching
+ * or the server's parking is blocked, and OXPHP_IN_FIBER_CAN_PARK otherwise on
+ * that fiber's own context: where `oxphp_fiber_suspend_for_await` and the other
+ * suspend points set out to park it. The two block checks are the ones those
+ * suspend points make, and both sides have to keep making the same ones: a
+ * caller told it can park where a suspend point refuses takes its parking path
+ * and gets an error instead of the wait it asked for.
+ *
+ * The refusal is answered before the context is looked at, because a context
+ * nested in the fiber holds the same thread: a userland Fiber the request
+ * started and sorts in, or the destructor fiber the engine's GC resumes even
+ * where switching is blocked (Zend/zend_gc.c, 8.4.27 / 8.5.12). A wait there
+ * keeps every request and task parked on the thread from running.
  *
  * A user-level `Fiber::start()` outside any oxphp fiber never sets
  * `oxphp_current_fiber`, so the pointer alone answers that case. It does not
@@ -9342,8 +9401,16 @@ static int oxphp_async_io_backoff_bridge(uint64_t ns) {
  * its own context while the pointer still names the outer fiber, and suspending
  * from there corrupts both (see oxphp_fiber_owns_current_context). */
 int oxphp_in_oxphp_fiber(void) {
-    return (oxphp_current_fiber != NULL
-            && oxphp_fiber_owns_current_context(oxphp_current_fiber)) ? 1 : 0;
+    if (oxphp_current_fiber == NULL) {
+        return OXPHP_IN_FIBER_NO;
+    }
+    if (zend_fiber_switch_blocked() || oxphp_park_blocked) {
+        return OXPHP_IN_FIBER_PARK_REFUSED;
+    }
+    if (!oxphp_fiber_owns_current_context(oxphp_current_fiber)) {
+        return OXPHP_IN_FIBER_NO;
+    }
+    return OXPHP_IN_FIBER_CAN_PARK;
 }
 
 /* Longest await timeout, in seconds, that sets a deadline: 1e9 s, about 31.7
@@ -11609,6 +11676,7 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
      * functions by now; worker threads have not started yet. */
     oxphp_filter_guard_install();
     oxphp_request_parse_body_guard_install();
+    oxphp_array_multisort_guard_install();
     oxphp_session_gate_install();
 #ifdef HAVE_PUTENV
     oxphp_putenv_hook_install();
@@ -11649,6 +11717,7 @@ PHP_MSHUTDOWN_FUNCTION(oxphp_sapi)
 #ifdef HAVE_PUTENV
     oxphp_putenv_hook_restore();
 #endif
+    oxphp_array_multisort_guard_restore();
     oxphp_request_parse_body_guard_restore();
     oxphp_filter_guard_restore();
     oxphp_shareable_unregister_ce();
