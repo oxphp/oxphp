@@ -68,6 +68,125 @@ function thread_cell_wait_for(array &$state, string $key, float $seconds = 3.0):
     return ($state[$key] ?? false) === true;
 }
 
+/**
+ * The next token of the strtok() the thread carries on, false once that string
+ * is used up, and null when the thread has no string at all, which strtok()
+ * reports with a warning — taken here whatever error handler stands, since one
+ * set by an earlier request on the worker stays.
+ */
+function thread_cell_strtok_next(): string|false|null
+{
+    $unset = false;
+    set_error_handler(static function () use (&$unset): bool {
+        $unset = true;
+
+        return true;
+    }, E_WARNING);
+    try {
+        $next = strtok(' ');
+    } finally {
+        restore_error_handler();
+    }
+
+    return $unset ? null : $next;
+}
+
+/**
+ * Whether PHP still takes a change to zlib.output_compression, as a
+ * Content-Length header changes it too. It refuses one with a warning once the
+ * request's output has gone out, taken here as thread_cell_strtok_next() takes
+ * its own.
+ */
+function thread_cell_compression_changeable(): bool
+{
+    $refused = false;
+    set_error_handler(static function () use (&$refused): bool {
+        $refused = true;
+
+        return true;
+    }, E_WARNING);
+    try {
+        $taken = ini_set('zlib.output_compression', '0') !== false;
+    } finally {
+        restore_error_handler();
+    }
+
+    return $taken && !$refused;
+}
+
+/**
+ * Keeps a request busy for $ms without parking, then says so in $state, so
+ * that a request queued meanwhile is started by the worker as this one ends,
+ * with nothing resumed in between.
+ *
+ * @param array<string, mixed> $state
+ */
+function thread_cell_busy(array &$state, int $ms): void
+{
+    $until = microtime(true) + $ms / 1000;
+    while (microtime(true) < $until) {
+    }
+    $state['cell_busy_done'] = true;
+}
+
+/**
+ * Whether the busy request was done and the test had resumed, read as a
+ * request starts: queued behind the busy one, it should find the first and
+ * not yet the second.
+ *
+ * @param array<string, mixed> $state
+ * @return array{busy_done: mixed, reader_resumed: mixed}
+ */
+function thread_cell_queue_premise(array $state): array
+{
+    return [
+        'busy_done' => $state['cell_busy_done'] ?? null,
+        'reader_resumed' => $state['cell_reader_resumed'] ?? null,
+    ];
+}
+
+/**
+ * Sends a request from an async task after $delay seconds, so that it arrives
+ * while the caller waits on a busy one, as session_arrival_send() does, and
+ * also notes when the first byte of the answer came, which tells when an event
+ * stream was flushed. The closure carries everything it uses: it runs on a pool
+ * thread, where nothing this file declares exists.
+ *
+ * @return int the promise of array{first_at: ?float, headers: string, body: string}
+ */
+function thread_cell_send_later(string $path, float $delay): int
+{
+    return oxphp_async(static function (string $path, float $delay): array {
+        oxphp_sleep($delay);
+        $sock = stream_socket_client('tcp://127.0.0.1:80', $errno, $errstr, 5.0);
+        if ($sock === false) {
+            return ['first_at' => null, 'headers' => '', 'body' => "connect failed: $errstr ($errno)"];
+        }
+        fwrite($sock, "GET $path HTTP/1.0\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n");
+        stream_set_blocking($sock, false);
+        $raw = '';
+        $firstAt = null;
+        $deadline = microtime(true) + 10.0;
+        while (!feof($sock) && microtime(true) < $deadline) {
+            $chunk = (string) fread($sock, 65536);
+            if ($chunk === '') {
+                oxphp_usleep(5_000);
+                continue;
+            }
+            $firstAt ??= microtime(true);
+            $raw .= $chunk;
+        }
+        fclose($sock);
+        $split = strpos($raw, "\r\n\r\n");
+
+        return [
+            'first_at' => $firstAt,
+            'headers' => $split === false ? $raw : substr($raw, 0, $split),
+            'body' => $split === false ? '' : substr($raw, $split + 4),
+        ];
+    }, $path, $delay);
+}
+
 if (!class_exists('ThreadCellFiberHolder', false)) {
     /** Fibers a request leaves suspended for a later request to resume. */
     final class ThreadCellFiberHolder

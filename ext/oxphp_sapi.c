@@ -8008,6 +8008,9 @@ static void oxphp_soft_reset(void) {
     }
     php_output_deactivate();
     php_output_activate();
+    /* php_output_activate() has just cleared the output cells this resets, but
+     * not the strtok() string or the headers of the last fetch. */
+    oxphp_reset_request_cells();
     /* And what the URL rewriter appends, which the end of the last request
      * empties but cannot free while a rewriter's handler is still on the stack
      * (see oxphp_url_rewriter_release()). Only now, with no handler left to
