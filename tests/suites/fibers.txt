@@ -284,8 +284,12 @@ fibers/test_stream_backpressure_handler_throw_reaches_catch
 # that output has gone out and its ob_implicit_flush(). A request that leaves
 # the last five on the thread does not hand them to the next. A fatal inside
 # unserialize() leaves the next call on the worker a table of its own, on either
-# way a request starts. Resuming a request runs nothing a finished request left
-# behind while the resumed one is in place.
+# way a request starts; so does a fatal inside serialize() in a shutdown
+# function, in the write of the session, or outside any request. A class whose
+# autoloader fataled, or that a parked request is still autoloading, is still
+# autoloaded for the others, and a class a request is autoloading stays guarded
+# in every fiber of that request. Resuming a request runs nothing a finished
+# request left behind while the resumed one is in place.
 fibers/test_header_callback_stays_with_its_request
 fibers/test_header_callback_stays_with_its_request >> ?action=trigger
 fibers/test_header_callback_stays_with_its_request >> ?action=check | GET | | 200 | X-Header-Callback:missing
@@ -299,6 +303,11 @@ fibers/test_implicit_flush_stays_with_its_request
 fibers/test_unserialize_state_after_a_fatal
 fibers/test_unserialize_state_after_a_fatal >> ?action=trigger
 fibers/test_unserialize_state_after_a_fatal >> ?action=check
+fibers/test_serialize_state_after_a_late_fatal
+fibers/test_serialize_state_on_the_worker_after_a_fatal
+fibers/test_autoload_guard_after_a_fatal
+fibers/test_autoload_guard_while_parked
+fibers/test_autoload_guard_reaches_the_requests_own_fibers
 fibers/test_unserialize_table_stays_with_its_request
 fibers/test_usort_comparator_stays_with_its_request
 fibers/test_array_multisort_keeps_its_comparisons_while_another_request_waits

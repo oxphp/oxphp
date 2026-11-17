@@ -21,6 +21,13 @@ async/test_timer_poll_beyond_32
 # while it is suspended.
 async/test_task_ini_survives_a_sibling_task
 
+# So does the guard against autoloading a class from inside its own autoloader,
+# for a task suspended inside one, without refusing the class to its sibling;
+# and a fatal inside a task's autoloader does not leave the class refused to
+# every later task on the thread.
+async/test_task_autoload_guard_survives_a_sibling_task
+async/test_task_autoload_guard_after_a_fatal
+
 # Two orphans on the single async worker, one spinning and one queued behind
 # it: the end of the request cancels both before it waits for either, so the
 # queued one never starts and the response is not held.

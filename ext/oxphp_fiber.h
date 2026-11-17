@@ -399,6 +399,14 @@ typedef struct {
     zend_string *strtok_string;
     char *strtok_last;
     size_t strtok_len;
+    /* The class names whose autoloaders it is running, in the order the engine
+     * added them, each with a reference of its own. The engine keeps them in a
+     * table on the thread and answers "not found" for a class named there
+     * without calling the autoloaders, so left standing they would fail the
+     * neighbour's lookups of those classes in the window. Owned while parked,
+     * in a block outside the request heap; NULL when it was loading none. */
+    zend_string **autoloading;
+    uint32_t autoloading_count;
 
     /* The ini directives this request changed, name to value, taken off the
      * thread while it is parked. The engine keeps every directive's live value

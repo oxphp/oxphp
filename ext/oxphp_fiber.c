@@ -845,6 +845,109 @@ static void oxphp_url_rewriter_drop(oxphp_request_fiber *fiber);
 
 /* ─── VM stack rewind after a bailout ─────────────────── */
 
+/* The engine's cells for the calls in progress on a stack; see "The engine's
+ * cells for a call in progress" below. */
+typedef struct {
+    unsigned serialize_lock;
+    struct php_serialize_data *serialize_data;
+    unsigned serialize_level;
+    struct php_unserialize_data *unserialize_data;
+    unsigned unserialize_level;
+    zend_fcall_info user_compare_fci;
+    zend_fcall_info_cache user_compare_fci_cache;
+} oxphp_call_cells;
+
+/* Where a point the worker can return to found them, with how many class names
+ * the request was autoloading there. */
+typedef struct {
+    oxphp_call_cells cells;
+    uint32_t autoloading;
+} oxphp_call_cells_mark;
+
+/* The index into zend_fiber_context.reserved where a fiber switched out with a
+ * call open keeps its set; -1 when the engine had no index left to give. */
+static int oxphp_call_cells_slot = -1;
+
+static inline void oxphp_call_cells_copy_out(oxphp_call_cells *cells) {
+    cells->serialize_lock = BG(serialize_lock);
+    cells->serialize_data = BG(serialize).data;
+    cells->serialize_level = BG(serialize).level;
+    cells->unserialize_data = BG(unserialize).data;
+    cells->unserialize_level = BG(unserialize).level;
+    cells->user_compare_fci = BG(user_compare_fci);
+    cells->user_compare_fci_cache = BG(user_compare_fci_cache);
+}
+
+static inline void oxphp_call_cells_copy_in(const oxphp_call_cells *cells) {
+    BG(serialize_lock) = cells->serialize_lock;
+    BG(serialize).data = cells->serialize_data;
+    BG(serialize).level = cells->serialize_level;
+    BG(unserialize).data = cells->unserialize_data;
+    BG(unserialize).level = cells->unserialize_level;
+    BG(user_compare_fci) = cells->user_compare_fci;
+    BG(user_compare_fci_cache) = cells->user_compare_fci_cache;
+}
+
+/* The engine's table of the class names whose autoloaders are running. PHP 8.6
+ * embeds it in the executor globals under a new name; before 8.6 it is NULL
+ * until the thread's first autoload allocates it. */
+static inline HashTable *oxphp_in_autoload(void) {
+#if PHP_VERSION_ID >= 80600
+    return &EG(autoload_current_classnames);
+#else
+    return EG(in_autoload);
+#endif
+}
+
+static inline uint32_t oxphp_in_autoload_count(void) {
+    HashTable *names = oxphp_in_autoload();
+
+    return names != NULL ? zend_hash_num_elements(names) : 0;
+}
+
+static inline void oxphp_call_cells_note(oxphp_call_cells_mark *mark) {
+    oxphp_call_cells_copy_out(&mark->cells);
+    mark->autoloading = oxphp_in_autoload_count();
+}
+
+/* Put the running stack's cells back to what the mark found, once a bailout has
+ * ended every call made above it: what those calls left counted open would
+ * otherwise be taken for a call in progress by the next one on this stack. A
+ * call open at the mark is still in progress below it, and keeps its count and
+ * its table. The tables of the ended calls are given up, as
+ * oxphp_call_cells_reset() gives them up.
+ *
+ * Without an index every fiber on the thread shares those cells, and the counts
+ * past the mark can be a suspended fiber's call: left as PHP leaves them.
+ *
+ * The class names are the running request's or task's, and are split by
+ * insertion order. A name is added by zend_lookup_class_ex() as it calls the
+ * autoloaders and deleted by that same call once they return, and the table
+ * refuses a name it already holds, so the names standing at the mark come
+ * first and every later one was added by a call the bailout ended. A Fiber of
+ * the request left suspended inside an autoloader adds and deletes its names
+ * out of that order, and so can leave the split off by as many names as it
+ * holds: its classes then go unguarded while it waits, or names the bailout
+ * left stay until the request ends.
+ * SYNC: php-src/Zend/zend_execute_API.c zend_lookup_class_ex() */
+static void oxphp_call_cells_return_to(const oxphp_call_cells_mark *mark) {
+    if (oxphp_call_cells_slot >= 0) {
+        oxphp_call_cells_copy_in(&mark->cells);
+    }
+
+    HashTable *names = oxphp_in_autoload();
+    if (names == NULL) {
+        return;
+    }
+    Bucket *name;
+    ZEND_HASH_MAP_REVERSE_FOREACH_BUCKET(names, name) {
+        if (zend_hash_num_elements(names) <= mark->autoloading) {
+            break;
+        }
+        zend_hash_del_bucket(names, name);
+    } ZEND_HASH_FOREACH_END();
+}
+
 /* Where the VM stack stood at a point the loop can return to, and in which
  * context: the VM stack is the context's own, so a frame recorded in any other
  * one is not on it. */
@@ -855,6 +958,7 @@ typedef struct {
     zend_execute_data *execute_data;
     zend_fiber_context *context;
     zend_fiber *active_fiber; /* what Fiber::getCurrent() answers there */
+    oxphp_call_cells_mark cells;
 } oxphp_vm_stack_mark;
 
 static inline void oxphp_vm_stack_save(oxphp_vm_stack_mark *mark) {
@@ -864,6 +968,17 @@ static inline void oxphp_vm_stack_save(oxphp_vm_stack_mark *mark) {
     mark->execute_data = EG(current_execute_data);
     mark->context = EG(current_fiber_context);
     mark->active_fiber = EG(active_fiber);
+    oxphp_call_cells_note(&mark->cells);
+}
+
+/* What a step of a recovery can leave changed under the next one, back to what
+ * the mark found: the current fiber (see the top of oxphp_recover()) and the
+ * cells of the calls in progress on this stack. The recovery runs on the stack
+ * the mark was taken on, which is the one whose cells these are. */
+static void oxphp_recovery_put_back(const oxphp_vm_stack_mark *mark) {
+    ZEND_ASSERT(EG(current_fiber_context) == mark->context);
+    EG(active_fiber) = mark->active_fiber;
+    oxphp_call_cells_return_to(&mark->cells);
 }
 
 /* Give back the one reference a frame holds on whatever it is running: the
@@ -1661,23 +1776,22 @@ static void oxphp_gc_unprotect_after_bailout(bool protect) {
  * of them — and a fatal there would leave from a point where the step's own
  * guard has already been unwound. Drained rather than cleared once, because a
  * destructor that throws in its turn leaves another standing. The current fiber
- * goes back on both sides of it: the step before may have left it cleared, and
- * so may the destructor (see the top of oxphp_recover()). And so does the
- * engine's note that it reported running out of memory, which the user code of
- * the step can leave as well — see oxphp_engine_reported_oom(): standing, it
- * would refuse every call into user code the next step makes, the onClose() of
- * a stream filter or the stream_close() of a stream wrapper on a stream the
- * release closes, say. Forgetting it
- * loses nothing: the error has been reported by then, through the error
- * callback. */
+ * and the call cells go back on both sides of it: the step before may have left
+ * them changed, and so may the destructor (see the top of oxphp_recover()). And
+ * so does the engine's note that it reported running out of memory, which the
+ * user code of the step can leave as well — see oxphp_engine_reported_oom():
+ * standing, it would refuse every call into user code the next step makes, the
+ * onClose() of a stream filter or the stream_close() of a stream wrapper on a
+ * stream the release closes, say. Forgetting it loses nothing: the error has
+ * been reported by then, through the error callback. */
 static void oxphp_recovery_drop_raised(const oxphp_vm_stack_mark *mark,
                                        const zend_object *ex_on_entry) {
-    EG(active_fiber) = mark->active_fiber;
+    oxphp_recovery_put_back(mark);
     if (EG(exception) && EG(exception) != ex_on_entry) {
         zend_try {
             oxphp_discard_pending_exception();
         } zend_end_try();
-        EG(active_fiber) = mark->active_fiber;
+        oxphp_recovery_put_back(mark);
     }
     oxphp_forget_reported_oom();
 }
@@ -1810,8 +1924,15 @@ static void oxphp_recover(const oxphp_vm_stack_mark *mark, bool discard_pending)
      * raise that bailout itself, and the next step would run without it. Parking
      * is held off below, but the engine still resumes a suspended fiber the
      * release destroys (zend_fiber_object_destroy, PHP 8.4.27 / 8.5.12), and the
-     * collector's, and a decorator's after() may drive a fiber of its own. */
-    EG(active_fiber) = mark->active_fiber;
+     * collector's, and a decorator's after() may drive a fiber of its own.
+     *
+     * The call cells go back with it, at the same points: the fatal ended every
+     * serialize(), unserialize(), sort and autoload call made above the mark,
+     * and left counted open they would make a step's own calls look like ones
+     * made inside the dead ones — a serialize() numbering its back-references
+     * after a dead call's values, a lookup refused because a dead call was
+     * loading the class. */
+    oxphp_recovery_put_back(mark);
 
     /* The operation the fatal interrupted is over, whatever it was in the middle of:
      * the names it left on the fiber go first, ahead of anything below that can run
@@ -1877,7 +1998,7 @@ static void oxphp_recover(const oxphp_vm_stack_mark *mark, bool discard_pending)
         zend_try {
             oxphp_discard_pending_exception();
         } zend_end_try();
-        EG(active_fiber) = mark->active_fiber;
+        oxphp_recovery_put_back(mark);
     }
 
     /* The caller's exception, held for the length of the recovery: the steps
@@ -2042,7 +2163,7 @@ static void oxphp_recover(const oxphp_vm_stack_mark *mark, bool discard_pending)
             zend_try {
                 OBJ_RELEASE(ex_on_entry);
             } zend_end_try();
-            EG(active_fiber) = mark->active_fiber;
+            oxphp_recovery_put_back(mark);
         }
     }
 
@@ -2089,9 +2210,9 @@ static void oxphp_recover(const oxphp_vm_stack_mark *mark, bool discard_pending)
      * the next request's handler. */
     oxphp_forget_reported_oom();
 
-    /* And the current fiber after the last step, for the caller: see the top
-     * of this function. */
-    EG(active_fiber) = mark->active_fiber;
+    /* And the current fiber and the call cells after the last step, for the
+     * caller: see the top of this function. */
+    oxphp_recovery_put_back(mark);
 
     /* Every fatal above recorded its own frame on the way out, and those frames
      * are on the stack the rewind below is about to give back. Left standing,
@@ -2795,6 +2916,17 @@ static void oxphp_output_stack_free(zend_stack *handlers) {
  * whichever request is sending them. A request takes it with it when it parks
  * and gets it back as it resumes; see header_callback in oxphp_fiber_php_state.
  *
+ * So does the engine's table of the class names whose autoloaders are running
+ * (EG(in_autoload), EG(autoload_current_classnames) from PHP 8.6). A lookup
+ * that finds the name there answers "not found" without calling them, which is
+ * what keeps an autoloader from loading its own class again; for that it has to
+ * reach every stack the request or task runs on, a Fiber the application
+ * starts and the one the engine runs the garbage collector's destructors in
+ * whenever a fiber is running, as a request's or task's always is. Left on the
+ * thread, the names of one suspended inside an autoloader would fail the lookup
+ * of that class by every other request or task on the thread until it resumed;
+ * see autoloading in oxphp_fiber_php_state.
+ *
  * BG(serialize_lock) with BG(serialize) and BG(unserialize), and
  * BG(user_compare_fci) with its cache, belong to a stack. In them the engine
  * counts the serialize() and unserialize() calls open on the running stack,
@@ -2809,9 +2941,18 @@ static void oxphp_output_stack_free(zend_stack *handlers) {
  * of its own compares with that one's comparator, and the suspended call,
  * ending on a count that is not its own, can take it below zero, after which
  * the next call gets no table at all.
+ *
+ * A fatal ends the calls without their returning, and leaves them counted open
+ * and their names in the table. Every recovery puts the cells back to what its
+ * mark found (oxphp_call_cells_return_to()), and so does the release of a
+ * request's session, which still runs the save handler and destructors after a
+ * bailout of its own. A bailout swallowed anywhere else leaves them as it found
+ * them, for the next recovery.
  * SYNC: php-src/ext/standard/var.c php_var_serialize_init(),
  *       ext/standard/var_unserializer.re php_var_unserialize_init(),
- *       ext/standard/array.c PHP_ARRAY_CMP_FUNC_BACKUP() */
+ *       ext/standard/array.c PHP_ARRAY_CMP_FUNC_BACKUP(),
+ *       Zend/zend_execute_API.c zend_lookup_class_ex(),
+ *       Zend/zend_gc.c zend_gc_collect_cycles() */
 
 /* Let go of a header callback still registered. Taken off the thread first: a
  * destructor that letting go of it runs may register another. */
@@ -2856,25 +2997,75 @@ void oxphp_reset_request_cells(void) {
     OG(flags) &= ~OXPHP_OUTPUT_REQUEST_FLAGS;
 }
 
-typedef struct {
-    unsigned serialize_lock;
-    struct php_serialize_data *serialize_data;
-    unsigned serialize_level;
-    struct php_unserialize_data *unserialize_data;
-    unsigned unserialize_level;
-    zend_fcall_info user_compare_fci;
-    zend_fcall_info_cache user_compare_fci_cache;
-} oxphp_call_cells;
+/* Take the class names a request or task is autoloading off the thread as it
+ * parks, each held by a reference of its own, outside the request heap, in the
+ * order the engine added them: oxphp_call_cells_return_to() reads that order
+ * once they are back. Emptying the thread's table frees nothing, since every
+ * name is still referenced from here, and the table keeps its storage for
+ * whatever runs in the window. */
+static void oxphp_fiber_park_autoloading(oxphp_request_fiber *fiber) {
+    ZEND_ASSERT(fiber->php_state.autoloading == NULL);
+    uint32_t count = oxphp_in_autoload_count();
 
-/* The index into zend_fiber_context.reserved where a fiber switched out with a
- * call open keeps its set; -1 when the engine had no index left to give. */
-static int oxphp_call_cells_slot = -1;
+    if (count == 0) {
+        return;
+    }
+    HashTable *names = oxphp_in_autoload();
+    zend_string **kept = pemalloc(sizeof(*kept) * count, 1);
+    zend_string *name;
+    uint32_t i = 0;
+
+    ZEND_HASH_MAP_FOREACH_STR_KEY(names, name) {
+        kept[i++] = zend_string_copy(name);
+    } ZEND_HASH_FOREACH_END();
+    zend_hash_clean(names);
+    fiber->php_state.autoloading = kept;
+    fiber->php_state.autoloading_count = count;
+}
+
+/* And install them over what stands as it resumes. What stands there is no
+ * running request's or task's: one that parked took its names with it, and one
+ * that ended deleted its own or had them taken back by its recovery. What is
+ * left — by a bailout swallowed in between, or by a Fiber that one left
+ * suspended inside an autoloader — is nobody's to keep. */
+static void oxphp_fiber_unpark_autoloading(oxphp_request_fiber *fiber) {
+    HashTable *names = oxphp_in_autoload();
+
+    if (names != NULL) {
+        zend_hash_clean(names);
+    }
+    if (fiber->php_state.autoloading == NULL) {
+        return;
+    }
+    /* Allocated by the lookups that added these names, and freed only as the
+     * executor shuts down. */
+    ZEND_ASSERT(names != NULL);
+    for (uint32_t i = 0; i < fiber->php_state.autoloading_count; i++) {
+        zend_hash_add_empty_element(names, fiber->php_state.autoloading[i]);
+        zend_string_release(fiber->php_state.autoloading[i]);
+    }
+    pefree(fiber->php_state.autoloading, 1);
+    fiber->php_state.autoloading = NULL;
+    fiber->php_state.autoloading_count = 0;
+}
+
+/* And let go of them for a request torn down while parked. */
+static void oxphp_fiber_drop_autoloading(oxphp_request_fiber *fiber) {
+    if (fiber->php_state.autoloading == NULL) {
+        return;
+    }
+    for (uint32_t i = 0; i < fiber->php_state.autoloading_count; i++) {
+        zend_string_release(fiber->php_state.autoloading[i]);
+    }
+    pefree(fiber->php_state.autoloading, 1);
+    fiber->php_state.autoloading = NULL;
+    fiber->php_state.autoloading_count = 0;
+}
 
 /* Leave the running stack counting no serialize() or unserialize() call open
- * and running no sort: a stack switched in with no set kept, or one whose calls
- * will never return, as a fatal inside one leaves them — kept, their count
- * would make a later call on that stack look like one made inside them. Their
- * tables are not destroyed, because destroying the unserialize() one runs the
+ * and running no sort: a stack switched in with no set kept, or one starting a
+ * request or task whose predecessor's calls have all ended. Their tables are
+ * not destroyed, because destroying the unserialize() one runs the
  * __unserialize() and __wakeup() calls it deferred; they are given up, and stay
  * until the thread exits. Without an index every fiber shares the thread's
  * cells, so what stands can be a suspended fiber's call, still open: left as
@@ -2907,21 +3098,17 @@ static void oxphp_call_cells_init(zend_fiber_context *context) {
 
 /* The set of the stack switched out goes with it, and the set of the one
  * switched in comes back: none, for a fiber never switched out with a call
- * open. Kept outside the request heap, so memory_limit cannot bail out of the
- * middle of a switch. */
+ * open. Kept outside the request heap: an allocation there that crossed
+ * memory_limit would queue the engine's delayed out-of-memory error, which the
+ * fiber switched in raises at its next function call or VM interrupt.
+ * SYNC: php-src/Zend/zend_alloc.c zend_mm_delayed_verror(), zend_handle_delayed_oom() */
 static void oxphp_call_cells_switch(zend_fiber_context *from, zend_fiber_context *to) {
     oxphp_call_cells *kept;
 
     ZEND_ASSERT(from->reserved[oxphp_call_cells_slot] == NULL);
     if (oxphp_call_cells_open()) {
         kept = pemalloc(sizeof(*kept), 1);
-        kept->serialize_lock = BG(serialize_lock);
-        kept->serialize_data = BG(serialize).data;
-        kept->serialize_level = BG(serialize).level;
-        kept->unserialize_data = BG(unserialize).data;
-        kept->unserialize_level = BG(unserialize).level;
-        kept->user_compare_fci = BG(user_compare_fci);
-        kept->user_compare_fci_cache = BG(user_compare_fci_cache);
+        oxphp_call_cells_copy_out(kept);
         from->reserved[oxphp_call_cells_slot] = kept;
     }
 
@@ -2931,13 +3118,7 @@ static void oxphp_call_cells_switch(zend_fiber_context *from, zend_fiber_context
         return;
     }
     to->reserved[oxphp_call_cells_slot] = NULL;
-    BG(serialize_lock) = kept->serialize_lock;
-    BG(serialize).data = kept->serialize_data;
-    BG(serialize).level = kept->serialize_level;
-    BG(unserialize).data = kept->unserialize_data;
-    BG(unserialize).level = kept->unserialize_level;
-    BG(user_compare_fci) = kept->user_compare_fci;
-    BG(user_compare_fci_cache) = kept->user_compare_fci_cache;
+    oxphp_call_cells_copy_in(kept);
     pefree(kept, 1);
 }
 
@@ -3619,6 +3800,8 @@ static void oxphp_fiber_free_task_payload(oxphp_request_fiber *fiber) {
         fiber->php_state.strtok_string = NULL;
         fiber->php_state.strtok_last = NULL;
     }
+    /* And the class names it parked, for lookups that will not finish. */
+    oxphp_fiber_drop_autoloading(fiber);
 
     if (fiber->php_state.last_error_message) {
         zend_string_release(fiber->php_state.last_error_message);
@@ -4783,11 +4966,6 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
          * once on entry; the loop needs it per iteration. */
         EG(jit_trace_num) = 0;
 
-        /* With no serialize(), unserialize() or sort call counted on this
-         * stack: what the previous request or task on this fiber called has
-         * returned, or ended in a fatal and never will. */
-        oxphp_call_cells_reset();
-
         /* With nothing of anyone else's in the travelling directives. A resume
          * sweeps on its way in (see oxphp_fiber_unpark_ini()); a fiber's first
          * request is not entered through one. Not for a task: the task
@@ -4826,6 +5004,19 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
             EG(error_reporting) = (int) error_reporting;
         }
 
+        /* With no serialize(), unserialize() or sort call counted on this
+         * stack, and no class name in the autoload table: what the previous
+         * request or task on this fiber called has returned, or ended in a
+         * fatal and been put back to the mark below by the recovery, and every
+         * request or task still suspended has taken its names with it. After
+         * the ini sweep, whose handlers can run destructors and which swallows
+         * a bailout out of them. */
+        oxphp_call_cells_reset();
+        HashTable *autoloading = oxphp_in_autoload();
+        if (autoloading != NULL) {
+            zend_hash_clean(autoloading);
+        }
+
         /* Where the VM stack stands before this iteration runs any PHP. A
          * normal return unwinds to here by itself, but a bailout does not: it
          * longjmps out of the interrupted frame with EG(vm_stack_top) and
@@ -4838,6 +5029,11 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
          * below rewind to this snapshot. */
         oxphp_vm_stack_mark mark;
         oxphp_vm_stack_save(&mark);
+        /* So a recovery to this mark leaves the next request or task no call
+         * counted open, which is what lets the arms below go without a reset
+         * of their own. */
+        ZEND_ASSERT(oxphp_call_cells_slot < 0 || !oxphp_call_cells_open());
+        ZEND_ASSERT(oxphp_in_autoload_count() == 0);
         /* Nothing recorded by an earlier iteration may be walked as if it
          * belonged to this one. */
         oxphp_bailout_frame.context = NULL;
@@ -4890,8 +5086,6 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
             } zend_catch {
                 oxphp_fiber_forget_io_names(fiber);
                 task_capture_fatal(fiber);
-                /* As in the request's catch below. */
-                oxphp_call_cells_reset();
                 oxphp_recover_from_bailout(&mark);
             } zend_end_try();
 
@@ -5144,11 +5338,6 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
             if (input_switch_blocked) {
                 zend_fiber_switch_unblock();
             }
-            /* A fatal inside serialize() or unserialize() leaves the call
-             * counted open on this stack, and a call that the shutdown
-             * functions below or the destructors the recovery runs make can be
-             * taken for one made inside it. */
-            oxphp_call_cells_reset();
             /* The exception left standing goes with the rest: not every bailout
              * caught here has been through php_error_cb — a write to a cancelled
              * request makes a bare one, with nothing flagged — so it can still
@@ -5972,6 +6161,10 @@ void oxphp_fiber_save_php_state(oxphp_request_fiber *fiber) {
      * anything a handler reports on the way is logged against this request. */
     oxphp_fiber_park_ini(fiber);
 
+    /* Step 1g: and the class names whose autoloaders it is running. After the
+     * last step that can run PHP for it, a handler step 1e puts back. */
+    oxphp_fiber_park_autoloading(fiber);
+
     /* Step 1d: and the profiler observer's share of the request, by the same
      * move as the three above. Ahead of step 2 rather than after it, because
      * parking it drains the observer's ring buffer, and the span stack those
@@ -6299,6 +6492,10 @@ void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber) {
      * per-thread pointer last. Without this, cancellation under fiber
      * multiplexing targets the wrong request. */
     oxphp_bridge_set_cancel_ptr(fiber->request_cancel_ptr);
+
+    /* And the class names it is autoloading, ahead of the ini directives,
+     * whose handlers run PHP for it. */
+    oxphp_fiber_unpark_autoloading(fiber);
 
     /* And its ini directives: the Rust ctx restored above is what a handler's
      * report is logged against. */
@@ -6678,8 +6875,13 @@ void oxphp_session_release_request_state(void) {
     /* Put back in every arm below. A bailout forwarded out of a fiber the save
      * handler started clears the engine's current fiber (zend_fiber_switch_to,
      * PHP 8.4.27 / 8.5.12), and the steps after it run application code — the
-     * handler's own, a destructor — which asks Fiber::getCurrent(). */
+     * handler's own, a destructor — which asks Fiber::getCurrent(). And a fatal
+     * inside the session's encode, or inside an autoload, leaves the call
+     * counted open, for the next step's serialize() or lookup to be taken for
+     * one made inside it; see oxphp_call_cells_return_to(). */
     zend_fiber *active_fiber = EG(active_fiber);
+    oxphp_call_cells_mark cells;
+    oxphp_call_cells_note(&cells);
 
     /* The write first, and always, the way every other SAPI ends a request:
      * php_session_flush(1) both saves the data and closes the save handler, and
@@ -6691,6 +6893,7 @@ void oxphp_session_release_request_state(void) {
         } zend_catch {
             oxphp_forget_current_io_names();
             EG(active_fiber) = active_fiber;
+            oxphp_call_cells_return_to(&cells);
         } zend_end_try();
     }
     /* Guarded, where upstream leaves it bare. Upstream reaches this after the
@@ -6706,6 +6909,7 @@ void oxphp_session_release_request_state(void) {
         } zend_catch {
             oxphp_forget_current_io_names();
             EG(active_fiber) = active_fiber;
+            oxphp_call_cells_return_to(&cells);
         } zend_end_try();
         ZVAL_UNDEF(&PS(http_session_vars));
     }
@@ -6726,6 +6930,7 @@ void oxphp_session_release_request_state(void) {
         } zend_catch {
             oxphp_forget_current_io_names();
             EG(active_fiber) = active_fiber;
+            oxphp_call_cells_return_to(&cells);
         } zend_end_try();
     }
     /* What the close leaves behind when it bails out, or when the handler
@@ -6823,6 +7028,7 @@ void oxphp_session_release_request_state(void) {
     } zend_catch {
         oxphp_forget_current_io_names();
         EG(active_fiber) = active_fiber;
+        oxphp_call_cells_return_to(&cells);
     } zend_end_try();
     zend_string_release(session_var_name);
 
@@ -9346,9 +9552,10 @@ static void oxphp_task_last_error_unpark(oxphp_request_fiber *fiber) {
  * at its entry, or a recycled one parked at the bottom of that loop.
  * Task-side mirror of oxphp_scheduler_start_fiber; a task carries no HTTP
  * request state, so the C-stack bounds are all it installs, and its last error
- * all it takes back out. A new task starts with none: the driver also runs PHP
- * outside every slice and window, in the destructors of what it frees, and what
- * that leaves standing is not the task's. */
+ * and the class names it is autoloading all it takes back out. A new task
+ * starts with no last error: the driver also runs PHP outside every slice and
+ * window, in the destructors of what it frees, and what that leaves standing is
+ * not the task's. */
 static void oxphp_task_start_fiber(oxphp_fiber_scheduler *sched, oxphp_request_fiber *fiber) {
     /* As oxphp_scheduler_start_fiber() does, for the task's sake. */
     oxphp_recover_from_reported_oom();
@@ -9366,6 +9573,7 @@ static void oxphp_task_start_fiber(oxphp_fiber_scheduler *sched, oxphp_request_f
     oxphp_fiber_enter(fiber, NULL);
     oxphp_task_last_error_park(fiber);
     oxphp_stream_errors_park(fiber);
+    oxphp_fiber_park_autoloading(fiber);
 
     EG(stack_base) = saved_stack_base;
     EG(stack_limit) = saved_stack_limit;
@@ -9374,8 +9582,8 @@ static void oxphp_task_start_fiber(oxphp_fiber_scheduler *sched, oxphp_request_f
 
 /* Resume a suspended task fiber. Task-side mirror of
  * oxphp_scheduler_resume_fiber, with no request state to re-install: it moves
- * the C-stack bounds, and the task's last error in for the slice and back out
- * after it. */
+ * the C-stack bounds, and the task's last error and the class names it is
+ * autoloading in for the slice and back out after it. */
 static void oxphp_task_resume_fiber(oxphp_fiber_scheduler *sched,
                                     oxphp_request_fiber *fiber, zval *value) {
     /* As oxphp_scheduler_start_fiber() does, for the task's sake. */
@@ -9390,9 +9598,11 @@ static void oxphp_task_resume_fiber(oxphp_fiber_scheduler *sched,
 
     oxphp_task_last_error_unpark(fiber);
     oxphp_stream_errors_unpark(fiber);
+    oxphp_fiber_unpark_autoloading(fiber);
     oxphp_fiber_enter(fiber, value);
     oxphp_task_last_error_park(fiber);
     oxphp_stream_errors_park(fiber);
+    oxphp_fiber_park_autoloading(fiber);
 
     EG(stack_base) = saved_stack_base;
     EG(stack_limit) = saved_stack_limit;
