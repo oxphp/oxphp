@@ -77,7 +77,7 @@ argument:
 | Suffix       | Behaviour                                                     | Examples                                                  |
 |--------------|---------------------------------------------------------------|-----------------------------------------------------------|
 | `try*`       | Non-blocking; reports the failure variant immediately.        | `Channel::trySend`, `Channel::tryRecv`, `Mutex::tryWithLock` |
-| (bare name)  | Block forever (or until the request fiber is cancelled).      | `Channel::send`, `Channel::recv`, `Mutex::withLock`       |
+| (bare name)  | Block forever (or until the request fiber is cancelled). `Channel::send()`/`recv()` throw instead where they would wait inside a fiber that cannot be suspended — see [Shared Channel](shared-channel.md#fiber-vs-blocking-behaviour). | `Channel::send`, `Channel::recv`, `Mutex::withLock`       |
 | `*Timeout`   | Bounded wait. Takes a mandatory `int $ms > 0`.                | `Channel::sendTimeout`, `Channel::recvTimeout`, `Mutex::withLockTimeout` |
 
 The trichotomy moves three ambiguous policies (`null` = forever, `0`

@@ -11,7 +11,7 @@ description: Bounded MPMC channel shared across PHP workers, with fiber-aware se
 
 - **Bounded.** Capacity is fixed at construction. Once full, `send` blocks (or suspends a fiber); `trySend` reports the result without waiting.
 - **MPMC.** Any number of senders and receivers across threads. Delivery is FIFO.
-- **Fiber-aware.** Under worker mode with the async pool, blocking variants suspend the fiber instead of the OS thread. In traditional mode they block the OS thread.
+- **Fiber-aware.** Under worker mode with the async pool, blocking variants suspend the fiber instead of the OS thread wherever the fiber can be suspended (see [Fiber vs blocking behaviour](#fiber-vs-blocking-behaviour)). In traditional mode they block the OS thread.
 - **Result-typed.** Every send/recv returns a [`Channel\SendResult`](#api-reference) / [`Channel\RecvResult`](#api-reference) — closed / full / timeout are normal outcomes for fan-out dispatchers, so they appear as result variants instead of exceptions.
 
 ## API Reference
@@ -96,7 +96,7 @@ Every direction has three method variants — the suffix encodes the wait policy
 | Suffix       | Behaviour                                                            |
 |--------------|----------------------------------------------------------------------|
 | `try*`       | Non-blocking. Reports `Empty` / `Full` if the call cannot proceed.   |
-| (bare name)  | Block forever, or until the request fiber is cancelled.              |
+| (bare name)  | Block forever, or until the request fiber is cancelled. Throws `SharedException` instead of waiting inside a fiber that cannot be suspended — see [Fiber vs blocking behaviour](#fiber-vs-blocking-behaviour). |
 | `*Timeout`   | Bounded wait. `$ms` must be `> 0` — use one of the other forms for forever or non-blocking. |
 
 `$ms` is **always a positive integer of milliseconds** for `recvTimeout` / `sendTimeout` / `sendMany` / `recvMany`. Zero, negative, non-int, and absent values raise `OxPHP\Shared\TypeException` at the bridge — that constraint moved out of the method body so the trichotomy is self-documenting.
@@ -167,6 +167,7 @@ The same method calls behave differently depending on whether PHP is currently r
 
 - **Inside a fiber** (worker mode + `oxphp_async(...)`): the blocking variants (`send`, `recv`, `sendTimeout`, `recvTimeout`) allocate a synthetic promise, register a waker with the channel, and suspend the fiber. The worker thread goes back to the scheduler and processes other fibers until the channel notifies the waker.
 - **Outside a fiber** (traditional mode, or a non-async call path): the blocking variants block the OS worker thread via `crossbeam_channel`. No other work runs on that thread until the call returns.
+- **Inside a fiber, where it cannot be suspended** — where a fiber switch is refused, such as a `FILTER_CALLBACK` of `filter_input_array()` given a definitions array or a `__toString()` that `array_multisort()` runs, and in the cleanup a worker runs around a request's end, such as the destructors of what the request left in its superglobals: `sendTimeout()` and `recvTimeout()` block the thread as they do outside a fiber, for up to their timeout. `send()` and `recv()` have no timeout, and the other end may be a request parked on the same worker, which cannot run until the call returns, so their wait there could never end: where they would have to wait, they throw `OxPHP\Shared\SharedException` at once, naming the timeout variant to use. They still go through where no wait is needed — a value is there to receive, or a slot is free — and report `Closed` on a closed channel.
 
 Traditional mode still gets the channel semantics — it simply pays with a blocked thread. Worker mode is the recommended deployment for any pipeline that relies on waiting.
 

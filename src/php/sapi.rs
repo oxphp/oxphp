@@ -4744,7 +4744,7 @@ pub unsafe extern "C" fn await_race_dispatch_callback(
 
     // Inside a task fiber, race cooperatively (poll + yield) so the worker
     // is not pinned while several promises are outstanding.
-    if ffi::oxphp_bridge_in_fiber() == 1 {
+    if ffi::oxphp_bridge_in_fiber() == ffi::OXPHP_IN_FIBER_CAN_PARK {
         return await_race_in_fiber(&ids, timeout, out_winner_id, retval);
     }
 
@@ -5199,7 +5199,7 @@ pub unsafe extern "C" fn await_any_dispatch_callback(
 
     // Inside a task fiber, resolve cooperatively (poll + yield) so the worker
     // is not pinned while waiting for one of several promises to fulfil.
-    if ffi::oxphp_bridge_in_fiber() == 1 {
+    if ffi::oxphp_bridge_in_fiber() == ffi::OXPHP_IN_FIBER_CAN_PARK {
         return await_any_in_fiber(&input_ids, timeout, out_winner_id, retval);
     }
 

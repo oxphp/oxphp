@@ -15,6 +15,13 @@ use std::os::raw::{c_char, c_int, c_void};
 /// test's `mock_pool_park` hook does.
 pub const OXPHP_FIBER_UNWIND: c_int = -9;
 
+/// `OXPHP_IN_FIBER_*` from `oxphp_bridge.h`. The real `ffi` leaves out `NO`,
+/// which only code built without `php` names; the mock predicate always
+/// answers it.
+pub const OXPHP_IN_FIBER_NO: c_int = 0;
+pub const OXPHP_IN_FIBER_CAN_PARK: c_int = 1;
+pub const OXPHP_IN_FIBER_PARK_REFUSED: c_int = 2;
+
 // ── Value reading ──
 
 pub unsafe fn oxphp_val_type(_zv: *mut c_void) -> u8 {
@@ -542,7 +549,7 @@ pub unsafe fn oxphp_bridge_fiber_await(
     1 // not in fiber — blocking path
 }
 pub unsafe fn oxphp_bridge_in_fiber() -> c_int {
-    0
+    OXPHP_IN_FIBER_NO
 }
 
 thread_local! {

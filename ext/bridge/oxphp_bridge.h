@@ -1559,22 +1559,33 @@ void oxphp_bridge_set_fiber_sleep(oxphp_fiber_sleep_fn_t fn);
  *  flush parks on it for room in a stream's queue. */
 void oxphp_bridge_set_fiber_fd_wait(oxphp_fiber_fd_wait_fn_t fn);
 
-/** Register the SAPI predicate that decides whether the calling thread
- *  is inside an oxphp-managed scheduler fiber. The bridge has no way
- *  to tell on its own — `EG(current_fiber_context)` is non-null on the
- *  main thread of every request, and a user-level `Fiber::start()`
+/** Register the SAPI predicate behind `oxphp_bridge_in_fiber`. The bridge
+ *  has no way to tell on its own — `EG(current_fiber_context)` is non-null
+ *  on the main thread of every request, and a user-level `Fiber::start()`
  *  installs a context that the oxphp scheduler does not own. The SAPI
  *  keys the predicate off its private `oxphp_current_fiber` __thread
  *  pointer, which is the only authoritative source. */
 void oxphp_bridge_set_in_fiber_check(oxphp_in_fiber_check_fn_t fn);
 
-/* Returns 1 if the calling thread is currently inside an oxphp
- * scheduler fiber (the only context where `oxphp_bridge_fiber_await`
- * can suspend), else 0. Cheap (single function pointer call). Used by
- * Shared\Channel (and other primitives) to choose between
- * synthetic-promise fiber-suspend and crossbeam thread-block when
- * timeout > 0. Returns 0 when no SAPI callback is registered (unit
- * tests, bare CLI without the extension). */
+/* What `oxphp_bridge_in_fiber` answers about the calling code. */
+/* No fiber the server runs a request or task on is running on this thread (a
+ * request in traditional mode, no SAPI callback registered: unit tests, bare
+ * CLI without the extension), or one is, with nothing blocked, and the caller
+ * is on a context nested in it, such as a userland Fiber. A wait holds the
+ * thread. */
+#define OXPHP_IN_FIBER_NO 0
+/* On such a fiber's own context, with neither fiber switching nor the server's
+ * parking blocked: the only place `oxphp_bridge_fiber_await` can suspend. */
+#define OXPHP_IN_FIBER_CAN_PARK 1
+/* Such a fiber is running, and fiber switching or the server's parking is
+ * blocked, on its own context or one nested in it. A wait holds the thread, and
+ * a request or task parked on it cannot run until the wait ends: where that is
+ * the other end, it never answers. */
+#define OXPHP_IN_FIBER_PARK_REFUSED 2
+
+/* One of OXPHP_IN_FIBER_*. Cheap (single function pointer call). Used by
+ * Shared\Channel and the await fan-outs to choose between suspending on a
+ * synthetic promise and waiting on the thread. */
 int oxphp_bridge_in_fiber(void);
 
 /** Register the SAPI predicate behind `oxphp_bridge_request_end_pending`.

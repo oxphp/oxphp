@@ -2432,6 +2432,22 @@ pub fn register_class(
     Ok(())
 }
 
+/// `send()` or `recv()` that would have to wait, called where the request or
+/// task cannot be suspended (`OXPHP_IN_FIBER_PARK_REFUSED`). Waiting there
+/// holds the thread, and a request or task parked on it cannot run until the
+/// wait ends; where that is the other end, a wait without a deadline would never
+/// return and the worker with it. A bounded wait still holds the thread, but
+/// its deadline ends it, so only the unbounded one is refused.
+fn refuse_forever_wait(method: &str, found: &str, bounded: &str) -> crate::plugin::PhpError {
+    crate::plugin::PhpError::Exception {
+        class: "OxPHP\\Shared\\SharedException".into(),
+        message: format!(
+            "Channel::{method}() {found} and cannot wait without a timeout where this request or task cannot be suspended; use {bounded}()"
+        ),
+        code: 0,
+    }
+}
+
 /// Map a Channel FFI rc → a PhpError exception. Mirrors
 /// `counter_rc_to_result` but adds `Closed` / `Timeout` mapping.
 #[allow(dead_code)]
@@ -2529,13 +2545,16 @@ fn invoke_channel_send(
 
     // The fiber-suspend path uses synthetic-promise FFI that is gated
     // behind `feature = "php"` (PROMISE_MAP lives on PHP worker
-    // threads). Without `php`, force `in_fiber = false` so we always
+    // threads). Without `php`, force `OXPHP_IN_FIBER_NO` so we always
     // take the thread-blocking branch — matches the mock
-    // `oxphp_bridge_in_fiber` returning 0 anyway.
+    // `oxphp_bridge_in_fiber` anyway.
     #[cfg(feature = "php")]
-    let in_fiber = unsafe { bridge_ffi::oxphp_bridge_in_fiber() } != 0;
+    // SAFETY: a plain read through the SAPI's registered predicate; it takes no
+    // arguments and runs on the PHP thread executing this handler.
+    let fiber_state = unsafe { bridge_ffi::oxphp_bridge_in_fiber() };
     #[cfg(not(feature = "php"))]
-    let in_fiber = false;
+    let fiber_state = bridge_ffi::OXPHP_IN_FIBER_NO;
+    let in_fiber = fiber_state == bridge_ffi::OXPHP_IN_FIBER_CAN_PARK;
 
     if in_fiber {
         // Fiber path: try_send → on full, register send-waiter and
@@ -2721,6 +2740,28 @@ fn invoke_channel_send(
             }
         }
     } else {
+        if fiber_state == bridge_ffi::OXPHP_IN_FIBER_PARK_REFUSED
+            && matches!(parse_timeout(timeout_ms), Wait::Forever)
+        {
+            // See `refuse_forever_wait`. A send that needs no wait goes through.
+            let mut success: c_int = 0;
+            // SAFETY: `buf`/`len` come from `buf_owner`, alive for this call, and
+            // `success` is a local `c_int`.
+            let rc = unsafe { oxphp_shared_channel_try_send(entry_ptr, buf, len, &mut success) };
+            if rc == SharedError::Closed.code() {
+                return results::write_send(call, SendKind::Closed);
+            }
+            super::counter::counter_rc_to_result(rc)?;
+            if success != 0 {
+                return results::write_send(call, SendKind::Ok);
+            }
+            return Err(refuse_forever_wait(
+                "send",
+                "found the channel full",
+                "sendTimeout",
+            ));
+        }
+
         // Non-fiber path: thread-block via send_blocking.
         let rc = unsafe { oxphp_shared_channel_send_blocking(entry_ptr, buf, len, timeout_ms) };
 
@@ -2754,13 +2795,16 @@ fn invoke_channel_recv(
 
     // The fiber-suspend path uses synthetic-promise FFI that is gated
     // behind `feature = "php"` (PROMISE_MAP lives on PHP worker
-    // threads). Without `php`, force `in_fiber = false` so we always
+    // threads). Without `php`, force `OXPHP_IN_FIBER_NO` so we always
     // take the thread-blocking branch — matches the mock
-    // `oxphp_bridge_in_fiber` returning 0 anyway.
+    // `oxphp_bridge_in_fiber` anyway.
     #[cfg(feature = "php")]
-    let in_fiber = unsafe { bridge_ffi::oxphp_bridge_in_fiber() } != 0;
+    // SAFETY: a plain read through the SAPI's registered predicate; it takes no
+    // arguments and runs on the PHP thread executing this handler.
+    let fiber_state = unsafe { bridge_ffi::oxphp_bridge_in_fiber() };
     #[cfg(not(feature = "php"))]
-    let in_fiber = false;
+    let fiber_state = bridge_ffi::OXPHP_IN_FIBER_NO;
+    let in_fiber = fiber_state == bridge_ffi::OXPHP_IN_FIBER_CAN_PARK;
 
     if in_fiber {
         // Fiber path: try_recv once first, then register recv-waiter and
@@ -2919,6 +2963,22 @@ fn invoke_channel_recv(
             }
         }
     } else {
+        if fiber_state == bridge_ffi::OXPHP_IN_FIBER_PARK_REFUSED
+            && matches!(parse_timeout(timeout_ms), Wait::Forever)
+        {
+            // See `refuse_forever_wait`. A recv that needs no wait goes through.
+            return match channel_try_recv_native(entry_ptr)? {
+                RecvOutcome::Got(payload) => write_recv_payload(call, &payload),
+                RecvOutcome::Closed => results::write_recv(call, RecvKind::Closed),
+                RecvOutcome::Empty => Err(refuse_forever_wait(
+                    "recv",
+                    "found nothing to receive",
+                    "recvTimeout",
+                )),
+                RecvOutcome::Timeout => unreachable!("try_recv never returns Timeout"),
+            };
+        }
+
         // Thread-block path. The popped Payload lives on this stack frame
         // through write_recv_payload, pinning nested Shared\* entries while the
         // bytes are deserialized.
