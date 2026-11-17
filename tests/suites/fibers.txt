@@ -277,6 +277,23 @@ fibers/test_stream_backpressure_client_gone_drops_its_output
 fibers/test_stream_backpressure_memory_fatal_holds_no_one
 fibers/test_stream_backpressure_handler_throw_reaches_catch
 
+# What the engine keeps per thread for the request on it goes with the request
+# when it parks: its header callback, its open unserialize() table, its sort
+# comparator. A fatal inside unserialize() leaves the next call on the worker a
+# table of its own, on either way a request starts. Resuming a request runs
+# nothing a finished request left behind while the resumed one is in place.
+fibers/test_header_callback_stays_with_its_request
+fibers/test_header_callback_stays_with_its_request >> ?action=trigger
+fibers/test_header_callback_stays_with_its_request >> ?action=check | GET | | 200 | X-Header-Callback:missing
+fibers/test_unserialize_state_after_a_fatal
+fibers/test_unserialize_state_after_a_fatal >> ?action=trigger
+fibers/test_unserialize_state_after_a_fatal >> ?action=check
+fibers/test_unserialize_table_stays_with_its_request
+fibers/test_usort_comparator_stays_with_its_request
+fibers/test_restore_runs_no_destructor_into_the_resumed_request
+fibers/test_resume_lets_go_of_a_backtrace_its_session_release_leaves
+fibers/test_userland_fiber_keeps_its_call_cells
+
 # How close to the end of its C stack a request or a task may recurse before the
 # engine throws. The second line drives an internal function that uses a lot of
 # stack into the last level the check lets through; if the limit loses its
