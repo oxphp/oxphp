@@ -2912,7 +2912,8 @@ static void oxphp_output_stack_free(zend_stack *handlers) {
 
 /* ─── The engine's cells for a call in progress ────────────
  *
- * SG(callback_func) belongs to a request: the engine runs it in the headers of
+ * The header callback (SG(callback_func), SG(send_header_fcc) from PHP 8.6)
+ * belongs to a request: the engine runs it in the headers of
  * whichever request is sending them. A request takes it with it when it parks
  * and gets it back as it resumes; see header_callback in oxphp_fiber_php_state.
  *
@@ -2954,16 +2955,48 @@ static void oxphp_output_stack_free(zend_stack *handlers) {
  *       Zend/zend_execute_API.c zend_lookup_class_ex(),
  *       Zend/zend_gc.c zend_gc_collect_cycles() */
 
+/* Move the thread's header callback into `dst`, leaving none registered. */
+static void oxphp_header_callback_take(oxphp_header_callback *dst) {
+#if PHP_VERSION_ID >= 80600
+    *dst = SG(send_header_fcc);
+    SG(send_header_fcc) = empty_fcall_info_cache;
+#else
+    ZVAL_COPY_VALUE(dst, &SG(callback_func));
+    ZVAL_UNDEF(&SG(callback_func));
+#endif
+}
+
+/* Install `src` over what stands, which is overwritten unreleased (see
+ * oxphp_fiber_release_what_stands()), leaving `src` empty. */
+static void oxphp_header_callback_put(oxphp_header_callback *src) {
+#if PHP_VERSION_ID >= 80600
+    SG(send_header_fcc) = *src;
+    *src = empty_fcall_info_cache;
+#else
+    ZVAL_COPY_VALUE(&SG(callback_func), src);
+    ZVAL_UNDEF(src);
+#endif
+}
+
+/* Let go of `cb` and leave it empty. Can run a destructor. */
+static void oxphp_header_callback_drop(oxphp_header_callback *cb) {
+#if PHP_VERSION_ID >= 80600
+    if (ZEND_FCC_INITIALIZED(*cb)) {
+        zend_fcc_dtor(cb);
+    }
+#else
+    zval_ptr_dtor(cb);
+    ZVAL_UNDEF(cb);
+#endif
+}
+
 /* Let go of a header callback still registered. Taken off the thread first: a
  * destructor that letting go of it runs may register another. */
 void oxphp_fiber_release_header_callback(void) {
-    if (!Z_ISUNDEF(SG(callback_func))) {
-        zval held;
+    oxphp_header_callback held;
 
-        ZVAL_COPY_VALUE(&held, &SG(callback_func));
-        ZVAL_UNDEF(&SG(callback_func));
-        zval_ptr_dtor(&held);
-    }
+    oxphp_header_callback_take(&held);
+    oxphp_header_callback_drop(&held);
 }
 
 /* The bits of OG(flags) that belong to a request rather than the thread, which
@@ -3791,8 +3824,7 @@ static void oxphp_fiber_free_task_payload(oxphp_request_fiber *fiber) {
     }
     oxphp_url_rewriter_drop(fiber);
     /* And the header callback it parked, for headers that will not be sent. */
-    zval_ptr_dtor(&fiber->php_state.header_callback);
-    ZVAL_UNDEF(&fiber->php_state.header_callback);
+    oxphp_header_callback_drop(&fiber->php_state.header_callback);
     zval_ptr_dtor_nogc(&fiber->php_state.last_http_headers);
     ZVAL_UNDEF(&fiber->php_state.last_http_headers);
     if (fiber->php_state.strtok_string) {
@@ -6145,8 +6177,7 @@ void oxphp_fiber_save_php_state(oxphp_request_fiber *fiber) {
     BG(user_shutdown_function_names) = NULL;
 
     /* Step 1f: and the header callback it registered, by the same move. */
-    ZVAL_COPY_VALUE(&fiber->php_state.header_callback, &SG(callback_func));
-    ZVAL_UNDEF(&SG(callback_func));
+    oxphp_header_callback_take(&fiber->php_state.header_callback);
     /* With the headers of its last http:// fetch and its strtok() string. */
     ZVAL_COPY_VALUE(&fiber->php_state.last_http_headers, &BG(last_http_headers));
     ZVAL_UNDEF(&BG(last_http_headers));
@@ -6502,8 +6533,7 @@ void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber) {
     oxphp_fiber_unpark_ini(fiber);
 
     /* And its header callback. */
-    ZVAL_COPY_VALUE(&SG(callback_func), &fiber->php_state.header_callback);
-    ZVAL_UNDEF(&fiber->php_state.header_callback);
+    oxphp_header_callback_put(&fiber->php_state.header_callback);
 
     /* And the headers of its last fetch and its strtok() string, giving up what
      * stands: strings and an array of strings, which run no destructor, and
@@ -7559,7 +7589,11 @@ void oxphp_fiber_init_request_state(void) {
      * release ahead of this one, with the headers of a parked request standing
      * unsent, is nobody's: dropped unrun, as a resume's install drops one, and
      * what it holds stays until the worker exits. */
+#if PHP_VERSION_ID >= 80600
+    SG(send_header_fcc) = empty_fcall_info_cache;
+#else
     ZVAL_UNDEF(&SG(callback_func));
+#endif
 
     /* Re-read cookies from the new request data */
     if (sapi_module.read_cookies) {

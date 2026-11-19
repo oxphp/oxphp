@@ -167,6 +167,16 @@ typedef struct oxphp_curl_wait {
     struct _oxphp_request_fiber *next;
 } oxphp_curl_wait;
 
+/* The engine's registration of header_register_callback(). PHP 8.6 keeps it as
+ * a call cache holding its own references, SG(send_header_fcc); earlier
+ * versions keep the callable, SG(callback_func), and refill the call cache
+ * beside it on every call, so that cache has no need to travel. */
+#if PHP_VERSION_ID >= 80600
+typedef zend_fcall_info_cache oxphp_header_callback;
+#else
+typedef zval oxphp_header_callback;
+#endif
+
 /* Written on suspend only (oxphp_fiber_save_php_state) and read only while that
  * fiber is suspended — see oxphp_scheduler_start_fiber for why handing a fiber a
  * NEW request restores none of it. Holds no Zend VM state: zend_fiber_switch_context
@@ -385,10 +395,9 @@ typedef struct {
 
     /* The header callback it registered, which the engine keeps on the thread
      * until its headers go out: left standing, it would run in the headers of
-     * the request the worker serves in the window. Owned while parked; IS_UNDEF
-     * when there is none. The engine's cache of how to call it stays behind,
-     * since the engine fills it again on every call. */
-    zval header_callback;
+     * the request the worker serves in the window. Owned while parked; empty
+     * when there is none. */
+    oxphp_header_callback header_callback;
 
     /* What http_get_last_response_headers() answers and the string strtok()
      * carries on with. The engine keeps both per thread for a whole request,

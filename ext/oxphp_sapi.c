@@ -162,7 +162,7 @@ typedef struct {
 } oxphp_http_request_obj;
 
 static zend_always_inline oxphp_http_request_obj *oxphp_http_request_from(zend_object *obj) {
-    return (oxphp_http_request_obj *)((char *)obj - XtOffsetOf(oxphp_http_request_obj, std));
+    return (oxphp_http_request_obj *)((char *)obj - offsetof(oxphp_http_request_obj, std));
 }
 
 /* create_object rather than the factory, so `new Request()` is stamped too. */
@@ -11471,7 +11471,7 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
         oxphp_http_request_ce->ce_flags |= ZEND_ACC_FINAL | ZEND_ACC_NOT_SERIALIZABLE;
         zend_class_implements(oxphp_http_request_ce, 1, oxphp_http_request_iface_ce);
         memcpy(&oxphp_http_request_handlers, &std_object_handlers, sizeof(zend_object_handlers));
-        oxphp_http_request_handlers.offset = XtOffsetOf(oxphp_http_request_obj, std);
+        oxphp_http_request_handlers.offset = offsetof(oxphp_http_request_obj, std);
         oxphp_http_request_handlers.clone_obj = NULL;
         oxphp_http_request_ce->create_object = oxphp_http_request_create;
         oxphp_http_request_ce->default_object_handlers = &oxphp_http_request_handlers;
