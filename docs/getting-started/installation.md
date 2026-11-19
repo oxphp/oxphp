@@ -5,7 +5,7 @@ description: Install OxPHP via Docker image or build from source. Covers prerequ
 
 # Installation
 
-OxPHP is distributed as a Docker image — the fastest and recommended way to start serving PHP applications. The image bundles the server binary, PHP 8.4, 8.5 or 8.6 ZTS, the OxPHP extension, and all runtime dependencies on Alpine Linux. The default `:0.15.0` and `:latest` tags ship PHP 8.5; pull PHP 8.4 with the `:0.15.0-php8.4`, `:php8.4`, or any `*-php8.4*` tag variant, and PHP 8.6 with `:php8.6` or any `*-php8.6*` tag variant. The latest release's tags that name no Alpine version (`:latest`, `:0.15.0`, `:php8.4`, `:0.15-php8.5`) are built on Alpine 3.24; each release is also published on Alpine 3.23 as `:0.15.0-php8.5-alpine3.23`, `:0.15.0-php8.4-alpine3.23` and the matching patch-pinned tags.
+OxPHP is distributed as a Docker image — the fastest and recommended way to start serving PHP applications. The image bundles the server binary, PHP 8.4, 8.5 or 8.6 ZTS, the OxPHP extension, and all runtime dependencies on Alpine Linux. The default `:0.15.0` and `:latest` tags ship PHP 8.5; pull PHP 8.4 with the `:0.15.0-php8.4`, `:php8.4`, or any `*-php8.4*` tag variant, and, from 0.16.0 on, PHP 8.6 with `:php8.6` or any `*-php8.6*` tag variant. The latest release's tags that name no Alpine version (`:latest`, `:0.15.0`, `:php8.4`, `:0.15-php8.5`) are built on Alpine 3.24; each release is also published on Alpine 3.23 as `:0.15.0-php8.5-alpine3.23`, `:0.15.0-php8.4-alpine3.23` and the matching patch-pinned tags.
 
 ## Docker (Recommended)
 
@@ -29,7 +29,7 @@ The image includes:
 
 ### Debian (glibc) Image
 
-From 0.13.0 on, every release is also published as the same server built on Debian trixie instead of Alpine, for `linux/amd64` and `linux/arm64`. The tags are the release's Alpine tags with `-trixie` added at the end (in place of `-alpine<X.Y>` where a tag has it), and `:trixie` stands in for `:latest`: `ghcr.io/oxphp/oxphp:trixie` and `:0.15.0-trixie` (PHP 8.5), `:php8.4-trixie`, `:php8.5-trixie`, `:0.15-php8.5-trixie`, `:0.15.0-php8.5-trixie`, and `:0.15.0-php8.5.<patch>-trixie` pinned to a PHP patch release. They are signed with cosign like the Alpine tags, and the weekly job that rebuilds recent releases on the current PHP patch release rebuilds them too. Releases before 0.13.0 are Alpine only.
+From 0.13.0 on, every release is also published as the same server built on Debian trixie instead of Alpine, for `linux/amd64` and `linux/arm64`. The tags are the release's Alpine tags with `-trixie` added at the end (in place of `-alpine<X.Y>` where a tag has it), and `:trixie` stands in for `:latest`: `ghcr.io/oxphp/oxphp:trixie` and `:0.15.0-trixie` (PHP 8.5), `:php8.4-trixie`, `:php8.5-trixie`, `:php8.6-trixie` (from 0.16.0 on), `:0.15-php8.5-trixie`, `:0.15.0-php8.5-trixie`, and `:0.15.0-php8.5.<patch>-trixie` pinned to a PHP patch release. They are signed with cosign like the Alpine tags, and the weekly job that rebuilds recent releases on the current PHP patch release rebuilds them too. Releases before 0.13.0 are Alpine only.
 
 The nightly pipeline publishes the Debian build as well: `:nightly-trixie` (PHP 8.4), `:php8.4-nightly-trixie`, `:php8.5-nightly-trixie` and `:php8.6-nightly-trixie`. Nightly tags are built from `main` on nights when it has moved since the last fully successful run, and carry no stability promise. A night on which the Debian build fails leaves `:nightly-trixie` and `:php<minor>-nightly-trixie` at the last build that succeeded, so they can trail `:nightly`.
 

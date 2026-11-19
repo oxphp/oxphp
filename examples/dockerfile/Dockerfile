@@ -26,8 +26,17 @@
 ARG OXPHP_VERSION=0.15.0
 ARG PHP_VERSION=8.4
 ARG ALPINE_VERSION=3.23
-# PHP 8.6: every official 8.6 image is ZTS and its tag has no -zts, so the
-# php-base FROM below becomes php:${PHP_VERSION}-alpine${ALPINE_VERSION}.
+# PHP 8.6 needs more than PHP_VERSION=8.6:
+#   - OXPHP_VERSION 0.16.0 or later; earlier releases have no -php8.6 image.
+#   - The php-base FROM without -zts: every official 8.6 image is ZTS and its
+#     tag dropped the infix (php:8.6-alpine${ALPINE_VERSION}).
+#   - mbstring in php-base, if the app requires ext-mbstring: the official 8.6
+#     images ship without it, and dev and prod-cli are built on them. Add
+#     mbstring to its docker-php-ext-install, oniguruma-dev to the packages it
+#     deletes again and oniguruma to the ones it keeps. prod already has it,
+#     from the OxPHP image.
+#   - No Xdebug in php-dev, or a pre-release of it: Xdebug 3.5 requires PHP
+#     older than 8.6.
 
 # ══════════════════════════════════════════════════════════════
 # Stage: php-base — shared PHP extensions (pdo, intl)
@@ -253,7 +262,8 @@ FROM alpine:${ALPINE_VERSION} AS prod
 #                        oniguruma, argon2-libs, zlib, ncurses-libs
 # App extensions:        icu-libs + libstdc++ (intl), libpq (pdo_pgsql)
 # Base-image extensions: libsodium (sodium — enabled by default in the
-#                        PHP base image via docker-php-ext-sodium.ini)
+#                        PHP base image via docker-php-ext-sodium.ini),
+#                        libzip (zip, which the OxPHP 8.6 images add)
 # Runtime niceties:      ca-certificates, tzdata
 # pdo_mysql:             not listed — uses mysqlnd (bundled in libphp.so)
 RUN apk add --no-cache \
@@ -272,6 +282,7 @@ RUN apk add --no-cache \
         argon2-libs \
         zlib \
         libsodium \
+        libzip \
         icu-libs \
         libpq
 

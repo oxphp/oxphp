@@ -75,7 +75,7 @@ Worker scripts keep their shape: bootstrap once, then serve requests. Replace th
 - **No reverse proxy or upstream.** There is no `proxy_pass` and no WebSocket server. If nginx also fronts other services, keep a proxy in front of OxPHP for those routes.
 - **One port, one protocol.** An instance serves plain HTTP or HTTPS, not both, so the port-80 redirect to HTTPS needs a proxy or a second instance. The certificate is read at startup, so a renewal needs a restart — see [TLS](../features/tls.md).
 - **Not yet available:** HTTP/3 and `103 Early Hints` — see the [Roadmap](https://github.com/oxphp/oxphp#roadmap).
-- **Platform.** Linux only, distributed as a Docker image; no apt or brew packages. PHP 8.4 and 8.5 are supported.
+- **Platform.** Linux only, distributed as a Docker image; no apt or brew packages. PHP 8.4, 8.5 and, from 0.16.0 on, 8.6 are supported.
 
 ## What's Next
 
