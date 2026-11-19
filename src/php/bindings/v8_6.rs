@@ -3,14 +3,11 @@
 //! Active when `cfg(php_v8_6)` is set by `build.rs`. Layout must match
 //! `main/SAPI.h` of PHP 8.6 exactly.
 //!
-//! Deltas vs PHP 8.5: none. `main/SAPI.h` carries no layout change between
-//! the 8.5 branch and 8.6 (verified against php-src 8.6.0-dev, 2026-08-04) —
-//! `sapi_module_struct` still ends at `pre_request_init` and
-//! `sapi_header_op_enum` still ends at `SAPI_HEADER_SET_STATUS = 5`.
-//!
-//! 8.6 has not been branched upstream yet, so this is a pre-release target:
-//! the struct can still gain members before the final release. Re-diff
-//! `main/SAPI.h` against this module when 8.6 branches and again at GA.
+//! Deltas vs PHP 8.5: none. Between the 8.5.12 and 8.6.0 releases'
+//! `main/SAPI.h`, `sapi_module_struct` still ends at `pre_request_init` and
+//! `sapi_header_op_enum` at `SAPI_HEADER_SET_STATUS = 5`; what 8.6 changed
+//! in that header (`sapi_globals_struct`, `int` → `zend_result` returns)
+//! touches nothing this module mirrors.
 
 #![allow(non_camel_case_types)]
 
