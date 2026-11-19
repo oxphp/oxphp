@@ -9,10 +9,10 @@ declare(strict_types=1);
 //
 // With ?throw=1 the trigger answers with the start of a body it never finishes, and
 // the write callback throws on it. ext/curl lets the transfer go on with the
-// exception pending (interface.c curl_write(), 8.4 and 8.5), and the engine runs
-// no PHP callback while it is: zend_call_function() returns at once. A progress
-// callback that runs once the kill has ended the wait is therefore one that found
-// the exception gone.
+// exception pending (interface.c curl_write(), 8.4 and 8.5; 8.6.0 ends it at once
+// with CURLE_WRITE_ERROR), and the engine runs no PHP callback while it is:
+// zend_call_function() returns at once. A progress callback that runs once the
+// kill has ended the wait is therefore one that found the exception gone.
 
 require_once __DIR__ . '/bailout_leak_probe.php';
 

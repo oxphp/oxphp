@@ -15,8 +15,12 @@ if ($req->method() === 'POST') {
     $t->assertSame('POST keeps the byte', $req->payload('x'), "a\0b");
     $t->assertSame('and the field after it', $req->payload('y'), '2');
 } else {
-    parse_str($req->body(), $parsed);
-    $t->assertSame('the result is what parse_str() gives', $req->payload(), $parsed);
+    // From PHP 8.6 parse_str() refuses a NUL byte with a ValueError before it
+    // reaches that parser, which payload() calls directly.
+    if (PHP_VERSION_ID < 80600) {
+        parse_str($req->body(), $parsed);
+        $t->assertSame('the result is what parse_str() gives', $req->payload(), $parsed);
+    }
     $t->assertSame('which stops at the byte', $req->payload(), ['x' => 'a']);
 }
 
