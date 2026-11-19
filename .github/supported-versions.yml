@@ -16,6 +16,13 @@ oxphp_versions:
 php_versions:
   - "8.4"
   - "8.5"
+  - "8.6"
+
+# The first oxphp release built on a PHP minor, for the minors that came
+# after the oldest entry of oxphp_versions. The weekly rebuild leaves an
+# older release off that minor: its extension does not compile there.
+php_min_oxphp:
+  "8.6": "0.16.0"
 
 # Alpine versions the Alpine image is published on, newest first. The
 # first entry receives the aliases that name no Alpine version (`latest`,

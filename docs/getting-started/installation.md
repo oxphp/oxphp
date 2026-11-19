@@ -5,7 +5,7 @@ description: Install OxPHP via Docker image or build from source. Covers prerequ
 
 # Installation
 
-OxPHP is distributed as a Docker image — the fastest and recommended way to start serving PHP applications. The image bundles the server binary, PHP 8.4 or 8.5 ZTS, the OxPHP extension, and all runtime dependencies on Alpine Linux. The default `:0.15.0` and `:latest` tags ship PHP 8.5; pull PHP 8.4 with the `:0.15.0-php8.4`, `:php8.4`, or any `*-php8.4*` tag variant. The latest release's tags that name no Alpine version (`:latest`, `:0.15.0`, `:php8.4`, `:0.15-php8.5`) are built on Alpine 3.24; each release is also published on Alpine 3.23 as `:0.15.0-php8.5-alpine3.23`, `:0.15.0-php8.4-alpine3.23` and the matching patch-pinned tags.
+OxPHP is distributed as a Docker image — the fastest and recommended way to start serving PHP applications. The image bundles the server binary, PHP 8.4, 8.5 or 8.6 ZTS, the OxPHP extension, and all runtime dependencies on Alpine Linux. The default `:0.15.0` and `:latest` tags ship PHP 8.5; pull PHP 8.4 with the `:0.15.0-php8.4`, `:php8.4`, or any `*-php8.4*` tag variant, and PHP 8.6 with `:php8.6` or any `*-php8.6*` tag variant. The latest release's tags that name no Alpine version (`:latest`, `:0.15.0`, `:php8.4`, `:0.15-php8.5`) are built on Alpine 3.24; each release is also published on Alpine 3.23 as `:0.15.0-php8.5-alpine3.23`, `:0.15.0-php8.4-alpine3.23` and the matching patch-pinned tags.
 
 ## Docker (Recommended)
 
@@ -18,7 +18,7 @@ docker pull ghcr.io/oxphp/oxphp:0.15.0
 The image includes:
 
 - **OxPHP server binary** — the async HTTP server
-- **PHP ZTS runtime** — 8.4 or 8.5, depending on the tag pulled; thread-safe PHP for multi-worker execution
+- **PHP ZTS runtime** — 8.4, 8.5 or 8.6, depending on the tag pulled; thread-safe PHP for multi-worker execution. The official PHP 8.6 images ship without `mbstring`; the `*-php8.6*` tags add it back, together with `zip`
 - **OxPHP PHP extension** (`oxphp_sapi.so`) — provides `oxphp_request_id()`, `oxphp_server_info()`, `oxphp_worker()`, and other built-in functions
 - **Bridge library** (`liboxphp_bridge.so`) — connects the Rust server to the PHP runtime
 - **Alpine Linux** base — minimal runtime footprint (releases are also published on Debian, see [Debian (glibc) Image](#debian-glibc-image))
@@ -31,7 +31,7 @@ The image includes:
 
 From 0.13.0 on, every release is also published as the same server built on Debian trixie instead of Alpine, for `linux/amd64` and `linux/arm64`. The tags are the release's Alpine tags with `-trixie` added at the end (in place of `-alpine<X.Y>` where a tag has it), and `:trixie` stands in for `:latest`: `ghcr.io/oxphp/oxphp:trixie` and `:0.15.0-trixie` (PHP 8.5), `:php8.4-trixie`, `:php8.5-trixie`, `:0.15-php8.5-trixie`, `:0.15.0-php8.5-trixie`, and `:0.15.0-php8.5.<patch>-trixie` pinned to a PHP patch release. They are signed with cosign like the Alpine tags, and the weekly job that rebuilds recent releases on the current PHP patch release rebuilds them too. Releases before 0.13.0 are Alpine only.
 
-The nightly pipeline publishes the Debian build as well: `:nightly-trixie` (PHP 8.4), `:php8.4-nightly-trixie` and `:php8.5-nightly-trixie`. Nightly tags are built from `main` on nights when it has moved since the last fully successful run, and carry no stability promise. A night on which the Debian build fails leaves `:nightly-trixie` and `:php<minor>-nightly-trixie` at the last build that succeeded, so they can trail `:nightly`.
+The nightly pipeline publishes the Debian build as well: `:nightly-trixie` (PHP 8.4), `:php8.4-nightly-trixie`, `:php8.5-nightly-trixie` and `:php8.6-nightly-trixie`. Nightly tags are built from `main` on nights when it has moved since the last fully successful run, and carry no stability promise. A night on which the Debian build fails leaves `:nightly-trixie` and `:php<minor>-nightly-trixie` at the last build that succeeded, so they can trail `:nightly`.
 
 The Debian image spends less CPU per request, for two reasons:
 
@@ -49,7 +49,7 @@ CPU time of the OxPHP container per response, Debian image against Alpine image:
 What changes for a Dockerfile built on it:
 
 - Packages come from `apt-get update && apt-get install -y --no-install-recommends`, not `apk`, and under Debian names: for example `libicu-dev` and `libpq-dev` to build `intl` and `pdo_pgsql`, `libicu76` and `libpq5` at runtime.
-- Build extensions in a `php:<minor>-zts-trixie` stage: a `.so` built against musl in a `-zts-alpine` stage is not compatible with this image, nor the reverse.
+- Build extensions in a `php:<minor>-zts-trixie` stage (`php:8.6-trixie` for 8.6): a `.so` built against musl in a `-zts-alpine` stage is not compatible with this image, nor the reverse.
 - `www-data` is UID/GID 33, not 82: `securityContext.runAsUser: 33`, and anything chowned by number has to use 33.
 - There is no `wget`; `curl` is there. A health check written for the Alpine image as `wget --spider http://localhost:9090/health` becomes `curl -fsS -o /dev/null http://localhost:9090/health`.
 - The image is larger: the PHP base is about 170–180 MiB compressed, against about 45–50 MiB for Alpine.
@@ -63,7 +63,7 @@ File layout of the runtime image:
 ├── bin/
 │   └── oxphp                                        # server binary
 ├── lib/
-│   ├── libphp.so                                    # PHP ZTS runtime (8.4 or 8.5, matches the image tag)
+│   ├── libphp.so                                    # PHP ZTS runtime (8.4, 8.5 or 8.6, matches the image tag)
 │   ├── liboxphp_bridge.so                           # C bridge library
 │   └── php/extensions/no-debug-zts-<ABI>/
 │       ├── oxphp_sapi.so                            # OxPHP PHP extension
@@ -105,7 +105,7 @@ The `oxphp` binary links to `libphp.so` and `liboxphp_bridge.so`. The PHP extens
 
 ### Minimal Dockerfile
 
-The base image `php:8.4-zts-alpine3.24` (or `php:8.5-zts-alpine3.24`) already contains `libphp.so` and all its dependencies. Match the PHP minor in your `FROM` to the OxPHP tag you copy from, and the C library too: artifacts from a `-trixie` tag go onto `php:<minor>-zts-trixie`, not onto an Alpine base, and artifacts from a tag of the latest release that names no Alpine version, such as `:0.15.0-php8.4`, go onto Alpine 3.24, the ones from an `-alpine3.23` tag onto `php:<minor>-zts-alpine3.23`. You only need to copy the three OxPHP artifacts:
+The base image `php:8.4-zts-alpine3.24` (or `php:8.5-zts-alpine3.24`) already contains `libphp.so` and all its dependencies. Match the PHP minor in your `FROM` to the OxPHP tag you copy from, and the C library too: artifacts from a `-trixie` tag go onto `php:<minor>-zts-trixie`, not onto an Alpine base, and artifacts from a tag of the latest release that names no Alpine version, such as `:0.15.0-php8.4`, go onto Alpine 3.24, the ones from an `-alpine3.23` tag onto `php:<minor>-zts-alpine3.23`. For PHP 8.6 drop `-zts` from these names: every official 8.6 image is ZTS (`php:8.6-alpine3.24`, `php:8.6-trixie`). You only need to copy the three OxPHP artifacts:
 
 ```dockerfile
 FROM php:8.4-zts-alpine3.24
@@ -196,7 +196,7 @@ Building OxPHP with full PHP support requires the bridge library and PHP extensi
 ### Prerequisites
 
 - Rust toolchain (1.91.1 or later)
-- PHP 8.4 or 8.5 with ZTS (Zend Thread Safety) enabled
+- PHP 8.4, 8.5 or 8.6 with ZTS (Zend Thread Safety) enabled
 - C compiler (gcc or clang)
 - `phpize` and PHP development headers
 
@@ -222,7 +222,7 @@ export LD_LIBRARY_PATH=/usr/local/lib
 ./target/release/oxphp
 ```
 
-> **Note:** When deploying to Alpine Linux, build inside the same `php:{8.4,8.5}-zts-alpine` image used for the PHP runtime — match the minor of the OxPHP image you ship. Mixing glibc and musl builds causes runtime errors. The official Docker image handles this correctly.
+> **Note:** When deploying to Alpine Linux, build inside the same `php:{8.4,8.5}-zts-alpine` or `php:8.6-alpine` image used for the PHP runtime — match the minor of the OxPHP image you ship. Mixing glibc and musl builds causes runtime errors. The official Docker image handles this correctly.
 
 ## Verifying Installation
 

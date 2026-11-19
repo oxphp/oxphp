@@ -24,6 +24,6 @@ docker build --target prod-cli -t myapp:prod-cli .
 
 ## Important: Alpine version must match
 
-The Alpine version in your Dockerfile **must match** the one baked into the OxPHP image you pull (`ghcr.io/oxphp/oxphp:<tag>` ships on a specific `php:<ver>-zts-alpine<X.Y>`). A mismatch changes the musl version behind the precompiled `libphp.so` and the Rust binary, and can cause musl TLS corruption or undefined-symbol errors at startup.
+The Alpine version in your Dockerfile **must match** the one baked into the OxPHP image you pull (`ghcr.io/oxphp/oxphp:<tag>` ships on a specific `php:<ver>-zts-alpine<X.Y>`, or `php:8.6-alpine<X.Y>` for PHP 8.6). A mismatch changes the musl version behind the precompiled `libphp.so` and the Rust binary, and can cause musl TLS corruption or undefined-symbol errors at startup.
 
 Check which Alpine the tag you depend on uses, then pin `ARG ALPINE_VERSION` accordingly.
