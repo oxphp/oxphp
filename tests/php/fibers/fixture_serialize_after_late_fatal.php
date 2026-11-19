@@ -62,6 +62,10 @@ if ($role === 'drain') {
 }
 
 ini_set('session.use_cookies', '0');
+// PHP 8.6 turns session.use_strict_mode on by default, and strict mode swaps an
+// id the store has never seen for a fresh one. The test picks the ids and reads
+// the session back by them, so they have to be kept.
+ini_set('session.use_strict_mode', '0');
 
 if ($role === 'session_close') {
     session_set_save_handler(new class implements SessionHandlerInterface {

@@ -56,6 +56,18 @@ final class LocaleRecordingSessionHandler implements SessionHandlerInterface
     {
         return 0;
     }
+
+    // PHP 8.6 warns once for each of these a handler class lacks, and a warning
+    // here ends the request, or its headers, before its session has started.
+    public function create_sid(): string
+    {
+        return bin2hex(random_bytes(16));
+    }
+
+    public function validateId(string $id): bool
+    {
+        return true;
+    }
 }
 
 // false: no shutdown function writes the session before the modules shut down.

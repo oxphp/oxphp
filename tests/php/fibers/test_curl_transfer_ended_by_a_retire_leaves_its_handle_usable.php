@@ -17,7 +17,9 @@ declare(strict_types=1);
 // callback throws on it, and the kill comes while the transfer waits for the rest
 // with that exception pending. The exception has to come back out of the wait with
 // the transfer: the request is ended only once libcurl returns, and until then the
-// transfer, or the callback a nested cURL call runs in, goes on running.
+// transfer, or the callback a nested cURL call runs in, goes on running. PHP 8.6's
+// ext/curl ends the transfer at the throw instead, so there the request ends on the
+// exception before the kill comes.
 
 require_once __DIR__ . '/../test_helper.php';
 require_once __DIR__ . '/bailout_leak_probe.php';

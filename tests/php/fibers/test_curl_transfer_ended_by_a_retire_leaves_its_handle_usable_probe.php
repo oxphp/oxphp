@@ -16,10 +16,15 @@ OxphpBailoutLeak::assertRetired($t, 'curl_retire');
 $state = OxphpBailoutLeak::state('curl_retire') ?? [];
 $after = $state['after_the_kill'] ?? null;
 $t->assertTrue('the killed request ran its shutdown function: ' . json_encode($state), is_array($after));
+// PHP 8.6's ext/curl ends the transfer when the write callback throws (interface.c
+// curl_write(), 8.6.0), so with ?throw=1 there is no wait left for the kill to end.
+[$endedBy, $errno] = PHP_VERSION_ID >= 80600 && isset($_GET['throw'])
+    ? ["the write callback's exception (CURLE_WRITE_ERROR)", CURLE_WRITE_ERROR]
+    : ['the kill (CURLE_BAD_FUNCTION_ARGUMENT)', CURLE_BAD_FUNCTION_ARGUMENT];
 $t->assertSame(
-    'curl_exec() came back out of libcurl, its transfer ended by the kill (CURLE_BAD_FUNCTION_ARGUMENT)',
+    "curl_exec() came back out of libcurl, its transfer ended by {$endedBy}",
     $after['errno'] ?? null,
-    CURLE_BAD_FUNCTION_ARGUMENT
+    $errno
 );
 $t->assertSame('and libcurl let go of the handle: a multi handle takes it', $after['added'] ?? null, CURLM_OK);
 $t->assertFalse('the code after curl_exec() did not run: the kill still ended the request', isset($state['returned']));

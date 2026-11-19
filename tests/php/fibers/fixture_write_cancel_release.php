@@ -290,6 +290,11 @@ if (!class_exists('OxphpWriteCancelDecorator', false)) {
             OxphpWriteCancelProbe::$fiberAtAfter = $current === null ? null : spl_object_id($current);
             OxphpWriteCancelProbe::$afterStage = 'fataling';
             (new \Fiber(static function (): void {
+                // Displaying the fatal is the write that ends it, ahead of the engine
+                // flagging every object as destructed. PHP 8.6.0 starts a Fiber at
+                // error_reporting 0 when the directive is unset (zend_fiber_execute()),
+                // which hides it: what the request held would then go without its destructor.
+                error_reporting(E_ALL);
                 engine_fatal('OxphpWriteCancelDecoratorAfterFiberFatal');
             }))->start();
             OxphpWriteCancelProbe::$afterStage = 'returned';

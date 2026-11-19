@@ -12,7 +12,8 @@ $t = new TestCase('curl_cancel_in_a_callback_ends_the_transfer', 'hooks');
 // sleep throws it, the callback lets it through, and libcurl, which goes on with the
 // transfer after the callback returns, is told its next wait failed, so the task
 // unwinds well before the three-second answer instead of waiting it out on the
-// thread. The handle is then usable, as after a cancellation libcurl itself waited in.
+// thread. PHP 8.6's ext/curl ends the transfer itself when a callback throws. The
+// handle is then usable, as after a cancellation libcurl itself waited in.
 $peer = net_peer_ip();
 $marker = sys_get_temp_dir() . '/oxphp_curlcbcancel_' . getmypid() . '_' . uniqid('', true);
 
@@ -79,7 +80,12 @@ $t->assertTrue(
     'curl_exec() ended in the cancellation, not with a result',
     is_array($seen) && array_key_exists('first', $seen) && $seen['first'] === null
 );
-$t->assertSame('libcurl was told its next wait failed (CURLE_BAD_FUNCTION_ARGUMENT)', $seen['errno'] ?? null, CURLE_BAD_FUNCTION_ARGUMENT);
+if (PHP_VERSION_ID >= 80600) {
+    // ext/curl/interface.c curl_xferinfo(), 8.6.0: a callback that threw reports an abort.
+    $t->assertSame('ext/curl ended the transfer on the exception (CURLE_ABORTED_BY_CALLBACK)', $seen['errno'] ?? null, CURLE_ABORTED_BY_CALLBACK);
+} else {
+    $t->assertSame('libcurl was told its next wait failed (CURLE_BAD_FUNCTION_ARGUMENT)', $seen['errno'] ?? null, CURLE_BAD_FUNCTION_ARGUMENT);
+}
 $t->assertSame('and the same handle ran the next transfer', $seen['again'] ?? null, 'curl-done:/0/again');
 if (file_exists($marker)) {
     unlink($marker);
