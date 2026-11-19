@@ -158,11 +158,11 @@ docker build --target dev -t myapp:dev .
 docker build --target prod -t myapp:prod .
 ```
 
-> **Note:** The `dev` target is based on `php:8.4-zts-alpine` (swap `8.4` for `8.5` to match an OxPHP `:*-php8.5*` tag; with a `-trixie` tag, base the stages on `php:<minor>-zts-trixie` and use `apt-get`, see [Debian (glibc) Image](installation.md#debian-glibc-image)) with OxPHP copied in, giving you full access to PHP CLI and Composer. The `prod` target is based on the OxPHP image directly, keeping the production image small.
+> **Note:** The `dev` target is based on `php:8.4-zts-alpine` (swap `8.4` for `8.5` to match an OxPHP `:*-php8.5*` tag; for a `:*-php8.6*` tag use `php:8.6-alpine`, since every official 8.6 image is ZTS and the tags dropped `-zts`; with a `-trixie` tag, base the stages on `php:<minor>-zts-trixie` (`php:8.6-trixie`) and use `apt-get`, see [Debian (glibc) Image](installation.md#debian-glibc-image)) with OxPHP copied in, giving you full access to PHP CLI and Composer. The `prod` target is based on the OxPHP image directly, keeping the production image small.
 
 ## Installing PHP Extensions in Production
 
-Starting with OxPHP 0.3.0, the production image ships the full PHP toolchain (`php`, `docker-php-ext-install`, `phpize`) inherited from `php:8.4-zts-alpine` (or `php:8.5-zts-alpine` for the `:*-php8.5*` variants, and `php:<minor>-zts-trixie` for the `-trixie` ones) and does **not** set a `USER` directive. Downstream Dockerfiles can install PHP extensions directly — no `USER` toggle required.
+Starting with OxPHP 0.3.0, the production image ships the full PHP toolchain (`php`, `docker-php-ext-install`, `phpize`) inherited from `php:8.4-zts-alpine` (or `php:8.5-zts-alpine` / `php:8.6-alpine` for the `:*-php8.5*` / `:*-php8.6*` variants, and `php:<minor>-zts-trixie` / `php:8.6-trixie` for the `-trixie` ones) and does **not** set a `USER` directive. Downstream Dockerfiles can install PHP extensions directly — no `USER` toggle required.
 
 ### Quick-start pattern (single stage)
 

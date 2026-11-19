@@ -152,6 +152,22 @@ FROM ${BASE_IMAGE}
 
 RUN apk add --no-cache libgcc ca-certificates
 
+# From PHP 8.6 the official images ship without mbstring, which every earlier
+# minor has built in and which frameworks require (Laravel's composer.json
+# does). zip comes with it, so Composer can unpack dist archives without the
+# unzip binary. Up to 8.5 the image stays as upstream ships it.
+RUN set -eux; \
+    if [ "$(php-config --vernum)" -ge 80600 ]; then \
+        apk add --no-cache --virtual .ext-build $PHPIZE_DEPS oniguruma-dev libzip-dev; \
+        docker-php-ext-install -j"$(nproc)" mbstring zip; \
+        runDeps="$(scanelf --needed --nobanner --format '%n#p' --recursive /usr/local/lib/php/extensions \
+            | tr ',' '\n' | sort -u \
+            | awk 'system("[ -e /usr/local/lib/" $1 " ]") == 0 { next } { print "so:" $1 }')"; \
+        apk add --no-cache --virtual .ext-run $runDeps; \
+        apk del .ext-build; \
+        php -m | grep -cxE 'mbstring|zip' | grep -qx 2; \
+    fi
+
 # Copy bridge library from bridge-builder
 COPY --from=bridge-builder /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
 

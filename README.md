@@ -25,7 +25,7 @@
 
 <p align="center">
   <img alt="Rust" src="https://img.shields.io/badge/rust-powered-orange">
-  <img alt="PHP" src="https://img.shields.io/badge/php-8.4%20%7C%208.5-blue">
+  <img alt="PHP" src="https://img.shields.io/badge/php-8.4%20%7C%208.5%20%7C%208.6-blue">
   <img alt="License" src="https://img.shields.io/github/license/oxphp/oxphp">
   <img alt="Release" src="https://img.shields.io/github/v/release/oxphp/oxphp">
   <img alt="Stars" src="https://img.shields.io/github/stars/oxphp/oxphp?style=flat">

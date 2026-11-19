@@ -145,6 +145,25 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
+# mbstring and zip from PHP 8.6, for the reason given in the Alpine release
+# Dockerfile. The -dev packages go again; the libraries the two extensions
+# link stay, marked manual so the purge keeps them.
+RUN set -eux; \
+    if [ "$(php-config --vernum)" -ge 80600 ]; then \
+        savedAptMark="$(apt-mark showmanual)"; \
+        apt-get update; \
+        apt-get install -y --no-install-recommends libonig-dev libzip-dev; \
+        docker-php-ext-install -j"$(nproc)" mbstring zip; \
+        apt-mark auto '.*' > /dev/null; \
+        apt-mark manual $savedAptMark > /dev/null; \
+        find /usr/local/lib/php/extensions -type f -name '*.so' -exec ldd '{}' ';' \
+            | awk '/=>/ { so = $(NF-1); if (index(so, "/usr/local/") == 1) { next }; gsub("^/(usr/)?", "", so); print so }' \
+            | sort -u | xargs -r dpkg-query --search | cut -d: -f1 | sort -u | xargs -r apt-mark manual; \
+        apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false; \
+        rm -rf /var/lib/apt/lists/*; \
+        php -m | grep -cxE 'mbstring|zip' | grep -qx 2; \
+    fi
+
 COPY --from=bridge-builder /usr/local/lib/liboxphp_bridge.so /usr/local/lib/
 
 # Merges into the extensions directory provided by the PHP base image.

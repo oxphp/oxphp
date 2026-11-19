@@ -57,7 +57,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        php: ["8.4", "8.5"]
+        php: ["8.4", "8.5", "8.6"]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
@@ -76,6 +76,12 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Resolve the PHP base image
+        id: base
+        env:
+          PHP_MINOR: ${{ matrix.php }}
+        run: echo "image=$(scripts/php-base-image.sh "$PHP_MINOR" alpine3.24)" >> "$GITHUB_OUTPUT"
+
       - name: Build dev image
         uses: docker/build-push-action@v7
         with:
@@ -86,6 +92,7 @@ jobs:
           provenance: false
           build-args: |
             PHP_VERSION=${{ matrix.php }}
+            BASE_IMAGE=${{ steps.base.outputs.image }}
           tags: oxphp-e2e:php${{ matrix.php }}
           cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.CACHE_IMAGE }}:php${{ matrix.php }}-e2e-dev-amd64
           cache-to: type=registry,ref=${{ env.REGISTRY }}/${{ env.CACHE_IMAGE }}:php${{ matrix.php }}-e2e-dev-amd64,mode=max,image-manifest=true,oci-mediatypes=true
@@ -100,7 +107,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        php: ["8.4", "8.5"]
+        php: ["8.4", "8.5", "8.6"]
     runs-on: ubuntu-24.04
     timeout-minutes: 180
     env:
@@ -112,6 +119,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # The compose profiles take BASE_IMAGE from the environment as well: the
+      # dev Dockerfile's default cannot name an image without the -zts infix.
+      - name: Resolve the PHP base image
+        run: echo "BASE_IMAGE=$(scripts/php-base-image.sh "$PHP_VERSION" alpine3.24)" >> "$GITHUB_ENV"
+
       # hooksdb is layered on this image rather than built from the Dockerfile
       # itself, so it is built on the same version as the profiles.
       #
@@ -121,7 +133,7 @@ jobs:
       # store, and the profiles that share this image's Dockerfile
       # and arguments then build from the same layer cache.
       - name: Build dev image
-        run: docker build --build-arg PHP_VERSION="$PHP_VERSION" -f docker/dev/Dockerfile -t "$OXPHP_BASE_IMAGE" .
+        run: docker build --build-arg PHP_VERSION="$PHP_VERSION" --build-arg BASE_IMAGE="$BASE_IMAGE" -f docker/dev/Dockerfile -t "$OXPHP_BASE_IMAGE" .
 
       # Unfiltered on purpose: the standalone admission and fiber checks only
       # run when neither --suite nor --test is given.

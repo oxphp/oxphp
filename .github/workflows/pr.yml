@@ -58,6 +58,9 @@ jobs:
           - name: default-php8.5
             flags: "--all-targets"
             php_id: "80500"
+          - name: default-php8.6
+            flags: "--all-targets"
+            php_id: "80600"
     steps:
       - uses: actions/checkout@v5
       - name: Rust version
@@ -146,8 +149,8 @@ jobs:
   # base image of the oldest Alpine the release image is built on, so
   # libphp.so is already there; the script installs Rust from that Alpine
   # (the compiler rust-toolchain.toml pins) and builds the bridge. PHP 8.4
-  # only: the clippy matrix type-checks the 8.5 bindings, and no test is
-  # version-gated.
+  # only: the clippy matrix type-checks the 8.5 and 8.6 bindings, and no
+  # test is version-gated.
   test-php:
     name: Test (php feature)
     runs-on: ubuntu-24.04

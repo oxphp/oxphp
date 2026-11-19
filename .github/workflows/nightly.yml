@@ -51,7 +51,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        php: ["8.4", "8.5"]
+        php: ["8.4", "8.5", "8.6"]
         arch: [amd64, arm64]
         variant: [alpine, trixie]
         include:
@@ -107,7 +107,7 @@ jobs:
           BASE_TAG: ${{ matrix.base }}
           ARCH: ${{ matrix.arch }}
         run: |
-          BASE="php:${PHP_MINOR}-zts-${BASE_TAG}"
+          BASE=$(scripts/php-base-image.sh "$PHP_MINOR" "$BASE_TAG")
           docker pull --platform "linux/${ARCH}" "$BASE"
           PATCH=$(docker run --rm --platform "linux/${ARCH}" "$BASE" php -r 'echo PHP_VERSION;')
           if [[ ! "$PATCH" =~ ^${PHP_MINOR}\.[0-9]+$ ]]; then
@@ -115,6 +115,7 @@ jobs:
             exit 1
           fi
           echo "patch=$PATCH" >> "$GITHUB_OUTPUT"
+          echo "base=$BASE" >> "$GITHUB_OUTPUT"
 
       # Commit time, not build time: a rerun of the same SHA gets the same
       # version and reuses the compiled layer. One numeric identifier —
@@ -139,7 +140,7 @@ jobs:
           # smoke test expects the version the build is based on.
           build-args: |
             PHP_VERSION=${{ matrix.php }}
-            BASE_IMAGE=php:${{ matrix.php }}-zts-${{ matrix.base }}
+            BASE_IMAGE=${{ steps.php_patch.outputs.base }}
             OXPHP_VERSION=${{ steps.version.outputs.version }}
           tags: oxphp:ci
           cache-from: type=registry,ref=${{ env.REGISTRY }}/${{ env.CACHE_IMAGE }}:php${{ matrix.php }}-nightly${{ matrix.suffix }}-${{ matrix.arch }}
@@ -190,7 +191,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        php: ["8.4", "8.5"]
+        php: ["8.4", "8.5", "8.6"]
         variant: [alpine, trixie]
         include:
           - { variant: alpine, suffix: "" }

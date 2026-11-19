@@ -43,7 +43,7 @@ jobs:
           DISTROS="$(yq '.alpine_versions[] | "alpine" + .' .github/supported-versions.yml) $(yq '.debian_versions[]' .github/supported-versions.yml)"
           for PHP in $(yq '.php_versions[]' .github/supported-versions.yml); do
             for DISTRO in $DISTROS; do
-              BASE="php:${PHP}-zts-${DISTRO}"
+              BASE=$(scripts/php-base-image.sh "$PHP" "$DISTRO")
               if ! docker manifest inspect "$BASE" >/dev/null 2>&1; then
                 echo "error: upstream base image not found: $BASE" >&2
                 FAIL=1
@@ -82,9 +82,17 @@ jobs:
               echo "v${OXPHP} has no docker/release/debian/Dockerfile; Alpine only"
             fi
             for PHP in $(yq '.php_versions[]' .github/supported-versions.yml); do
+              SINCE=$(yq ".php_min_oxphp[\"$PHP\"] // \"\"" .github/supported-versions.yml)
+              if [[ -n "$SINCE" && "$(printf '%s\n%s\n' "$SINCE" "$OXPHP" | sort -V | head -n1)" != "$SINCE" ]]; then
+                echo "v${OXPHP} predates PHP ${PHP} (first built by ${SINCE}); skipped"
+                continue
+              fi
               for ENTRY in $DISTROS; do
                 DISTRO="${ENTRY%%:*}"
                 DOCKERFILE="${ENTRY#*:}"
+                # Resolved here, on the default branch: the build job checks
+                # out the release tag, which may predate the helper.
+                BASE=$(scripts/php-base-image.sh "$PHP" "$DISTRO")
                 if [[ $FIRST_M -eq 0 ]]; then MERGE_JSON+=","; fi
                 FIRST_M=0
                 MERGE_JSON+="{\"oxphp\":\"$OXPHP\",\"php\":\"$PHP\",\"distro\":\"$DISTRO\"}"
@@ -100,7 +108,7 @@ jobs:
                   if [[ "$ARCH" == "arm64" ]]; then RUNNER="ubuntu-24.04-arm"; fi
                   if [[ $FIRST_B -eq 0 ]]; then BUILD_JSON+=","; fi
                   FIRST_B=0
-                  BUILD_JSON+="{\"oxphp\":\"$OXPHP\",\"php\":\"$PHP\",\"distro\":\"$DISTRO\",\"dockerfile\":\"$DOCKERFILE\",\"arch\":\"$ARCH\",\"runner\":\"$RUNNER\"}"
+                  BUILD_JSON+="{\"oxphp\":\"$OXPHP\",\"php\":\"$PHP\",\"distro\":\"$DISTRO\",\"base\":\"$BASE\",\"dockerfile\":\"$DOCKERFILE\",\"arch\":\"$ARCH\",\"runner\":\"$RUNNER\"}"
                 done
               done
             done
@@ -146,10 +154,8 @@ jobs:
       - name: Resolve upstream base image digest
         id: base_digest
         env:
-          PHP_MINOR: ${{ matrix.php }}
-          DISTRO: ${{ matrix.distro }}
+          BASE: ${{ matrix.base }}
         run: |
-          BASE="php:${PHP_MINOR}-zts-${DISTRO}"
           # Parse default human-readable output — the `{{.Manifest.Digest}}`
           # template is silently ignored in newer docker buildx builds and
           # would cause multi-line $GITHUB_OUTPUT content that GitHub rejects.
@@ -195,10 +201,9 @@ jobs:
         id: php_patch
         env:
           PHP_MINOR: ${{ matrix.php }}
-          DISTRO: ${{ matrix.distro }}
+          BASE: ${{ matrix.base }}
           ARCH: ${{ matrix.arch }}
         run: |
-          BASE="php:${PHP_MINOR}-zts-${DISTRO}"
           docker pull --platform "linux/${ARCH}" "$BASE"
           PATCH=$(docker run --rm --platform "linux/${ARCH}" "$BASE" php -r 'echo PHP_VERSION;')
           if [[ ! "$PATCH" =~ ^${PHP_MINOR}\.[0-9]+$ ]]; then
@@ -211,7 +216,7 @@ jobs:
         if: steps.decide.outputs.skip != 'true'
         env:
           PHP_MINOR: ${{ matrix.php }}
-          DISTRO: ${{ matrix.distro }}
+          BASE: ${{ matrix.base }}
           DOCKERFILE: ${{ matrix.dockerfile }}
           ARCH: ${{ matrix.arch }}
           OXPHP_VER: ${{ matrix.oxphp }}
@@ -221,7 +226,7 @@ jobs:
             --platform "linux/${ARCH}" \
             --file "$DOCKERFILE" \
             --build-arg "PHP_VERSION=${PHP_MINOR}" \
-            --build-arg "BASE_IMAGE=php:${PHP_MINOR}-zts-${DISTRO}" \
+            --build-arg "BASE_IMAGE=${BASE}" \
             --build-arg "OXPHP_VERSION=${OXPHP_VER}" \
             --cache-from "type=gha,scope=weekly-${ARCH}-${PHP_MINOR}-${BASE_DIGEST}" \
             --cache-to "type=gha,scope=weekly-${ARCH}-${PHP_MINOR}-${BASE_DIGEST},mode=max" \

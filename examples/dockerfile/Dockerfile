@@ -26,6 +26,8 @@
 ARG OXPHP_VERSION=0.15.0
 ARG PHP_VERSION=8.4
 ARG ALPINE_VERSION=3.23
+# PHP 8.6: every official 8.6 image is ZTS and its tag has no -zts, so the
+# php-base FROM below becomes php:${PHP_VERSION}-alpine${ALPINE_VERSION}.
 
 # ══════════════════════════════════════════════════════════════
 # Stage: php-base — shared PHP extensions (pdo, intl)

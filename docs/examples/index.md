@@ -46,7 +46,7 @@ OxPHP ships a ready PHP runtime as `ghcr.io/oxphp/oxphp` (PHP 8.5 by default; a 
 
 2. **Extend the OxPHP runtime directly** (used by WordPress). A builder stage compiles the extensions against a matching `php:*-zts-alpine` and drops the `.so` files into the OxPHP image.
 
-Either way, **the PHP ABI must match**. The OxPHP image's `libphp.so` and `oxphp_sapi.so` are compiled for one PHP version (e.g. 8.4 → `no-debug-zts-20240924`); the `php-base`/builder stage must use the same `php:<X.Y>-zts-alpine<Z>` so the extensions you compile are ABI-compatible. Mixing versions makes `oxphp_sapi.so` refuse to load or corrupts musl TLS at startup.
+Either way, **the PHP ABI must match**. The OxPHP image's `libphp.so` and `oxphp_sapi.so` are compiled for one PHP version (e.g. 8.4 → `no-debug-zts-20240924`); the `php-base`/builder stage must use the same `php:<X.Y>-zts-alpine<Z>` (`php:8.6-alpine<Z>` for 8.6, whose official images are all ZTS and drop `-zts`) so the extensions you compile are ABI-compatible. Mixing versions makes `oxphp_sapi.so` refuse to load or corrupts musl TLS at startup.
 
 See the [Docker Guide](../getting-started/docker.md) for the canonical multi-stage template, and [`examples/dockerfile/`](../../examples/dockerfile/) in the repository for a ready-to-copy version.
 
