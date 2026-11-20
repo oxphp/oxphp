@@ -78,6 +78,7 @@
 ## Operations
 
 - [Configuration Reference](docs/operations/configuration.md): Complete environment variable reference for OxPHP. Every setting, its default, and what it controls — all in one place.
+- [Diagnosing Overload](docs/operations/overload.md): How to read the queue and admission gauges together, and what OxPHP logs while it sheds requests under overload or the worker pool stops taking work.
 - [Graceful Shutdown](docs/operations/graceful-shutdown.md): How OxPHP handles SIGTERM and SIGINT signals to drain connections and shut down cleanly, with Kubernetes and Docker configuration examples.
 - [Health Checks](docs/operations/health-checks.md): Internal server endpoints for health monitoring, Kubernetes probes, Prometheus metrics, and runtime configuration inspection.
 - [Prometheus Metrics](docs/operations/metrics.md): Reference for all Prometheus-compatible metrics exposed by OxPHP at the /metrics endpoint, including request, connection, worker, and compression metrics.
