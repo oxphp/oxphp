@@ -695,7 +695,7 @@ impl SharedInner for MapInner {
     }
 
     fn mem_bytes(&self) -> usize {
-        // Approximate per spec §mem_bytes — documented to drift ±30%
+        // Approximate: `oxphp_shared_bytes` is documented to drift ±30%
         // vs mallinfo. Per-entry ~64B + key & value sizes. +128B base
         // accounts for DashMap shard-array overhead.
         let count = self.count();

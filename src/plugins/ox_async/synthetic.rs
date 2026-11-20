@@ -6,7 +6,7 @@
 //! Design summary (integration chosen to keep sapi.rs changes minimal):
 //!
 //! - Public API speaks `PromisePayload` (`Value(Vec<u8>)` /
-//!   `Exception(String, String)` / `Cancelled`), matching the spec.
+//!   `Exception(String, String)` / `Cancelled`).
 //! - Internally, `alloc_and_register()` creates a
 //!   `tokio::sync::oneshot::channel::<AsyncResult>()` — the SAME
 //!   receiver type the existing `PROMISE_MAP` stores — and parks the

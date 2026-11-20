@@ -285,10 +285,8 @@ fn entry_to_json(e: &Arc<Entry>) -> Value {
                 let idle = pool.idle_count() as u64;
                 let in_use = size.saturating_sub(idle);
                 // Per-thread idle snapshot keyed by the raw pthread
-                // id as a stringified u64 — matches the spec's
-                // `{"t0": N, "t1": M}` shape (thread labels are
-                // opaque to the consumer; only the distribution is
-                // meaningful).
+                // id as a stringified u64. The keys are opaque to the
+                // consumer; only the distribution is meaningful.
                 let mut idle_by_thread = serde_json::Map::new();
                 for (k, n) in pool.idle_by_thread() {
                     idle_by_thread.insert(k.to_string(), json!(n as u64));

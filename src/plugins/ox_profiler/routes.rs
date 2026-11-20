@@ -1,4 +1,4 @@
-//! Internal HTTP routes for the profiler plugin. See spec §8.
+//! Internal HTTP routes for the profiler plugin, under `/__profiler/`.
 
 use std::sync::Arc;
 

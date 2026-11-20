@@ -829,8 +829,9 @@ impl ChannelInner {
         was_open
     }
 
-    /// Thread-blocking send. Used by the "not inside a fiber" path per
-    /// 24-type-channel.md §Fiber integration. Tries a non-blocking send
+    /// Thread-blocking send: waits on the caller's thread, never suspending a
+    /// fiber. Used where the caller cannot suspend one, and by `send_many`
+    /// in every case. Tries a non-blocking send
     /// first; on `Full` enters a bounded-poll wait loop so `close()`
     /// can wake us promptly.
     ///
@@ -1044,8 +1045,8 @@ impl ChannelInner {
 
     /// Send many payloads; returns the count actually sent. Stops on
     /// the first `send_blocking` failure (Closed or Timeout) WITHOUT
-    /// raising — matches the spec's "returns how many were actually
-    /// sent before full/closed/timeout" semantics.
+    /// raising: the caller is told how many were sent before the channel
+    /// was full, closed or timed out.
     ///
     /// `wait` controls blocking behaviour per-item:
     /// - `Wait::Forever` — block indefinitely per-item.
