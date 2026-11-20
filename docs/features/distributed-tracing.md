@@ -280,6 +280,8 @@ The `#[Trace]` attribute targets both functions and methods. No registration cal
 
 If the decorated function throws an exception, the span's status is set to error and an `exception` event is recorded with the full OpenTelemetry semantic-convention data: `exception.type` (the class), `exception.message` (the message), and `exception.stacktrace` (the call stack from `getTraceAsString()`). The message is truncated to `OTEL_APM_MESSAGE_MAX_BYTES` bytes (default 4096) and the stacktrace to `OTEL_APM_STACKTRACE_MAX_BYTES` bytes (default 8192); `0` disables either cap. Argument capture inside frames follows PHP's own `zend.exception_ignore_args` setting.
 
+A call ended by `exit()` or `die()`, or by the destruction of a `Fiber` suspended inside it, is not an error: the span closes without an error status or an `exception` event. A call ended by running past `memory_limit`, or ended in one of those ways after the request has run past it, closes its span with an error status and without an `exception` event, as there is no exception to describe.
+
 ## APM: PHP Tracing SDK
 
 The APM plugin registers 10 `oxphp_apm_*()` functions for manual span management. They are all registered whether or not APM is enabled, so your code works without modification in any environment. With APM disabled the span functions become no-ops returning sentinel values (`0` for IDs, `""` for strings); the one exception is `oxphp_apm_trace()`, which still runs the callback it was given and still returns its value — a tracing helper that swallowed business logic when tracing happens to be off would be worse than no helper at all.
