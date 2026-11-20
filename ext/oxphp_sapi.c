@@ -5939,6 +5939,180 @@ static void oxphp_filter_guard_restore(void)
     oxphp_orig_filter_input_array = NULL;
 }
 
+#if PHP_VERSION_ID >= 80600
+/* ─── A FILTER_CALLBACK resolved through self, static or parent ───
+ * On 8.6.0 php_filter_callback() resolves its callback with the deprecation
+ * suppressed and calls what it resolved (ext/filter/callback_filter.c:22,29), so
+ * the observer that refuses such a callable on a thread lacking the calling
+ * class never sees it. These wrappers refuse it before the original runs. They
+ * check every callback the arguments name, whether or not the input a filter
+ * would run on is there; one a filter can rewrite before PHP calls it is refused
+ * on that thread whatever it holds now. */
+
+/* filter_private.h is not installed. */
+#define OXPHP_FILTER_CALLBACK 0x0400
+
+/* Whether a filter id selects FILTER_CALLBACK. One that is not an int is not
+ * converted, which for an object can raise a warning into a user error handler;
+ * it is taken to select it. */
+static bool oxphp_filter_id_is_callback(const zval *id)
+{
+    return Z_TYPE_P(id) != IS_LONG || Z_LVAL_P(id) == OXPHP_FILTER_CALLBACK;
+}
+
+/* The callback of a filter spec, NULL for none, read as php_filter_call() reads
+ * it (8.6.0 ext/filter/filter.c:527-540): a "filter" entry overrides the id given
+ * outside the spec.
+ * Code a filter runs (a callback, __toString() of a value, an error handler) can
+ * write through a reference to what PHP has yet to read: php_filter_array_handler()
+ * reads an entry's id when it reaches the entry, and php_filter_callback() resolves
+ * the callback again for every value. So an id held through a reference is taken
+ * to select FILTER_CALLBACK, and `may_change` is set when the callback or a part of
+ * it is held through one; what it holds then does not matter, so it is not
+ * dereferenced. */
+static zval *oxphp_filter_spec_callback(HashTable *spec, bool callback, bool *may_change)
+{
+    zval *id = zend_hash_str_find(spec, "filter", sizeof("filter") - 1);
+    if (id) {
+        callback = Z_ISREF_P(id) || oxphp_filter_id_is_callback(id);
+    }
+    zval *options = callback ? zend_hash_str_find(spec, "options", sizeof("options") - 1) : NULL;
+    if (!options) {
+        return NULL;
+    }
+    *may_change = Z_ISREF_P(options);
+    if (Z_TYPE_P(options) == IS_ARRAY) {
+        zval *part;
+        ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(options), part) {
+            *may_change = *may_change || Z_ISREF_P(part);
+        } ZEND_HASH_FOREACH_END();
+    }
+    return options;
+}
+
+/* filter_var() and filter_input(): the filter id at `filter_arg`, the spec after it. */
+static bool oxphp_filter_args_refuse(zend_execute_data *execute_data, uint32_t filter_arg)
+{
+    if (ZEND_NUM_ARGS() <= filter_arg) {
+        return false;
+    }
+    zval *spec = ZEND_CALL_ARG(execute_data, filter_arg + 1);
+    ZVAL_DEREF(spec);
+    if (Z_TYPE_P(spec) != IS_ARRAY) {
+        return false;
+    }
+    zval *id = ZEND_CALL_ARG(execute_data, filter_arg);
+    ZVAL_DEREF(id);
+    bool may_change = false;
+    zval *callback = oxphp_filter_spec_callback(Z_ARRVAL_P(spec), oxphp_filter_id_is_callback(id),
+                                                &may_change);
+    return callback && oxphp_scope_callable_refuse(callback, may_change);
+}
+
+/* filter_var_array() and filter_input_array(): a definition array is the second
+ * argument. php_filter_array_handler() takes an entry that is not an array, a
+ * reference included, as a filter id with no options, so neither is dereferenced. */
+static bool oxphp_filter_definition_refuse(zend_execute_data *execute_data)
+{
+    if (ZEND_NUM_ARGS() < 2) {
+        return false;
+    }
+    zval *definition = ZEND_CALL_ARG(execute_data, 2);
+    ZVAL_DEREF(definition);
+    if (Z_TYPE_P(definition) != IS_ARRAY) {
+        return false;
+    }
+    zval *spec;
+    ZEND_HASH_FOREACH_VAL(Z_ARRVAL_P(definition), spec) {
+        bool may_change = false;
+        zval *callback = Z_TYPE_P(spec) == IS_ARRAY
+            ? oxphp_filter_spec_callback(Z_ARRVAL_P(spec), false, &may_change)
+            : NULL;
+        if (callback && oxphp_scope_callable_refuse(callback, may_change)) {
+            return true;
+        }
+    } ZEND_HASH_FOREACH_END();
+    return false;
+}
+
+enum {
+    OXPHP_FILTER_CHECK_var,
+    OXPHP_FILTER_CHECK_input,
+    OXPHP_FILTER_CHECK_var_array,
+    OXPHP_FILTER_CHECK_input_array,
+    OXPHP_FILTER_CHECK_COUNT
+};
+
+static struct {
+    const char *name;
+    size_t name_len;
+    zif_handler orig;
+} oxphp_filter_checks[OXPHP_FILTER_CHECK_COUNT] = {
+    [OXPHP_FILTER_CHECK_var] = {"filter_var", sizeof("filter_var") - 1, NULL},
+    [OXPHP_FILTER_CHECK_input] = {"filter_input", sizeof("filter_input") - 1, NULL},
+    [OXPHP_FILTER_CHECK_var_array] = {"filter_var_array", sizeof("filter_var_array") - 1, NULL},
+    [OXPHP_FILTER_CHECK_input_array] = {"filter_input_array", sizeof("filter_input_array") - 1, NULL},
+};
+
+static ZEND_NAMED_FUNCTION(oxphp_checked_filter_var)
+{
+    if (oxphp_filter_args_refuse(execute_data, 2)) {
+        RETURN_THROWS();
+    }
+    oxphp_filter_checks[OXPHP_FILTER_CHECK_var].orig(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+}
+
+static ZEND_NAMED_FUNCTION(oxphp_checked_filter_input)
+{
+    if (oxphp_filter_args_refuse(execute_data, 3)) {
+        RETURN_THROWS();
+    }
+    oxphp_filter_checks[OXPHP_FILTER_CHECK_input].orig(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+}
+
+static ZEND_NAMED_FUNCTION(oxphp_checked_filter_var_array)
+{
+    if (oxphp_filter_definition_refuse(execute_data)) {
+        RETURN_THROWS();
+    }
+    oxphp_filter_checks[OXPHP_FILTER_CHECK_var_array].orig(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+}
+
+/* Over the guard above: a refused call never enters it. */
+static ZEND_NAMED_FUNCTION(oxphp_checked_filter_input_array)
+{
+    if (oxphp_filter_definition_refuse(execute_data)) {
+        RETURN_THROWS();
+    }
+    oxphp_filter_checks[OXPHP_FILTER_CHECK_input_array].orig(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+}
+
+static const zif_handler oxphp_filter_check_handlers[OXPHP_FILTER_CHECK_COUNT] = {
+    [OXPHP_FILTER_CHECK_var] = oxphp_checked_filter_var,
+    [OXPHP_FILTER_CHECK_input] = oxphp_checked_filter_input,
+    [OXPHP_FILTER_CHECK_var_array] = oxphp_checked_filter_var_array,
+    [OXPHP_FILTER_CHECK_input_array] = oxphp_checked_filter_input_array,
+};
+
+/* After oxphp_filter_guard_install(), on the startup thread like it. */
+static void oxphp_filter_checks_install(void)
+{
+    for (size_t i = 0; i < OXPHP_FILTER_CHECK_COUNT; i++) {
+        oxphp_hook_swap(oxphp_filter_checks[i].name, oxphp_filter_checks[i].name_len,
+                        oxphp_filter_check_handlers[i], &oxphp_filter_checks[i].orig);
+    }
+}
+
+static void oxphp_filter_checks_restore(void)
+{
+    for (size_t i = 0; i < OXPHP_FILTER_CHECK_COUNT; i++) {
+        oxphp_hook_restore(oxphp_filter_checks[i].name, oxphp_filter_checks[i].name_len,
+                           oxphp_filter_checks[i].orig);
+        oxphp_filter_checks[i].orig = NULL;
+    }
+}
+#endif
+
 /* ─── request_parse_body() ───────────────────────────────
  *
  * A worker POST body is normally parsed before the script runs, so the script's
@@ -11675,6 +11849,9 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
     /* Last: all extensions (standard included) have registered their
      * functions by now; worker threads have not started yet. */
     oxphp_filter_guard_install();
+#if PHP_VERSION_ID >= 80600
+    oxphp_filter_checks_install();
+#endif
     oxphp_request_parse_body_guard_install();
     oxphp_array_multisort_guard_install();
     oxphp_session_gate_install();
@@ -11719,6 +11896,9 @@ PHP_MSHUTDOWN_FUNCTION(oxphp_sapi)
 #endif
     oxphp_array_multisort_guard_restore();
     oxphp_request_parse_body_guard_restore();
+#if PHP_VERSION_ID >= 80600
+    oxphp_filter_checks_restore();
+#endif
     oxphp_filter_guard_restore();
     oxphp_shareable_unregister_ce();
     return SUCCESS;

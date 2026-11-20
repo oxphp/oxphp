@@ -13,7 +13,7 @@ header('Content-Type: application/json');
 $out = ['helper_here' => function_exists('worker_run_time_callable_helper')];
 try {
     $pool = \OxPHP\Shared\Registry::pool(
-        'worker-run-time-callable-pool',
+        (string) ($_GET['pool'] ?? 'worker-run-time-callable-pool'),
         static fn () => throw new \LogicException('the test did not register the pool'),
     );
     $handle = $pool->acquire();

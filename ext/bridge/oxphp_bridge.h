@@ -1954,6 +1954,14 @@ int oxphp_reconstruct_async_closure(
  * releases the string. */
 zend_string *oxphp_bridge_function_missing_here(const zend_op_array *op);
 
+/* For a callable PHP resolves through self, static or parent, which it deprecates,
+ * or for any callable when `may_change` says PHP code can rewrite it into one before
+ * it is resolved: throws the Error that oxphp_scope_callable_check_register()'s
+ * observer throws when this thread lacks code of the calling class, and returns
+ * true. Does not raise the interrupt: for a caller that refuses before it calls
+ * anything. */
+bool oxphp_scope_callable_refuse(const zval *callable, bool may_change);
+
 /* ─── Custom Object for Plugin Classes ──────────────────────── */
 
 /**

@@ -11,7 +11,8 @@ function asyncdecl_run_time_helper(int $base = 0): int
 
 // A callable naming its class as self, static or parent, built while the code
 // runs, cannot be found by reading the callback before it is called. It is
-// checked when PHP resolves it: on a thread that lacks that class, the class is
+// checked when PHP resolves it, or, for a FILTER_CALLBACK on PHP 8.6, when the
+// filter_*() function is called: on a thread that lacks that class, the class is
 // checked whole and the call throws an Error naming what is missing. A
 // call_user_func() compiled to an opcode throws a TypeError on top of that Error,
 // as it does for a handler that throws.
@@ -104,8 +105,9 @@ class AsyncDeclRunTimeMaker
         }
     }
 
-    // filter_var() checks the callable with deprecations suppressed, so PHP resolves
-    // it for the check that counts when it calls it by name.
+    // filter_var() checks the callable with deprecations suppressed. On 8.4 and 8.5
+    // PHP resolves it again as filter_var() calls it, and refuses it there; on 8.6
+    // filter_var() calls what it resolved, and is refused before it runs.
     public static function throughFilterVar(): object
     {
         \set_error_handler(static fn (): bool => true, E_DEPRECATED);
@@ -447,8 +449,8 @@ final class AsyncDeclRunTimeNamedChild extends AsyncDeclPreScopeMiddle
         }
     }
 
-    // filter_var() calls the callable by name, and PHP reports this form as valid,
-    // so its frame is pushed with the Error pending.
+    // On 8.4 and 8.5 filter_var() calls the callable by name, and PHP reports this
+    // form as valid, so its frame is pushed with the Error pending.
     public static function throughFilterVar(): object
     {
         \set_error_handler(static fn (): bool => true, E_DEPRECATED);
@@ -462,8 +464,8 @@ final class AsyncDeclRunTimeNamedChild extends AsyncDeclPreScopeMiddle
         }
     }
 
-    // The method's first opcode builds a string: unwinding from that opcode, not
-    // before it, would release one not written yet.
+    // The method's first opcode builds a string: on 8.4 and 8.5, unwinding from
+    // that opcode, not before it, would release one not written yet.
     public static function quotedThroughFilterVar(): object
     {
         \set_error_handler(static fn (): bool => true, E_DEPRECATED);
@@ -507,7 +509,8 @@ final class AsyncDeclRunTimeNamedChild extends AsyncDeclPreScopeMiddle
         return $made;
     }
 
-    // The frame pushed with the Error pending unwinds before its first statement.
+    // On 8.4 and 8.5 the frame pushed with the Error pending unwinds before its
+    // first statement; on 8.6 no frame is pushed.
     public static function startedThroughFilterVar(): object
     {
         \set_error_handler(static fn (): bool => true, E_DEPRECATED);
@@ -522,12 +525,68 @@ final class AsyncDeclRunTimeNamedChild extends AsyncDeclPreScopeMiddle
             \restore_error_handler();
         }
     }
+
+    // A pool whose factory hands the callable $parts make up, a string or an array,
+    // to $function as a FILTER_CALLBACK, and throws whether the method started. The
+    // parts are captured ROT13-encoded, as unwoundPool() captures its name.
+    public static function startedPool(string $function, string ...$parts): \OxPHP\Shared\Pool
+    {
+        $rot13 = \array_map(\str_rot13(...), $parts);
+        return new \OxPHP\Shared\Pool(factory: static function () use ($function, $rot13): object {
+            $parts = \array_map(\str_rot13(...), $rot13);
+            $callable = \count($parts) === 1 ? $parts[0] : $parts;
+            $spec = ['filter' => FILTER_CALLBACK, 'options' => $callable];
+            // A callback that runs first and writes, through references, what PHP
+            // reads after it: $callable, a part of it, FILTER_CALLBACK as the id.
+            $late = $method = null;
+            $id = FILTER_DEFAULT;
+            $first = static function (string $v) use (&$late, &$method, &$id, $callable, $parts): string {
+                [$late, $method, $id] = [$callable, $parts[1] ?? null, FILTER_CALLBACK];
+                return $v;
+            };
+            $late = $first;
+            // The flag is this thread's: a call that started here before left it set.
+            AsyncDeclPreScopeBase::$started = false;
+            // E_WARNING: the reference case below, a filter id PHP does not know.
+            \set_error_handler(static fn (): bool => true, E_DEPRECATED | E_WARNING);
+            try {
+                match ($function) {
+                    'filter_var' => \filter_var('x', FILTER_CALLBACK, ['options' => $callable]),
+                    'filter_var, another filter' => \filter_var('x', FILTER_VALIDATE_INT, ['options' => $callable]),
+                    'filter_var, the spec naming another filter' => \filter_var('x', FILTER_CALLBACK, ['filter' => FILTER_DEFAULT, 'options' => $callable]),
+                    'filter_var, by reference' => \filter_var('x', FILTER_CALLBACK, ['options' => &$callable]),
+                    'filter_var, an object' => \filter_var('x', FILTER_CALLBACK, ['options' => [new $parts[0](), $parts[1]]]),
+                    'filter_input' => \filter_input(INPUT_ENV, 'PATH', FILTER_CALLBACK, ['options' => $callable]),
+                    'filter_var_array' => \filter_var_array(['x' => 'x'], ['x' => $spec]),
+                    // PHP converts the id: '1024' is FILTER_CALLBACK.
+                    'filter_var_array, the id a string' => \filter_var_array(['x' => 'x'], ['x' => ['filter' => (string) FILTER_CALLBACK] + $spec]),
+                    'filter_input_array' => \filter_input_array(INPUT_ENV, ['PATH' => $spec]),
+                    // PHP takes an entry that is not an array as a filter id.
+                    'filter_var_array, a reference to the spec' => \filter_var_array(['x' => 'x'], ['x' => &$spec]),
+                    'filter_var, the options rewritten' => \filter_var(['x', 'x'], FILTER_CALLBACK, ['options' => &$late]),
+                    'filter_var_array, a part of the options rewritten' => \filter_var_array(['x' => 'x', 'y' => 'y'], [
+                        'x' => ['filter' => FILTER_CALLBACK, 'options' => $first],
+                        'y' => ['filter' => FILTER_CALLBACK, 'options' => [$parts[0], &$method]],
+                    ]),
+                    'filter_var_array, the id rewritten' => \filter_var_array(['x' => 'x', 'y' => 'y'], [
+                        'x' => ['filter' => FILTER_CALLBACK, 'options' => $first],
+                        'y' => ['filter' => &$id, 'options' => $callable],
+                    ]),
+                };
+            } catch (\Error $e) {
+                throw new \RuntimeException('started: ' . \var_export(AsyncDeclPreScopeBase::$started, true), 0, $e);
+            } finally {
+                \restore_error_handler();
+            }
+            throw new \RuntimeException('started: ' . \var_export(AsyncDeclPreScopeBase::$started, true));
+        }, destroy: null, maxSize: 1);
+    }
 }
 
-// A method the named class lacks is called through its __callStatic(), and
-// filter_var() pushes the frame that would call it. That frame unwinds before
-// __callStatic() starts, and what it holds is released: memory stays flat over
-// repeated refusals.
+// A method the named class lacks is called through its __callStatic(). On 8.4
+// and 8.5 filter_var() pushes the frame that would call it; that frame unwinds
+// before __callStatic() starts, and what it holds is released. On 8.6 filter_var()
+// is refused before it runs. Either way memory stays flat over repeated refusals.
 final class AsyncDeclRunTimeMagicChild extends AsyncDeclPreScopeMagic
 {
     public static function helper(): int
@@ -726,8 +785,62 @@ $t->assertSame('that array through filter_var(): the method does not start', asy
     $namedRefused,
 ]);
 
-// Unwinding before the method's first opcode passes its own try, so neither its
-// catch nor its finally runs on the thread that lacks the called class.
+// The other forms PHP deprecates, and the other filter_*() functions taking a
+// FILTER_CALLBACK. filter_input() and filter_input_array() read PATH from the
+// environment, there on every thread, so the callback has input to run on.
+foreach ([
+    "'Parent::markStarted' through filter_var()" => ['filter_var', 'Parent::markStarted'],
+    "['parent', 'markStarted'] through filter_var()" => ['filter_var', 'parent', 'markStarted'],
+    "['Base', 'self::markStarted'] by reference through filter_var()" => ['filter_var, by reference', AsyncDeclPreScopeBase::class, 'self::markStarted'],
+    "[new Base, 'self::markStarted'] through filter_var()" => ['filter_var, an object', AsyncDeclPreScopeBase::class, 'self::markStarted'],
+    "['Base', 'self::markStarted'] through filter_input()" => ['filter_input', AsyncDeclPreScopeBase::class, 'self::markStarted'],
+    "['Base', 'self::markStarted'] through filter_var_array()" => ['filter_var_array', AsyncDeclPreScopeBase::class, 'self::markStarted'],
+    "['Base', 'self::markStarted'] through filter_var_array(), the id a string" => ['filter_var_array, the id a string', AsyncDeclPreScopeBase::class, 'self::markStarted'],
+    "['Base', 'self::markStarted'] through filter_input_array()" => ['filter_input_array', AsyncDeclPreScopeBase::class, 'self::markStarted'],
+] as $what => $args) {
+    $t->assertSame("$what: the method does not start", asyncdecl_run_time_thrown_in_task(AsyncDeclRunTimeNamedChild::startedPool(...$args)), [
+        [\RuntimeException::class, 'started: false'],
+        $namedRefused,
+    ]);
+}
+// Each call starts with no FILTER_CALLBACK of these forms, and a callback that runs
+// first writes, through a reference, what PHP reads next: the callable into the
+// options or a part of them, or FILTER_CALLBACK into the id of an entry whose
+// options are the callable.
+foreach ([
+    'written into the options' => 'filter_var, the options rewritten',
+    'written into a part of the options' => 'filter_var_array, a part of the options rewritten',
+    'selected by FILTER_CALLBACK written into the filter id' => 'filter_var_array, the id rewritten',
+] as $what => $function) {
+    $t->assertSame(
+        "['Base', 'self::markStarted'] $what by a callback before it: the method does not start",
+        asyncdecl_run_time_thrown_in_task(AsyncDeclRunTimeNamedChild::startedPool($function, AsyncDeclPreScopeBase::class, 'self::markStarted')),
+        [[\RuntimeException::class, 'started: false'], $namedRefused],
+    );
+}
+// No FILTER_CALLBACK runs here, so nothing is refused.
+foreach ([
+    'with another filter' => 'filter_var, another filter',
+    'with a spec naming another filter' => 'filter_var, the spec naming another filter',
+    'through filter_var_array(), a reference to the spec' => 'filter_var_array, a reference to the spec',
+] as $what => $function) {
+    $t->assertSame(
+        "['Base', 'self::markStarted'] $what: in a task",
+        asyncdecl_run_time_thrown_in_task(AsyncDeclRunTimeNamedChild::startedPool($function, AsyncDeclPreScopeBase::class, 'self::markStarted')),
+        [[\RuntimeException::class, 'started: false']],
+    );
+}
+// static:: in the method stands for the caller's class, which the class named first
+// must extend, so PHP refuses this one itself, as it does through call_user_func().
+$t->assertSame(
+    "['Base', 'static::markStarted'] through filter_var(): in a task",
+    asyncdecl_run_time_thrown_in_task(AsyncDeclRunTimeNamedChild::startedPool('filter_var', AsyncDeclPreScopeBase::class, 'static::markStarted')),
+    [[\RuntimeException::class, 'started: false'], [\TypeError::class, 'filter_var(): Option must be a valid callback']],
+);
+
+// On 8.4 and 8.5, unwinding before the method's first opcode passes its own try,
+// so neither its catch nor its finally runs on the thread that lacks the called
+// class. On 8.6 the method is not reached at all.
 foreach (['self::tryMake' => 'a catch', 'self::finallyMake' => 'a finally'] as $method => $what) {
     $pool = AsyncDeclRunTimeNamedChild::unwoundPool($method);
     $t->assertSame("that array through filter_var(), the method starting in a try with $what: in a task", asyncdecl_run_time_thrown_in_task($pool), [
