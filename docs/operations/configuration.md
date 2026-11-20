@@ -27,7 +27,7 @@ An unset variable or empty assignment (`FOO=`) falls back to the documented defa
 | `ENTRY_FILE` | *(unset)* | Single canonical entry script. Unset, or a file name without an extension = direct file mapping. `*.php` = front controller. Any other extension = static fallback (SPA). With `WORKER_MODE_ENABLED=true` = worker bootstrap. Resolved against `DOCUMENT_ROOT` (relative paths and `..` allowed; absolute paths used as-is, and required with `DOCUMENT_ROOT` switched off). See [Routing](../features/routing.md) |
 | `WORKER_MODE_ENABLED` | `false` | Enable persistent worker mode. Requires `ENTRY_FILE` to point at a `.php` script. Boolean — see [Boolean values](#boolean-values) |
 | `MAX_CONNECTIONS` | `10000` | Maximum concurrent TCP connections. Also the ceiling for the default `QUEUE_MAX_WAITING` (half of it), so a malformed value is a startup error rather than a silent fallback. Lowering it does not move the `QUEUE_CAPACITY` default, which is sized from the worker count alone — keep it above `PHP_WORKERS` + `QUEUE_CAPACITY` + `QUEUE_MAX_WAITING`, see below |
-| `TOKIO_WORKERS` | [CPU](#how-the-cpu-count-is-detected) / 2 (min 1) | Async I/O threads. `1` = single-threaded, `N > 1` = fixed thread count, unset = auto (CPU / 2, min 1) |
+| `TOKIO_WORKERS` | [CPU](sizing-workers.md#how-the-cpu-count-is-detected) / 2 (min 1) | Async I/O threads. `1` = single-threaded, `N > 1` = fixed thread count, unset = auto (CPU / 2, min 1) |
 
 ### Sizing the async runtime
 
@@ -44,88 +44,14 @@ Both this and `PHP_WORKERS` default to half the machine, so their sum lands on t
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `EXECUTOR` | `sapi` | PHP executor backend. `sapi` for PHP execution, `stub` for benchmarking without PHP |
-| `PHP_WORKERS` | [CPU](#how-the-cpu-count-is-detected) / 2 (min 1) | Worker pool size. `N` = fixed pool, `MIN:MAX` = dynamic scaling, `0` = auto |
+| `PHP_WORKERS` | [CPU](sizing-workers.md#how-the-cpu-count-is-detected) / 2 (min 1) | Worker pool size. `N` = fixed pool, `MIN:MAX` = dynamic scaling, `0` = auto |
 | `PHP_WORKERS_IDLE_SECONDS` | `30` | Seconds a dynamic worker stays idle before being retired (dynamic mode only). A worker is retired at a moment when it has nothing in flight, so nothing it is serving is cut short — and a worker holding a request that never ends, such as an open stream, never reaches such a moment and is not retired at all |
 | `QUEUE_CAPACITY` | Initial workers × 128 | Maximum pending requests in the PHP queue. Requests arriving at a full queue wait for a slot (see `QUEUE_WAIT_TIMEOUT_MS`). For dynamic pools (`MIN:MAX`), initial workers = minimum count. `0` = auto |
 | `QUEUE_WAIT_TIMEOUT_MS` | `1000` | The longest a request may spend waiting for a PHP worker before it is rejected with 529 — a ceiling rather than a fixed value. One deadline, stamped on arrival, covering both waits a request can face: for a slot in the queue, and inside the queue for a worker. The server shortens the budget below this ceiling on its own while the work the waiting admits is completing for clients who have already left, and lengthens it back once the queue drains; `oxphp_admission_wait_budget_us` publishes what is in force and `oxphp_admission_wait_budget_ceiling_us` what was configured. The shortening is not gentle and is worth knowing the size of before choosing a ceiling: the budget is **halved** each time a quarter or more of what the pool started went to clients who had already gone, measured over a window of at least eight started requests rather than a fixed interval, and it can go down to a floor of a sixty-fourth of this value — 15.6 ms at the default — or 10 ms, whichever is larger, though never above the ceiling itself. It walks back up in eighths of the ceiling, and only while the queue is observed empty and less than a quarter of what the pool started went to departed clients — so the ordinary trickle of clients closing a tab or timing out mid-request does not hold it down, and a server whose queue never empties stays on the shortened budget until the load lets up. An operator who has set 1000 here should expect 15 to be in force during an episode, and an alert on the wait should be written against the pair of series rather than against this number. The deadline is enforced from both ends: the request is answered with a 529 when it passes, and a worker that reaches a request past it refuses rather than executes it. Enforcing it only at pickup would make the budget a rule about which requests run rather than about how long anyone waits — a queued request nobody picks up would wait indefinitely, which is what an application calling back into this same server produces. It does not bound how long the handler then runs: a request a worker started inside the budget is left alone. At most `QUEUE_MAX_WAITING` requests wait at once; past that, requests are rejected immediately. `0` = reject immediately whenever the queue is full. Lower it when the application calls back into this same server over HTTP — the inner call needs a worker the outer one is holding while it waits for the inner one, so the wait is spent for nothing however long it is given; `oxphp_admission_wait_wasted_total` counts those waits, but only while the budget is at this ceiling. Whether it stays there is not a property of the self-call: the budget comes down on work finishing for clients who have already left, which the server can only read from a queue it finds non-empty when it looks and from enough started requests behind it — so the same self-caller keeps its ceiling wherever its own callers wait for it, an internal cron or a sidecar on a generous timeout being the ordinary case, and comes down only where they do not *and* those two conditions hold. Where the budget does come down, that counter goes quiet, so a `0` is not by itself the absence of this pattern — or when a load balancer in front has a shorter timeout of its own. `0` shortens nothing here: it removes the wait for a queue slot and not the wait inside the queue, so unless `QUEUE_CAPACITY` is small enough for the queue to be full, the inner call is admitted to a queue nothing is consuming and is never answered at all. A client that closes the connection mid-wait gives its place back immediately, on HTTP/1.1 as well as HTTP/2, so a balancer that times out and closes does not fill the waiting set with attempts it has already abandoned. A request already in the queue when its client closes keeps its place until a worker reaches it or the budget runs out, and is then answered `499` rather than counted as an overload refusal. What the server cannot see is a client that stops waiting *without* closing — it holds its place until it is admitted or the budget runs out, and if a worker frees up first its script runs for nobody — so keeping the budget below the timeout of anything in front of it is still worth doing. The server's own shortening does not cover that case either: it is driven by clients who close, so a population that stops waiting without closing produces no signal and leaves the ceiling in force |
 | `QUEUE_MAX_WAITING` | Initial workers × 128, capped at `MAX_CONNECTIONS` / 2 | Maximum requests parked waiting for a queue slot at once. Past it, requests are rejected immediately instead of waiting. Each waiter holds a connection and a fully buffered request body for as long as it waits, so this is a bound on resources held, not on waits that will pay off. The `MAX_CONNECTIONS` / 2 cap on the default bounds this part of the backlog only; queued and running requests hold a connection the same way, so the headroom the server actually keeps for accepting and refusing follows from `PHP_WORKERS` + `QUEUE_CAPACITY` + `QUEUE_MAX_WAITING` against `MAX_CONNECTIONS` — see below. Size it from your own handler latency — also below. `0` = auto, never below 1 |
 | `QUEUE_MAX_WAITING_BYTES` | `67108864` (64 MiB) | Maximum request-body bytes the parked requests may hold between them, in bytes. A request whose body would push the total past it is rejected with 529 immediately instead of waiting; a request carrying no body is never rejected for this. `QUEUE_MAX_WAITING` bounds the same set in requests, which says nothing about their size — bodies are buffered in full before a request reaches the queue, so with only a count to stop them the parked set can hold `QUEUE_MAX_WAITING` × 10 MiB. Raise it for an upload-heavy application that should absorb bursts of large bodies rather than shed them; lower it on a memory-capped container. `0` = auto |
 
-### Sizing the Waiting Set
-
-How many requests can *usefully* wait follows from how fast the pool retires them. With `W` workers and a handler that takes `T` milliseconds, the pool admits `W / T` requests per millisecond, so a budget of `B` milliseconds can let in about `W × B / T` waiters. Everything past that waits the whole budget and is refused anyway, holding a connection and a buffered request body the entire time.
-
-The default cannot compute this — service rate is not known at startup — so it is deliberately generous. That fits fast handlers, where the pool drains a deep backlog well inside the budget, and is far too large for slow ones: with 8 workers, a 200 ms handler and the default 1 s ceiling — the budget in force whenever the pool is not shedding — only about 40 requests can be admitted in time while the default parks up to 1024.
-
-```bash
-QUEUE_MAX_WAITING=40
-```
-
-Setting it near `W × B / T` turns the surplus into an immediate 529 rather than a 529 a second later. Shortening `QUEUE_WAIT_TIMEOUT_MS` achieves the same by the other term — the two trade against each other, and on a slow handler the smaller budget is usually the better lever, because it also bounds how long a client waits for the refusal. `B` here is the budget in force, which under overload is the one the server has shortened to rather than the configured ceiling — so read `oxphp_admission_wait_budget_us` before sizing the waiting set from a number in a config file.
-
-The set is bounded a second time, in bytes. Every waiter holds its request body in memory for as long as it waits, so a cap counted in requests leaves the memory they hold to the traffic: the same 1024 waiters cost nothing on bodyless `GET`s and gigabytes on uploads. `QUEUE_MAX_WAITING_BYTES` bounds that sum directly — past it a request carrying a body is refused at once rather than parked, while bodyless ones keep waiting normally. An upload-heavy application that should absorb bursts instead of shedding them wants a larger value; a container with a hard memory limit wants a smaller one. Refusals for either cap are counted separately in `oxphp_admission_refused_total` (`waiting_full` against the count, `waiting_bytes` against the memory), so the metric names the knob to reach for.
-
-### Keeping Headroom for the Accept Loop
-
-A request holds its connection — and one of the `MAX_CONNECTIONS` permits — from the moment it arrives until it is answered, whatever it is doing in between. The PHP path holds requests in three places, each with a bound of its own, because a queue slot is released the moment a worker picks the request up, before the script runs:
-
-- **running** in a worker: at least `PHP_WORKERS`, and more in worker mode, where one thread multiplexes fibers;
-- **queued**, up to `QUEUE_CAPACITY`;
-- **parked** in admission, up to `QUEUE_MAX_WAITING`.
-
-These count requests, not connections, and the two part in the queue: a request answered on its queue deadline — `529`, or `499` once its client has gone — gives its connection back at once and keeps its queue slot until a worker reaches it. So `QUEUE_CAPACITY` can overstate the connections the queue holds, as `PHP_WORKERS` understates the ones running in worker mode; the sum is a guide, not a count. Only the third has a ceiling derived from `MAX_CONNECTIONS`. Keep `PHP_WORKERS` + `QUEUE_CAPACITY` + `QUEUE_MAX_WAITING` below `MAX_CONNECTIONS`. Past it the failure mode changes for the worse: the accept loop takes a connection permit before it starts serving a connection, so once the PHP path holds them all it parks, and a client arriving then gets no response at all instead of a `529` — which a load balancer cannot tell apart from a dead instance, while the health probe on `INTERNAL_ADDR` stays green because it does not go through either limit.
-
-The stall itself is no longer silent: an accept that has to wait for a permit logs a `WARN` naming the budget, and an `INFO` reporting how long the loop was parked is written the moment the permit arrives — not on the next connection, which on an overload that ended because the load went away may be minutes later or never. The reports are rate-limited so a server flapping around the ceiling cannot turn its own log into the outage — a stall that begins within seconds of a reported one is held back at first, but if it is still going when that window closes it is reported then, so no ongoing stall stays silent however it started. A stall passed over that way leaves no line at all; the metrics still see it. The state is exported as `oxphp_accept_stalled` (gauge, readable while the stall lasts because the internal listener does not go through `MAX_CONNECTIONS`) and `oxphp_accept_stalls_total` (counter) — see the [metrics reference](metrics.md). The behaviour is unchanged — arriving clients still get no response rather than an error — but the node now says so.
-
-The server checks this at startup and warns when the sum reaches the budget, naming every value; `oxphp config --check` reports the same, without changing its verdict or exit code. Treat clearing it as necessary rather than sufficient: idle keep-alive connections, static-file requests and handshakes in progress hold permits too, and none of them can be counted at startup.
-
-Lowering `MAX_CONNECTIONS` is the usual way into the warning, because the `QUEUE_CAPACITY` default is sized from the worker count and does not follow it down — 7 workers and `MAX_CONNECTIONS=1000` gives 7 + 896 + 500 against a budget of 1000. Note which knob to reach for: raising `MAX_CONNECTIONS` on its own does not clear it while `QUEUE_MAX_WAITING` is left at its default, because that default is half of `MAX_CONNECTIONS` and rises with it — at 7 workers the sum settles at 1799 and the condition only clears from `MAX_CONNECTIONS=1800` up. Lower `QUEUE_CAPACITY`, or set `QUEUE_MAX_WAITING` explicitly and then raise the budget.
-
-For a dynamic pool (`MIN:MAX`) the running term is the minimum, the same count the queue defaults are sized from, so a pool grown to its maximum holds more than the sum says.
-
-The comparison counts connections while the budget is spent by requests, so an HTTP/2-heavy deployment can legitimately sit above it: one connection carries up to `H2_MAX_CONCURRENT_STREAMS` requests, so the same backlog is held by a fraction of the connections. The warning is expected there. A large pool on the stock budget reaches it too — an auto-sized pool of 39 workers gives 39 + 4992 + 4992 against 10 000 — and that one is worth acting on rather than ignoring.
-
-### Static vs Dynamic Workers
-
-Set `PHP_WORKERS` to a single number for a fixed pool:
-
-```bash
-PHP_WORKERS=8      # Fixed 8 workers
-PHP_WORKERS=0      # Auto-detect: CPU / 2 (min 1)
-```
-
-Set `PHP_WORKERS` to `MIN:MAX` for automatic scaling:
-
-```bash
-PHP_WORKERS=2:16   # Scale between 2 and 16 workers
-PHP_WORKERS=4:0    # 4 minimum, auto-detect maximum (CPU × 2)
-PHP_WORKERS=0:16   # auto-detect minimum (CPU / 4, min 1), 16 maximum
-```
-
-In dynamic mode, OxPHP scales workers up when all are busy and scales down when workers have been idle longer than `PHP_WORKERS_IDLE_SECONDS`.
-
-### How the CPU count is detected
-
-Every default on this page written in terms of CPU — `TOKIO_WORKERS`, and `PHP_WORKERS` unset, `0`, or with `0` on either side of `MIN:MAX` — counts the CPUs the process is allowed to run on: its affinity mask (`taskset`, `docker run --cpuset-cpus`), lowered to the container's CPU quota where one is set (`docker run --cpus`; `cpu.max` on cgroup v2, `cpu.cfs_quota_us` on v1). A quota is rounded down and counts as at least 1, so `--cpus=1.5` counts as 1.
-
-Two kinds of limit are not counted, and a container held back only by one of them is sized from every CPU it can see:
-
-- **A CPU weight** — `docker run --cpu-shares`, `cpu.weight` on cgroup v2, `cpu.shares` on v1. It decides how contended CPU time is shared with neighbours; it is not a cap, and no CPU count follows from it.
-- **A limit enforced outside the container.** A platform can sell a share of a machine and enforce it where the container cannot see it. On DigitalOcean App Platform, for example, an instance sold as 1 vCPU was observed running in a gVisor sandbox with no quota (`cpu.cfs_quota_us` is `-1`) and 8 CPUs visible, so the defaults came to 4 PHP workers, 4 runtime threads and a queue of 512.
-
-On such a plan, set `PHP_WORKERS` and `TOKIO_WORKERS` explicitly, to what the plan actually provides. In Worker mode, check `PHP_WORKERS` × `WORKER_MAX_MEMORY_MIB` against the plan's memory as well: the threshold is a recycle trigger the worker checks in its loop, not a cap on what its PHP heap can allocate, so the pool can hold that much and more before any worker is recycled for it, with OPcache and the server itself on top — and with the default `0` there is no threshold at all. The same sandbox can hide the memory limit too — the App Platform container above saw none.
-
-At startup the server logs the count, what set it, and the resulting `PHP_WORKERS` and `TOKIO_WORKERS` — here under `docker run --cpus=1` on a 14-CPU machine:
-
-```json
-{"timestamp":"2026-10-05T18:55:39.801254Z","level":"INFO","fields":{"message":"CPU count for default sizing","cpus":1,"cpu_source":"cgroup quota","host_cpus":14,"php_workers":"1 (auto)","tokio_workers":"1 (auto)"}}
-```
-
-- `cpu_source` is `host` when neither a mask nor a quota lowered the count, `affinity` or `cgroup quota` when one of them did, and `unknown` when the server could not tell, because the mask or the online count could not be read (if it could not count CPUs at all, `cpus` is 4).
-- `host_cpus` is how many CPUs the system reports online (`/sys/devices/system/cpu/online` on Linux), which a mask or quota does not lower; it is omitted when it cannot be read. A runtime that rewrites that file to list only the container's CPUs makes a narrowed mask read as `host`.
-- `(auto)` marks a value left entirely to the default: the variable is unset or empty, or for `TOKIO_WORKERS` not a number.
-
-`cpu_source` of `host` on a plan that sold you fewer CPUs than `cpus` is the case above.
+How to size the pool, the queue and the waiting set against each other and against `MAX_CONNECTIONS`, static against dynamic pools, and how the CPU count behind these defaults is detected, is in [Sizing PHP Workers](sizing-workers.md).
 
 ## Worker Mode
 
