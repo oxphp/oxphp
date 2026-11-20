@@ -3,15 +3,17 @@
 declare(strict_types=1);
 
 // Holds a shared connection mid-exchange for test_shared_conn_outside_fiber_refused,
-// in one of three shapes chosen by ?mode=:
+// in one of four shapes chosen by ?mode=:
 //
-//   redis      — through phpredis, parked in its reply;
-//   redis-idle — through phpredis, holding the client-level claim but parked on a
-//                sleep, not on the connection;
-//   raw        — through a hand-written RESP exchange on a plain tcp:// stream,
-//                which has no client level at all.
+//   redis           — through phpredis, parked in its reply;
+//   redis-idle      — through phpredis, holding the client-level claim but parked
+//                     on a sleep, not on the connection;
+//   redis-elsewhere — through phpredis, holding the client-level claim but parked
+//                     in a phpredis call on a second connection of its own;
+//   raw             — through a hand-written RESP exchange on a plain tcp://
+//                     stream, which has no client level at all.
 //
-// The two that are mid-exchange block on an empty list, so Redis holds the reply
+// The ones parked in a reply block on an empty list, so Redis holds the reply
 // back and the request stays parked in its read until the test pushes a value onto
 // that list — after the destructor it is waiting for has run. The idle one sleeps in
 // short steps until the test says so. The window is the upper bound on how long
@@ -50,6 +52,19 @@ try {
         }
         $sharedState['outside_fiber_redis_idle_done'] = true;
         echo 'redis-idle-done';
+    } elseif ($mode === 'redis-elsewhere') {
+        // Inside a phpredis call, but on another connection: the one the test reaches
+        // has nothing of this request's on the wire.
+        $redis = new Redis();
+        $redis->connect($host, 6379, 3.0, null, 0, 15.0);
+        $sharedState['outside_fiber_redis_elsewhere'] = $redis;
+        $redis->get('hooksdb:outside:probe');
+
+        $other = new Redis();
+        $other->connect($host, 6379, 3.0, null, 0, 15.0);
+        $popped = $other->blPop(['hooksdb:outside:elsewhere'], 12);
+        $sharedState['outside_fiber_redis_elsewhere_done'] = true;
+        echo 'redis-elsewhere-done:' . var_export($popped, true);
     } elseif ($mode === 'raw') {
         $sock = stream_socket_client("tcp://{$host}:6379", $errno, $errstr, 3.0);
         if ($sock === false) {

@@ -15,6 +15,9 @@ hooksdb/test_shared_persistent_no_crosstalk
 hooksdb/test_shared_db_concurrent_queries
 hooksdb/test_shared_pdo_attribute_filter
 hooksdb/test_shared_redis_wait_gives_up
+hooksdb/test_shared_pconnect_two_objects
+hooksdb/test_shared_redis_reconnect_while_waited
+hooksdb/test_shared_redis_reconnect_past_the_bound
 hooksdb/test_shared_mysqli_close_under_parked_reader
 
 # APM wraps curl_setopt() and curl_exec() too, which the curl category claims a
@@ -35,18 +38,18 @@ hooksdb/test_persistent_ctor_gate_spellings
 hooksdb/test_persistent_ctor_ping_under_concurrent_use
 hooksdb/test_persistent_ctor_nested_handle_keeps_claim
 
-# Its Redis commands go through the APM wrapper, but what it checks does not
-# depend on the wrapper: code outside a request fiber never waits for a claim,
-# and the refusal it expects happens at the socket, below the method handlers.
-# It passes with the wrapper calling around the guard too, and is here to show
-# the wrapper does not break that path, not to catch the guard being skipped.
+# Its Redis commands go through the APM wrapper, and code outside a request fiber
+# never waits for a claim. phpredis is refused in the method hook rather than at
+# the socket, which this catches being skipped only on a phpredis that closes the
+# connection on a refused write — the one the fixture installs on PHP 8.6. On
+# 6.3.0 the socket's refusal, below the method handlers, gives the same answer.
 hooksdb/test_shared_conn_outside_fiber_refused
 
 # Controls: these never pass through the APM wrapper, and pass with or without
 # it. The procedural mysqli_query() is not an APM target; PDO::connect() returns
 # the driver subclass, whose inherited copy of query() APM does not wrap; and
-# pconnect()/rawCommand() are not APM targets. They show the runtime hooks still
+# pconnect() and blPop() are not APM targets. They show the runtime hooks still
 # hold on the paths APM leaves alone while it is enabled.
 hooksdb/test_shared_mysqli_no_crosstalk
 hooksdb/test_shared_pdo_connect_no_crosstalk
-hooksdb/test_shared_pconnect_two_objects
+hooksdb/test_shared_pconnect_moves_held_object

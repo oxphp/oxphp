@@ -8909,12 +8909,12 @@ void oxphp_stream_waiters_abandon(void) {
  * group in `io_op` — the stream it is inside, whether that stream was freed under
  * it, whether it is a TLS loop, whether a connect is going on — the cURL call in
  * `curl_op`, its place among the calls waiting for a cURL handle and among the
- * socket writes waiting for a stream, and the count of holds on the thread. Each is
- * put back by the frame
- * that set it, and a bailout walks past those frames without running them — so
- * every place that recovers from one has to do it, or the shutdown functions and
- * destructors that follow see an operation that is over, the name of a stream that
- * may be freed by then included.
+ * socket writes waiting for a stream, the database call in `db_call_conn`, and the
+ * count of holds on the thread. Each is put back by the frame that set it, and a
+ * bailout walks past those frames without running them — so every place that
+ * recovers from one has to do it, or the shutdown functions and destructors that
+ * follow see an operation that is over, the name of a stream that may be freed by
+ * then included.
  * The recovery does it for all of them; the two arms of the loop do it again before
  * anything else, because what they run next is userland. `net_park_off` is not
  * among them: it says what has happened to the fiber and not what it is in the
@@ -8927,6 +8927,7 @@ static void oxphp_fiber_forget_io_names(oxphp_request_fiber *fiber) {
     oxphp_curl_wait_leave(fiber);
     /* A close walks a waiting write's io_op chain, which was just cut. */
     oxphp_stream_wait_leave(fiber);
+    fiber->db_call_conn = NULL;
     fiber->net_park_hold = 0;
 }
 
