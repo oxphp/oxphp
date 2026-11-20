@@ -229,9 +229,13 @@ pub struct ScriptResponse {
     /// commonest cancellation of all produces no response for this field to
     /// travel on.
     pub cancel_reason: u8,
-    /// Set when this response is the queue's own answer rather than a
-    /// script's output — the request waited out its budget with no worker
-    /// reaching it, and never got to PHP.
+    /// Set on the answers admission gives in place of a worker: every
+    /// admission refusal, whatever its reason (overload, shutdown, a dead
+    /// pool), and the queue's `499` for a request a worker reached past its
+    /// budget, its client gone. `shed_reason` marks the refusals alone. The
+    /// `499`s the dispatch side answers itself, at the gate and on the queue
+    /// deadline, carry neither: `rejected` there already keeps them out of the
+    /// histogram.
     ///
     /// Mirrored to the dispatch side like `cancel_reason`, because an answer
     /// decided on a worker thread (a request reached past its queue deadline)

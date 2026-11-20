@@ -178,7 +178,7 @@ oxphp config --check
 config: OK
 ```
 
-Validation covers filesystem sanity only — path existence and file/directory kind (`DOCUMENT_ROOT`, `ENTRY_FILE`, `TLS_CERT`, `TLS_KEY`, `ERROR_PAGES_DIR`, …). PHP runtime, the TLS handshake, and network binding are out of scope. It exits non-zero and prints `config: INVALID` with one line per problem when validation fails, which makes it suitable as a pre-start gate in an entrypoint or CI job.
+Validation parses the server's own configuration — values such as `TLS_MIN_VERSION` and `MAX_CONNECTIONS`, the routing mode, and a `.oxphpdeny` at the top of `DOCUMENT_ROOT`, with the line of any malformed rule — and checks that its paths exist and are of the right kind (`DOCUMENT_ROOT`, `ENTRY_FILE`, `TLS_CERT`, `TLS_KEY`, `ERROR_PAGES_DIR`, …). Some settings are checked only at startup: `PHP_DENY_*` and `SYMLINK_ALLOW_PATHS` as the server builds its routing, and the settings each plugin reads for itself, such as `PROFILER_*`, as that plugin starts. PHP runtime, the TLS handshake, and network binding are out of scope. It exits non-zero and prints `config: INVALID` with one line per problem when validation fails, which makes it suitable as a pre-start gate in an entrypoint or CI job.
 
 A sizing advisory can follow the verdict on a `  ! ` line — currently one, for a PHP queue sized to hold every connection the server is allowed to accept:
 
