@@ -66,7 +66,10 @@ $decode = static function (string $body, string $prefix): ?array {
 $seed = new Redis();
 $seed->connect($host, 6379, 3.0);
 $seed->set('hooksdb:two-objects:probe', 'two-objects-probe-value');
-$rounds = ['pconnect', 'pconnect-long', 'ctor', 'mixed', 'mixed-late', 'pooled', 'pooled-ctor', 'error'];
+$rounds = [
+    'pconnect', 'pconnect-long', 'pconnect-timeout', 'ctor', 'mixed', 'mixed-late', 'pooled',
+    'pooled-ctor', 'error',
+];
 $seed->del(...array_map(static fn (string $round): string => "hooksdb:two-objects:{$round}", $rounds));
 $seed->close();
 
@@ -76,18 +79,16 @@ $seed->close();
 $holdFor = 0.5;
 
 // The pconnect() rounds name the connection by a persistent id — the second object
-// passing its port once as a numeric string and once as an int — the constructor
-// round by the connect timeout, and the constructor round also connects inside the
-// first command rather than in a connect call of its own. The rounds after it are
-// the cases where the id alone says nothing: a pconnect() that phpredis does not
-// keep persistent, beside a stream the constructor's option registered under the
-// same id before it or after it; connections phpredis takes from its pool, opened
-// through pconnect() and through the constructor, beside a stream registered under
-// their id while pooling was off; and a connect() phpredis rejects before it lets
-// go of the shared stream the object is on. The mixed round comes after the
-// pconnect() rounds: a pconnect() that does or does not register a stream of its
-// own is what tells whether this phpredis keeps pconnect() persistent, and its
-// second object finds a stream already there.
+// passing its port once as a numeric string and once as an int — or, given none, by
+// the connect timeout, as the constructor round does; the constructor round also
+// connects inside the first command rather than in a connect call of its own. The
+// rounds after it are the cases where the id alone says nothing: a pconnect() that
+// phpredis does not keep persistent, beside a stream the constructor's option
+// registered under the same id before it or after it; connections phpredis takes
+// from its pool, opened through pconnect() and through the constructor, beside a
+// stream registered under their id while pooling was off; and a connect() phpredis
+// rejects before it lets go of the shared stream the object is on.
+$pconnectPersists = false;
 foreach ($rounds as $round) {
     foreach (['hold_started', 'hold_done', 'wait_started', 'wait_done', 'waiter'] as $edge) {
         unset($sharedState["two_objects_{$round}_{$edge}"]);
@@ -140,11 +141,17 @@ foreach ($rounds as $round) {
     // it comes from the pool.
     $persistent = match ($round) {
         'pconnect', 'pconnect-long' => ($held['persistent_id'] ?? null) === 'hooksdb-two-objects',
+        // getPersistentID() reports nothing for a connection opened without an id:
+        // this phpredis keeps it persistent exactly when it kept the pconnect round's.
+        'pconnect-timeout' => $pconnectPersists,
         'mixed', 'mixed-late' => ($waited['persistent_id'] ?? null) === "hooksdb-two-objects-{$round}",
         'pooled', 'pooled-ctor' => false,
         default => true,
     };
     $t->meta("{$round}_persistent", $persistent);
+    if ($round === 'pconnect') {
+        $pconnectPersists = $persistent;
+    }
     if (PHP_VERSION_ID >= 80600 && !str_starts_with($round, 'pooled')) {
         // Or this round exercised nothing.
         $t->assertTrue("{$round}: the two objects' connection is persistent", $persistent);

@@ -5767,12 +5767,46 @@ static bool oxphp_redis_pooling_off(void)
  * its pconnect() opens a plain socket even where a constructor's `persistent`
  * option registered a stream under the same id; the development branch does. The
  * version string cannot tell them apart, since that branch reports 6.3.0RC1, so it
- * is learned: yes from a pconnect() that registers the stream it opened, for good;
- * no from one that succeeds with nothing registered under its id. Until then, one
- * that finds a stream already registered is taken to be on it — a wait it may not
- * need rather than none where it does. */
+ * is learned: yes from a pconnect() that registers the stream it opened, or that
+ * phpredis reports persistent; no only from one phpredis reports plain. Nothing
+ * registered under the id after a pconnect() says nothing: a wrong id looks the
+ * same, and a no learned from it would hold for every pconnect() after it. Until
+ * then, one phpredis is not asked about that finds a stream already registered is
+ * taken to be on it — a wait it may not need rather than none where it does. */
 enum { OXPHP_REDIS_PERSISTS_UNKNOWN, OXPHP_REDIS_PERSISTS_NO, OXPHP_REDIS_PERSISTS_YES };
 static _Atomic(int) oxphp_redis_pconnect_persists = OXPHP_REDIS_PERSISTS_UNKNOWN;
+
+/* Redis::getPersistentID() as the Redis class declares it, so that a subclass's
+ * override, which is userland, is not what answers. */
+static zend_function *oxphp_redis_persistent_id_fn = NULL;
+
+/* What phpredis reports for the pconnect() that just succeeded: getPersistentID()
+ * answers the id it was given for a persistent connection and null for a plain
+ * one. Asked only of a call given an id — without one it answers null either way —
+ * and no `auth`: on the socket pconnect() leaves, not yet authenticated, the
+ * question would send the AUTH itself. */
+static int oxphp_redis_reported_persists(zend_object *obj, zend_execute_data *execute_data)
+{
+    if (oxphp_redis_persistent_id_fn == NULL || EG(exception) != NULL || ZEND_NUM_ARGS() < 4
+        || Z_TYPE_P(ZEND_CALL_ARG(execute_data, 4)) != IS_STRING) {
+        return OXPHP_REDIS_PERSISTS_UNKNOWN;
+    }
+    if (ZEND_NUM_ARGS() >= 7) {
+        zval *context = ZEND_CALL_ARG(execute_data, 7);
+        if (Z_TYPE_P(context) == IS_ARRAY
+            && zend_hash_str_exists(Z_ARRVAL_P(context), ZEND_STRL("auth"))) {
+            return OXPHP_REDIS_PERSISTS_UNKNOWN;
+        }
+    }
+
+    zval reported;
+    zend_call_known_function(oxphp_redis_persistent_id_fn, obj, obj->ce, &reported, 0, NULL, NULL);
+    int persists = Z_TYPE(reported) == IS_STRING ? OXPHP_REDIS_PERSISTS_YES
+                   : Z_TYPE(reported) == IS_NULL ? OXPHP_REDIS_PERSISTS_NO
+                                                 : OXPHP_REDIS_PERSISTS_UNKNOWN;
+    zval_ptr_dtor(&reported);
+    return persists;
+}
 
 static ZEND_NAMED_FUNCTION(oxphp_redis_hook)
 {
@@ -5871,17 +5905,28 @@ static ZEND_NAMED_FUNCTION(oxphp_redis_hook)
     if (id != NULL && Z_TYPE_P(return_value) == IS_TRUE) {
         void *before = opened != obj ? opened : NULL;
         void *after = oxphp_redis_id_key(id, NULL);
-        if (after == NULL) {
+        int persists = oxphp_redis_reported_persists(obj, execute_data);
+        if (persists == OXPHP_REDIS_PERSISTS_YES) {
+            atomic_store_explicit(&oxphp_redis_pconnect_persists, OXPHP_REDIS_PERSISTS_YES,
+                                  memory_order_relaxed);
+        } else if (persists == OXPHP_REDIS_PERSISTS_NO) {
             int unknown = OXPHP_REDIS_PERSISTS_UNKNOWN;
-            if (before == NULL) {
-                atomic_compare_exchange_strong_explicit(&oxphp_redis_pconnect_persists, &unknown,
-                                                        OXPHP_REDIS_PERSISTS_NO,
-                                                        memory_order_relaxed, memory_order_relaxed);
-            }
+            atomic_compare_exchange_strong_explicit(&oxphp_redis_pconnect_persists, &unknown,
+                                                    OXPHP_REDIS_PERSISTS_NO, memory_order_relaxed,
+                                                    memory_order_relaxed);
+        } else {
+            persists = atomic_load_explicit(&oxphp_redis_pconnect_persists, memory_order_relaxed);
+        }
+
+        if (after == NULL) {
+            bound = false;
+        } else if (persists != OXPHP_REDIS_PERSISTS_UNKNOWN) {
+            bound = persists == OXPHP_REDIS_PERSISTS_YES;
         } else if (after != before) {
             /* Registered by this call, unless a lazy connect on another fiber did it
              * while this one was parked in its own: that fiber's first command
-             * claimed it. */
+             * claimed it. Asked only while persistence is unknown: a persistent
+             * pconnect() is on the stream under its id, whoever registered it. */
             oxphp_request_fiber *owner = oxphp_claim_owner(after);
             if (owner == NULL || owner == oxphp_current_fiber) {
                 atomic_store_explicit(&oxphp_redis_pconnect_persists, OXPHP_REDIS_PERSISTS_YES,
@@ -5889,8 +5934,7 @@ static ZEND_NAMED_FUNCTION(oxphp_redis_hook)
                 bound = true;
             }
         } else {
-            bound = atomic_load_explicit(&oxphp_redis_pconnect_persists, memory_order_relaxed)
-                    != OXPHP_REDIS_PERSISTS_NO;
+            bound = true;
         }
     }
     if (!bound && id != NULL) zend_string_release(id);
@@ -5929,6 +5973,8 @@ static void oxphp_hook_redis_entries(void)
 
     zend_hash_init(&oxphp_redis_origs, 256, NULL, NULL, 1);
     oxphp_redis_hooked = true;
+    oxphp_redis_persistent_id_fn =
+        zend_hash_str_find_ptr(&ce->function_table, ZEND_STRL("getpersistentid"));
 
     zend_string *table_key;
     zend_function *fn;
@@ -5992,6 +6038,7 @@ static void oxphp_restore_redis_entries(void)
 
     zend_hash_destroy(&oxphp_redis_origs);
     oxphp_redis_hooked = false;
+    oxphp_redis_persistent_id_fn = NULL;
 }
 
 static void oxphp_restore_db_entries(void)
