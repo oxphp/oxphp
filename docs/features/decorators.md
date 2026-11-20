@@ -193,7 +193,7 @@ function getProduct(int $id): array
 
 If `before()` throws an exception, OxPHP records the exception and invokes `after()` in reverse order on all decorators that already completed their `before()`. The caller will observe the exception via normal PHP `try`/`catch`, and `after()` is **not** called on the decorator whose `before()` threw.
 
-A call that `exit()` or `die()` ends inside the decorated function, nested calls included, or that a `Fiber` suspended inside it ends by being destroyed, does not return, and `after()` is not called for it. The request ends as `exit()` ends any request: its shutdown functions run and the response is sent. A script that destroys such a fiber carries on from there. Unlike `exit()`, destroying the fiber runs the `finally` blocks it was suspended in. A `finally` block that returns makes the decorated call return as usual, and `after()` is called. One that throws ends the call with that exception.
+A call that `exit()` or `die()` ends inside the decorated function, nested calls included, or that a `Fiber` suspended inside it ends by being destroyed, does not return, and `after()` is not called for it. The request ends as `exit()` ends any request: its shutdown functions run and the response is sent. A script that destroys such a fiber carries on from there. Unlike `exit()`, destroying the fiber runs the `finally` blocks it was suspended in. A `finally` block of the decorated function itself that returns makes the call return as usual, and `after()` is called. One that throws ends the call with that exception. A `finally` block that returns from a function the decorated one called returns from that function only: the decorated function goes on running in the fiber being destroyed, and its next `Fiber::suspend()` throws a `FiberError`.
 
 > **Important caveat about stopping execution.** PHP's `zend_observer_fcall_begin` API — which OxPHP uses to invoke `before()` — does not expose a way to cancel the call itself. When `before()` throws, the decorated function body may still execute a handful of opcodes before the VM unwinds to the nearest exception handler. **Do not rely on `RejectedException` to skip side effects inside the function body.** Treat decorator rejection as "the caller sees an exception" and implement any hard authorization gate inside the function body (or in front of it), not in the decorator.
 
@@ -285,7 +285,7 @@ class PaymentService
 }
 ```
 
-A call ended by `exit()` or `die()`, or by the destruction of a `Fiber` suspended inside it, closes its span as a call that finished: no error status, no `exception` event. A call ended by running past `memory_limit`, or ended in one of those ways after the request has run past it, closes its span with an error status and without an `exception` event, as there is no exception to describe.
+A call ended by `exit()` or `die()`, or by the destruction of a `Fiber` suspended inside it, closes its span as a call that finished: no error status, no `exception` event. A call ended by running past `memory_limit`, or ended in one of those ways while that overrun is still unwinding the request, closes its span with an error status and without an `exception` event, as there is no exception to describe.
 
 The `#[Trace]` attribute targets both functions and methods. It works on user-defined PHP code (not internal C functions — those are handled by the APM auto-instrumentation hooks).
 

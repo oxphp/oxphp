@@ -9481,9 +9481,9 @@ static void oxphp_decorator_end(zend_execute_data *execute_data, zval *retval) {
     uint64_t elapsed_ns = now_ns - dctx->timestamp_ns;
     /* exit() and a fiber ended while suspended unwind the frame with an engine
      * object that is not a Throwable (UnwindExit, GracefulExit), and the call
-     * counts as finished. A memory_limit overrun unwinds it with UnwindExit too.
-     * Once the request is past the limit, the call fails however it ended: the
-     * overrun state belongs to the thread, not to the call.
+     * counts as finished. A memory_limit overrun unwinds it with UnwindExit too,
+     * and ZEND_HAS_OOM() tells the two apart. That state belongs to the thread,
+     * not to the call: while it is set, any such unwind counts as failed.
      * SYNC: php-src/Zend/zend_alloc.c zend_handle_delayed_oom() */
     zend_object *ex = EG(exception);
     int success = !ex
