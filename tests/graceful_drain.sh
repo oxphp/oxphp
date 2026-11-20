@@ -68,6 +68,14 @@
 # what tells an ended wait from a stuck one is whether a request was still
 # running at it.
 #
+# Scenario L (what runs after the drain ends a stream): the stream ends with
+# the fatal error the drain raises, so its shutdown function runs and reads
+# that error, while its finally block and the destructor of what its frame
+# holds do not — with display_errors off, as in production. The destructor of
+# an object a global holds runs in a worker (L), whose recovery clears the
+# engine's flag once the request's frames are given back, and not in a
+# classic process (L2).
+#
 # NOT wired into run_all.sh or CI (like tests/cli_run.sh) — run manually after
 # touching the drain machinery (fiber sweep, cancel plumbing, drain latches).
 #
@@ -93,6 +101,8 @@ DRAIN_J2="drain_j2_$$"
 DRAIN_J3="drain_j3_$$"
 DRAIN_K="drain_k_$$"
 DRAIN_K2="drain_k2_$$"
+DRAIN_L="drain_l_$$"
+DRAIN_L2="drain_l2_$$"
 # Ephemeral free port unless the caller pins one via PORT=.
 PORT="${PORT:-$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')}"
 PASS=0
@@ -103,7 +113,7 @@ ok()   { printf '  \033[32mPASS\033[0m %s\n' "$1"; PASS=$((PASS + 1)); }
 bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$1"; FAIL=$((FAIL + 1)); }
 
 cleanup() {
-	docker rm -f "$DRAIN_A" "$DRAIN_B" "$DRAIN_C" "$DRAIN_D" "$DRAIN_E" "$DRAIN_F" "$DRAIN_G" "$DRAIN_H" "$DRAIN_I" "$DRAIN_J" "$DRAIN_J2" "$DRAIN_J3" "$DRAIN_K" "$DRAIN_K2" >/dev/null 2>&1
+	docker rm -f "$DRAIN_A" "$DRAIN_B" "$DRAIN_C" "$DRAIN_D" "$DRAIN_E" "$DRAIN_F" "$DRAIN_G" "$DRAIN_H" "$DRAIN_I" "$DRAIN_J" "$DRAIN_J2" "$DRAIN_J3" "$DRAIN_K" "$DRAIN_K2" "$DRAIN_L" "$DRAIN_L2" >/dev/null 2>&1
 	rm -rf "$TMP"
 }
 trap cleanup EXIT
@@ -731,6 +741,66 @@ if start_classic "$DRAIN_K2" 6; then
 	flood_scenario K2 "$DRAIN_K2" /flood.php
 else
 	bad "K2: container failed to start"; docker logs "$DRAIN_K2" 2>&1 | tail -5
+fi
+
+# ── Scenario L: what runs after the drain ends a stream ─────
+ending_scenario() {
+	# ending_scenario <label> <name> <path> <runs|skipped> — the container is
+	# up; the last argument is what becomes of the global's destructor
+	local label="$1" name="$2" logs state started=no
+	curl -N -s --max-time 20 "http://localhost:${PORT}$3" > "$TMP/${label}_ending" 2>&1 &
+	for _ in $(seq 1 10); do
+		docker logs "$name" 2>&1 | grep -q "ending-started" && { started=yes; break; }
+		sleep 1
+	done
+	[ "$started" = yes ] \
+		&& ok "$label: the stream was running at SIGTERM" \
+		|| bad "$label: the stream never started"
+	docker kill -s TERM "$name" >/dev/null
+	ELAPSED=$(wait_exit_seconds "$name" 15)
+	logs="$(docker logs "$name" 2>&1)"
+	state=$(docker inspect -f '{{.State.Status}} {{.State.ExitCode}}' "$name" 2>/dev/null)
+
+	# A crash or a forced stop would leave the negative checks below green.
+	# A stream ended at the drain deadline instead of by the soft phase gets
+	# the same error and also exits 0, so its log lines are what catch it.
+	[ "$state" = "exited 0" ] \
+		&& ok "$label: exited with status 0, ${ELAPSED}s after SIGTERM" \
+		|| bad "$label: state after SIGTERM: $state"
+	printf '%s' "$logs" | grep -q -E "Drain timeout reached|Forcing shutdown" \
+		&& bad "$label: the drain deadline ended the stream, not the soft phase" \
+		|| ok "$label: the soft phase ended the stream, before the drain deadline"
+	printf '%s' "$logs" | grep -q "ending-shutdown Request cancelled (shutdown)" \
+		&& ok "$label: the shutdown function ran and read the drain's error" \
+		|| bad "$label: no shutdown function with 'Request cancelled (shutdown)' (exited ${ELAPSED}s after SIGTERM)"
+	printf '%s' "$logs" | grep -q "ending-finally" \
+		&& bad "$label: the finally block ran" \
+		|| ok "$label: the finally block did not run"
+	printf '%s' "$logs" | grep -q "ending-dtor frame" \
+		&& bad "$label: the destructor of what the frame held ran" \
+		|| ok "$label: the destructor of what the frame held did not run"
+	if printf '%s' "$logs" | grep -q "ending-dtor global"; then
+		[ "$4" = runs ] && ok "$label: the global's destructor ran" \
+			|| bad "$label: the global's destructor ran"
+	else
+		[ "$4" = skipped ] && ok "$label: the global's destructor did not run" \
+			|| bad "$label: the global's destructor did not run"
+	fi
+	docker rm -f "$name" >/dev/null 2>&1
+}
+
+if start_container "$DRAIN_L" 10; then
+	ok "L: container up"
+	ending_scenario L "$DRAIN_L" /ending runs
+else
+	bad "L: container failed to start"; docker logs "$DRAIN_L" 2>&1 | tail -5
+fi
+
+if start_classic "$DRAIN_L2" 10; then
+	ok "L2: container up"
+	ending_scenario L2 "$DRAIN_L2" /ending.php skipped
+else
+	bad "L2: container failed to start"; docker logs "$DRAIN_L2" 2>&1 | tail -5
 fi
 
 echo

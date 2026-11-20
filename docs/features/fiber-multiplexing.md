@@ -103,13 +103,16 @@ oxphp_worker(function () {
 
 ### SSE with Cooperative Sleep
 
-Interleave Server-Sent Events with other requests using `oxphp_stream_flush()` and `oxphp_sleep()`:
+Interleave Server-Sent Events with other requests using `oxphp_stream_flush()` and `oxphp_sleep()`. The time a request spends suspended counts towards its `max_execution_time`, so a stream switches its limit off; in worker mode that is the limit of its own request only (see [Request Deadlines](worker-mode.md#request-deadlines)):
 
 ```php
 <?php
 oxphp_worker(function () {
     header('Content-Type: text/event-stream');
     header('Cache-Control: no-cache');
+
+    // A stream outlives max_execution_time, which is 30 s unless the PHP configuration sets another value
+    set_time_limit(0);
 
     for ($i = 0; $i < 30; $i++) {
         echo "data: " . json_encode(['count' => $i, 'time' => time()]) . "\n\n";
