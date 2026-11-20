@@ -271,7 +271,7 @@ All methods that can fail throw subclasses of `OxPHP\Shared\SharedException`:
 
 | Exception                | Raised by                                                                 |
 |--------------------------|---------------------------------------------------------------------------|
-| `CapacityException`      | A new key past `maxEntries` (`set` / `setIfAbsent` / `compareAndSet` / `setMany`). |
+| `CapacityException`      | A new key past `maxEntries` (`set` / `setIfAbsent` / `compareAndSet` / `setMany`); `new Map()` past `SHARED_MAX_ENTRIES` or `SHARED_MAX_BYTES`. |
 | `ValueTooLargeException` | A value over the per-value cap (`SHARED_MAX_VALUE_SIZE`).                  |
 | `CycleException`         | A write that would close a reachability cycle (`extends TypeException`).   |
 | `TypeException`          | A `null` value; a non-storable value (object/closure/resource); a non-int/string key; `maxEntries <= 0`. |

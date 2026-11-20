@@ -179,6 +179,7 @@ try {
 | `OperationTimeoutException`  | `Async\AsyncException`          | `withLockTimeout` deadline expired.                                  |
 | `DeadlockException`          | `Async\AsyncException`          | Same-thread re-entry, or a wait-for cycle broken under `SHARED_LOCK_DIAGNOSTICS=strict`. |
 | `CorruptedMutexException`    | `Shared\SharedException`        | A prior closure invocation crashed via Rust panic; mutex is unusable.|
+| `CapacityException`          | `Shared\SharedException`        | `new Mutex()` past `SHARED_MAX_ENTRIES` or `SHARED_MAX_BYTES`.       |
 | `TypeException`              | `Shared\SharedException`        | Constructor or `$ms` argument violated its type contract.            |
 | `StaleHandleException`       | `Shared\SharedException`        | Method call on a handle whose registry entry was evicted.            |
 | `UninitializedException`     | `Shared\SharedException`        | `id()` on a wrapper that has not finished `__construct`.             |

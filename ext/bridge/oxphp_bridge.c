@@ -5910,10 +5910,11 @@ static bool oxphp_scope_callable_refuse_at_frame(void) {
  * built at run time, which no reading of a callback before its call finds, is seen
  * here.
  * Observers run before any error handler, whatever error_reporting says
- * (zend_error_zstr_at()), but on 8.5 a recorded error that is not fatal reaches
- * them only when replayed. OPcache records for the whole compile of a file, where
- * a stream wrapper can run, so a callable such a wrapper resolves is seen after
- * its method has run, from the frame of the include.
+ * (zend_error_zstr_at()), but from 8.5 on (read in 8.5.12 and 8.6.0) a recorded
+ * error that is not fatal reaches them only when replayed. OPcache records for
+ * the whole compile of a file, where a stream wrapper can run, so a callable such
+ * a wrapper resolves is seen after its method has run, from the frame of the
+ * include.
  *
  * An exception pending when zend_is_callable_check_class() returns makes the
  * callable invalid (GH-21699), so the method does not start. ZEND_INIT_USER_CALL,

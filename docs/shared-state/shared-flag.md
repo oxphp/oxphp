@@ -139,6 +139,7 @@ if ($ready->load(Ordering::Acquire)) {
 |----------------------------|--------------------------------------------------------------|
 | `StaleHandleException`     | Any method on a handle whose registry entry was evicted.     |
 | `UninitializedException`   | `id()` on a wrapper that has not finished `__construct`.     |
+| `CapacityException`        | `new Flag()` past `SHARED_MAX_ENTRIES` or `SHARED_MAX_BYTES`. |
 | `InvalidOrderingException` | An `Ordering` not allowed for the operation (see above).     |
 
 ## Observability

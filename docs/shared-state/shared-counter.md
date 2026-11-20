@@ -110,6 +110,7 @@ $newTotal = $bytes->add(array_sum($deltas));
 |-------------------------|--------------------------------------------------------------|
 | `StaleHandleException`  | Any method on a handle whose registry entry was evicted.     |
 | `UninitializedException`| `id()` on a wrapper that has not finished `__construct`.     |
+| `CapacityException`     | `new Counter()` past `SHARED_MAX_ENTRIES` or `SHARED_MAX_BYTES`. |
 
 Counters never throw on overflow or extreme values — they wrap.
 

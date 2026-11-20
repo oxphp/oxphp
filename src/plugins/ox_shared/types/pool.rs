@@ -1255,8 +1255,8 @@ impl PoolInner {
 
     // ── observability helpers ─────────────────────────────────────────
 
-    /// Authoritative capacity gauge: `in_use + idle`. This is what
-    /// the PHP `count()` method returns.
+    /// Authoritative capacity gauge: `in_use + idle`, the figure
+    /// `Pool::stats()->size()` reports.
     pub fn size(&self) -> u64 {
         self.size.load(Ordering::Acquire)
     }
@@ -2181,7 +2181,8 @@ pub unsafe extern "C" fn oxphp_shared_pool_stats(
     })
 }
 
-/// `$pool->count()` — `in_use + idle` across every thread.
+/// `in_use + idle` across every thread. No PHP method calls this:
+/// `Pool::stats()` derives its `size()` from `oxphp_shared_pool_stats`.
 ///
 /// # Safety
 /// `out_size` must be valid for a `u64` write.
