@@ -5,9 +5,8 @@
 //!
 //! Deltas vs PHP 8.5: none. Between the 8.5.12 and 8.6.0 releases'
 //! `main/SAPI.h`, `sapi_module_struct` still ends at `pre_request_init` and
-//! `sapi_header_op_enum` at `SAPI_HEADER_SET_STATUS = 5`; what 8.6 changed
-//! in that header (`sapi_globals_struct`, `int` → `zend_result` returns)
-//! touches nothing this module mirrors.
+//! `sapi_header_op_enum` at `SAPI_HEADER_SET_STATUS = 5`; the header's other
+//! changes touch no type this module mirrors.
 
 #![allow(non_camel_case_types)]
 

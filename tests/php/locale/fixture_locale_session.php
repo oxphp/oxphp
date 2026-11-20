@@ -57,8 +57,8 @@ final class LocaleRecordingSessionHandler implements SessionHandlerInterface
         return 0;
     }
 
-    // PHP 8.6 warns once for each of these a handler class lacks, and a warning
-    // here ends the request, or its headers, before its session has started.
+    // PHP 8.6 raises E_DEPRECATED for each of these a handler class lacks, and
+    // displaying it sends the headers before session_start() runs.
     public function create_sid(): string
     {
         return bin2hex(random_bytes(16));

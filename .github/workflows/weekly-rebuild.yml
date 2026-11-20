@@ -98,10 +98,15 @@ jobs:
                 MERGE_JSON+="{\"oxphp\":\"$OXPHP\",\"php\":\"$PHP\",\"distro\":\"$DISTRO\"}"
                 # The PHP suites run on the Alpine image only: their health
                 # checks call wget, which the Debian image does not have.
+                # They build docker/dev/Dockerfile, which defaults to Alpine
+                # 3.24 whatever this cell's Alpine is. Naming that base keeps
+                # 8.4 and 8.5 on it and gives 8.6, whose tag has no -zts-, one
+                # that exists.
                 if [[ "$DISTRO" == alpine* ]]; then
+                  SUITE_BASE=$(scripts/php-base-image.sh "$PHP" alpine3.24)
                   if [[ $FIRST_S -eq 0 ]]; then SUITE_JSON+=","; fi
                   FIRST_S=0
-                  SUITE_JSON+="{\"oxphp\":\"$OXPHP\",\"php\":\"$PHP\",\"distro\":\"$DISTRO\"}"
+                  SUITE_JSON+="{\"oxphp\":\"$OXPHP\",\"php\":\"$PHP\",\"distro\":\"$DISTRO\",\"base\":\"$SUITE_BASE\"}"
                 fi
                 for ARCH in amd64 arm64; do
                   RUNNER="ubuntu-24.04"
@@ -331,6 +336,8 @@ jobs:
       - name: Run focused PHP integration suites
         env:
           PHP_VERSION: ${{ matrix.php }}
+          # Read by the compose profiles from 0.16.0 on; earlier tags ignore it.
+          BASE_IMAGE: ${{ matrix.base }}
         run: |
           set -eo pipefail
           # Suites run against a fresh build of the released source checked out
