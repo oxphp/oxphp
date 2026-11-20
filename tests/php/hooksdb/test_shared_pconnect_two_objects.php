@@ -68,8 +68,11 @@ $seed->connect($host, 6379, 3.0);
 $seed->set('hooksdb:two-objects:probe', 'two-objects-probe-value');
 $rounds = [
     'pconnect', 'pconnect-long', 'pconnect-timeout', 'ctor', 'mixed', 'mixed-late', 'pooled',
-    'pooled-ctor', 'error',
+    'pooled-ctor', 'pooled-late', 'unpooled-late', 'ctor-connect', 'error',
 ];
+// The rounds whose second object phpredis gives a connection of its own whatever
+// the build.
+$ownConnection = ['pooled', 'pooled-ctor', 'pooled-late', 'ctor-connect'];
 $seed->del(...array_map(static fn (string $round): string => "hooksdb:two-objects:{$round}", $rounds));
 $seed->close();
 
@@ -86,8 +89,10 @@ $holdFor = 0.5;
 // phpredis does not keep persistent, beside a stream the constructor's option
 // registered under the same id before it or after it; connections phpredis takes
 // from its pool, opened through pconnect() and through the constructor, beside a
-// stream registered under their id while pooling was off; and a connect() phpredis
-// rejects before it lets go of the shared stream the object is on.
+// stream registered under their id while pooling was off; a constructor's object
+// first used under the other pooling setting than the one it was built under, both
+// ways round; and a connect(), one that moves a constructor's object onto a plain
+// socket and one phpredis rejects before it lets go of the object's shared stream.
 $pconnectPersists = false;
 foreach ($rounds as $round) {
     foreach (['hold_started', 'hold_done', 'wait_started', 'wait_done', 'waiter'] as $edge) {
@@ -139,20 +144,19 @@ foreach ($rounds as $round) {
     // and the constructor's option is kept persistent by both. A persistent
     // connection opened with the same arguments is the one both objects get, unless
     // it comes from the pool.
-    $persistent = match ($round) {
+    $persistent = !in_array($round, $ownConnection, true) && match ($round) {
         'pconnect', 'pconnect-long' => ($held['persistent_id'] ?? null) === 'hooksdb-two-objects',
         // getPersistentID() reports nothing for a connection opened without an id:
         // this phpredis keeps it persistent exactly when it kept the pconnect round's.
         'pconnect-timeout' => $pconnectPersists,
         'mixed', 'mixed-late' => ($waited['persistent_id'] ?? null) === "hooksdb-two-objects-{$round}",
-        'pooled', 'pooled-ctor' => false,
         default => true,
     };
     $t->meta("{$round}_persistent", $persistent);
     if ($round === 'pconnect') {
         $pconnectPersists = $persistent;
     }
-    if (PHP_VERSION_ID >= 80600 && !str_starts_with($round, 'pooled')) {
+    if (PHP_VERSION_ID >= 80600 && !in_array($round, $ownConnection, true)) {
         // Or this round exercised nothing.
         $t->assertTrue("{$round}: the two objects' connection is persistent", $persistent);
     }

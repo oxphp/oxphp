@@ -5509,37 +5509,48 @@ static const char *const oxphp_redis_local[] = {
  * destruction; in the request's arena, like the cURL tables. */
 static __thread HashTable *oxphp_redis_binds = NULL;
 
+/* The same for an object the constructor configured and nothing has connected
+ * yet: whether it is bound under the id is up to the pooling setting its first
+ * command connects under — see oxphp_redis_settle(). */
+static __thread HashTable *oxphp_redis_unconnected = NULL;
+
 static void oxphp_redis_bind_dtor(zval *zv)
 {
     zend_string_release(Z_PTR_P(zv));
 }
 
 /* Takes `id`; NULL drops the object's entry. */
-static void oxphp_redis_bind(zend_object *obj, zend_string *id)
+static void oxphp_redis_put(HashTable **table, zend_object *obj, zend_string *id)
 {
-    if (oxphp_redis_binds == NULL) {
+    if (*table == NULL) {
         if (id == NULL) return;
-        ALLOC_HASHTABLE(oxphp_redis_binds);
-        zend_hash_init(oxphp_redis_binds, 8, NULL, oxphp_redis_bind_dtor, 0);
+        ALLOC_HASHTABLE(*table);
+        zend_hash_init(*table, 8, NULL, oxphp_redis_bind_dtor, 0);
     }
     /* zend_weakrefs_hash_add() does not replace an entry. */
-    (void) zend_weakrefs_hash_del(oxphp_redis_binds, obj);
-    if (id != NULL) (void) zend_weakrefs_hash_add_ptr(oxphp_redis_binds, obj, id);
+    (void) zend_weakrefs_hash_del(*table, obj);
+    if (id != NULL) (void) zend_weakrefs_hash_add_ptr(*table, obj, id);
 }
 
 /* Before the executor frees the objects, for the reason oxphp_curl_members_destroy()
  * gives. */
-static void oxphp_redis_binds_destroy(void)
+static void oxphp_redis_table_destroy(HashTable **table)
 {
-    if (oxphp_redis_binds == NULL) return;
+    if (*table == NULL) return;
 
     zend_ulong key;
-    ZEND_HASH_FOREACH_NUM_KEY(oxphp_redis_binds, key) {
-        zend_weakrefs_hash_del(oxphp_redis_binds, zend_weakref_key_to_object(key));
+    ZEND_HASH_FOREACH_NUM_KEY(*table, key) {
+        zend_weakrefs_hash_del(*table, zend_weakref_key_to_object(key));
     } ZEND_HASH_FOREACH_END();
-    zend_hash_destroy(oxphp_redis_binds);
-    FREE_HASHTABLE(oxphp_redis_binds);
-    oxphp_redis_binds = NULL;
+    zend_hash_destroy(*table);
+    FREE_HASHTABLE(*table);
+    *table = NULL;
+}
+
+static void oxphp_redis_binds_destroy(void)
+{
+    oxphp_redis_table_destroy(&oxphp_redis_binds);
+    oxphp_redis_table_destroy(&oxphp_redis_unconnected);
 }
 
 /* The id redis_sock_connect_impl() (library.c, phpredis 6.3.0 and develop) gives a
@@ -5762,6 +5773,30 @@ static bool oxphp_redis_pooling_off(void)
     return zend_ini_long(ZEND_STRL("redis.pconnect.pooling_enabled"), 0) == 0;
 }
 
+/* Binds an object the constructor configured at its first hooked call: a command
+ * connects an object that is not yet connected before it builds anything
+ * (redis_sock_get(), phpredis 6.3.0 and develop), under the pooling setting of that
+ * moment. Read at the constructor instead, an object built with pooling on and
+ * first used with it off would be on a shared stream with nothing to say so. The
+ * getters in oxphp_redis_local connect it as well, without passing through here. */
+static void oxphp_redis_settle(zend_object *obj)
+{
+    if (oxphp_redis_unconnected == NULL || zend_hash_num_elements(oxphp_redis_unconnected) == 0) {
+        return;
+    }
+    zend_string *id =
+        zend_hash_index_find_ptr(oxphp_redis_unconnected, zend_object_to_weakref_key(obj));
+    if (id == NULL) return;
+
+    zend_string_addref(id);
+    oxphp_redis_put(&oxphp_redis_unconnected, obj, NULL);
+    if (oxphp_redis_pooling_off()) {
+        oxphp_redis_put(&oxphp_redis_binds, obj, id);
+    } else {
+        zend_string_release(id);
+    }
+}
+
 /* Whether this phpredis keeps a pconnect() connection persistent in a ZTS build.
  * 6.3.0 does not — redis_connect() turns persistence off under ZTS (redis.c) — so
  * its pconnect() opens a plain socket even where a constructor's `persistent`
@@ -5824,6 +5859,7 @@ static ZEND_NAMED_FUNCTION(oxphp_redis_hook)
                            || zend_string_equals_literal_ci(name, "popen");
     bool plain_open = zend_string_equals_literal_ci(name, "connect")
                       || zend_string_equals_literal_ci(name, "open");
+    if (obj != NULL && !persistent_open && !plain_open) oxphp_redis_settle(obj);
     void *key = oxphp_redis_conn_key(obj);
     zend_string *id = persistent_open && obj != NULL && oxphp_redis_pooling_off()
                           ? oxphp_redis_pconnect_id(execute_data)
@@ -5900,6 +5936,7 @@ static ZEND_NAMED_FUNCTION(oxphp_redis_hook)
         if (id != NULL) zend_string_release(id);
         return;
     }
+    oxphp_redis_put(&oxphp_redis_unconnected, obj, NULL);
 
     bool bound = false;
     if (id != NULL && Z_TYPE_P(return_value) == IS_TRUE) {
@@ -5938,23 +5975,21 @@ static ZEND_NAMED_FUNCTION(oxphp_redis_hook)
         }
     }
     if (!bound && id != NULL) zend_string_release(id);
-    oxphp_redis_bind(obj, bound ? id : NULL);
+    oxphp_redis_put(&oxphp_redis_binds, obj, bound ? id : NULL);
 }
 
-/* Binds the object it built; never takes the connection — see oxphp_redis_local. */
+/* Leaves the object it built to be bound by its first command; never takes the
+ * connection — see oxphp_redis_local. */
 static ZEND_NAMED_FUNCTION(oxphp_redis_ctor_hook)
 {
     zif_handler orig = oxphp_redis_orig(execute_data);
     if (orig == NULL) return;
 
     orig(INTERNAL_FUNCTION_PARAM_PASSTHRU);
-    /* Pooling as the constructor sees it, not as each call does: an object that
-     * connected with pooling off is still on the shared stream after a later request
-     * turns it back on. phpredis reads it at the first command, which connects; one
-     * run under the other setting is keyed by what the constructor saw. */
     if (EG(exception) == NULL && getThis() != NULL) {
-        oxphp_redis_bind(Z_OBJ_P(getThis()),
-                         oxphp_redis_pooling_off() ? oxphp_redis_ctor_id(execute_data) : NULL);
+        zend_object *obj = Z_OBJ_P(getThis());
+        oxphp_redis_put(&oxphp_redis_binds, obj, NULL);
+        oxphp_redis_put(&oxphp_redis_unconnected, obj, oxphp_redis_ctor_id(execute_data));
     }
 }
 
@@ -12688,6 +12723,7 @@ ZEND_MODULE_POST_ZEND_DEACTIVATE_D(oxphp_sapi)
     oxphp_curl_members = NULL;
     oxphp_curl_multis = NULL;
     oxphp_redis_binds = NULL;
+    oxphp_redis_unconnected = NULL;
 
     /* A mark PHP code made after RSHUTDOWN. The heap reset comes after this
      * (php_request_shutdown(), 8.4.27, 8.5.12). */
