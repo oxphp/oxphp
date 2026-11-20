@@ -1414,8 +1414,9 @@ void oxphp_exception_capture(void *ex_v,
      * does a spent memory_limit where no PHP frame is running. Where one is, the
      * engine reports the overrun at the call's entry or once it returns, as the
      * exception exit() raises. That lands in the slot the loop below empties, so
-     * the overrun does not end the request: the caller's exception goes on in
-     * its place.
+     * the overrun does not end the request and the caller's exception goes on in
+     * its place: the reverse of the engine, which raises the overrun over any
+     * exception in flight.
      * SYNC: php-src/Zend/zend_execute_API.c zend_call_function();
      *       php-src/Zend/zend_alloc.c zend_handle_delayed_oom()
      * The zend_try exists only to run our own cleanup on
