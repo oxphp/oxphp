@@ -133,7 +133,7 @@ oxphp_finish_request();     // Send response
 // ... work that no longer has a session ...
 ```
 
-In worker mode this is worth doing whether or not the request finishes early. A worker keeps one session open at a time, so while a request is paused with its session open, the worker takes no new request, `session_start()` in the other requests it is running waits, and the save handler holds whatever it locked — for the default handler, an exclusive lock that blocks anyone else reading that session. Closing the session as soon as its data is final gives all three back. See [Worker State Between Requests](worker-state.md#what-gets-reset-between-requests) for the full boundary.
+In worker mode this is worth doing whether or not the request finishes early. A worker keeps one session open at a time, so while a request is paused with its session open, the worker takes no new request, `session_start()` in the other requests it is running waits, and the save handler holds whatever it locked — for the default handler, an exclusive lock that blocks anyone else reading that session. Closing the session as soon as its data is final gives all three back. See [Worker State Between Requests](worker-state.md#sessions) for the full boundary.
 
 ### Response body is empty after calling `oxphp_finish_request()`
 

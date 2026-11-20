@@ -95,7 +95,7 @@ The client-level claim above is what keeps a guarded client's commands from reac
 
 #### Two fibers waiting on each other
 
-Because every wait is [bounded](#second-boundary-every-wait-is-bounded), two fibers each holding what the other waits for come apart on that bound instead of waiting on each other for good. The one such pair OxPHP can recognise comes apart at once instead: a request waiting in `session_start()` for the session another request on its worker has open (see [Worker State Between Requests](worker-state.md#what-gets-reset-between-requests)), while holding a connection that request is waiting for. The wait for the connection is then given up as soon as both are waiting, with the outcome a spent bound has, and the server log says so.
+Because every wait is [bounded](#second-boundary-every-wait-is-bounded), two fibers each holding what the other waits for come apart on that bound instead of waiting on each other for good. The one such pair OxPHP can recognise comes apart at once instead: a request waiting in `session_start()` for the session another request on its worker has open (see [Worker State Between Requests](worker-state.md#a-worker-has-one-session-open-at-a-time)), while holding a connection that request is waiting for. The wait for the connection is then given up as soon as both are waiting, with the outcome a spent bound has, and the server log says so.
 
 #### Code outside any fiber
 
