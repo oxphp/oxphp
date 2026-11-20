@@ -741,9 +741,10 @@ static zend_op_array *oxphp_compile_string(zend_string *source, const char *file
  * the log. Reached by a write that comes before the interrupt: a request
  * cancelled while it was parked, whose interrupt was raised against a worker
  * that was not running it, resuming into a write; or a stream writing after its
- * client left and before the interrupt reaches it. Not by a stream whose client
- * left after it had sent its headers: nothing notices that until its next flush,
- * and the flush interrupts it instead.
+ * client left and before the interrupt reaches it. And by the flush that finds
+ * the client gone: oxphp_bridge_flush() checks again after the send that
+ * recorded CLIENT_ABORT, so a stream that had sent its headers, and did not
+ * call ignore_user_abort(true), ends here, in that same flush.
  *
  * A write is made from inside an opcode or an internal call, which leaves the
  * chain in the states the walk already handles for a fatal raised there — an
@@ -3224,11 +3225,16 @@ static php_stream *oxphp_live_body_of(zend_resource *res) {
 }
 
 /* Give back the reference in `slot`. Never closes anything, whatever the state of
- * the resource: an open stream holds a reference of its own (php_stream::res, the
- * one it was registered with), so ours is never the last one while there is still
- * a stream to close, and by the time it is the last one zend_resource_dtor has
- * already run and only the zend_resource itself is left to free. Closing is the
- * caller's decision and rests on the liveness test above. */
+ * the resource. While the body is open ours is not the last reference: no zval
+ * holds the one the body was registered with (SG(request_info).request_body is a
+ * raw pointer), and only _php_stream_free() gives that one back: after
+ * zend_list_close() has run zend_resource_dtor, and not at all on a close with
+ * PHP_STREAM_FREE_KEEP_RSRC, as fclose() makes (main/streams/streams.c, 8.4.28).
+ * So if ours is ever the last, only the zend_resource itself is left to free. This
+ * holds for the body, not for streams in general: a stream handed to a script
+ * gives its registration reference to the script's zval (see
+ * oxphp_close_input_wrapper_guarded()). Closing is the caller's decision and
+ * rests on the liveness test above. */
 static void oxphp_drop_body_res(zend_resource **slot) {
     if (*slot != NULL) {
         zend_list_delete(*slot);
@@ -3259,7 +3265,7 @@ static void oxphp_drop_body_res(zend_resource **slot) {
  * pointer that goes stale when userland closes the body: php-src leaves it
  * standing. So nothing is read through it until the claim already held says it
  * is still the body's — and when the claim is dead, this returns rather than
- * asking anything of a pointer it knows to be dangling. Skipping that step is
+ * asking anything of a pointer that may be dangling. Skipping that step is
  * not academic: the walk that opens php://temp after closing the body would
  * otherwise read the resource of whichever stream has taken the block and adopt
  * THAT as the body, and the end of the request would close it. */
@@ -3282,7 +3288,14 @@ static void oxphp_adopt_request_body(void) {
             return; /* already ours, and the pointer is sound */
         }
         if (owned == NULL) {
-            return; /* our body is gone: `body` names freed memory */
+            /* Our claim is dead, so `body` is either a pointer to the closed
+             * body or a body created since — an error handler that closed ours
+             * inside a request_parse_body() call before its parse ran. The two
+             * cannot be told apart without a dereference, and zend_mm can hand
+             * the new stream the closed one's address, so nothing is read here.
+             * In the second case the new body is not claimed and stays
+             * allocated: a known trade-off. */
+            return;
         }
         /* Our body is alive and something else is standing in SG(). Only a
          * second parse in one request does that (userland request_parse_body),
@@ -4446,9 +4459,8 @@ static bool oxphp_ini_take_entry(zend_ini_entry *entry, oxphp_ini_pass *pass) {
         return false;
     }
 
-    /* Kept before the entry is put back, not after: keeping allocates, and an
-     * allocation that runs into memory_limit once the entry is back would lose
-     * the request's value with nothing left standing to show it. */
+    /* Kept before the entry is put back, not after: putting it back releases
+     * the request's value. */
     bool held = false;
     if (pass->keeping && entry->value != entry->orig_value) {
         if (pass->kept == NULL) {
@@ -4504,10 +4516,10 @@ static void oxphp_ini_retire_after_bailout(void) {
  * is reached like any other; one it has put back in the meantime has left the
  * set, and the iterator steps over the hole.
  *
- * Under a guard of its own: what the pass allocates for itself can run into
- * memory_limit, and a bailout from there past the end of the quiet window would
- * leave the application's error handler in this frame, the reporting level at
- * zero and parking blocked on this worker for good. Stops at the first bailout,
+ * Under a guard of its own: a handler can run user code, and a bailout from
+ * there past the end of the quiet window would leave the application's error
+ * handler in this frame, the reporting level at zero and parking blocked on
+ * this worker for good. Stops at the first bailout,
  * wherever it came from: user code that runs after one, before the request's
  * abandoned frames are given back, runs on top of them, and a second bailout
  * would take the place of the first as the frame the give-back starts from.
@@ -4630,9 +4642,8 @@ static void oxphp_fiber_unpark_ini(oxphp_request_fiber *fiber) {
     }
     fiber->php_state.ini_parked = NULL;
 
-    /* Guarded, stopped and retired from as a pass is (see
-     * oxphp_ini_run_pass()): a refusal is logged through an allocation of its
-     * own, which can run into memory_limit, and a handler can bail out. */
+    /* Guarded, stopped and retired from as a pass is, for the same reason: a
+     * handler can bail out (see oxphp_ini_run_pass()). */
     oxphp_ini_quiet q;
     oxphp_ini_engine_state engine;
     volatile bool bailed = false;
@@ -5607,9 +5618,8 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
              * half given back for as long as it was parked. Blocked, our suspend
              * points take their blocking path. Ours only, not the engine's
              * switch block, which would make a handler's own Fiber::start()
-             * throw. Guarded as a whole, not only where it runs user code:
-             * what the release allocates for itself can run into memory_limit,
-             * and a bailout from there past the lowering would leave parking
+             * throw. Guarded as a whole, not only where it runs user code: a
+             * bailout from anywhere in it past the lowering would leave parking
              * blocked on this worker for good. */
             oxphp_park_blocked++;
             zend_try {
@@ -6777,15 +6787,17 @@ void oxphp_reset_request_post_state(void) {
     SG(request_info).request_body = NULL;
     SG(rfc1867_uploaded_files) = NULL;
     /* And the claim on a body that goes with that pointer. The end of a request
-     * gives it back, so there should be nothing here; giving it back again
-     * rather than overwriting it is what keeps a path that skipped the end of a
-     * request from leaking the zend_resource for the life of the worker. */
+     * gives it back, so there should be nothing here. Giving it back rather than
+     * overwriting it frees the zend_resource of a body that is already closed,
+     * where ours is the last reference. A body a path past the end of the
+     * request left open still holds the reference it was registered with, so
+     * that stream and its resource stay allocated either way. */
     oxphp_drop_body_res(&oxphp_owned_body_res);
 
     /* The context request_parse_body() runs the parse under, reset the way
      * sapi_activate() resets it. That function restores both fields itself when
-     * it returns, but a bailout inside the parse — a fatal, exit(), the memory
-     * limit, the execution timeout — jumps straight past the line that would,
+     * it returns, but any bailout inside the parse — a fatal error, say, or the
+     * execution timeout — jumps straight past the line that would,
      * and in worker mode nothing else puts them back. Left standing, the flag
      * turns every later oversized or malformed body on that worker into a thrown
      * RequestParseBodyException raised from this reset, where no request is

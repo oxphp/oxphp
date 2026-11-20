@@ -193,6 +193,16 @@ The server says so itself at `WARN`: one line per counted failure, naming the wo
 docker logs <container> 2>&1 | grep -E '"level":"(ERROR|WARN)"'
 ```
 
+### Leaks or skipped destructors under Xdebug
+
+Xdebug's `develop` mode — the default when `xdebug.mode` is not set, and in force whenever `develop` is one of the modes listed — takes over PHP's error reporting from the first request on and does not pass errors on, so the worker's own handling of an error never runs. On a worker serving such requests:
+
+- a request ended by a fatal error leaves what its abandoned frames were holding allocated for the life of the worker, instead of the worker giving it back;
+- after a request exceeds `memory_limit`, the worker neither hands that memory back and puts the limit back in force, nor recycles for it, as [Recycling](#recycling) describes;
+- after a fatal error, the objects the worker keeps and those of the other requests in flight on it are released without their destructors running, as PHP does after a fatal, rather than as [Objects after a fatal error](#what-gets-reset-between-requests) describes.
+
+`debug` passes errors on to what stood before it, so none of this happens under it, but like `develop` it keeps the server's own error callback out of the chain: under either, errors are not logged with the server's structured fields, running out of `max_execution_time` is answered like any other fatal error instead of with `504`, and in worker mode the status of a fatal error is left to PHP, which answers `500` only with `display_errors` off. `profile`, `trace` and `off` leave error handling alone. Keep `develop` for development.
+
 ### Database connection drops after idle
 
 If your database server closes idle connections, reconnect attempts in the next request may fail. Use a connection pool that handles reconnection, or catch the exception and reconnect manually.

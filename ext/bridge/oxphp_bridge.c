@@ -1794,22 +1794,28 @@ int oxphp_call_callable_native(void *callable_zval, void *args, uint32_t argc, v
         zend_unwrap_reference((zval*)result);
     }
 
-    /* The result slot is droppable unconditionally, but not for the reason a
-     * first reading suggests: the zval_ptr_dtor + ZVAL_UNDEF pair inside
-     * zend_call_function (Zend/zend_execute_API.c:1035) sits in the
-     * ZEND_INTERNAL_FUNCTION branch only. For a user function — a Closure, the
-     * common case here — the retval is simply the ZVAL_UNDEF written at :804
-     * that ZEND_RETURN never got to overwrite. Either way the dtor below is a
-     * no-op or a correct release, and re-NULLing keeps that true for the Rust
-     * owner. EG(exception) stays set for the caller to propagate.
+    /* The result slot is droppable unconditionally: whatever the call left in
+     * it is ours, UNDEF where zend_call_function() released a value or never
+     * wrote one. So the dtor below is a no-op or a correct release, and
+     * re-NULLing keeps that true for the Rust owner. EG(exception) stays set
+     * for the caller to propagate.
      *
      * -2 means "an exception is pending after the attempt", not the stronger
-     * "the callable threw". Resolving "self::m" / "parent::m" / "static::m"
-     * emits E_DEPRECATED — check_flags is 0, so IS_CALLABLE_SUPPRESS_DEPRECATIONS
-     * is unset (Zend/zend_API.c:3780) — and under a throwing error handler that
-     * leaves an exception pending on a *successful* resolve. zend_call_function
-     * then releases the cache and returns without invoking anything (:810-814):
-     * nothing leaks, but the callable did not run. */
+     * "the callable threw". check_flags is 0, so IS_CALLABLE_SUPPRESS_DEPRECATIONS
+     * is unset: resolving a deprecated callable form raises a deprecation, and a
+     * throwing error handler leaves an exception pending. Where it is found
+     * depends on which check raised it (8.4.28, 8.5.13, 8.6.0):
+     * - zend_is_callable_check_class(), for the class part ("self::m",
+     *   ['self', 'm'] and the like), reports the resolve as failed when an
+     *   exception is pending, so the -2 comes from the early return above;
+     * - zend_is_callable_check_func() (zend_is_method_callable() on 8.6), for
+     *   an array whose method names a class (['Cls', 'A::m']), deprecates after
+     *   resolving, with no such check, so the resolve succeeds and
+     *   zend_call_function() finds the exception at its head and returns
+     *   without invoking anything. That exit only covers a call
+     *   made at once, as this one is: a callable kept and called later runs
+     *   unchecked.
+     * Either way the callable did not run here. */
     if (EG(exception)) {
         zval_ptr_dtor((zval*)result);
         ZVAL_NULL((zval*)result);
@@ -5645,8 +5651,10 @@ static zend_string *oxphp_class_missing_here(zend_class_entry *ce, HashTable *se
 /* A class whose constant or static property a body reads through self::,
  * static:: or parent::. An enum is checked whole, as its cases are among its
  * constants and reading one can create it. Any other class is refused when it
- * is another request's, and has what its constants and static properties hold
- * looked at otherwise, as have its parents. */
+ * is another request's, and has what its constants and property defaults hold
+ * looked at otherwise — a non-static property's default included, and the
+ * constants it inherits from the class or interface that declares them — as
+ * have its parents. */
 static zend_string *oxphp_scope_data_missing_here(zend_class_entry *ce, uint32_t *uses,
                                                   HashTable *seen) {
     if (ce && (ce->ce_flags & ZEND_ACC_ENUM)) {
@@ -5709,9 +5717,10 @@ static zend_string *oxphp_value_missing_here(zval *zv, HashTable *seen) {
  * from the OXPHP_USES_* flags in `uses`. Its body is checked, then, for a
  * closure and when `captures` is set, what it captured, then $this if the
  * body uses it, as any object it reaches, then the classes self and static
- * stand for: what their constants and static properties hold if the body
- * reads one through them, and the classes whole if it calls a method or
- * creates an object through them. */
+ * stand for: what their constants and property defaults hold if the body
+ * reads a constant or static property through them, as
+ * oxphp_scope_data_missing_here() says, and the classes whole if it calls a
+ * method or creates an object through them. */
 static zend_string *oxphp_call_missing_here(const zend_function *fn, zend_object *obj,
                                             zend_class_entry *called_scope, uint32_t uses,
                                             bool captures, HashTable *seen) {
