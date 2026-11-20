@@ -2179,7 +2179,7 @@ static void oxphp_stream_claim_refused_log(int fd, const char *why)
 
     /* Plain buffer rather than zend_strpprintf: this can be reached from a
      * shutdown path with no request arena, and the message is bounded. */
-    char msg[768];
+    char msg[1024];
     snprintf(msg, sizeof(msg),
              "oxphp: refused a socket operation on fd %d because another fiber holds this "
              "stream (%s). One connection is shared between concurrent fibers, so the "
@@ -2188,8 +2188,12 @@ static void oxphp_stream_claim_refused_log(int fd, const char *why)
              "exchange: a client is free to read a refused operation as the server having "
              "gone, and mysqlnd does so for both — a write that sends nothing and a read "
              "that comes away empty each mark the connection gone, and it is answered as "
-             "gone from then on, for as long as anything holds the handle (further "
-             "refusals on this thread are logged at most once a second)", fd, why);
+             "gone from then on, for as long as anything holds the handle. phpredis closes "
+             "the connection on a refused read of a reply line. Any other refused read fails "
+             "the call and leaves the rest of that reply unread on the connection, unless "
+             "phpredis goes on to read another line of it, which closes it. Built from its "
+             "development branch, it closes it on a refused write too (further refusals on "
+             "this thread are logged at most once a second)", fd, why);
     php_log_err(msg);
 }
 
@@ -2289,12 +2293,16 @@ static bool oxphp_write_may_wait(const php_stream *stream)
  * worker loop's cycle collection runs between requests. That code is checked like
  * a fiber, but its writes are refused rather than kept waiting — it has nothing to
  * suspend into — and it is never recorded: an entry with no owner would erase the
- * holder's claim, and there is no request end to release one from. This is the
- * only level such code is refused at. The client level's claim lasts to the end of
- * the holder's request rather than its exchange, so code that cannot wait would be
- * refused there for a connection nobody is using at that moment; here the refusal
- * is confined to the holder being parked on this descriptor for its reply, which is
- * the one window where the operation would land inside its exchange. */
+ * holder's claim, and there is no request end to release one from. For every client
+ * but phpredis this is the only level such code is refused at. The client level's
+ * claim lasts to the end of the holder's request rather than its exchange, so code
+ * that cannot wait would be refused on the claim alone for a connection nobody is
+ * using at that moment; here the refusal is confined to the holder being parked on
+ * this descriptor for its reply, which is the one window where the operation would
+ * land inside its exchange. phpredis built from its development branch closes the
+ * connection on a refused write, so phpredis calls are refused a level up as well,
+ * while the holder is inside a call on the connection: see
+ * oxphp_redis_mid_exchange(). */
 static oxphp_stream_claim_result oxphp_stream_claim(php_stream *stream,
                                                    const php_netstream_data_t *sock,
                                                    oxphp_request_fiber *self, bool may_wait)
@@ -2831,11 +2839,14 @@ static ssize_t oxphp_sockop_write_plain(php_stream *stream, const char *buf, siz
              * marks it gone where it stands. Every later command on it is then
              * answered from that state without touching the wire, so what is lost
              * is the connection rather than the call, for as long as anything
-             * holds the handle. The read side is reached the same way this one
-             * is, through the calls a claim does not stand in front of. That is
-             * what makes this the last resort rather than the mechanism — a
-             * guarded client's calls are kept from reaching here by the claim
-             * taken a level up, which waits. */
+             * holds the handle. phpredis built from its development branch closes
+             * the connection on a write that fails, and the close wakes the holder
+             * parked on it. The read side is reached the same way this one is,
+             * through the calls a claim does not stand in front of. That is what
+             * makes this the last resort rather than the mechanism — a guarded
+             * client's calls from a fiber are kept from reaching here by the claim
+             * taken a level up, which waits, and phpredis's from outside every
+             * fiber by a refusal taken there, which sends nothing. */
             sock->timeout_event = true;
             return -1;
         }
@@ -3767,11 +3778,12 @@ typedef enum {
 } oxphp_claim_wait_end;
 
 /* Wait, without holding any of them, until no fiber but `self` holds any of
- * `keys`, for at most `budget_ns` (oxphp_claim_budget_ns(), read by the caller so
- * that what it reports is what was waited for). `*held` is written only with a key
- * a poll found held, so on DEADLOCK and BUDGET it is the key that was still held,
- * and it is left as it was when no poll found one. `on_held`, when given, runs on
- * each poll that finds a key held. Takes nothing: the caller acquires, on FREE.
+ * `keys`, for at most `budget_ns` (oxphp_claim_budget_ns() or what the call has
+ * left of it, read by the caller so that what it reports is what was waited for).
+ * `*held` is written only with a key a poll found held, so on DEADLOCK and BUDGET
+ * it is the key that was still held, and it is left as it was when no poll found
+ * one. `on_held`, when given, runs on each poll that finds a key held. Takes
+ * nothing: the caller acquires, on FREE.
  *
  * The keys are only ever hashed, never dereferenced, so unlike the socket wait
  * this one cannot be left holding freed memory: an object destroyed while a fiber
@@ -3832,12 +3844,23 @@ static oxphp_claim_wait_end oxphp_claim_await(void *const *keys, size_t nkeys,
  *           a claim either way: the connection still belongs to a fiber that is
  *           mid-exchange on it, and overwriting that would erase the real
  *           holder's protection along with its release.
- * THREW   — cancelled, with an exception pending; the caller returns. */
-static oxphp_stream_claim_result oxphp_db_await_owner(void *key, oxphp_request_fiber *self)
+ * THREW   — cancelled, with an exception pending; the caller returns.
+ *
+ * `since`, when given, is when the call began waiting for the connections it named
+ * before this one: the bound is the call's, not each wait's. */
+static oxphp_stream_claim_result oxphp_db_await_owner(void *key, oxphp_request_fiber *self,
+                                                      const struct timespec *since)
 {
     int64_t budget_ns = oxphp_claim_budget_ns();
+    int64_t left_ns = budget_ns;
+    if (since != NULL) {
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        left_ns -= (int64_t)(now.tv_sec - since->tv_sec) * 1000000000
+                   + (int64_t)(now.tv_nsec - since->tv_nsec);
+    }
     void *held = key;
-    switch (oxphp_claim_await(&key, 1, self, budget_ns, &held, NULL, NULL)) {
+    switch (oxphp_claim_await(&key, 1, self, left_ns, &held, NULL, NULL)) {
     case OXPHP_CLAIM_WAIT_FREE:
         return OXPHP_CLAIM_OK;
     case OXPHP_CLAIM_WAIT_CANCELLED:
@@ -3898,12 +3921,12 @@ static oxphp_stream_claim_result oxphp_db_await_owner(void *key, oxphp_request_f
  * every object built from the same DSN, and two objects would otherwise be two
  * keys that never collide on the one connection they both use.
  *
- * For mysqli and phpredis the object IS the connection: both pool by handing a
- * free connection to one object at a time rather than one connection to two live
- * objects. Checked for phpredis rather than assumed, because pconnect() reads like
- * PDO::ATTR_PERSISTENT and is not the same thing — two objects built with
- * identical pconnect() arguments report different CLIENT IDs, with connection
- * pooling both on (the default) and off. */
+ * For mysqli the object IS the connection: it pools by handing a free connection
+ * to one object at a time rather than one connection to two live objects. So does
+ * phpredis with connection pooling on (the default). With it off, a phpredis that
+ * keeps persistent connections in a ZTS build hands every object opened with the
+ * same arguments the one stream it registered for them, and its claims are keyed
+ * by that stream instead: see oxphp_redis_conn_key(). */
 #ifdef OXPHP_HAVE_PDO_HEADERS
 /* For each PDO object on a pooled handle we guard, the request or task that last
  * had a use for it: the one that built it, then each one that makes a claimed
@@ -3980,8 +4003,8 @@ static void *oxphp_db_conn_key(zend_object *obj, bool is_pdo)
     return obj;
 }
 
-/* The body every hooked client entry point shares: find the connection this call
- * is about, make sure it is this fiber's, then run the original handler.
+/* Make sure the connection `key` names is this fiber's. False when the call must
+ * not go ahead, with the exception that says why pending.
  *
  * `fail_unguarded` picks what happens when the wait gives up, and it differs by
  * client for one reason: what running unguarded costs. mysqlnd refuses a command
@@ -3989,15 +4012,89 @@ static void *oxphp_db_conn_key(zend_object *obj, bool is_pdo)
  * a loud, catchable client error and nothing reaches the wire. phpredis has no
  * such check — delegating puts the command on the wire and each fiber reads the
  * other's reply, which is the silent data crossing this whole mechanism exists to
- * prevent. Sixty seconds in, the choice is not between cheap and expensive but
- * between an error and corruption, so that path raises instead. */
-static void oxphp_db_guarded_call(zif_handler orig, bool conn_is_arg1, bool is_pdo,
-                                 bool fail_unguarded, INTERNAL_FUNCTION_PARAMETERS)
+ * prevent. Once the wait is spent, the choice is not between cheap and expensive
+ * but between an error and corruption, so that path raises instead.
+ *
+ * `since`: see oxphp_db_await_owner(). */
+static bool oxphp_db_take(zend_object *conn, void *key, bool is_pdo, bool fail_unguarded,
+                          const struct timespec *since)
 {
     oxphp_request_fiber *self = oxphp_current_fiber;
+    ZEND_ASSERT(key != NULL && self != NULL);
+
+    oxphp_request_fiber *owner = oxphp_claim_owner(key);
+    bool ours = (owner == NULL || owner == self);
+
+    if (!ours) {
+        switch (oxphp_db_await_owner(key, self, since)) {
+            case OXPHP_CLAIM_THREW:
+                return false; /* cancelled; the exception is already pending */
+            case OXPHP_CLAIM_OK:
+                ours = true;
+                break;
+            default:
+                /* Gave up. Either way the holder's claim is left alone — it is
+                 * still mid-exchange and overwriting it would erase its
+                 * protection along with its release. */
+                if (fail_unguarded) {
+                    oxphp_throw_exception(
+                        "RedisException",
+                        "oxphp: another fiber holds this Redis connection and did not give "
+                        "it up in time, so the command was not sent. Sending it would have "
+                        "landed in the middle of that fiber's exchange, and phpredis reads "
+                        "whatever reply comes next — the two would have been swapped with "
+                        "no error raised. The server log says which connection and why",
+                        0);
+                    return false;
+                }
+                break; /* delegate; the client answers for itself */
+        }
+    }
+
+    /* Failure here means the table could not grow, which the socket path
+     * already reports; the call goes ahead either way. */
+    if (ours) (void) oxphp_claim_acquire(key, self);
+#ifdef OXPHP_HAVE_PDO_HEADERS
+    /* Only a call that has the connection: one that went ahead without it
+     * changes nothing about whose business this object is. */
+    if (ours && is_pdo) oxphp_pdo_user_set(conn, self, false);
+#else
+    (void) conn;
+    (void) is_pdo;
+#endif
+    return true;
+}
+
+/* Make sure the connection `key` names is this fiber's, then run the original
+ * handler. NULL means no connection to guard: outside a fiber, or a call that
+ * names none. Returns whether the handler ran. */
+static bool oxphp_db_guarded_run(zif_handler orig, zend_object *conn, void *key, bool is_pdo,
+                                 bool fail_unguarded, INTERNAL_FUNCTION_PARAMETERS)
+{
+    if (key == NULL) {
+        orig(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+        return true;
+    }
+    if (!oxphp_db_take(conn, key, is_pdo, fail_unguarded, NULL)) return false;
+
+    /* Put back rather than cleared: the handler can run PHP code — an error
+     * handler, a serializer — that makes a client call of its own on this fiber. */
+    oxphp_request_fiber *self = oxphp_current_fiber;
+    zend_object *outer = self->db_call_conn;
+    self->db_call_conn = conn;
+    orig(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+    self->db_call_conn = outer;
+    return true;
+}
+
+/* The body every hooked client entry point shares: find the connection this call
+ * is about, then guard it. */
+static void oxphp_db_guarded_call(zif_handler orig, bool conn_is_arg1, bool is_pdo,
+                                  INTERNAL_FUNCTION_PARAMETERS)
+{
     zend_object *conn = NULL;
 
-    if (self != NULL) {
+    if (oxphp_current_fiber != NULL) {
         if (conn_is_arg1) {
             /* The procedural mysqli form, mysqli_query($link, …): the connection
              * is the first argument. Read without touching it — the original
@@ -4011,48 +4108,8 @@ static void oxphp_db_guarded_call(zif_handler orig, bool conn_is_arg1, bool is_p
         }
     }
 
-    void *key = oxphp_db_conn_key(conn, is_pdo);
-    if (key != NULL) {
-        oxphp_request_fiber *owner = oxphp_claim_owner(key);
-        bool ours = (owner == NULL || owner == self);
-
-        if (!ours) {
-            switch (oxphp_db_await_owner(key, self)) {
-                case OXPHP_CLAIM_THREW:
-                    return; /* cancelled; the exception is already pending */
-                case OXPHP_CLAIM_OK:
-                    ours = true;
-                    break;
-                default:
-                    /* Gave up. Either way the holder's claim is left alone — it is
-                     * still mid-exchange and overwriting it would erase its
-                     * protection along with its release. */
-                    if (fail_unguarded) {
-                        oxphp_throw_exception(
-                            "RedisException",
-                            "oxphp: another fiber holds this Redis connection and did not give "
-                            "it up in time, so the command was not sent. Sending it would have "
-                            "landed in the middle of that fiber's exchange, and phpredis reads "
-                            "whatever reply comes next — the two would have been swapped with "
-                            "no error raised. The server log says which connection and why",
-                            0);
-                        return;
-                    }
-                    break; /* delegate; the client answers for itself */
-            }
-        }
-
-        /* Failure here means the table could not grow, which the socket path
-         * already reports; the call goes ahead either way. */
-        if (ours) (void) oxphp_claim_acquire(key, self);
-#ifdef OXPHP_HAVE_PDO_HEADERS
-        /* Only a call that has the connection: one that went ahead without it
-         * changes nothing about whose business this object is. */
-        if (ours && is_pdo) oxphp_pdo_user_set(conn, self, false);
-#endif
-    }
-
-    orig(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+    (void) oxphp_db_guarded_run(orig, conn, oxphp_db_conn_key(conn, is_pdo), is_pdo, false,
+                                INTERNAL_FUNCTION_PARAM_PASSTHRU);
 }
 
 /* The hooked entry points, as (id, lowercase class or NULL, lowercase name,
@@ -4150,7 +4207,7 @@ static void oxphp_db_guarded_call(zif_handler orig, bool conn_is_arg1, bool is_p
     static zif_handler oxphp_db_orig_##id = NULL;                             \
     static ZEND_NAMED_FUNCTION(oxphp_db_hook_##id)                            \
     {                                                                         \
-        oxphp_db_guarded_call(oxphp_db_orig_##id, (arg1), (pdo), false,       \
+        oxphp_db_guarded_call(oxphp_db_orig_##id, (arg1), (pdo),              \
                               INTERNAL_FUNCTION_PARAM_PASSTHRU);              \
     }
 OXPHP_DB_ENTRIES(OXPHP_DB_DEFINE)
@@ -5248,7 +5305,7 @@ static ZEND_NAMED_FUNCTION(oxphp_db_hook_pdo_getattr)
         oxphp_db_orig_pdo_getattr(INTERNAL_FUNCTION_PARAM_PASSTHRU);
         return;
     }
-    oxphp_db_guarded_call(oxphp_db_orig_pdo_getattr, false, true, false,
+    oxphp_db_guarded_call(oxphp_db_orig_pdo_getattr, false, true,
                           INTERNAL_FUNCTION_PARAM_PASSTHRU);
 }
 
@@ -5258,7 +5315,7 @@ static ZEND_NAMED_FUNCTION(oxphp_db_hook_pdo_setattr)
         oxphp_db_orig_pdo_setattr(INTERNAL_FUNCTION_PARAM_PASSTHRU);
         return;
     }
-    oxphp_db_guarded_call(oxphp_db_orig_pdo_setattr, false, true, false,
+    oxphp_db_guarded_call(oxphp_db_orig_pdo_setattr, false, true,
                           INTERNAL_FUNCTION_PARAM_PASSTHRU);
 }
 
@@ -5446,7 +5503,241 @@ static const char *const oxphp_redis_local[] = {
     "_unserialize", "_pack", "_unpack", "_compress", "_uncompress",
 };
 
-static ZEND_NAMED_FUNCTION(oxphp_redis_hook)
+/* Redis object → the persistent id phpredis registers its stream under when
+ * connection pooling is off, for the objects opened persistently with arguments
+ * the id can be built from. Weakly keyed, so an entry goes in its object's own
+ * destruction; in the request's arena, like the cURL tables. */
+static __thread HashTable *oxphp_redis_binds = NULL;
+
+static void oxphp_redis_bind_dtor(zval *zv)
+{
+    zend_string_release(Z_PTR_P(zv));
+}
+
+/* Takes `id`; NULL drops the object's entry. */
+static void oxphp_redis_bind(zend_object *obj, zend_string *id)
+{
+    if (oxphp_redis_binds == NULL) {
+        if (id == NULL) return;
+        ALLOC_HASHTABLE(oxphp_redis_binds);
+        zend_hash_init(oxphp_redis_binds, 8, NULL, oxphp_redis_bind_dtor, 0);
+    }
+    /* zend_weakrefs_hash_add() does not replace an entry. */
+    (void) zend_weakrefs_hash_del(oxphp_redis_binds, obj);
+    if (id != NULL) (void) zend_weakrefs_hash_add_ptr(oxphp_redis_binds, obj, id);
+}
+
+/* Before the executor frees the objects, for the reason oxphp_curl_members_destroy()
+ * gives. */
+static void oxphp_redis_binds_destroy(void)
+{
+    if (oxphp_redis_binds == NULL) return;
+
+    zend_ulong key;
+    ZEND_HASH_FOREACH_NUM_KEY(oxphp_redis_binds, key) {
+        zend_weakrefs_hash_del(oxphp_redis_binds, zend_weakref_key_to_object(key));
+    } ZEND_HASH_FOREACH_END();
+    zend_hash_destroy(oxphp_redis_binds);
+    FREE_HASHTABLE(oxphp_redis_binds);
+    oxphp_redis_binds = NULL;
+}
+
+/* The id redis_sock_connect_impl() (library.c, phpredis 6.3.0 and develop) gives a
+ * persistent stream when pooling is off, from the same inputs and by the same
+ * steps. The id is the whole of what makes two objects share a stream, so a step
+ * missed here is two objects on one connection that never wait for each other. */
+static zend_string *oxphp_redis_persistent_id(const char *address, int port, double timeout,
+                                              const char *pid, bool tls)
+{
+    char host[1024], scheme[8];
+    const char *pos = strstr(address, "://");
+    if (pos == NULL) {
+        strcpy(scheme, tls ? "ssl" : "tcp");
+    } else {
+        snprintf(scheme, sizeof(scheme), "%.*s", (int) (pos - address), address);
+        address = pos + sizeof("://") - 1;
+    }
+
+    if (address[0] == '/' && port < 1) {
+        snprintf(host, sizeof(host), "unix://%s", address);
+    } else {
+        if (port == 0) port = 6379;
+        bool bracket = false;
+#ifdef HAVE_IPV6
+        bracket = strchr(address, ':') != NULL && strchr(address, '[') == NULL;
+#endif
+        snprintf(host, sizeof(host), bracket ? "%s://[%s]:%d" : "%s://%s:%d", scheme, address,
+                 port);
+    }
+
+    /* strpprintf(), as phpredis does: %f is PHP's own formatting, not libc's. */
+    return pid != NULL ? strpprintf(0, "phpredis:%s:%s", host, pid)
+                       : strpprintf(0, "phpredis:%s:%f", host, timeout);
+}
+
+/* The id for a pconnect()/popen() call, from its arguments as redis_connect()
+ * reads them. A numeric string is read as ZPP reads it, since that conversion is
+ * plain parsing and a port taken from the environment arrives as one; a port only
+ * when written as a whole number. NULL for an argument ZPP would convert in any
+ * other way: a host that is not a string would run its __toString() a second
+ * time. */
+static zend_string *oxphp_redis_pconnect_id(zend_execute_data *execute_data)
+{
+    uint32_t argc = ZEND_NUM_ARGS();
+    if (argc < 1) return NULL;
+
+    zval *zhost = ZEND_CALL_ARG(execute_data, 1);
+    if (Z_TYPE_P(zhost) != IS_STRING) return NULL;
+
+    zend_long port = -1;
+    if (argc >= 2) {
+        zval *zv = ZEND_CALL_ARG(execute_data, 2);
+        if (Z_TYPE_P(zv) == IS_LONG) {
+            port = Z_LVAL_P(zv);
+        } else if (Z_TYPE_P(zv) != IS_STRING
+                   || is_numeric_string(Z_STRVAL_P(zv), Z_STRLEN_P(zv), &port, NULL, false)
+                          != IS_LONG) {
+            return NULL;
+        }
+    }
+
+    double timeout = 0.0;
+    if (argc >= 3) {
+        zval *zv = ZEND_CALL_ARG(execute_data, 3);
+        zend_long ltimeout;
+        if (Z_TYPE_P(zv) == IS_DOUBLE) {
+            timeout = Z_DVAL_P(zv);
+        } else if (Z_TYPE_P(zv) == IS_LONG) {
+            timeout = (double) Z_LVAL_P(zv);
+        } else if (Z_TYPE_P(zv) != IS_STRING) {
+            return NULL;
+        } else {
+            switch (is_numeric_string(Z_STRVAL_P(zv), Z_STRLEN_P(zv), &ltimeout, &timeout, false)) {
+            case IS_LONG: timeout = (double) ltimeout; break;
+            case IS_DOUBLE: break;
+            default: return NULL;
+            }
+        }
+    }
+
+    const char *pid = NULL;
+    if (argc >= 4) {
+        zval *zv = ZEND_CALL_ARG(execute_data, 4);
+        if (Z_TYPE_P(zv) == IS_STRING) {
+            pid = Z_STRVAL_P(zv);
+        } else if (Z_TYPE_P(zv) != IS_NULL) {
+            return NULL;
+        }
+    }
+
+    /* TLS when the context carries a "stream" array, looked up without
+     * dereferencing, as redis_sock_set_context_zval() takes it. */
+    bool tls = false;
+    if (argc >= 7) {
+        zval *zv = ZEND_CALL_ARG(execute_data, 7);
+        if (Z_TYPE_P(zv) == IS_ARRAY) {
+            zval *stream = zend_hash_str_find(Z_ARRVAL_P(zv), "stream", sizeof("stream") - 1);
+            tls = stream != NULL && Z_TYPE_P(stream) == IS_ARRAY;
+        } else if (Z_TYPE_P(zv) != IS_NULL) {
+            return NULL;
+        }
+    }
+
+    const char *host = Z_STRVAL_P(zhost);
+    size_t host_len = Z_STRLEN_P(zhost);
+    bool af_unix = (host_len > 0 && host[0] == '/')
+        || (host_len > 6 && (strncasecmp(host, "unix://", sizeof("unix://") - 1) == 0
+                             || strncasecmp(host, "file://", sizeof("file://") - 1) == 0));
+    if (port == -1 && !af_unix) port = 6379;
+
+    return oxphp_redis_persistent_id(host, (int) port, timeout, pid, tls);
+}
+
+/* The id for an object the constructor configured, from its options as
+ * redis_sock_configure() reads them, which connects lazily inside the first
+ * command. NULL when it is not persistent. Only called once the constructor has
+ * returned without an exception, so every option it reads has the type
+ * redis_sock_configure() accepted. */
+static zend_string *oxphp_redis_ctor_id(zend_execute_data *execute_data)
+{
+    if (ZEND_NUM_ARGS() < 1) return NULL;
+    zval *opts = ZEND_CALL_ARG(execute_data, 1);
+    if (Z_TYPE_P(opts) != IS_ARRAY) return NULL;
+
+    const char *host = "127.0.0.1";
+    zend_long port = 6379;
+    double timeout = 0.0;
+    const char *pid = NULL;
+    bool persistent = false, tls = false;
+
+    zend_string *zkey;
+    zval *val;
+    ZEND_HASH_FOREACH_STR_KEY_VAL(Z_ARRVAL_P(opts), zkey, val) {
+        if (zkey == NULL) continue;
+        ZVAL_DEREF(val);
+        if (zend_string_equals_literal_ci(zkey, "host")) {
+            if (Z_TYPE_P(val) != IS_STRING) return NULL;
+            host = Z_STRVAL_P(val);
+        } else if (zend_string_equals_literal_ci(zkey, "port")) {
+            if (Z_TYPE_P(val) != IS_LONG) return NULL;
+            port = Z_LVAL_P(val);
+        } else if (zend_string_equals_literal_ci(zkey, "connectTimeout")) {
+            if (Z_TYPE_P(val) != IS_LONG && Z_TYPE_P(val) != IS_DOUBLE) return NULL;
+            timeout = zval_get_double(val);
+        } else if (zend_string_equals_literal_ci(zkey, "persistent")) {
+            if (Z_TYPE_P(val) == IS_STRING) {
+                pid = Z_STRVAL_P(val);
+                persistent = true;
+            } else {
+                persistent = zend_is_true(val);
+            }
+        } else if (zend_string_equals_literal_ci(zkey, "ssl")) {
+            if (Z_TYPE_P(val) != IS_ARRAY) return NULL;
+            tls = true;
+        }
+    } ZEND_HASH_FOREACH_END();
+
+    return persistent ? oxphp_redis_persistent_id(host, (int) port, timeout, pid, tls) : NULL;
+}
+
+/* The stream registered under `id`, or else `obj`. A stream is the key the socket
+ * level claims it by, so a call through any object on it waits for an exchange
+ * started through another — including one started by the call that connected it,
+ * before that call's own key could name the stream. Looked up on every call rather
+ * than kept: phpredis closes the stream on an error and the next connect registers
+ * a new one under the same id. With pooling on the streams carry ids of their own,
+ * this one names none, and the key stays the object. */
+static void *oxphp_redis_id_key(zend_string *id, zend_object *obj)
+{
+    if (id != NULL) {
+        zend_resource *le = zend_hash_find_ptr(&EG(persistent_list), id);
+        if (le != NULL && le->type == php_file_le_pstream() && le->ptr != NULL) return le->ptr;
+    }
+    return obj;
+}
+
+static void *oxphp_redis_conn_key(zend_object *obj)
+{
+    if (obj == NULL) return NULL;
+    zend_string *id = oxphp_redis_binds != NULL
+        ? zend_hash_index_find_ptr(oxphp_redis_binds, zend_object_to_weakref_key(obj))
+        : NULL;
+    return oxphp_redis_id_key(id, obj);
+}
+
+/* Asked from outside every fiber, where nothing can wait: whether the fiber holding
+ * `key` is inside a Redis call on that connection, and so suspended in the middle
+ * of its exchange. A holder that is not still has the claim, to the end of its
+ * request, with nothing of its own on the wire. */
+static bool oxphp_redis_mid_exchange(void *key)
+{
+    if (key == NULL) return false;
+    oxphp_request_fiber *owner = oxphp_claim_owner(key);
+    return owner != NULL && owner->db_call_conn != NULL
+           && oxphp_redis_conn_key(owner->db_call_conn) == key;
+}
+
+static zif_handler oxphp_redis_orig(zend_execute_data *execute_data)
 {
     zend_string *name = execute_data->func->common.function_name;
     zif_handler orig = name != NULL
@@ -5459,10 +5750,108 @@ static ZEND_NAMED_FUNCTION(oxphp_redis_hook)
          * nothing would return null from a command that never ran. */
         zend_throw_error(NULL, "oxphp: no original handler recorded for Redis::%s",
                          name != NULL ? ZSTR_VAL(name) : "?");
+    }
+    return orig;
+}
+
+static ZEND_NAMED_FUNCTION(oxphp_redis_hook)
+{
+    zif_handler orig = oxphp_redis_orig(execute_data);
+    if (orig == NULL) return;
+
+    zend_object *obj = getThis() != NULL ? Z_OBJ_P(getThis()) : NULL;
+    zend_string *name = execute_data->func->common.function_name;
+
+    /* Every call is keyed by the connection the object is on, connect() included:
+     * it lets go of that one first. pconnect() lets go of it too, and is keyed as
+     * well by the connection it opens, whose read timeout it sets inside the call
+     * when given one, under any fiber reading a reply from it. */
+    bool persistent_open = zend_string_equals_literal_ci(name, "pconnect")
+                           || zend_string_equals_literal_ci(name, "popen");
+    bool plain_open = zend_string_equals_literal_ci(name, "connect")
+                      || zend_string_equals_literal_ci(name, "open");
+    void *key = oxphp_redis_conn_key(obj);
+    zend_string *id = persistent_open && obj != NULL ? oxphp_redis_pconnect_id(execute_data) : NULL;
+    void *opened = persistent_open ? oxphp_redis_id_key(id, obj) : key;
+
+    void *busy = NULL;
+    if (oxphp_current_fiber == NULL) {
+        if (oxphp_redis_mid_exchange(key)) {
+            busy = key;
+        } else if (opened != key && oxphp_redis_mid_exchange(opened)) {
+            busy = opened;
+        }
+    }
+
+    bool ran = true;
+    if (oxphp_current_fiber != NULL) {
+        /* A take that waits lets other fibers run, and what a key names can change
+         * meanwhile: the stream is closed, which frees its claim, and the object's
+         * next call opens another under the same id, or another object opens the
+         * stream pconnect() goes on to reuse. So both are named again on each pass,
+         * until a pass changes neither — a take that did not wait runs nothing
+         * else, so the first such pass ends it. Every take counts against the one
+         * bound the call has: a holder that keeps replacing the connection would
+         * otherwise hand the waiter a fresh one each time. */
+        struct timespec started;
+        clock_gettime(CLOCK_MONOTONIC, &started);
+        void *took = NULL, *took_opened = NULL;
+        while (obj != NULL) {
+            key = oxphp_redis_conn_key(obj);
+            opened = persistent_open ? oxphp_redis_id_key(id, obj) : key;
+            if (key == took && opened == took_opened) break;
+            took = key;
+            took_opened = opened;
+            if (!oxphp_db_take(obj, key, false, true, &started)
+                || (opened != key && !oxphp_db_take(obj, opened, false, true, &started))) {
+                ran = false;
+                break;
+            }
+        }
+        ran = ran && oxphp_db_guarded_run(orig, obj, opened, false, true,
+                                          INTERNAL_FUNCTION_PARAM_PASSTHRU);
+    } else if (busy != NULL) {
+        /* Not sent, and not thrown either: an exception raised out here surfaces
+         * in whichever fiber is resumed next. false is what phpredis answers for a
+         * command it could not write. */
+        static __thread int64_t last_ns = 0;
+        if (oxphp_contended_log_ready(&last_ns)) {
+            char msg[400];
+            snprintf(msg, sizeof(msg),
+                     "oxphp: Redis::%s on connection %p was not sent and returned false: it "
+                     "was called outside any request fiber, where nothing can wait, while "
+                     "the fiber holding the connection was in the middle of a command on it "
+                     "(logged at most once a second on this thread)", ZSTR_VAL(name), busy);
+            php_log_err(msg);
+        }
+        RETVAL_FALSE;
+        ran = false;
+    } else {
+        orig(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+        ran = true;
+    }
+
+    if (!ran || obj == NULL || !(persistent_open || plain_open)) {
+        if (id != NULL) zend_string_release(id);
         return;
     }
 
-    oxphp_db_guarded_call(orig, false, false, true, INTERNAL_FUNCTION_PARAM_PASSTHRU);
+    /* A failed pconnect() leaves the object with no connection at all. */
+    bool bound = persistent_open && Z_TYPE_P(return_value) == IS_TRUE;
+    if (!bound && id != NULL) zend_string_release(id);
+    oxphp_redis_bind(obj, bound ? id : NULL);
+}
+
+/* Binds the object it built; never takes the connection — see oxphp_redis_local. */
+static ZEND_NAMED_FUNCTION(oxphp_redis_ctor_hook)
+{
+    zif_handler orig = oxphp_redis_orig(execute_data);
+    if (orig == NULL) return;
+
+    orig(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+    if (EG(exception) == NULL && getThis() != NULL) {
+        oxphp_redis_bind(Z_OBJ_P(getThis()), oxphp_redis_ctor_id(execute_data));
+    }
 }
 
 static bool oxphp_redis_is_local(const char *name)
@@ -5503,6 +5892,18 @@ static void oxphp_hook_redis_entries(void)
         /* The table key is the lowercase form the function tables are keyed by. */
         (void) oxphp_retarget_inherited(ce, ZSTR_VAL(table_key), orig, oxphp_redis_hook);
     } ZEND_HASH_FOREACH_END();
+
+    fn = zend_hash_str_find_ptr(&ce->function_table, ZEND_STRL("__construct"));
+    if (fn != NULL && fn->type == ZEND_INTERNAL_FUNCTION && fn->common.function_name != NULL
+        && fn->internal_function.handler != oxphp_redis_ctor_hook) {
+        zif_handler orig = fn->internal_function.handler;
+        zend_string *name = fn->common.function_name;
+        if (zend_hash_str_add_ptr(&oxphp_redis_origs, ZSTR_VAL(name), ZSTR_LEN(name),
+                                  (void *) orig) != NULL) {
+            fn->internal_function.handler = oxphp_redis_ctor_hook;
+            (void) oxphp_retarget_inherited(ce, "__construct", orig, oxphp_redis_ctor_hook);
+        }
+    }
 }
 
 static void oxphp_restore_redis_entries(void)
@@ -5515,7 +5916,8 @@ static void oxphp_restore_redis_entries(void)
         zend_function *fn;
         ZEND_HASH_FOREACH_STR_KEY_PTR(&ce->function_table, table_key, fn) {
             if (table_key == NULL || fn == NULL || fn->type != ZEND_INTERNAL_FUNCTION) continue;
-            if (fn->internal_function.handler != oxphp_redis_hook) continue;
+            zif_handler hook = fn->internal_function.handler;
+            if (hook != oxphp_redis_hook && hook != oxphp_redis_ctor_hook) continue;
 
             zend_string *name = fn->common.function_name;
             zif_handler orig = name != NULL
@@ -5524,7 +5926,7 @@ static void oxphp_restore_redis_entries(void)
             if (orig == NULL) continue;
 
             fn->internal_function.handler = orig;
-            (void) oxphp_retarget_inherited(ce, ZSTR_VAL(table_key), oxphp_redis_hook, orig);
+            (void) oxphp_retarget_inherited(ce, ZSTR_VAL(table_key), hook, orig);
         } ZEND_HASH_FOREACH_END();
     }
 
@@ -12123,6 +12525,7 @@ PHP_RSHUTDOWN_FUNCTION(oxphp_sapi)
     oxphp_bridge_cleanup_outstanding_promises();
 
     oxphp_curl_members_destroy();
+    oxphp_redis_binds_destroy();
 
     /* Clear decorator instance cache — zvals are dtor'd by the HT's
      * registered destructor, we just need to empty the table. */
@@ -12174,9 +12577,10 @@ ZEND_MODULE_POST_ZEND_DEACTIVATE_D(oxphp_sapi)
 
     /* Tables a cURL call made after RSHUTDOWN — from a session save handler, say,
      * whose module shuts down after this one — opened: the arena they are in goes
-     * with the heap reset. */
+     * with the heap reset. The same for the Redis bindings. */
     oxphp_curl_members = NULL;
     oxphp_curl_multis = NULL;
+    oxphp_redis_binds = NULL;
 
     /* A mark PHP code made after RSHUTDOWN. The heap reset comes after this
      * (php_request_shutdown(), 8.4.27, 8.5.12). */

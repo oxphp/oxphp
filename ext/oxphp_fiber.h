@@ -584,6 +584,13 @@ typedef struct _oxphp_request_fiber {
      * it before the second runs. See oxphp_pdo_free_obj in oxphp_sapi.c. */
     oxphp_pdo_teardown pdo_teardown;
 
+    /* The connection object of the guarded database client call this fiber is
+     * inside, NULL outside one. Code running outside any fiber cannot wait for a
+     * connection; this is what tells it a holder in the middle of a command from
+     * one that only still holds the claim. Only compared, never dereferenced. One
+     * of the operation names oxphp_fiber_forget_io_names() clears. */
+    zend_object *db_call_conn;
+
     /* The zend_fcall_info/cache for the handler closure (shared, not owned) */
     zend_fcall_info *fci;
     zend_fcall_info_cache *fcc;

@@ -33,10 +33,20 @@ hooksdb/test_shared_pdo_connect_no_crosstalk
 hooksdb/test_shared_persistent_no_crosstalk
 hooksdb/test_shared_db_concurrent_queries
 
-# A premise the phpredis claim key rests on rather than a scenario: one live Redis
-# object is one connection, including through pconnect(), which reads like PDO's
-# persistent connections and does not behave like them.
+# Redis objects phpredis puts on one persistent connection, which it does with
+# pooling off: they take turns on it, as calls through one object do. With pooling
+# on, the default, each object has a connection of its own.
 hooksdb/test_shared_pconnect_two_objects
+
+# pconnect() on an object another request is reading a reply through moves it off
+# that connection, so it waits for the reader like any other call through it.
+hooksdb/test_shared_pconnect_moves_held_object
+
+# A holder that loses such a connection and reconnects is on a new one under the
+# same id: a request that was waiting for the old one goes on waiting for it, and
+# however often the holder reconnects, within the one bound its call has.
+hooksdb/test_shared_redis_reconnect_while_waited
+hooksdb/test_shared_redis_reconnect_past_the_bound
 
 # Both sides of the one list whose mistakes are unsafe: a call left unclaimed that
 # should have been claimed sends a command into someone else's exchange, while the
@@ -56,8 +66,10 @@ hooksdb/test_shared_raw_write_wait_gives_up
 
 # The same claims, seen from code that is not in a request fiber at all — a
 # destructor the worker loop's cycle collection runs between requests. It cannot
-# wait, so it is refused at the socket while a holder is parked on its reply, and
-# goes through on a connection that is held but idle.
+# wait, so it is refused while a holder is in the middle of an exchange on the
+# connection — at the socket on a raw stream, a step earlier for phpredis — and
+# goes through on a connection that is held but idle, or whose holder is busy on
+# another.
 hooksdb/test_shared_conn_outside_fiber_refused
 
 # A persistent connection is put into the pool, or found there, while another

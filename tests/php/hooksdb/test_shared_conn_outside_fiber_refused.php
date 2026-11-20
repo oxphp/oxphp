@@ -13,14 +13,15 @@ $t = new TestCase('shared_conn_outside_fiber_refused', 'hooksdb');
 // cannot wait for a connection — but it must still see a holder parked on one for
 // its reply, or its command lands in the middle of that exchange.
 //
-// Three holders. Two are mid-exchange, each parked in a blocking pop: one through
-// phpredis, one through a hand-written RESP exchange on a plain stream. The third
-// used its phpredis connection and then parked on a sleep, so it holds that
-// connection's client-level claim with nothing on the wire. This request drops a
-// cycle whose destructor uses all three connections, and fills the worker's request
-// count up to the next multiple of a hundred so the loop collects it while all
-// three are still parked. Then it releases the holders itself, so the run takes as
-// long as the fill does rather than the holders' twelve-second window.
+// Four holders. Two are mid-exchange, each parked in a blocking pop: one through
+// phpredis, one through a hand-written RESP exchange on a plain stream. The other
+// two used a phpredis connection and then parked elsewhere, so each holds that
+// connection's client-level claim with nothing on its wire: one on a sleep, one in
+// a phpredis pop on a second connection of its own. This request drops a cycle
+// whose destructor uses the four connections, and fills the worker's request count
+// up to the next multiple of a hundred so the loop collects it while all four are
+// still parked. Then it releases the holders itself, so the run takes as long as
+// the fill does rather than the holders' twelve-second window.
 $fetch = static function (string $path): string {
     $sock = stream_socket_client('tcp://127.0.0.1:80', $errno, $errstr, 3.0);
     if ($sock === false) {
@@ -38,8 +39,8 @@ $fetch = static function (string $path): string {
 };
 
 unset($sharedState['outside_fiber_redis_done'], $sharedState['outside_fiber_raw_done'],
-      $sharedState['outside_fiber_redis_idle_done'], $sharedState['outside_fiber_probe'],
-      $sharedState['outside_fiber_release']);
+      $sharedState['outside_fiber_redis_idle_done'], $sharedState['outside_fiber_redis_elsewhere_done'],
+      $sharedState['outside_fiber_probe'], $sharedState['outside_fiber_release']);
 
 // A value the destructor's GET would return. If that command reaches the wire of a
 // connection mid-exchange, its reply is the next thing there after the pop's, and a
@@ -47,12 +48,13 @@ unset($sharedState['outside_fiber_redis_done'], $sharedState['outside_fiber_raw_
 $seed = new Redis();
 $seed->connect(getenv('DB_REDIS_HOST') ?: 'hooksdb-redis', 6379, 3.0);
 $seed->set('hooksdb:outside:probe', 'outside-fiber-probe-value');
-$seed->del('hooksdb:outside:empty', 'hooksdb:outside:raw');
+$seed->del('hooksdb:outside:empty', 'hooksdb:outside:raw', 'hooksdb:outside:elsewhere');
 $seed->close();
 
 $hold = '/tests/hooksdb/fixture_outside_fiber_hold.php?mode=';
 $redisHold = oxphp_async($fetch, $hold . 'redis');
 $idleHold = oxphp_async($fetch, $hold . 'redis-idle');
+$elsewhereHold = oxphp_async($fetch, $hold . 'redis-elsewhere');
 $rawHold = oxphp_async($fetch, $hold . 'raw');
 
 oxphp_usleep(500_000);
@@ -61,6 +63,8 @@ $t->assertTrue('the phpredis holder is parked on its connection',
     isset($sharedState['outside_fiber_redis']) && !isset($sharedState['outside_fiber_redis_done']));
 $t->assertTrue('the idle phpredis holder is parked on a sleep',
     isset($sharedState['outside_fiber_redis_idle']) && !isset($sharedState['outside_fiber_redis_idle_done']));
+$t->assertTrue('the phpredis holder busy elsewhere is parked on its second connection',
+    isset($sharedState['outside_fiber_redis_elsewhere']) && !isset($sharedState['outside_fiber_redis_elsewhere_done']));
 $t->assertTrue('the raw-stream holder is parked on its connection',
     isset($sharedState['outside_fiber_raw']) && !isset($sharedState['outside_fiber_raw_done']));
 
@@ -83,6 +87,7 @@ $t->assertTrue('the raw-stream holder is parked on its connection',
             'request_count' => $requestCount,
             'redis_holder_done' => isset($sharedState['outside_fiber_redis_done']),
             'idle_holder_done' => isset($sharedState['outside_fiber_redis_idle_done']),
+            'elsewhere_holder_done' => isset($sharedState['outside_fiber_redis_elsewhere_done']),
             'raw_holder_done' => isset($sharedState['outside_fiber_raw_done']),
         ];
 
@@ -94,7 +99,12 @@ $t->assertTrue('the raw-stream holder is parked on its connection',
         // Every phpredis outcome is recorded rather than asserted here, including
         // an exception: one left uncaught on the worker loop would surface in
         // whichever request is resumed next.
-        foreach (['redis' => 'outside_fiber_redis', 'idle' => 'outside_fiber_redis_idle'] as $name => $key) {
+        $connections = [
+            'redis' => 'outside_fiber_redis',
+            'idle' => 'outside_fiber_redis_idle',
+            'elsewhere' => 'outside_fiber_redis_elsewhere',
+        ];
+        foreach ($connections as $name => $key) {
             $started = microtime(true);
             try {
                 $probe["{$name}_result"] = var_export($sharedState[$key]->get('hooksdb:outside:probe'), true);
@@ -137,18 +147,20 @@ $t->meta('fill_seconds', round(microtime(true) - $fillStarted, 3));
 
 oxphp_usleep(200_000);
 
-// Release the holders: a value on each list ends the two pops with a reply of their
-// own, and the flag ends the idle holder's sleep. Pushed on a connection of its own,
+// Release the holders: a value on each list ends the three pops with a reply of
+// their own, and the flag ends the idle holder's sleep. Pushed on a connection of its own,
 // after the destructor has had its turn.
 $release = new Redis();
 $release->connect(getenv('DB_REDIS_HOST') ?: 'hooksdb-redis', 6379, 3.0);
 $release->rPush('hooksdb:outside:empty', 'released');
 $release->rPush('hooksdb:outside:raw', 'released');
+$release->rPush('hooksdb:outside:elsewhere', 'released');
 $release->close();
 $sharedState['outside_fiber_release'] = true;
 
 $redisBody = oxphp_async_await($redisHold);
 $idleBody = oxphp_async_await($idleHold);
+$elsewhereBody = oxphp_async_await($elsewhereHold);
 $rawBody = oxphp_async_await($rawHold);
 
 $probe = $sharedState['outside_fiber_probe'] ?? null;
@@ -158,7 +170,7 @@ $t->meta('probe', $probe);
 
 // Premises: the destructor ran from the loop's collection — on the hundredth
 // request, not from an automatic collection inside some request — and while all
-// three holders were still parked. Without these the assertions below could pass
+// four holders were still parked. Without these the assertions below could pass
 // on a run that exercised nothing.
 $t->assertSame('the destructor ran on a request count the loop collects on',
     ($probe['request_count'] ?? -1) % 100, 0);
@@ -166,6 +178,8 @@ $t->assertFalse('the phpredis holder was still parked when the destructor ran',
     $probe['redis_holder_done'] ?? true);
 $t->assertFalse('the idle phpredis holder was still parked when the destructor ran',
     $probe['idle_holder_done'] ?? true);
+$t->assertFalse('the phpredis holder busy elsewhere was still parked when the destructor ran',
+    $probe['elsewhere_holder_done'] ?? true);
 $t->assertFalse('the raw-stream holder was still parked when the destructor ran',
     $probe['raw_holder_done'] ?? true);
 
@@ -176,9 +190,10 @@ $t->assertTrue('and reported a timeout', $probe['raw_timed_out'] ?? false);
 $t->assertSame('the raw-stream holder read only its own reply', $rawBody,
     'raw-hold-done:' . json_encode("*2\r\n\$19\r\nhooksdb:outside:raw\r\n\$8\r\nreleased\r\n"));
 
-// Mid-exchange, phpredis: its command was refused at the socket, so it failed at
-// once instead of waiting on the wire behind the holder's pop and taking that
-// reply as its own.
+// Mid-exchange, phpredis: its command was refused before it reached the socket,
+// so it failed at once instead of waiting on the wire behind the holder's pop and
+// taking that reply as its own — and without a failed write, which phpredis
+// answers by closing the connection under the holder.
 $t->assertSame('the phpredis call on a connection mid-exchange failed',
     $probe['redis_result'] ?? ($probe['redis_threw'] ?? ''), var_export(false, true));
 $t->assertLessThan('and failed without waiting on the wire', $probe['redis_seconds'] ?? 99.0, 1.0);
@@ -190,5 +205,12 @@ $t->assertSame('the phpredis holder got the answer to its own pop', $redisBody,
 $t->assertSame('a call on a connection held but idle went through',
     $probe['idle_result'] ?? ($probe['idle_threw'] ?? ''), var_export('outside-fiber-probe-value', true));
 $t->assertSame('the idle holder finished normally', $idleBody, 'redis-idle-done');
+
+// Held, and inside a phpredis call — but on another connection, so the one reached
+// here is as idle as the one above.
+$t->assertSame('a call on a connection whose holder is mid-exchange on another went through',
+    $probe['elsewhere_result'] ?? ($probe['elsewhere_threw'] ?? ''), var_export('outside-fiber-probe-value', true));
+$t->assertSame('the holder busy elsewhere got the answer to its own pop', $elsewhereBody,
+    'redis-elsewhere-done:' . var_export(['hooksdb:outside:elsewhere', 'released'], true));
 
 $t->done();
