@@ -10,6 +10,10 @@
 # reason's counter in oxphp_worker_recycles_by_reason_total is exactly what the
 # blocks above it caused.
 #
+# recycle.ini turns session cookies off for the block that raises a fatal error
+# in a session's request shutdown as the worker exits: the session it needs is
+# started after the worker's loop, where headers are already out.
+#
 # Standalone usage:
 #   docker compose -f compose.yml -f compose.recycle.yml up
 services:
@@ -56,3 +60,4 @@ services:
       - ../www:/var/www/html
       - ./php:/var/www/html/public/tests
       - ./fixtures/worker:/var/www/html/worker
+      - ./recycle.ini:/usr/local/etc/php/conf.d/zz-recycle.ini:ro

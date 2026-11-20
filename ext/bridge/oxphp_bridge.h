@@ -1399,6 +1399,17 @@ void oxphp_script_guard_install(void);
 /** Close the calling thread's persistent resources. Last PHP call before ts_free_thread(). */
 void oxphp_bridge_destroy_persistent_list(void);
 
+/** Wrap every loaded module's RSHUTDOWN so that a bailout inside it is caught
+ *  and recorded for the thread instead of reaching the engine, which from PHP
+ *  8.4.28 / 8.5.13 ends the process there. Once, after php_module_startup(),
+ *  before any other thread runs PHP. Returns how many modules were left
+ *  unwrapped, and the name of the first in *first_unguarded (NULL when none). */
+int oxphp_bridge_guard_request_shutdown(const char **first_unguarded);
+
+/** Name of the first module whose RSHUTDOWN a bailout cut short on this thread
+ *  since the last call, or NULL; clears it. */
+const char *oxphp_bridge_take_interrupted_request_shutdown(void);
+
 /* ─── Worker Mode Metrics Getters ─────────────────────────── */
 
 /** Set the exit flag with reason 'scheduled' (1). Idempotent.

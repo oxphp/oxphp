@@ -27,3 +27,12 @@ recycle/test_recycle_schedule
 recycle/test_recycle_after_scheduled
 log ~"reason":"scheduled"
 log ~Recycled workers detected
+
+# A fatal error inside an extension's request shutdown, which a worker's thread
+# runs only as it exits: the thread still leaves as a recycle, and the server
+# stays up to start the one that replaces it. The log lines settle that the
+# fatal was raised and that the pool saw the exit it scheduled.
+recycle/test_rshutdown_fatal_arm
+recycle/test_rshutdown_fatal_after_exit
+log ~worker session shutdown bailout
+log ~Recycled workers detected

@@ -51,12 +51,7 @@ pub(super) fn spawn_worker(
         .name(format!("php-worker-{id}"))
         .spawn(move || {
             let _release = super::pool::ReleaseWorkerThread(id);
-            worker_thread(id, rx, shutdown, last_active, loop_mode, metrics);
-            // A traditional worker has no recycle of its own: it leaves its
-            // loop on a panic, when the pool retires it, or when its channel
-            // closes at shutdown, and of those the pool's scan sees only the
-            // panic.
-            WorkerExit::Ended
+            worker_thread(id, rx, shutdown, last_active, loop_mode, metrics)
         })
         .expect("failed to spawn PHP worker thread")
 }
@@ -176,6 +171,9 @@ fn refuse_script(path: &Path, error: ScriptOpenError) -> ScriptResponse {
     }
 }
 
+/// Serve requests until the thread has to stop. `Recycled` when the thread
+/// retires itself after a request (see [`retire_after_request`]); `Ended` for
+/// every other way out, of which the pool's scan only ever sees a panic.
 fn worker_thread(
     worker_id: usize,
     request_rx: crossbeam_channel::Receiver<WorkerRequest>,
@@ -183,7 +181,7 @@ fn worker_thread(
     last_active: Arc<LastActive>,
     loop_mode: WorkerLoopMode,
     metrics: Arc<crate::metrics::Metrics>,
-) {
+) -> WorkerExit {
     let thread_name = std::thread::current()
         .name()
         .unwrap_or("php-worker")
@@ -203,6 +201,7 @@ fn worker_thread(
 
     tracing::info!(worker = %thread_name, "PHP worker thread started");
 
+    let mut exit = WorkerExit::Ended;
     match loop_mode {
         WorkerLoopMode::Static => {
             // Blocking recv — zero CPU while idle, exits when channel closes.
@@ -256,6 +255,10 @@ fn worker_thread(
                         break;
                     }
                 }
+                if retire_after_request(&thread_name) {
+                    exit = WorkerExit::Recycled;
+                    break;
+                }
             }
         }
         WorkerLoopMode::Dynamic => {
@@ -308,6 +311,10 @@ fn worker_thread(
                                 break;
                             }
                         }
+                        if retire_after_request(&thread_name) {
+                            exit = WorkerExit::Recycled;
+                            break;
+                        }
                     }
                     Err(RecvTimeoutError::Timeout) => continue,
                     Err(RecvTimeoutError::Disconnected) => break,
@@ -317,6 +324,24 @@ fn worker_thread(
     }
 
     tracing::info!(worker = %thread_name, "PHP worker thread stopped");
+    exit
+}
+
+/// Whether the request just served left this thread unfit for another: a fatal
+/// error, or an `exit()` in code it ran, cut an extension's request shutdown
+/// short, and that extension's state on this thread may still point into the
+/// request's freed memory. The thread then leaves its loop with the response
+/// already sent, and the pool starts a replacement.
+fn retire_after_request(thread_name: &str) -> bool {
+    let Some(module) = crate::php::thread::take_interrupted_request_shutdown() else {
+        return false;
+    };
+    tracing::warn!(
+        worker = %thread_name,
+        module = %module,
+        "PHP worker thread retired: an extension's request shutdown was cut short"
+    );
+    true
 }
 
 /// RAII guard that clears SAPI request data on drop (even on panic).

@@ -298,6 +298,16 @@ extern "C" {
     /// persistent streams). Must be the last PHP call before `ts_free_thread()`.
     pub fn oxphp_bridge_destroy_persistent_list();
 
+    /// Catch a bailout inside any module's RSHUTDOWN and record it for the
+    /// thread. Once, after `php_module_startup`, before any other thread runs
+    /// PHP. Returns how many modules were left unguarded, and the first one's
+    /// name in `first_unguarded`.
+    pub fn oxphp_bridge_guard_request_shutdown(first_unguarded: *mut *const c_char) -> c_int;
+
+    /// The module whose RSHUTDOWN a bailout cut short on this thread since the
+    /// last call, or null; clears it. The name is the module entry's own.
+    pub fn oxphp_bridge_take_interrupted_request_shutdown() -> *const c_char;
+
     pub fn oxphp_bridge_set_sapi_callbacks(
         ub_write: Option<unsafe extern "C" fn(*const c_char, usize) -> usize>,
         flush: Option<unsafe extern "C" fn(*mut c_void, c_int, *mut c_int) -> c_int>,

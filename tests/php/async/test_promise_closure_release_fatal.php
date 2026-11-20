@@ -79,6 +79,12 @@ $t->assertFalse(
 // end that request, not wait on its thread to be raised in the next request
 // there. This test's own request holds the other of the profile's two PHP
 // threads, so every inner request lands on that one.
+//
+// The fatal is raised inside the server's own request shutdown, which leaves
+// that thread's state unfinished, so the thread is retired and the next inner
+// request runs on its replacement: the first request that thread starts. From
+// PHP 8.4.28 / 8.5.13 a server that does not catch the fatal there is ended
+// by PHP itself.
 $run = bin2hex(random_bytes(4));
 $get("case=shutdown&run=$run");
 $t->assertTrue(
@@ -86,7 +92,8 @@ $t->assertTrue(
     file_exists(sys_get_temp_dir() . "/oxphp-promise-closure-shutdown-$run")
 );
 $resp = $get('case=async');
-$t->assertMatch('shutdown: the next request on that thread completes', $resp, '#^HTTP/\S+ 200 #');
+$t->assertMatch('shutdown: the next request completes', $resp, '#^HTTP/\S+ 200 #');
 $t->assertContains('shutdown: its call into the server returns', $resp, 'ASYNC: 42');
+$t->assertContains('shutdown: it runs on a thread started after the fatal', $resp, 'REQUESTS: 1' . "\n");
 
 $t->done();

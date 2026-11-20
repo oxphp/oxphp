@@ -5952,6 +5952,9 @@ static void oxphp_reset_filter_input_storage(void) {
         filter_module_resolved = true;
     }
 
+    /* Through the request shutdown guard, which would swallow a bailout from
+     * here; filter's RSHUTDOWN only frees its copies of the input and runs no
+     * PHP code, so it has none to raise. */
     if (filter_module != NULL && filter_module->request_shutdown_func != NULL) {
         filter_module->request_shutdown_func(filter_module->type,
                                              filter_module->module_number);

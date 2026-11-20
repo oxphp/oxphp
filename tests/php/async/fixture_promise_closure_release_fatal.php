@@ -154,6 +154,7 @@ switch ($case) {
         // Raises nothing, and calls into the server: a bailout left waiting
         // on this thread would be raised here.
         echo 'ASYNC: ', oxphp_async_await(oxphp_async(static fn (): int => 42)), "\n";
+        echo 'REQUESTS: ', \OxPHP\Server\Worker::current()->requestCount(), "\n";
         return;
 
     case 'none':

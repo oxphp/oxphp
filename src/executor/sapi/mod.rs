@@ -53,6 +53,10 @@ fn php_startup() {
         sapi::install_error_cb();
     }
     crate::php::opcache_restart::install();
+    // SAFETY: right after php_module_startup(), and no worker thread exists yet.
+    unsafe {
+        crate::php::thread::guard_request_shutdown();
+    }
 
     // 5. open_basedir for the primary script, which is handed to PHP already
     // open. After php_module_startup, so that it sits in front of OPcache's
