@@ -1898,12 +1898,12 @@ static bool oxphp_hooks_category_enabled(const char *category)
 }
 
 /* Hooked sleep(): native argument contract (mirrors ext/standard
- * PHP_FUNCTION(sleep)), cooperative suspend inside a fiber. Returns 0 when it
- * suspends — the cooperative timer always runs to completion, so the "seconds
- * left on signal interrupt" case of the native builtin does not arise there;
- * where the fiber cannot be suspended the call is handed to that builtin and
- * answers whatever it answers. Cancellation of a task fiber unwinds via
- * AsyncException, matching oxphp_sleep(). */
+ * PHP_FUNCTION(sleep)), cooperative suspend inside a fiber. Returns 0 only when
+ * the whole wait elapsed, or for sleep(0), so the "seconds left on signal
+ * interrupt" answer of the native builtin does not arise there. A sleep ended
+ * early leaves without a count, by a bailout or a pending exception, matching
+ * oxphp_sleep(). Where the fiber cannot be suspended the call is handed to that
+ * builtin and answers whatever it answers. */
 static ZEND_NAMED_FUNCTION(oxphp_hooked_sleep)
 {
     if (oxphp_current_fiber == NULL) {
@@ -2586,7 +2586,7 @@ static ssize_t oxphp_sockop_read_plain(php_stream *stream, char *buf, size_t cou
 
             /* php_sockop_read() runs userland code on its way out — a stream
              * context's notification callback — so it can leave through
-             * zend_bailout(); exit() in that callback is enough. The shortened
+             * zend_bailout(); a fatal error in that callback is enough. The shortened
              * timeout must not survive that unwind: on a persistent stream the
              * socket outlives the request, and every later read on that
              * connection would inherit whatever fraction of the budget was
@@ -5909,11 +5909,12 @@ static ZEND_NAMED_FUNCTION(oxphp_guarded_filter_input_array)
     zend_try {
         oxphp_orig_filter_input_array(INTERNAL_FUNCTION_PARAM_PASSTHRU);
     } zend_catch {
-        /* A fatal, exit() or the memory limit inside the call jumps over the
-         * unwind below. Left up, the block would keep this worker from ever
-         * parking again and the reader count would make every later request read
-         * stale input. zend_catch has already put the outer bailout target back,
-         * so re-raising here lands where it would have landed. */
+        /* Any bailout inside the call jumps over the unwind below. exit() and
+         * memory_limit throw instead (8.4.27, 8.5.12, 8.6.0), so the call
+         * returns and the unwind runs. Left up, the block would keep this worker
+         * from ever parking again and the reader count would make every later
+         * request read stale input. zend_catch has already put the outer bailout
+         * target back, so re-raising here lands where it would have landed. */
         zend_fiber_switch_unblock();
         oxphp_filter_storage_readers--;
         zend_bailout();
@@ -7870,7 +7871,8 @@ static void oxphp_runtime_hooks_restore(void)
 /* ─── Worker Mode: soft reset between requests ─────────────── */
 
 /* Discard any output a background async task left in the shared PHP output
- * buffer, freeing the backing allocation, and restart a clean default buffer.
+ * buffer, freeing the backing allocation, and, under output_buffering, restart
+ * the default buffer.
  * Called by the async driver only when the worker is idle (no fiber running),
  * so nothing is mid-write. DISCARDS (does not flush) — the bytes have no
  * client. Returns the bytes discarded from the active buffer (the metric
@@ -11817,8 +11819,8 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
      * fiber exists. */
     oxphp_fiber_minit();
 
-    /* Register async-task scheduler callbacks (stub bodies for now; the
-     * Rust fiber-mode async driver reaches the scheduler through these). */
+    /* Register async-task scheduler callbacks: the Rust fiber-mode async
+     * driver reaches the scheduler through these. */
     oxphp_bridge_set_async_sched_callbacks(
         oxphp_async_sched_spawn,
         oxphp_async_sched_tick,

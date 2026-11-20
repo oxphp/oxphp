@@ -1433,9 +1433,12 @@ uint64_t oxphp_bridge_get_requests_done(void);
 uint64_t oxphp_bridge_increment_requests_done(void);
 
 /** Process resident set size (RSS) in bytes.
- *  Linux: parses /proc/self/status VmRSS line (KiB → bytes).
- *  macOS / other: getrusage(RUSAGE_SELF, &ru).ru_maxrss (bytes on Darwin).
- *  Returns 0 on failure (rare; restrictive sandbox kernels). */
+ *  Linux: the resident page count, the second field of /proc/self/statm,
+ *  times the page size, read through a descriptor each thread opens once and
+ *  keeps. Where statm cannot be opened or parsed, getrusage() ru_maxrss: the
+ *  process's peak RSS, not its current one.
+ *  macOS: getrusage() ru_maxrss, the peak as well (bytes on Darwin).
+ *  Other systems: 0, logged once. Also 0 when getrusage() fails. */
 uint64_t oxphp_bridge_get_rss_bytes(void);
 
 /** Configured per-worker memory cap in bytes (0 = unlimited). */
@@ -2364,7 +2367,7 @@ int     oxphp_async_synthetic_promise_cancel(int64_t id);
  * lives in the extension (it owns the zend_fiber contexts); the Rust
  * driver loop reaches it only through these bridge forwarders.
  *
- * The extension registers the five implementations once at MINIT via
+ * The extension registers the six implementations once at MINIT via
  * oxphp_bridge_set_async_sched_callbacks (mirrors set_fiber_await). Rust
  * calls the oxphp_bridge_async_* wrappers; each forwards through the
  * stored pointer, or returns a not-registered sentinel when the
@@ -2408,6 +2411,11 @@ int     oxphp_async_synthetic_promise_cancel(int64_t id);
  *             returns.
  *   cancel()  request cancellation of an in-flight fiber. Returns 1 if
  *             the fiber was found and flagged, 0 otherwise.
+ *   drain()   discard the output tasks left in the thread's output
+ *             buffers, which have no client, and, under output_buffering,
+ *             start the default buffer again.
+ *             Called only while no fiber is running. Returns the bytes
+ *             discarded from the active buffer.
  */
 typedef int64_t (*oxphp_async_sched_spawn_fn_t)(
     void *op_array, void *static_vars, int bind_this,
