@@ -77,7 +77,7 @@ pub fn register_functions(
             Ok(())
         })?;
 
-    // OxPHP\Profile\mark(string $label, array $attrs = []): void —
+    // OxPHP\Profile\mark(string $label, ?array $attrs = null): void —
     // attach a Mark event to the topmost open span. No-op when no
     // span is open.
     ctx.function("OxPHP\\Profile\\mark")

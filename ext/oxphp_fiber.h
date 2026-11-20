@@ -282,7 +282,7 @@ typedef struct {
     bool bridge_headers_sent;   /* ctx.headers_sent: stream headers on the wire */
     bool bridge_finished;       /* ctx.finished: oxphp_finish_request() was called */
 
-    /* When this request was received, from the same __thread ctx as the trio
+    /* When a worker took this request, from the same __thread ctx as the trio
      * above and needing the same treatment for a stronger reason: a neighbour's
      * prep overwrites it, and a neighbour's teardown ZEROES it, so a fiber that
      * parks across a request the worker serves whole comes back to 0.0 rather

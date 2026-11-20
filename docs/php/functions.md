@@ -172,7 +172,7 @@ Returns an associative array with server and request metadata.
 |-----|------|-------------|
 | `version` | `string` | Server version (e.g. `"0.15.0"`) |
 | `worker_id` | `int` | Same value as `oxphp_worker_id()` |
-| `request_time` | `float` | Unix timestamp with microsecond precision when the request started |
+| `request_time` | `float` | Unix timestamp with microsecond precision of when a PHP worker took the request, as `$_SERVER['REQUEST_TIME_FLOAT']`; time spent waiting for a free worker is not included |
 | `worker_mode` | `bool` | Whether the current process runs in worker mode |
 | `runtime_hooks` | `array` | The runtime-hook categories this process installed at startup, as a list of category names (`["sleep", "streams", "net", "curl"]`). Empty when `RUNTIME_HOOKS` enabled nothing — see [Runtime Hooks](../operations/configuration.md#runtime-hooks) |
 
@@ -190,7 +190,7 @@ $info = oxphp_server_info();
 // ]
 
 $elapsed = microtime(true) - $info['request_time'];
-echo "Processing took {$elapsed}s so far";
+echo "PHP has been handling this request for {$elapsed}s";
 ```
 
 ---

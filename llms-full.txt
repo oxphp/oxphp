@@ -12391,6 +12391,17 @@ $request->cookie('%D0%BA'); // "1"     — look up by the name as sent
 
 Names are reported as sent here too. PHP rewrites `' '`, `'.'` and `'['` in every superglobal name, cookies included, so `Cookie: a.b=1` lands in `$_COOKIE` as `a_b` while `cookie('a.b')` and `cookies()['a.b']` use the name the client sent.
 
+That rewrite can also land one cookie on another's key. With `Cookie: a.b=1; a_b=2` both names become `a_b` in `$_COOKIE`, which keeps the first, while the object API keeps them apart:
+
+```php
+// Cookie: a.b=1; a_b=2
+$_COOKIE['a_b'];           // "1" — a.b, rewritten, came first
+$request->cookie('a_b');   // "2"
+$request->cookie('a.b');   // "1"
+```
+
+So, as with query parameters, do not validate a cookie through one API and read it through the other: the two can disagree on the value, not only on the name.
+
 Values are byte strings, so a signed cookie or `setcookie('sid', random_bytes(16))` round-trips as the exact bytes it was set with.
 
 ```php
@@ -12486,7 +12497,7 @@ The raw `X-Forwarded-For` header remains available via `$request->header('X-Forw
 $request->startTime(bool $asFloat = false): int|float
 ```
 
-Returns the Unix timestamp for when this request was received.
+Returns the Unix timestamp of when a PHP worker took this request — the same moment as `$_SERVER['REQUEST_TIME_FLOAT']`. The time the request spent waiting for a free worker is not included; the `oxphp_queue_wait_us` [metric](../operations/metrics.md) reports that wait.
 
 | Call | Returns |
 |------|---------|
@@ -12496,7 +12507,7 @@ Returns the Unix timestamp for when this request was received.
 ```php
 <?php
 $elapsed = microtime(true) - $request->startTime(true);
-error_log(sprintf("Request took %.3fs so far", $elapsed));
+error_log(sprintf("PHP has been handling this request for %.3fs", $elapsed));
 ```
 
 ---
@@ -12629,15 +12640,16 @@ if (!$file || !$file->isValid()) {
 }
 
 $detectedMime = $file->type();
-$allowed = ['application/pdf', 'image/jpeg', 'image/png'];
+// The keys are the allow-list; the extension comes from here, never from the client
+$allowed = ['application/pdf' => 'pdf', 'image/jpeg' => 'jpg', 'image/png' => 'png'];
 
-if (!in_array($detectedMime, $allowed, true)) {
+if (!isset($allowed[$detectedMime])) {
     http_response_code(415);
     echo json_encode(['error' => "File type not allowed: $detectedMime"]);
     return;
 }
 
-$file->moveTo('/var/uploads/' . bin2hex(random_bytes(8)) . '.pdf');
+$file->moveTo('/var/uploads/' . bin2hex(random_bytes(8)) . '.' . $allowed[$detectedMime]);
 ```
 
 ---
@@ -13326,7 +13338,7 @@ Returns an associative array with server and request metadata.
 |-----|------|-------------|
 | `version` | `string` | Server version (e.g. `"0.15.0"`) |
 | `worker_id` | `int` | Same value as `oxphp_worker_id()` |
-| `request_time` | `float` | Unix timestamp with microsecond precision when the request started |
+| `request_time` | `float` | Unix timestamp with microsecond precision of when a PHP worker took the request, as `$_SERVER['REQUEST_TIME_FLOAT']`; time spent waiting for a free worker is not included |
 | `worker_mode` | `bool` | Whether the current process runs in worker mode |
 | `runtime_hooks` | `array` | The runtime-hook categories this process installed at startup, as a list of category names (`["sleep", "streams", "net", "curl"]`). Empty when `RUNTIME_HOOKS` enabled nothing — see [Runtime Hooks](../operations/configuration.md#runtime-hooks) |
 
@@ -13344,7 +13356,7 @@ $info = oxphp_server_info();
 // ]
 
 $elapsed = microtime(true) - $info['request_time'];
-echo "Processing took {$elapsed}s so far";
+echo "PHP has been handling this request for {$elapsed}s";
 ```
 
 ---
@@ -14367,8 +14379,8 @@ OxPHP builds `$_SERVER` from the incoming HTTP request following the CGI/1.1 spe
 | `REQUEST_SCHEME` | `"https"` for TLS connections, `"http"` otherwise | `https` |
 | `CONTENT_TYPE` | Value of the `Content-Type` header (no `HTTP_` prefix) | `application/json` |
 | `CONTENT_LENGTH` | Value of the `Content-Length` header (no `HTTP_` prefix) | `128` |
-| `REQUEST_TIME` | Unix timestamp (integer) when the request started | `1738800000` |
-| `REQUEST_TIME_FLOAT` | Unix timestamp with microsecond precision | `1738800000.123456` |
+| `REQUEST_TIME` | Unix timestamp (integer) of when a PHP worker took the request — time spent waiting for a free worker is not included | `1738800000` |
+| `REQUEST_TIME_FLOAT` | The same moment as `REQUEST_TIME`, with microsecond precision | `1738800000.123456` |
 | `GATEWAY_INTERFACE` | CGI version string | `CGI/1.1` |
 
 A request without a `Host` header reaches PHP only over HTTP/1.0, and then `SERVER_NAME` defaults to `localhost` and `SERVER_PORT` defaults to `80` (or `443` for TLS). RFC 9112 §3.2 has a server answer `400 Bad Request` to an HTTP/1.1 request without one, and to any request with more than one `Host` line or a `Host` that is not valid, and OxPHP does so without running PHP. An HTTP/2 request that names its host in `:authority` needs no `Host`; one without an `:authority` is held to the HTTP/1.1 rules, since RFC 9110 §7.2 lets a client leave `Host` out only when it sends `:authority`. A valid `Host` is a host and an optional `:port`, as RFC 9110 §7.2 has it: a name made of letters, digits, `-._~`, `!$&'()*+,;=` and `%` escapes such as `%41`, or an IPv6 address in brackets (`[::1]`, or the IPvFuture form RFC 3986 keeps for address formats to come, such as `[v1.x]`), and a port from 0 to 65535 written in digits. So `Host: café.example` sent as raw UTF-8, `Host: example.com:abc`, `Host: :80` and an IPv6 zone such as `Host: [fe80::1%25eth0]` are each refused, while a name in another script sent as punycode (`xn--caf-dma.example`) is valid. A port left empty, as in `Host: example.com:`, is valid and reads as the scheme's default, which is what RFC 9110 §4.2.3 makes of `http://example.com:/`: `SERVER_PORT` is `80` and `HTTP_HOST` is `example.com:`. nginx answers each of these cases the same way; of the values tried against it, it differs on three: it accepts a `%` that starts no escape (`Host: a%zz`) and brackets around anything but an IPv6 address or an IPvFuture (`Host: []`, `Host: [1.2.3.4]`, `Host: [a.example]`), which OxPHP refuses, and refuses an empty label (`Host: a..b`), which OxPHP accepts.
