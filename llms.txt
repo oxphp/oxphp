@@ -27,6 +27,7 @@
 - [Access Logging](docs/features/access-logging.md): Structured JSON access logs for every HTTP request in OxPHP, with configurable modes for all requests or errors only.
 - [Async Promises](docs/features/async-promises.md): Run PHP closures in background threads and await results without blocking the worker pool.
 - [Compression](docs/features/compression.md): OxPHP compresses responses with Brotli, Zstandard, or gzip, reducing transfer sizes for text, JSON, SVG, and other compressible content types.
+- [cURL Under Runtime Hooks](docs/features/runtime-hooks-curl.md): How cURL transfers suspend the fiber under the RUNTIME_HOOKS curl category, and what happens when several fibers use one easy, multi or share handle.
 - [Custom Error Pages](docs/features/error-pages.md): Serve branded HTML error pages for 4xx and 5xx responses in OxPHP, loaded once at startup and served from memory.
 - [Decorators](docs/features/decorators.md): Intercept PHP function and method calls with attribute-based decorators for logging, timing, caching, and access control.
 - [Distributed Tracing & APM](docs/features/distributed-tracing.md): W3C Trace Context propagation, OpenTelemetry integration, automatic instrumentation, PHP tracing SDK, and end-to-end observability with OxPHP.
@@ -37,7 +38,9 @@
 - [Rate Limiting](docs/features/rate-limiting.md): Built-in per-IP rate limiting for OxPHP with configurable thresholds, time windows, and standard HTTP rate limit response headers.
 - [Request IDs](docs/features/request-ids.md): Automatic unique request identifiers in OxPHP for distributed tracing and log correlation across your stack.
 - [Routing](docs/features/routing.md): Configure OxPHP routing with three modes — traditional file mapping, framework front-controller, and SPA fallback. Each mode mirrors the equivalent nginx try_files directive.
+- [Runtime Hooks](docs/features/runtime-hooks.md): Opt-in RUNTIME_HOOKS categories that make sleep(), socket reads, stream_select(), connects, TLS and cURL waits suspend the fiber instead of the worker thread.
 - [Server-Sent Events (SSE)](docs/features/sse.md): Stream real-time data to browser clients using Server-Sent Events in OxPHP with built-in backpressure and connection management.
+- [Shared Connections Under Runtime Hooks](docs/features/runtime-hooks-shared-state.md): How one database or Redis connection behaves when several fibers share it under RUNTIME_HOOKS, and what a hooked wait lets other requests see.
 - [Static Files](docs/features/static-files.md): OxPHP serves static files with automatic MIME detection, in-memory caching, HTTP cache headers, conditional 304 responses, and Range requests.
 - [Timeouts](docs/features/timeouts.md): Configure header read timeouts and PHP execution timeouts in OxPHP to protect against slow clients and runaway PHP scripts.
 - [TLS](docs/features/tls.md): Configure native TLS termination in OxPHP with support for TLS 1.2, TLS 1.3, a configurable minimum protocol version, HTTP/2 ALPN negotiation, and PEM certificates.
