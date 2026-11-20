@@ -13,8 +13,30 @@ description: Opt-in RUNTIME_HOOKS categories that make sleep(), socket reads, st
 |----------|---------------|
 | `sleep` | Native `sleep()` and `usleep()` suspend the current fiber exactly like `oxphp_sleep()`/`oxphp_usleep()` — including the contexts where those two cannot suspend either and wait on the worker thread instead (see below) |
 | `streams` | Two waits suspend the current fiber instead of pinning the worker thread: a blocking **read** on a `tcp://` socket stream, and **`stream_select()`**. The read covers clients that block on one socket — `fsockopen()`, `stream_socket_client()`, HTTP stream wrappers, mysqlnd (PDO_MySQL, mysqli), phpredis; `stream_select()` covers loops that wait on several at once. No code changes to the client either way; what the other requests on the worker can see while one waits is [covered separately](runtime-hooks-shared-state.md#hooked-waits-and-shared-application-state). Clients that wait some other way are unaffected (see below) |
-| `net` | The waits that happen below PHP streams, where the `streams` read hook cannot see them, suspend the current fiber instead of pinning the worker thread: **connecting** (`stream_socket_client()`, `fsockopen()` and every client built on PHP streams — mysqlnd, so PDO_MySQL and mysqli, and phpredis among them), the TLS **handshake**, **reads on `ssl://`/`tls://` streams** once crypto is active, **writes** that have to wait for room in the send buffer, and **stream reads on `unix://`, `udp://` and `udg://` sockets, on `stream_socket_pair()` streams and on the streams `socket_export_stream()` makes from sockets that are not TCP**. Needs `streams` listed alongside it (see below), and works on Linux only. Waits inside libpq (`pgsql`, `pdo_pgsql`) and libmemcached, which call `poll()` from their own libraries, and DNS resolution, `stream_socket_recvfrom()`, writes on a plain (non-TLS) stream with an infinite timeout (`default_socket_timeout=-1`), and persistent connects (`pfsockopen()`, `STREAM_CLIENT_PERSISTENT`, and the persistent modes of the clients built on them) are not covered. libcurl's waits are the `curl` category's |
+| `net` | The waits that happen below PHP streams, where the `streams` read hook cannot see them, suspend the current fiber instead of pinning the worker thread: connecting, the TLS handshake, TLS reads, writes, and reads on sockets that are not TCP. Needs `streams` listed alongside it, and works on Linux only; [The `net` category](#the-net-category) lists what it covers and what it does not |
 | `curl` | The waits of a cURL transfer suspend the current fiber instead of pinning the worker thread: everything `curl_exec()` waits for, from resolving the host name to the last byte of the answer, and the wait inside `curl_multi_select()`. That covers the HTTP clients built on ext/curl — Guzzle with its default handler, Symfony HttpClient's `CurlHttpClient`, and the SDKs built on either. A cURL call made on a handle another fiber is in the middle of a call on waits for it, or is refused with an exception, so requests sharing a client that keeps one multi handle for all of them, as Symfony HttpClient does and Guzzle does for its asynchronous requests, take turns calling on it while their transfers run side by side ([cURL Under Runtime Hooks](runtime-hooks-curl.md#curl-transfers)). Needs neither `streams` nor `net`, and works on Linux only, with libcurl loaded as a library of its own, as it is in the official images |
+
+### The `net` category
+
+The waits that happen below PHP streams, where the `streams` read hook cannot see them, suspend the current fiber instead of pinning the worker thread:
+
+- **connecting** (`stream_socket_client()`, `fsockopen()` and every client built on PHP streams — mysqlnd, so PDO_MySQL and mysqli, and phpredis among them);
+- the TLS **handshake**;
+- **reads on `ssl://`/`tls://` streams** once crypto is active;
+- **writes** that have to wait for room in the send buffer;
+- **stream reads on `unix://`, `udp://` and `udg://` sockets, on `stream_socket_pair()` streams and on the streams `socket_export_stream()` makes from sockets that are not TCP**.
+
+`net` needs `streams` listed alongside it (see [Checking That Hooks Are Active](#checking-that-hooks-are-active)), and works on Linux only.
+
+These waits are not covered:
+
+- waits inside libpq (`pgsql`, `pdo_pgsql`) and libmemcached, which call `poll()` from their own libraries;
+- DNS resolution;
+- `stream_socket_recvfrom()`;
+- writes on a plain (non-TLS) stream with an infinite timeout (`default_socket_timeout=-1`);
+- persistent connects (`pfsockopen()`, `STREAM_CLIENT_PERSISTENT`, and the persistent modes of the clients built on them).
+
+libcurl's waits are the `curl` category's.
 
 ## Configuration
 
@@ -57,7 +79,26 @@ Hooks take effect inside worker-mode request fibers and async task fibers. Outsi
 
 ## Where Hooks Do Not Suspend
 
-**Where the `sleep` hooks do not suspend.** Where a fiber switch is refused, the hooked `sleep()`/`usleep()` hand the call to the builtin they replaced, which waits on the worker thread and returns what it returns — so a `sleep()` cut short by a signal there gives back the seconds it did not sleep, as it does outside a fiber and as it would with the hooks off. (The argument check is the hook's own either way: it rejects anything above `4294967295`, which the unhooked builtin accepts and truncates.) Switching is blocked wherever leaving the current frame would be unsafe, which covers more than a list can close: inside a `declare(ticks)` handler and inside pcntl's signal dispatch, both upstream PHP's own doing; while a request's input is being built, in Worker mode by `request_parse_body()` as well as before the script runs; inside a `FILTER_CALLBACK` reached from `filter_input_array()` given a per-field definitions array, described in the note under `$_GET` in [Superglobals](../php/superglobals.md); and inside `array_multisort()`, in the code it runs as it compares — a `__toString()`, an error handler or a destructor, say — since the sort keeps its comparison functions on the worker thread for the length of the call. The hooks also wait on the worker thread in the cleanup a worker runs after a request has come apart — after a fatal error, a timeout, or a write to a stream whose client has already left — in the destructors it runs there, a decorator's `after()` and a stream filter's `onClose()`, so a `__destruct()` that sleeps to back off does it holding the thread. So do they in an output handler that a fatal error's message passes through as it is displayed, just before that cleanup. Switching itself is not blocked there: a `new Fiber` started in that code runs as usual. The ordinary end of a request is not one of these: the hooks suspend in its shutdown functions, and in the destructors its variables run as they go — except those of what it left in a superglobal or in the closure of an `oxphp_async()` task it never awaited, which run after its session is written and wait on the thread. A fiber a userland scheduler started — AMPHP, Revolt, or a bare `new Fiber` — is a different case rather than another entry in that list: switching is not blocked there, and the scheduler suspends and resumes its own fibers normally, but OxPHP cannot resume a context it does not own, so the hook stands aside for the same reason the `streams` hook does. `oxphp_sleep()` and `oxphp_usleep()` take their blocking path in every one of these places, so reaching for them instead is not a way around it. That last case is about a fiber started *inside* a request — by `new Fiber` directly, or by a scheduler the application drives there — and not about the shape of a whole deployment: a worker-mode request is itself a fiber OxPHP drives — which is why Revolt refuses to run its loop from inside one, as the note below on the `streams` hook says — so the hooks apply to the request's own fiber normally. What does sleep on the worker thread is the code inside a fiber the application started itself, and that share of the load has to be sized as if the hook were off.
+### Where the `sleep` hooks do not suspend
+
+Where a fiber switch is refused, the hooked `sleep()`/`usleep()` hand the call to the builtin they replaced, which waits on the worker thread and returns what it returns — so a `sleep()` cut short by a signal there gives back the seconds it did not sleep, as it does outside a fiber and as it would with the hooks off. (The argument check is the hook's own either way: it rejects anything above `4294967295`, which the unhooked builtin accepts and truncates.)
+
+Switching is blocked wherever leaving the current frame would be unsafe, which covers more than a list can close. It is blocked:
+
+- inside a `declare(ticks)` handler and inside pcntl's signal dispatch, both upstream PHP's own doing;
+- while a request's input is being built, in Worker mode by `request_parse_body()` as well as before the script runs;
+- inside a `FILTER_CALLBACK` reached from `filter_input_array()` given a per-field definitions array, described in the note under `$_GET` in [Superglobals](../php/superglobals.md);
+- inside `array_multisort()`, in the code it runs as it compares — a `__toString()`, an error handler or a destructor, say — since the sort keeps its comparison functions on the worker thread for the length of the call.
+
+The hooks also wait on the worker thread in the cleanup a worker runs after a request has come apart — after a fatal error, a timeout, or a write to a stream whose client has already left. They wait in the destructors it runs there, a decorator's `after()` and a stream filter's `onClose()`, so a `__destruct()` that sleeps to back off does it holding the thread. So do they in an output handler that a fatal error's message passes through as it is displayed, just before that cleanup. Switching itself is not blocked there: a `new Fiber` started in that code runs as usual.
+
+The ordinary end of a request is not one of these: the hooks suspend in its shutdown functions, and in the destructors its variables run as they go — except those of what it left in a superglobal or in the closure of an `oxphp_async()` task it never awaited, which run after its session is written and wait on the thread.
+
+A fiber a userland scheduler started — AMPHP, Revolt, or a bare `new Fiber` — is a different case rather than another entry in that list: switching is not blocked there, and the scheduler suspends and resumes its own fibers normally, but OxPHP cannot resume a context it does not own, so the hook stands aside for the same reason the `streams` hook does. This case is about a fiber started *inside* a request — by `new Fiber` directly, or by a scheduler the application drives there — and not about the shape of a whole deployment. A worker-mode request is itself a fiber OxPHP drives — which is why Revolt refuses to run its loop from inside one, as the note below on the `streams` hook says — so the hooks apply to the request's own fiber normally. What does sleep on the worker thread is the code inside a fiber the application started itself, and that share of the load has to be sized as if the hook were off.
+
+`oxphp_sleep()` and `oxphp_usleep()` take their blocking path in every one of these places, so reaching for them instead is not a way around it.
+
+### Where the `streams` hook does not suspend
 
 What the `streams` hook makes cooperative is a blocking read on a PHP socket stream and a wait inside `stream_select()`. Before counting on it, check that your client waits one of those two ways, or one of the ways the `net` and `curl` categories add (below) — several common clients do not, and for them nothing changes:
 
