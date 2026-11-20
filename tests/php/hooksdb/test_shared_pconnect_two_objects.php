@@ -29,8 +29,12 @@ $t->assertNotEqual(
     $first->rawCommand('CLIENT', 'ID'),
     $second->rawCommand('CLIENT', 'ID')
 );
-unset($first, $second);
 ini_restore('redis.pconnect.pooling_enabled');
+
+// Every Redis object this request uses stays alive until it ends. A claim taken
+// through an object outlives it, keyed by its address, and a fixture's object
+// allocated there would wait for this request instead of for the one under test.
+$kept = [$first, $second];
 
 // Pooling off: the scenario. A second object is opened with the same arguments by
 // a request that is over before anything else starts; a holder then parks in a
@@ -62,7 +66,8 @@ $decode = static function (string $body, string $prefix): ?array {
 $seed = new Redis();
 $seed->connect($host, 6379, 3.0);
 $seed->set('hooksdb:two-objects:probe', 'two-objects-probe-value');
-$seed->del('hooksdb:two-objects:pconnect', 'hooksdb:two-objects:pconnect-long', 'hooksdb:two-objects:ctor');
+$rounds = ['pconnect', 'pconnect-long', 'ctor', 'mixed', 'mixed-late', 'pooled', 'pooled-ctor', 'error'];
+$seed->del(...array_map(static fn (string $round): string => "hooksdb:two-objects:{$round}", $rounds));
 $seed->close();
 
 // How long the waiter is left alone with the holder parked before the holder is
@@ -73,8 +78,17 @@ $holdFor = 0.5;
 // The pconnect() rounds name the connection by a persistent id — the second object
 // passing its port once as a numeric string and once as an int — the constructor
 // round by the connect timeout, and the constructor round also connects inside the
-// first command rather than in a connect call of its own.
-foreach (['pconnect', 'pconnect-long', 'ctor'] as $round) {
+// first command rather than in a connect call of its own. The rounds after it are
+// the cases where the id alone says nothing: a pconnect() that phpredis does not
+// keep persistent, beside a stream the constructor's option registered under the
+// same id before it or after it; connections phpredis takes from its pool, opened
+// through pconnect() and through the constructor, beside a stream registered under
+// their id while pooling was off; and a connect() phpredis rejects before it lets
+// go of the shared stream the object is on. The mixed round comes after the
+// pconnect() rounds: a pconnect() that does or does not register a stream of its
+// own is what tells whether this phpredis keeps pconnect() persistent, and its
+// second object finds a stream already there.
+foreach ($rounds as $round) {
     foreach (['hold_started', 'hold_done', 'wait_started', 'wait_done', 'waiter'] as $edge) {
         unset($sharedState["two_objects_{$round}_{$edge}"]);
     }
@@ -104,6 +118,7 @@ foreach (['pconnect', 'pconnect-long', 'ctor'] as $round) {
     $release->connect($host, 6379, 3.0);
     $release->rPush("hooksdb:two-objects:{$round}", 'released');
     $release->close();
+    $kept[] = $release;
 
     $holdBody = oxphp_async_await($hold);
     $waitBody = oxphp_async_await($wait);
@@ -121,15 +136,21 @@ foreach (['pconnect', 'pconnect-long', 'ctor'] as $round) {
     // turns pconnect() into a plain connect, which getPersistentID() then reports by
     // answering null; the develop commit the fixture installs on PHP 8.6 does not,
     // and the constructor's option is kept persistent by both. A persistent
-    // connection opened with the same arguments is the one both objects get.
-    $persistent = $round === 'ctor' || ($held['persistent_id'] ?? null) === 'hooksdb-two-objects';
+    // connection opened with the same arguments is the one both objects get, unless
+    // it comes from the pool.
+    $persistent = match ($round) {
+        'pconnect', 'pconnect-long' => ($held['persistent_id'] ?? null) === 'hooksdb-two-objects',
+        'mixed', 'mixed-late' => ($waited['persistent_id'] ?? null) === "hooksdb-two-objects-{$round}",
+        'pooled', 'pooled-ctor' => false,
+        default => true,
+    };
     $t->meta("{$round}_persistent", $persistent);
-    if (PHP_VERSION_ID >= 80600) {
+    if (PHP_VERSION_ID >= 80600 && !str_starts_with($round, 'pooled')) {
         // Or this round exercised nothing.
-        $t->assertTrue("{$round}: the holder's connection is persistent", $persistent);
+        $t->assertTrue("{$round}: the two objects' connection is persistent", $persistent);
     }
-    $t->assertSame("{$round}: the two objects are on one connection exactly when it is persistent",
-        $shared, $persistent);
+    $t->assertSame("{$round}: the two objects are on one connection exactly when it is persistent"
+        . ' and not pooled', $shared, $persistent);
 
     $t->assertSame("{$round}: the holder got the answer to its own pop", $held['popped'] ?? $holdBody,
         ["hooksdb:two-objects:{$round}", 'released']);
