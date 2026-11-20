@@ -46,6 +46,14 @@ hooksdb/test_shared_pdo_attribute_filter
 # The other half of the guarantee: what a fiber gets when the wait does not win.
 hooksdb/test_shared_redis_wait_gives_up
 
+# The same sharing with a client that has no guarded entry point at all — a
+# userland one such as Predis, which closes a connection whose write failed. The
+# socket level is all there is: an fwrite() waits for the fiber parked on the
+# connection for its reply, bounded the way a claim is, while a C client's write is
+# refused there.
+hooksdb/test_shared_raw_write_waits_for_parked_reader
+hooksdb/test_shared_raw_write_wait_gives_up
+
 # The same claims, seen from code that is not in a request fiber at all — a
 # destructor the worker loop's cycle collection runs between requests. It cannot
 # wait, so it is refused at the socket while a holder is parked on its reply, and
@@ -167,10 +175,12 @@ hooksdb/test_session_slot_claim_cycle_breaks
 # resource, where nothing serialises the close at all, and once through the client
 # call that does wait but is bounded and eventually delegates. The third is the
 # second with the read made by a destructor while an exception unwinds: the fatal
-# still ends the request, and does not report that exception as uncaught.
+# still ends the request, and does not report that exception as uncaught. The
+# fourth closes a connection under a write waiting for the fiber parked on it.
 hooksdb/test_stream_closed_under_parked_reader
 hooksdb/test_shared_mysqli_close_under_parked_reader
 hooksdb/test_shared_mysqli_close_under_unwinding_reader
+hooksdb/test_stream_closed_under_waiting_writer
 
 # After everything else, because the first of these retires the worker. A
 # persistent connection belongs to the thread that opened it, and a thread that

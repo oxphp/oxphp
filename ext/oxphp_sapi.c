@@ -2029,8 +2029,8 @@ static void oxphp_hook_restore(const char *name, size_t name_len, zif_handler or
  * the delegate's) without ever preventing the block. Serving that correctly would
  * mean reimplementing the native retry and warning path, which is exactly what
  * this design refuses to do. The write op is still patched, but only to ask whose
- * exchange this is — see the claim section below; an uncontended write goes to the
- * original handler untouched. */
+ * exchange this is, and to wait for another fiber's to end — see the claim section
+ * below; an uncontended write goes to the original handler untouched. */
 
 static ssize_t (*oxphp_orig_sockop_read)(php_stream *, char *, size_t) = NULL;
 
@@ -2243,32 +2243,61 @@ static bool oxphp_owner_awaits_fd(const oxphp_request_fiber *owner, int fd)
     return false;
 }
 
+static oxphp_stream_claim_result oxphp_stream_await_holder(php_stream *stream,
+                                                           const php_netstream_data_t *sock,
+                                                           oxphp_request_fiber *self);
+
+/* Whether a write can wait for the fiber parked on its stream: only one whose
+ * bytes and whose client's state nothing else touches meanwhile, which is a
+ * userland fwrite() or fputs() — what reaches the socket is the string argument
+ * its frame holds — on a stream with no write filter.
+ *
+ * A C client is not that. Before it writes a command, mysqlnd resets the
+ * connection's packet counter, and builds the command in a buffer the connection
+ * owns if it fits (php_mysqlnd_cmd_write, 8.4.28 and 8.5.13): a second command on
+ * the connection while the first waits breaks the exchange the first is part of,
+ * and can overwrite the bytes it then sends. A write filter has run before the write gets
+ * here, and its state is the stream's: a second write filtered while the first
+ * waits can reach the socket ahead of it. */
+static bool oxphp_write_may_wait(const php_stream *stream)
+{
+    if (stream->writefilters.head != NULL) return false;
+
+    const zend_execute_data *call = EG(current_execute_data);
+    if (call == NULL || call->func == NULL || call->func->type != ZEND_INTERNAL_FUNCTION) {
+        return false;
+    }
+    /* NULL on the engine's own frames, a Fiber's base frame among them. */
+    const zend_string *name = call->func->common.function_name;
+    return name != NULL
+           && (zend_string_equals_literal(name, "fwrite") || zend_string_equals_literal(name, "fputs"));
+}
+
 /* Ask to use `stream` on behalf of the running fiber, and record the claim.
  *
- * Refuses rather than waits, and that is the whole shape of the socket level: a
- * fiber waiting here would have to hold `stream` and its php_netstream_data_t
- * across the suspension, and the holder can close both while it sleeps — after
- * which the waiter, and every engine frame above it, reads freed memory. Waiting
- * belongs where no such pointer is held, which is the client entry points; here
- * the answer is the one a socket timeout gives.
- *
- * A conflict is therefore refused only in the window where it is real — the holder
- * parked on this descriptor waiting for its reply — and otherwise the claim is
- * taken over, which is also what clears an entry left behind by a stream that has
- * since been freed.
+ * A conflict exists only in the window where it is real — the holder parked on
+ * this descriptor waiting for its reply — and otherwise the claim is taken over,
+ * which is also what clears an entry left behind by a stream that has since been
+ * freed. In that window a write from a fiber waits for the holder's exchange to
+ * end (oxphp_stream_await_holder) where the hook allows it (`may_wait`) and the
+ * write is one that can (oxphp_write_may_wait), because a refused write is what a
+ * client with no guarded entry point — Predis — reads as a dead connection and
+ * closes, under the holder. Anything else is refused, with the answer a socket
+ * timeout gives; why a read cannot wait is set out at the wait.
  *
  * `self` is NULL for code running outside any request fiber — a destructor the
  * worker loop's cycle collection runs between requests. That code is checked like
- * a fiber but never recorded: an entry with no owner would erase the holder's claim,
- * and there is no request end to release one from. This is the only level such code
- * is refused at. The client level's claim lasts to the end of the holder's request
- * rather than its exchange, so code that cannot wait would be refused there for a
- * connection nobody is using at that moment; here the refusal is confined to the
- * holder being parked on this descriptor for its reply, which is the one window
- * where the operation would land inside its exchange. */
+ * a fiber, but its writes are refused rather than kept waiting — it has nothing to
+ * suspend into — and it is never recorded: an entry with no owner would erase the
+ * holder's claim, and there is no request end to release one from. This is the
+ * only level such code is refused at. The client level's claim lasts to the end of
+ * the holder's request rather than its exchange, so code that cannot wait would be
+ * refused there for a connection nobody is using at that moment; here the refusal
+ * is confined to the holder being parked on this descriptor for its reply, which is
+ * the one window where the operation would land inside its exchange. */
 static oxphp_stream_claim_result oxphp_stream_claim(php_stream *stream,
                                                    const php_netstream_data_t *sock,
-                                                   oxphp_request_fiber *self)
+                                                   oxphp_request_fiber *self, bool may_wait)
 {
     oxphp_request_fiber *owner = oxphp_claim_owner(stream);
     if (owner != NULL && owner != self && oxphp_owner_awaits_fd(owner, sock->socket)) {
@@ -2277,9 +2306,13 @@ static oxphp_stream_claim_result oxphp_stream_claim(php_stream *stream,
          * failure it did not ask for. */
         if (!oxphp_sock_would_wait(sock, owner)) return OXPHP_CLAIM_BUSY;
 
-        oxphp_stream_claim_refused_log(sock->socket,
-                                       "it is parked on this connection waiting for a reply");
-        return OXPHP_CLAIM_REFUSED;
+        if (!may_wait || self == NULL || !oxphp_write_may_wait(stream)) {
+            oxphp_stream_claim_refused_log(sock->socket,
+                                           "it is parked on this connection waiting for a reply");
+            return OXPHP_CLAIM_REFUSED;
+        }
+        oxphp_stream_claim_result waited = oxphp_stream_await_holder(stream, sock, self);
+        if (waited != OXPHP_CLAIM_OK) return waited;
     }
 
     if (self != NULL && !oxphp_claim_acquire(stream, self)) {
@@ -2400,6 +2433,106 @@ static inline void oxphp_io_op_pop(oxphp_request_fiber *self, const oxphp_io_op 
     }
 }
 
+/* Wait, for a write, until the fiber parked on this stream for its reply is no
+ * longer parked on it.
+ *
+ * A write can wait here and a read cannot. Both hold `stream` and its
+ * php_netstream_data_t across the wait, and any other fiber can close both
+ * meanwhile; the close hook covers that, because this fiber names the stream in
+ * its io_op and is listed where the hook finds it, and once told the stream is
+ * gone it ends the request instead of touching either struct again. What a read
+ * cannot survive is its buffer: on a buffered stream, the default,
+ * _php_stream_fill_read_buffer() hands it a pointer into the stream's own read
+ * buffer, which the holder's read may fill or reallocate while this fiber sleeps.
+ * A write is handed the caller's buffer, which for the writes that get here —
+ * oxphp_write_may_wait — stays put while the frames above it are suspended.
+ *
+ * Bounded by the smaller of the stream's own timeout — what the caller asked a
+ * write to take at most — and the bound every claim has. A wait that runs out is
+ * refused. */
+static oxphp_stream_claim_result oxphp_stream_await_holder(php_stream *stream,
+                                                           const php_netstream_data_t *sock,
+                                                           oxphp_request_fiber *self)
+{
+    const int fd = sock->socket;
+
+    /* The close hook is the only thing that can tell this wait its stream is gone,
+     * so a stream on a table it was never installed on — the registry was full —
+     * cannot wait. */
+    if (oxphp_patched_ops_lookup(stream->ops) == NULL) {
+        oxphp_stream_claim_refused_log(fd, "it is parked on this connection waiting for a reply");
+        return OXPHP_CLAIM_REFUSED;
+    }
+
+    int64_t bound_ns = oxphp_claim_budget_ns();
+    int64_t timeout_ns = oxphp_sock_timeout_ns(sock);
+    if (timeout_ns >= 0 && timeout_ns < bound_ns) bound_ns = timeout_ns;
+
+    struct timespec started;
+    clock_gettime(CLOCK_MONOTONIC, &started);
+
+    oxphp_io_op outer;
+    oxphp_io_op_push(self, stream, false, &outer);
+    oxphp_stream_wait_enter(self);
+
+    oxphp_stream_claim_result result = OXPHP_CLAIM_REFUSED;
+    const char *why = NULL;
+    uint64_t step_us = OXPHP_STREAM_CLAIM_POLL_US;
+    for (;;) {
+        int rc = oxphp_fiber_sleep_us(step_us);
+        /* Before anything reads `stream` or `sock` again: both may be freed. */
+        if (self->io_op.stream_closed) {
+            oxphp_stream_wait_leave(self);
+            /* The frames that would put the rest back are the ones the fatal skips. */
+            self->io_op = (oxphp_io_op) {0};
+            oxphp_raise_stream_closed_while_parked(false, stream);
+            /* not reached */
+        }
+        if (rc == 0) {
+            /* Nothing to suspend into — a userland fiber scheduler owns the context,
+             * or switching is blocked here — and blocking the thread would only wait
+             * out the bound: the holder runs on this thread. */
+            why = "it is parked on this connection waiting for a reply, and this context "
+                  "cannot be suspended to wait for it";
+            break;
+        }
+        if (rc == OXPHP_FIBER_UNWIND) {
+            /* An exception is already pending; nothing of ours is added to it. */
+            result = OXPHP_CLAIM_THREW;
+            break;
+        }
+        if (rc < 0) {
+            oxphp_throw_exception("OxPHP\\Async\\AsyncException", "Async task cancelled", 0);
+            result = OXPHP_CLAIM_THREW;
+            break;
+        }
+
+        oxphp_request_fiber *owner = oxphp_claim_owner(stream);
+        if (owner == NULL || owner == self || !oxphp_owner_awaits_fd(owner, fd)) {
+            result = OXPHP_CLAIM_OK;
+            break;
+        }
+
+        struct timespec now;
+        clock_gettime(CLOCK_MONOTONIC, &now);
+        int64_t spent_ns = (int64_t) (now.tv_sec - started.tv_sec) * 1000000000
+                           + (int64_t) (now.tv_nsec - started.tv_nsec);
+        if (spent_ns >= bound_ns) {
+            why = "it stayed parked on this connection waiting for a reply for longer than "
+                  "this write waits";
+            break;
+        }
+
+        step_us *= 2;
+        if (step_us > OXPHP_STREAM_CLAIM_POLL_MAX_US) step_us = OXPHP_STREAM_CLAIM_POLL_MAX_US;
+    }
+
+    oxphp_stream_wait_leave(self);
+    oxphp_io_op_pop(self, &outer);
+    if (why != NULL) oxphp_stream_claim_refused_log(fd, why);
+    return result;
+}
+
 /* The original read, with the stream named on the fiber while it runs. Once the
  * wait above has ended, php_sockop_read() polls the descriptor again, and when what
  * the first wait ended on is gone by then — a spurious wake, bytes taken by
@@ -2454,7 +2587,7 @@ static ssize_t oxphp_sockop_read_plain(php_stream *stream, char *buf, size_t cou
         if (oxphp_current_fiber != NULL) oxphp_note_stream_ops(stream);
 
         oxphp_stream_claim_result claim =
-            oxphp_stream_claim(stream, sock, oxphp_current_fiber);
+            oxphp_stream_claim(stream, sock, oxphp_current_fiber, false);
         if (claim == OXPHP_CLAIM_BUSY) {
             /* A read that was never going to wait gets the answer it already has
              * for a descriptor with nothing on it: zero bytes, try again.
@@ -2668,8 +2801,14 @@ static ssize_t oxphp_sockop_write_plain(php_stream *stream, const char *buf, siz
          * checked and not taken, as in the read hook. */
         if (oxphp_current_fiber != NULL) oxphp_note_stream_ops(stream);
 
-        oxphp_stream_claim_result claim =
-            oxphp_stream_claim(stream, sock, oxphp_current_fiber);
+        /* Not on a stream OpenSSL carries — with OpenSSL loaded, every tcp:// one —
+         * because there this hook is OpenSSL's plain branch, chosen before the
+         * call: a holder that turned TLS on while this write waited would have it
+         * sent unencrypted. Such a write waits in oxphp_hooked_ssl_write instead,
+         * ahead of that choice, and is refused here where that hook is not
+         * installed. */
+        oxphp_stream_claim_result claim = oxphp_stream_claim(
+            stream, sock, oxphp_current_fiber, !oxphp_ops_is_openssl(stream->ops));
         if (claim == OXPHP_CLAIM_BUSY) {
             /* Nothing sent, which is what php_sockop_write() reports for a write
              * that cannot proceed and was not going to wait. Costs whatever the
@@ -2681,7 +2820,8 @@ static ssize_t oxphp_sockop_write_plain(php_stream *stream, const char *buf, siz
         }
         if (claim == OXPHP_CLAIM_REFUSED) {
             /* php_sockop_write()'s own timeout answer: mark the stream and report
-             * that nothing was sent.
+             * that nothing was sent. Reached where the write could not wait for the
+             * holder, or waited and gave up.
              *
              * Worth knowing what that answer costs, because it is more than the
              * call, and not only on this side of an exchange. A client is free to
@@ -2697,6 +2837,11 @@ static ssize_t oxphp_sockop_write_plain(php_stream *stream, const char *buf, siz
              * guarded client's calls are kept from reaching here by the claim
              * taken a level up, which waits. */
             sock->timeout_event = true;
+            return -1;
+        }
+        if (claim == OXPHP_CLAIM_THREW) {
+            /* Cancelled or unwound while waiting, with the exception pending. The
+             * stream is still there: a close while waiting does not return here. */
             return -1;
         }
     }
@@ -2733,7 +2878,8 @@ static ssize_t oxphp_hooked_sockop_write(php_stream *stream, const char *buf, si
  * stream: the claim naming it has to go, because the allocator hands that address
  * to the next stream; and a fiber suspended inside a read on it has to be woken
  * and marked, because everything it would do on resuming — its own frame, and
- * php_stream_read() above it — reads the struct this call is about to free.
+ * php_stream_read() above it — reads the struct this call is about to free. A
+ * write waiting for that fiber holds the struct the same way, and is marked too.
  *
  * Delegation goes through the table the stream carries rather than one saved
  * pointer: this hook is installed on more than one ops table (see the capture
@@ -2768,6 +2914,10 @@ static int oxphp_hooked_sockop_close(php_stream *stream, int close_handle)
             oxphp_fiber_wake_io(owner);
         }
     }
+    /* Not woken: a waiting write sleeps on a timer of a few milliseconds and looks
+     * at the mark first when it ends. Found through a list of its own because the
+     * claim names the holder, not the fibers waiting for it. */
+    oxphp_stream_waiters_mark_closed(stream);
     oxphp_claim_forget(stream);
 
     int (*orig)(php_stream *, int) = oxphp_orig_close_for(stream->ops);
@@ -2936,15 +3086,17 @@ static int oxphp_net_park(struct pollfd *fds, unsigned long nfds, int timeout_ms
 
 /* The claim and the bookkeeping every operation that can park below the stream
  * layer starts with, and the undoing of it. `tls_loop` is what tells a cancelled
- * wait that the operation will not return on its own — see oxphp_net_park. What
+ * wait that the operation will not return on its own — see oxphp_net_park;
+ * `may_wait` is the claim's — see oxphp_stream_claim. What
  * the fiber had in hand when the operation began comes back through `outer`, and
  * goes back with it when the operation ends: see oxphp_io_op_push. */
 static oxphp_stream_claim_result oxphp_net_op_enter(oxphp_request_fiber *self,
                                                    php_stream *stream,
                                                    php_netstream_data_t *sock,
-                                                   bool tls_loop, oxphp_io_op *outer)
+                                                   bool tls_loop, bool may_wait,
+                                                   oxphp_io_op *outer)
 {
-    oxphp_stream_claim_result claim = oxphp_stream_claim(stream, sock, self);
+    oxphp_stream_claim_result claim = oxphp_stream_claim(stream, sock, self, may_wait);
     if (claim == OXPHP_CLAIM_OK && self != NULL) {
         oxphp_io_op_push(self, stream, tls_loop, outer);
     }
@@ -2987,7 +3139,7 @@ static ssize_t oxphp_hooked_ssl_read(php_stream *stream, char *buf, size_t count
 
     oxphp_request_fiber *self = oxphp_current_fiber;
     oxphp_io_op outer = {0};
-    switch (oxphp_net_op_enter(self, stream, sock, true, &outer)) {
+    switch (oxphp_net_op_enter(self, stream, sock, true, false, &outer)) {
     case OXPHP_CLAIM_BUSY:
         return 0;
     case OXPHP_CLAIM_REFUSED:
@@ -3011,11 +3163,13 @@ static ssize_t oxphp_hooked_ssl_write(php_stream *stream, const char *buf, size_
 
     oxphp_request_fiber *self = oxphp_current_fiber;
     oxphp_io_op outer = {0};
-    switch (oxphp_net_op_enter(self, stream, sock, true, &outer)) {
+    switch (oxphp_net_op_enter(self, stream, sock, true, true, &outer)) {
     case OXPHP_CLAIM_BUSY:
         return 0;
     case OXPHP_CLAIM_REFUSED:
         sock->timeout_event = true;
+        return -1;
+    case OXPHP_CLAIM_THREW:
         return -1;
     default:
         break;
@@ -3087,7 +3241,7 @@ static int oxphp_set_option_with(const oxphp_patched_ops_entry *entry, bool tcp_
             bool tls = !tcp_slot && sock != NULL && oxphp_ops_is_openssl(stream->ops);
             oxphp_io_op outer = {0};
             oxphp_stream_claim_result claim = OXPHP_CLAIM_BUSY;
-            if (tls) claim = oxphp_net_op_enter(self, stream, sock, true, &outer);
+            if (tls) claim = oxphp_net_op_enter(self, stream, sock, true, false, &outer);
 
             /* The TCP connect proper is the slot-0 wrapper's part of it: for an
              * ssl:// stream the handshake that follows is not inside this window.
@@ -3154,7 +3308,8 @@ static int oxphp_set_option_with(const oxphp_patched_ops_entry *entry, bool tcp_
              * carries: that is the other entry point's. */
             oxphp_io_op outer = {0};
             if (oxphp_net_op_enter(self, stream, sock,
-                                   !tcp_slot && oxphp_ops_is_openssl(stream->ops), &outer)
+                                   !tcp_slot && oxphp_ops_is_openssl(stream->ops), false,
+                                   &outer)
                 == OXPHP_CLAIM_OK) {
                 int rv = entry->orig_set_option(stream, option, value, ptrparam);
                 oxphp_net_op_leave(self, &outer);
@@ -3170,7 +3325,7 @@ static int oxphp_set_option_with(const oxphp_patched_ops_entry *entry, bool tcp_
         if (cparam->op == STREAM_XPORT_CRYPTO_OP_ENABLE && cparam->inputs.activate
             && sock != NULL && sock->socket != -1) {
             oxphp_io_op outer = {0};
-            switch (oxphp_net_op_enter(self, stream, sock, true, &outer)) {
+            switch (oxphp_net_op_enter(self, stream, sock, true, false, &outer)) {
             case OXPHP_CLAIM_BUSY:
             case OXPHP_CLAIM_REFUSED:
                 cparam->outputs.returncode = -1;
@@ -8784,11 +8939,14 @@ static void oxphp_serve_loop(zend_fcall_info *fci, zend_fcall_info_cache *fcc)
          * replaced, which only puts the environment back as it was before the
          * boot if the boot's entries are in it again — they are kept on this
          * frame, which the long jump leaves; they go back before the session
-         * does, whose write runs a save handler. Those three are all; the
-         * cleanup above is not run. */
+         * does, whose write runs a save handler. And every stream closed on this
+         * thread from here on — a persistent one after the worker's heap is gone —
+         * walks the list of socket writes waiting on one, whose entries are fibers
+         * this jump abandons. The cleanup above is not run. */
         oxphp_scheduler_release_execution_timer(&sched);
         oxphp_scheduler_release_putenv(&sched);
         oxphp_scheduler_return_session_holder(&sched);
+        oxphp_stream_waiters_abandon();
         zend_bailout();
     } zend_end_try();
     oxphp_scheduler_release_execution_timer(&sched);

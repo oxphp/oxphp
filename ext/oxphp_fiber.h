@@ -110,9 +110,11 @@ extern const struct oxphp_symbol_global_name
  * the frames without running them.
  *
  * What the chain gives is limited by how the close hook finds the fiber: through
- * the claim on the stream, which has one holder. While the fiber holds it, a close
- * of any stream in the chain is seen; once another fiber's operation on the same
- * stream has taken it over, the close finds that fiber and not this one. */
+ * the claim on the stream, which has one holder, and through the list of socket
+ * writes waiting for that holder (oxphp_stream_wait_enter). While the fiber holds
+ * the claim or waits in that list, a close of any stream in the chain is seen; once
+ * another fiber's operation on the same stream has taken the claim over, the close
+ * finds that fiber and not this one. */
 typedef struct oxphp_io_op {
     struct _php_stream *stream;
     bool stream_closed;
@@ -555,6 +557,10 @@ typedef struct _oxphp_request_fiber {
     oxphp_io_op io_op;
     oxphp_curl_op curl_op;
     oxphp_curl_wait curl_wait;
+    /* This fiber's place in the thread's list of waiting socket writes
+     * (oxphp_stream_wait_enter). */
+    struct _oxphp_request_fiber *stream_wait_next;
+    bool stream_waiting;
 
     /* libc-level waits (RUNTIME_HOOKS category "net"). `net_park_off` keeps the
      * fiber from parking in them, and from parking in the reads the category adds
@@ -1092,6 +1098,22 @@ void oxphp_curl_wait_leave(oxphp_request_fiber *self);
  * waiting), claims one of the same handles, and could have all of its handles now. */
 bool oxphp_curl_turn_is_anothers(const oxphp_request_fiber *self, void *const *keys,
                                  uint32_t take);
+
+/* A socket write waiting for the fiber parked on its stream to finish its
+ * exchange. The waiter names the stream in its own `io_op` for the length of the
+ * wait, and `enter` lists it where a close of that stream can find it; `leave`
+ * takes it out. Leaving is idempotent. */
+void oxphp_stream_wait_enter(oxphp_request_fiber *self);
+void oxphp_stream_wait_leave(oxphp_request_fiber *self);
+
+/* Mark `stream` closed in the operation chain of every waiting write that names
+ * it. Called by the close hook before the stream is freed. */
+void oxphp_stream_waiters_mark_closed(const struct _php_stream *stream);
+
+/* Empty that list without touching its entries, for a serve loop left by a long
+ * jump: the fibers on it are abandoned there, and their structs do not outlive
+ * the worker's heap, while every later close on the thread walks the list. */
+void oxphp_stream_waiters_abandon(void);
 
 /* Run one tick of the event loop: check try_recv, timers, await results. */
 int oxphp_scheduler_tick(oxphp_fiber_scheduler *sched);
