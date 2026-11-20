@@ -229,8 +229,8 @@ export LD_LIBRARY_PATH=/usr/local/lib
 After starting OxPHP, structured JSON log output confirms the server is running:
 
 ```text
-{"timestamp":"...","level":"INFO","message":"OxPHP HTTP server starting","listen_addr":"0.0.0.0:80",...}
-{"timestamp":"...","level":"INFO","message":"Server listening","addr":"0.0.0.0:80"}
+{"timestamp":"...","level":"INFO","fields":{"message":"OxPHP HTTP server starting","version":"...","listen_addr":"0.0.0.0:80",...}}
+{"timestamp":"...","level":"INFO","fields":{"message":"Server listening","addr":"0.0.0.0:80"}}
 ```
 
 Test that the server responds:

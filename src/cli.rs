@@ -757,9 +757,12 @@ fn enabled_features() -> String {
 /// config parses and all filesystem checks pass, `Err` otherwise — the caller
 /// decides the exit code.
 ///
-/// Validation is filesystem sanity only: path existence and file/directory
-/// kind. PHP runtime, TLS handshake, and network binding are intentionally out
-/// of scope.
+/// Parsing covers everything `Config::from_env()` reads, `.oxphpdeny`
+/// included; validation adds path existence and file/directory kind. What is
+/// read later — the `PHP_DENY_*` and `SYMLINK_ALLOW_PATHS` settings as routing
+/// is built, each plugin's own settings at its init — is not checked here, and
+/// PHP runtime, TLS handshake and network binding are intentionally out of
+/// scope.
 ///
 /// A sizing advisory may follow the verdict on a `  ! ` line. It is not
 /// validation — the configuration is legal and the exit code is unaffected —

@@ -114,22 +114,27 @@ During a graceful shutdown, OxPHP emits structured log messages you can monitor:
 **Successful drain:**
 
 ```json
-{"level":"INFO","message":"Received shutdown signal, draining connections"}
-{"level":"INFO","message":"Draining in-flight connections","active_connections":3,"in_flight_requests":4}
-{"level":"INFO","message":"All connections drained"}
-{"level":"INFO","message":"Server stopped"}
+{"timestamp":"2026-11-20T05:04:31.055060Z","level":"INFO","fields":{"message":"Received shutdown signal, draining connections"}}
+{"timestamp":"2026-11-20T05:04:31.055124Z","level":"INFO","fields":{"message":"Draining in-flight connections","active_connections":3,"in_flight_requests":4}}
+{"timestamp":"2026-11-20T05:04:31.771935Z","level":"INFO","fields":{"message":"All connections drained"}}
+{"timestamp":"2026-11-20T05:04:31.772061Z","level":"INFO","fields":{"message":"Server stopped"}}
 ```
+
+The event's own fields, `message` included, sit under `fields`, so a log pipeline reads the counts as `fields.active_connections` and `fields.in_flight_requests`.
 
 The two counts overlap rather than partition: `active_connections` is live client connections, `in_flight_requests` is requests still executing on PHP workers, and a request holding a connection is counted in both. A request that ended its response early with `oxphp_finish_request()` appears only in `in_flight_requests` — its connection is already gone while its background work runs.
 
 **Drain deadline reached:**
 
 ```json
-{"level":"INFO","message":"Received shutdown signal, draining connections"}
-{"level":"WARN","message":"Drain timeout reached, cancelling in-flight requests","remaining_connections":1,"in_flight_requests":1}
-{"level":"INFO","message":"All connections drained"}
-{"level":"INFO","message":"Server stopped"}
+{"timestamp":"2026-11-20T05:04:38.816253Z","level":"INFO","fields":{"message":"Received shutdown signal, draining connections"}}
+{"timestamp":"2026-11-20T05:04:38.816346Z","level":"INFO","fields":{"message":"Draining in-flight connections","active_connections":1,"in_flight_requests":1}}
+{"timestamp":"2026-11-20T05:04:40.850747Z","level":"WARN","fields":{"message":"Drain timeout reached, cancelling in-flight requests","remaining_connections":1,"in_flight_requests":1}}
+{"timestamp":"2026-11-20T05:04:41.152304Z","level":"INFO","fields":{"message":"All connections drained"}}
+{"timestamp":"2026-11-20T05:04:41.152411Z","level":"INFO","fields":{"message":"Server stopped"}}
 ```
+
+Where a cancelled request does not unwind within the ~2 seconds that follow — one inside a blocking call (step 4 above) — a `WARN` `Forcing shutdown`, with the same two counts, takes the place of `All connections drained`.
 
 If you regularly see the "Drain timeout reached" warning, increase `DRAIN_TIMEOUT_SECONDS` or investigate long-running requests using the `oxphp_request_duration_us` histogram.
 

@@ -1700,8 +1700,8 @@ mod tests {
 
     #[test]
     fn stall_reported_when_idle_workers_refuse_everything() {
-        // The later phase, and the one the issue reported: the queue has
-        // filled, so arrivals are refused at admission rather than piling up.
+        // The later phase: the queue has filled, so arrivals are refused at
+        // admission rather than piling up.
         // Same fault, different counter.
         let mut watch = StallWatch::default();
         watch.observe(wedged_scan(0, 0, 0));
@@ -1840,11 +1840,10 @@ mod tests {
         }
     }
 
-    /// The pool the issue was measured on: seven workers, a queue of 896 full
-    /// to the brim with no admission slot free, and the wait budget already
-    /// driven down. Deliberately without worker metrics — that makes it a
-    /// traditional-mode pool, which is both the default and the mode the
-    /// measurement was taken in.
+    /// A wedged pool: seven workers, a queue of 896 full to the brim with no
+    /// admission slot free, and the wait budget already driven down.
+    /// Deliberately without worker metrics — that makes it a traditional-mode
+    /// pool, the default mode.
     fn shedding_supervisor() -> (Arc<Metrics>, Supervisor) {
         let metrics = Arc::new(Metrics::new_with_workers(7));
         metrics.set_queue_probe(Box::new(|| crate::metrics::QueueSnapshot {
