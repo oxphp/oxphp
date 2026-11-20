@@ -158,6 +158,10 @@ oxphp_worker(function () {
             }
             // unreachable
 
+        case '/ending': // stream the soft drain ends, logging what runs after
+            require __DIR__ . '/ending.php';
+            return;
+
         case '/flood': // stream for a client that reads nothing: its flush
                        // waits for room in its queue, and the soft drain must
                        // end it there

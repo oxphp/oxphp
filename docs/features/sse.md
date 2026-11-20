@@ -27,6 +27,9 @@ header('Content-Type: text/event-stream');
 header('Cache-Control: no-cache');
 header('Connection: keep-alive');
 
+// A stream outlives max_execution_time, which is 30 s unless the PHP configuration sets another value
+set_time_limit(0);
+
 for ($i = 0; $i < 100; $i++) {
     $data = json_encode(['counter' => $i, 'time' => microtime(true)]);
     echo "id: {$i}\n";
@@ -100,6 +103,9 @@ PHP's native `flush()` also works for streaming, but requires clearing all outpu
 header('Content-Type: text/event-stream');
 header('Cache-Control: no-cache');
 
+// A stream outlives max_execution_time, which is 30 s unless the PHP configuration sets another value
+set_time_limit(0);
+
 while (ob_get_level()) {
     ob_end_clean();
 }
@@ -113,7 +119,7 @@ for ($i = 0; $i < 100; $i++) {
 
 ### SSE with Worker Mode
 
-SSE works in both standard and worker mode. In worker mode, the streaming connection occupies the worker for the full duration of the stream. The worker handles the next request only after the script finishes.
+SSE works in both standard and worker mode. Outside worker mode a stream holds its PHP worker for as long as it stays open. In worker mode a stream is one of the up to 256 requests a worker runs at once: while it waits at a [suspension point](fiber-multiplexing.md#suspension-points) — in `oxphp_sleep()`, in a flush waiting for the client to make room, or, with the matching [runtime hooks](../operations/configuration.md#runtime-hooks) on, in `sleep()` or a socket read — the worker runs its other requests. A wait the hooks do not cover — a native `sleep()` or a blocking read with the hooks off, a heavy native call — holds the whole worker until it returns (see [Blocking I/O](fiber-multiplexing.md#blocking-io)). The example below waits in a Redis read, so with the `streams` hooks off every open stream holds a worker for up to 25 s at a time.
 
 In a broadcast every open stream has to receive every event, so the example reads them from a Redis Stream rather than popping them off a list. Reading a stream leaves its entries where they are and each reader keeps its own position, so every client reads every event the stream still holds. `BRPOP` on a list works the other way: it removes the element it returns, and that element goes to exactly one of the connections waiting on the list. That is the right shape for a work queue and the wrong one for a broadcast — with two streams open, each event would reach only one of them.
 
@@ -225,9 +231,9 @@ The PHP output buffer is capturing output instead of streaming it. This happens 
 
 **Fix:** Call `oxphp_stream_flush()` after each event. This function flushes all PHP output buffer layers and sends the accumulated output as a chunk.
 
-### SSE connections are closed after a few minutes
+### SSE connections are closed after 30 seconds
 
-PHP's `max_execution_time` is firing and terminating the script. SSE streams must run longer than the configured limit.
+PHP's `max_execution_time` is firing and terminating the script: it is 30 seconds unless the PHP configuration sets another value, and the release image ships no `php.ini`. SSE streams must run longer than the configured limit.
 
 **Fix:** Disable the per-request execution timer at the top of the streaming script:
 
@@ -259,7 +265,7 @@ oxphp_stream_flush();
 
 ## Docker Example
 
-SSE endpoints require PHP's execution timer to be disabled or set high. Each active SSE connection occupies one PHP worker for the full duration of the stream, so size the worker pool to accommodate your expected concurrent stream count.
+SSE endpoints require PHP's execution timer to be disabled or set high. Outside worker mode each open stream holds one PHP worker for its whole life, so size `PHP_WORKERS` for the number of concurrent streams. In worker mode a stream that waits at a [suspension point](fiber-multiplexing.md#suspension-points) leaves its worker free meanwhile, and a worker runs up to 256 requests at once; one that waits in a blocking call holds its worker as above.
 
 ```yaml
 services:
@@ -283,19 +289,19 @@ Each streaming script should call `set_time_limit(0)` at the top so the per-requ
 - **Send periodic comment heartbeats** (`: heartbeat\n\n`) every 20–30 seconds to keep intermediate proxies from closing idle connections and to detect client disconnections early.
 - **Keep event payloads small.** Large payloads fill the 64-chunk buffer faster, causing PHP to stall on each flush. For large data, send an event ID and let the client fetch the full payload via a separate request.
 - **Disable PHP's execution timer per-script** with `set_time_limit(0)` for long-lived SSE endpoints, or set `max_execution_time` high enough to cover your longest expected stream duration.
-- **Size your worker pool for peak concurrent streams.** Each active SSE connection holds one PHP worker for its full duration. Budget at least one worker per expected concurrent client, plus additional workers for regular non-SSE requests.
+- **Size your worker pool for peak concurrent streams.** Outside worker mode, and in worker mode for a stream that waits in a blocking call, each open stream holds one PHP worker for its full duration: budget at least one worker per expected concurrent client, plus additional workers for regular non-SSE requests. In worker mode a stream that waits only at [suspension points](fiber-multiplexing.md#suspension-points) takes one of its worker's 256 request slots instead, and the worker serves other requests between its events.
 
 ## Notes
 
 - Event streams are never compressed, by either of two independent rules: `text/event-stream` is not a compressible media type, and a response whose length is unknown when the headers go out is passed through whatever the client accepts. That holds for every coding OxPHP offers — Brotli, Zstandard and gzip alike — so no configuration can turn compression on for a stream.
 - `oxphp_stream_flush()` returns `false` if `oxphp_finish_request()` was already called on the same request.
-- In worker mode, the worker remains occupied for the full duration of the stream and handles the next request only after the PHP script exits.
+- In worker mode, a stream occupies one of its worker's 256 request slots until the script exits; whether it also holds the worker between events depends on how it waits — see [SSE with Worker Mode](#sse-with-worker-mode).
 
 ## Behaviour on shutdown
 
 When the server receives SIGTERM (a rolling deploy, a `docker stop`, a Kubernetes pod eviction), it drains gracefully:
 
-- Each open SSE stream is ended cleanly on its next `flush` — its handler bails as if the connection closed, so `register_shutdown_function()` callbacks still run and `error_get_last()['message']` reads `Request cancelled (shutdown)`.
+- Each open SSE stream is ended, as a rule, with the fatal error `Request cancelled (shutdown)`. In worker mode a stream that waits at a [suspension point](fiber-multiplexing.md#suspension-points) — `oxphp_sleep()`, a flush waiting for room, a wait the runtime hooks took over — is ended there at once; any other stream at a flush, the one it is waiting in or its next one (see below). What runs then is what runs after any fatal error: `register_shutdown_function()` callbacks run, and `error_get_last()['message']` reads `Request cancelled (shutdown)` in them, but `finally` blocks do not run, and neither, as a rule, do the destructors of the objects the script holds. That is not what a client leaving does: that ends the script without an error, and those destructors run (see [Detecting client disconnects](#detecting-client-disconnects)). Three cases differ. In worker mode the destructor of an object that something besides the script's own variables still references — a global variable, say — runs when that reference goes. And with `display_errors` on and no output buffer — PHP's built-in default, which applies in the release image, as it loads no `php.ini` — displaying the error ends the request before PHP marks its objects as destructed, and every destructor runs. And a stream that writes again after the flush that found the drain, before PHP next checks for an interrupt — an event split over two `echo` statements under `ob_implicit_flush()`, say — is ended at that write without an error: `error_get_last()` returns `null` in its shutdown functions, its `finally` blocks still do not run, and its destructors run as they do when a client leaves. Put cleanup that has to happen at shutdown in a shutdown function.
 - HTTP/2 clients receive a `GOAWAY` frame; HTTP/1.1 keep-alive connections are closed. The browser's `EventSource` reconnects automatically — to a healthy instance when a load balancer fronts the fleet.
 - The stream does **not** receive a 503: its `200` headers were already sent, so the status cannot be rewritten. Design clients to resume from the last event id (send `id:` with each event; on reconnect the browser sends it back as the `Last-Event-ID` request header, available in PHP as `$_SERVER['HTTP_LAST_EVENT_ID']`); the [worker-mode example](#sse-with-worker-mode) does exactly that.
 

@@ -19,14 +19,22 @@ header('Content-Type: text/event-stream');
 header('Cache-Control: no-cache');
 header('X-Accel-Buffering: no');
 
+// A stream outlives max_execution_time, which is 30 s unless the PHP
+// configuration sets another value.
+set_time_limit(0);
+
+// Keep running when the client leaves, so that the connection_aborted() check
+// below sees it. Without this call the flush() that finds the client gone does
+// not return, as under php-fpm, and the check is never reached.
+ignore_user_abort(true);
+
 // Disable PHP output buffering so echo goes directly to ub_write
 while (ob_get_level()) {
     ob_end_flush();
 }
 
 for ($i = 0; $i < $count; $i++) {
-    // Portable disconnect check: works on php-fpm, OxPHP, and any SAPI
-    // that updates PG(connection_status) when the client closes the socket.
+    // A client that left is found out by the previous pass's flush().
     if (connection_aborted()) {
         break;
     }

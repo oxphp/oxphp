@@ -16,6 +16,10 @@ header('Content-Type: text/event-stream');
 header('Cache-Control: no-cache');
 header('X-Accel-Buffering: no');
 
+// A stream outlives max_execution_time, which is 30 s unless the PHP
+// configuration sets another value.
+set_time_limit(0);
+
 for ($i = 0; $i < $count; $i++) {
     $data = json_encode([
         'counter' => $i + 1,
