@@ -29,11 +29,11 @@ A fiber therefore claims a connection before using it, at both of the levels thi
 
 Another fiber reaching the same connection waits for it to be given up at the client level, where nothing but the connection's identity is held. At the socket level an `fwrite()` or `fputs()` from PHP code, on a stream with no write filter, waits as well, but only for the exchange the holder is parked in, not for the holder's request: what reaches the socket is the string the call was given, which nothing else touches while it waits. Anything else is refused, the way a socket timeout is refused.
 
-A read cannot wait, because what PHP hands a read on a buffered stream, which is the default, is the stream's own buffer, which the holder's read fills and may reallocate while the second fiber would be suspended. Nor can a C client's write, because what it writes with is not its own: before every command mysqlnd resets the connection's packet counter, and it builds the command in a buffer that belongs to the connection whenever the command fits, so a second command issued while the first waited would break the first one's exchange.
+A read cannot wait, because what PHP hands a read on a buffered stream, which is the default, is the stream's own buffer, which the holder's read fills and may reallocate while the second fiber would be suspended. Nor can a C client's write, because what it writes with is not its own: before every command mysqlnd resets the connection's packet counter, and it builds the command in a buffer that belongs to the connection whenever the command fits, so a second command issued while the first waited would break the first one's exchange. phpredis is guarded at the client level too, method by method, for exactly that reason.
 
 ### Writes under `streams` without `net`
 
-Under `streams` without `net` the `fwrite()` is refused too wherever the OpenSSL extension is loaded, the official images included: OpenSSL then carries every `tcp://` stream and has chosen between its plain and TLS paths before the write reaches the hook, so a write that waited there could go out unencrypted on a connection the holder had meanwhile switched to TLS. phpredis is guarded at the client level too, method by method, for exactly that reason.
+Under `streams` without `net` the `fwrite()` is refused too wherever the OpenSSL extension is loaded, the official images included: OpenSSL then carries every `tcp://` stream and has chosen between its plain and TLS paths before the write reaches the hook, so a write that waited there could go out unencrypted on a connection the holder had meanwhile switched to TLS.
 
 ### What the claim covers
 
@@ -48,7 +48,7 @@ Read the hook's gain, then, as belonging to connections a fiber opens for itself
 
 Four boundaries are worth knowing.
 
-### First boundary: a claim lasts to the end of the request
+### First boundary: a fiber that queried keeps the connection until its request ends
 
 A fiber that queried once keeps the connection to the end of its request, because the end of the request is the first moment certainly past the end of an exchange. It keeps it while parked on anything else as well, so a request that has queried and then waits on work of its own that needs the same connection is waiting for itself, and the two come apart on [the bound below](#second-boundary-every-wait-is-bounded) instead of proceeding.
 
@@ -70,7 +70,7 @@ Past the bound the call falls back on unguarded behaviour and says why in the se
 
 One PDO call is the exception, both here and for code running outside any fiber ([below](#code-outside-any-fiber)): `PDO::rollBack()` on a persistent connection another fiber holds, finding a transaction open on it, sends nothing and returns `false` — reporting, the way the error mode says, an error the connection already records, which can be the holder's — because that transaction is the holder's and a `ROLLBACK` sent between its statements would end it.
 
-#### PDO handle teardown on a held connection
+#### PDO handle teardown on a persistent connection
 
 PDO's own object teardown is held to the holder as well. While a request or task holds a persistent connection, dropping a handle on it rolls back the transaction open there and runs the driver's end-of-request cleanup only if the holder was the last to use that handle — built it, or since called one of the PDO methods OxPHP guards through it. That holds wherever the handle is destroyed, PHP's cycle collector running in another request included. Any other handle skips both; on a connection nobody holds, no handle skips them for being another's.
 
@@ -95,7 +95,7 @@ The client-level claim above is what keeps a guarded client's commands from reac
 
 #### Two fibers waiting on each other
 
-Two fibers each holding what the other waits for therefore come apart on the bound instead of waiting on each other for good. The one such pair OxPHP can recognise comes apart at once instead: a request waiting in `session_start()` for the session another request on its worker has open (see [Worker Mode](worker-state.md#what-gets-reset-between-requests)), while holding a connection that request is waiting for. The wait for the connection is then given up as soon as both are waiting, with the outcome a spent bound has, and the server log says so.
+Because every wait is [bounded](#second-boundary-every-wait-is-bounded), two fibers each holding what the other waits for come apart on that bound instead of waiting on each other for good. The one such pair OxPHP can recognise comes apart at once instead: a request waiting in `session_start()` for the session another request on its worker has open (see [Worker State Between Requests](worker-state.md#what-gets-reset-between-requests)), while holding a connection that request is waiting for. The wait for the connection is then given up as soon as both are waiting, with the outcome a spent bound has, and the server log says so.
 
 #### Code outside any fiber
 
@@ -127,7 +127,7 @@ That wait is bounded like the ones above, and unlike them what it costs when it 
 
 A constructor inside a userland fiber scheduler's own fiber is the one place where that budget is spent at once rather than occasionally: such a context cannot be suspended, so a constructor that finds another one already running gives up immediately instead of waiting. One that finds the way clear still takes its turn like any other, and the fibers OxPHP drives still wait for it.
 
-#### The liveness check on a pooled connection
+#### The liveness check and constructor options on a pooled connection
 
 The other step is the liveness check PDO makes before handing a pooled connection over: it is a ping, sent on the connection itself. One sent while the fiber holding that connection is parked on it waiting for its reply is refused, so PDO reads it as dead, drops it from the pool and opens a second connection — the request mid-exchange keeps its own connection and its reply, but what the application meant to share is no longer shared.
 
