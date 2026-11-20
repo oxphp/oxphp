@@ -553,8 +553,8 @@ services:
 Customize PHP settings by creating an `custom.ini` file and mounting it into the container. This is the recommended way to configure OPcache, JIT, sessions, and other PHP runtime settings.
 
 ```ini
-; Do NOT add zend_extension=opcache — OPcache is already compiled into the
-; PHP ZTS base image. The [opcache] section below configures it directly.
+; Do NOT add zend_extension=opcache — the image already loads OPcache.
+; The [opcache] section below configures it directly.
 
 [opcache]
 opcache.enable = 1
@@ -572,7 +572,7 @@ session.use_cookies = 1
 session.use_only_cookies = 1
 ```
 
-> **Note:** Do not add `zend_extension=opcache` to this file. OPcache is already built into the PHP ZTS image used by OxPHP. Adding a `zend_extension` line will produce a warning on every request startup.
+> **Note:** Do not add `zend_extension=opcache` to this file. OPcache is already loaded in the OxPHP image — compiled into PHP on 8.5 and 8.6, loaded by the PHP base image's `conf.d/docker-php-ext-opcache.ini` on 8.4 — and the extra line costs a message every time PHP starts. See [OPcache](../php/opcache.md).
 
 In development, set `opcache.validate_timestamps = 1` and `opcache.revalidate_freq = 0` so PHP picks up file changes without a container restart.
 
@@ -770,7 +770,7 @@ This approach is convenient for development — PHP CLI, `composer`, `docker-php
 
 ### Production Dockerfile
 
-The official OxPHP image is minimal — it does not include PHP CLI or extension build tools. If your application needs additional extensions (pdo_mysql, intl, etc.), build them in a separate stage and copy into the final image:
+The official OxPHP image keeps PHP's own tooling — `php`, `docker-php-ext-install` and `phpize` — so an extension can be installed into it directly, as [Installing PHP Extensions in Production](docker.md#installing-php-extensions-in-production) shows. The `-dev` packages an extension is compiled against then stay in the final image, though. To keep them out when your application needs additional extensions (pdo_mysql, intl, etc.), build them in a separate stage and copy them into the final image:
 
 ```dockerfile
 # Extension build stage
@@ -4274,7 +4274,7 @@ When the OTel plugin is enabled, each HTTP request becomes a span exported to yo
 
 ### Span Attributes
 
-Exported spans include standard HTTP semantic convention attributes:
+Exported spans include standard HTTP semantic convention attributes and OxPHP's own `oxphp.*` attributes:
 
 | Attribute | Description |
 |-----------|-------------|
@@ -4287,6 +4287,9 @@ Exported spans include standard HTTP semantic convention attributes:
 | `oxphp.request_id` | OxPHP request ID |
 | `http.request.body.size` | Request body size in bytes (if non-zero) |
 | `http.response.body.size` | Response body size in bytes (if non-zero) |
+| `error.type` | The response status code as a string, on a `5xx` response. Absent otherwise |
+| `oxphp.queue_wait_us` | Microseconds the request waited for a PHP worker — for admission and in the queue — until one took it, the figure `oxphp_queue_wait_us` records. Present only when a worker took the request within its queue budget: absent on a request admission refused and on one PHP did not handle, such as a static file |
+| `oxphp.php_exec_us` | Microseconds of PHP execution. Present on every request the PHP pool or its admission answered, and `0` where no script ran — a refused request, or one whose client left before a worker ran it — so there it is not an execution time. Absent on a `500 PHP Worker Error`, where the request's answer was lost, and on a request PHP did not handle |
 | `oxphp.shed_reason` | Why admission refused the request, on a request it refused: `queue_full`, `wait_timeout`, `waiting_full` or `waiting_bytes` on a `529`, `shutting_down` on a `503`, `pool_unavailable` on a `500` — the values of the `reason` label on `oxphp_admission_refused_total`. Absent otherwise, including on a `529` the application returned itself |
 
 5xx responses are marked as error spans.
@@ -4336,9 +4339,11 @@ When the APM plugin is enabled, OxPHP automatically hooks 34 internal PHP functi
 | **PDO** | `PDO::__construct`, `PDO::query`, `PDO::exec`, `PDO::prepare`, `PDOStatement::execute` |
 | **mysqli** | `mysqli::__construct`, `mysqli::query`, `mysqli::prepare`, `mysqli_stmt::prepare`, `mysqli_stmt::execute` |
 | **cURL** | `curl_init`, `curl_setopt`, `curl_exec`, `curl_multi_exec` |
-| **Redis** | `Redis::connect`, `Redis::get`, `Redis::set`, `Redis::del`, `Redis::mget`, `Redis::mset`, `Redis::hget`, `Redis::hset`, `Redis::lpush`, `Redis::rpush` |
+| **Redis** | `Redis::connect`, `Redis::get`, `Redis::set`, `Redis::del`, `Redis::mget`, `Redis::mset`, `Redis::hGet`, `Redis::hSet`, `Redis::lPush`, `Redis::rPush` |
 | **Memcached** | `Memcached::get`, `Memcached::set`, `Memcached::delete`, `Memcached::getMulti`, `Memcached::setMulti` |
 | **File I/O** | `fopen`, `fread`, `fwrite`, `file_get_contents`, `file_put_contents` |
+
+A span is named after the class and method as the extension declares them, which is how this table writes them: phpredis's `hGet` gives a `Redis::hGet` span, however the call spells it.
 
 Hooks are only installed for extensions that are actually loaded. If your build does not include the Redis extension, the Redis hooks are silently skipped.
 
@@ -5844,7 +5849,6 @@ paginated via `?limit=N&offset=M`.
 
 - A background task every 5 seconds deletes entries past
   `PROFILER_RETENTION_COUNT` (atomic `rename` → `index.json`).
-- Files without an `index.json` entry (orphaned by a crash) are swept.
 - The `PROFILER_DISK_MAX_PER_SEC` token bucket protects the disk: if the
   rate is higher, runs are not written and
   `oxphp_profiler_disk_drops_total` increments.
@@ -12991,7 +12995,7 @@ To enable OPcache, at minimum:
 opcache.enable=1
 ```
 
-> **Note:** The official OxPHP Docker image is based on `php:*-zts-alpine` (`php:8.6-alpine` for PHP 8.6), which compiles OPcache statically into the PHP binary. Do NOT add `zend_extension=opcache` to your INI file — the extension is already loaded, and adding that line will cause a warning on every PHP startup. Only the `[opcache]` configuration section is needed.
+> **Note:** OPcache is already loaded in the official OxPHP Docker image. On PHP 8.5 and 8.6 it is compiled into the PHP binary; on PHP 8.4 it is a shared extension that the PHP base image loads from `conf.d/docker-php-ext-opcache.ini`. Do NOT add `zend_extension=opcache` to your INI file — on 8.4 PHP reports that OPcache is already loaded, and on 8.5 and 8.6 there is no `opcache.so` to load, so either way the line costs a message on every PHP startup. Only the `[opcache]` configuration section is needed.
 
 ## Recommended Production Settings
 

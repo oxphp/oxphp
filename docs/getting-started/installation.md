@@ -130,7 +130,7 @@ This approach is convenient for development — PHP CLI, `composer`, `docker-php
 
 ### Production Dockerfile
 
-The official OxPHP image is minimal — it does not include PHP CLI or extension build tools. If your application needs additional extensions (pdo_mysql, intl, etc.), build them in a separate stage and copy into the final image:
+The official OxPHP image keeps PHP's own tooling — `php`, `docker-php-ext-install` and `phpize` — so an extension can be installed into it directly, as [Installing PHP Extensions in Production](docker.md#installing-php-extensions-in-production) shows. The `-dev` packages an extension is compiled against then stay in the final image, though. To keep them out when your application needs additional extensions (pdo_mysql, intl, etc.), build them in a separate stage and copy them into the final image:
 
 ```dockerfile
 # Extension build stage
