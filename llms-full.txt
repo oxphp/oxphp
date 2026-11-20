@@ -391,7 +391,7 @@ For the smallest possible final image, compile extensions in a dedicated builder
 
 Note: the walkthrough above still shows explicit `USER root` / `USER www-data` toggles for defense-in-depth — with v0.3.0 they are optional since the base image no longer sets `USER`.
 
-### Running CLI tools and migrations
+## Running CLI tools and migrations
 
 The same prod image can run `php` CLI commands for migrations, Composer, or ad-hoc inspection. `docker run` replaces the default CMD with the command you pass — the container runs the command and exits, it does not also start the OxPHP server.
 
@@ -412,6 +412,8 @@ docker run --rm --user www-data \
 ```
 
 `docker exec <container> docker-php-ext-install <ext>` also works on a running container without any additional flags — useful for debugging a live container. For production, persist the extension in your Dockerfile so it survives restarts.
+
+## Running as Root or Non-Root
 
 ### Security note
 
