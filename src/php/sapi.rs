@@ -2002,8 +2002,10 @@ const CLIENT_ABORT_FATAL: &str = "Request cancelled (client_abort)";
 /// A client hanging up is not a failure of the application's, and a request
 /// interrupted that way said it was on both of the routes a fatal can take
 /// out of the engine: this server's own error callback, and — where
-/// `log_errors` is on and no `error_log` file has been named — the engine's
-/// error log, which then arrives through the SAPI's log hook. Both drop to
+/// `error_reporting` includes `E_ERROR`, `log_errors` is on and `error_log` is
+/// unset or names a file that cannot be opened — the engine's error log, which
+/// then arrives through the SAPI's log hook (`error_log=syslog` goes to syslog
+/// and never reaches it). Both drop to
 /// DEBUG, and nothing else about the fatal changes: the status handling, the
 /// async fatal capture, the entry in this request's collected errors and the
 /// delegation to Zend's own callback all still run.
@@ -2347,14 +2349,15 @@ pub fn clear_buffers() {
     REQUEST_ERRORS.with(|errors| errors.borrow_mut().clear());
 }
 
-/// Set the response status if the current status is still the default 200.
+/// Stamp the fatal-error status onto `RESPONSE` unless it already holds a
+/// non-200 one.
 ///
-/// Called from the fatal-error callback and from `execute_request` on bailout.
-/// When a cancellation reason is recorded on the bridge, the status reflects
-/// the cause: ClientAbort → 499 (nginx-style, log-only — connection is gone),
-/// Timeout → 504, Shutdown → 503. Other reasons (None / Stuck / UserCancel)
-/// fall through to the generic 500. The `status == 200` guard preserves any
-/// status the userland set explicitly via `http_response_code()` before bailout.
+/// A recorded cancel reason picks the status; a client abort's 499 is only
+/// logged, since the connection is gone. A status the script set, with
+/// `http_response_code()`, a `Location:` header or an `HTTP/` status line,
+/// lives in `SG(sapi_headers)` and reaches `RESPONSE` only through
+/// `collect_response_code`, so until then the guard sees only statuses the
+/// server set itself.
 pub fn set_fatal_error_status_if_default() {
     RESPONSE.with(|r| {
         let mut resp = r.borrow_mut();
