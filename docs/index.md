@@ -112,6 +112,7 @@ Process-wide concurrent primitives so workers can coordinate mutable state witho
 - [HTTP Request API](php/request-api.md) — object-oriented request access via `oxphp_http_request()`: query params, parsed body, headers, cookies, file uploads, and more
 - [Functions](php/functions.md) — built-in PHP functions provided by OxPHP (`oxphp_worker()`, `oxphp_request_id()`, `oxphp_server_info()`, and more)
 - [Superglobals](php/superglobals.md) — how `$_SERVER`, `$_GET`, `$_POST`, `$_COOKIE`, `$_FILES`, and `php://input` are populated
+- [Server Variables](php/server-variables.md) — every `$_SERVER` key OxPHP sets, request headers, reverse-proxy values, `PATH_INFO`, and differences from PHP-FPM
 - [OPcache and JIT](php/opcache.md) — OPcache configuration and JIT compilation settings
 
 ## Operations

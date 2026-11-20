@@ -113,7 +113,7 @@ $request->isSecure(): bool
 $request->host(): string
 ```
 
-Hostname from the `Host` header. Returns an empty string when the header is absent (an HTTP/1.0 request in origin form, `GET /path`, sent without a `Host` header). Over HTTP/2 the `Host` header is the request's `:authority`, and over HTTP/1.1 and HTTP/1.0 the host of a request target in absolute form (`GET http://example.com/path`), as described in [Superglobals](superglobals.md#standard-variables).
+Hostname from the `Host` header. Returns an empty string when the header is absent (an HTTP/1.0 request in origin form, `GET /path`, sent without a `Host` header). Over HTTP/2 the `Host` header is the request's `:authority`, and over HTTP/1.1 and HTTP/1.0 the host of a request target in absolute form (`GET http://example.com/path`), as described in [Superglobals](server-variables.md#standard-variables).
 
 ```php
 $request->port(): int
@@ -250,9 +250,9 @@ $data = $request->payload();        // ["name" => "Alice", "role" => "admin"]
 $request->header(string $name, ?string $default = null): ?string
 ```
 
-Returns the raw header value. Header names are case-insensitive. A list such as `Accept` or `X-Forwarded-For` comes back as one string — parsing it is your responsibility — and a header sent as several lines with the same name comes back as one string too, its lines joined the way [`$_SERVER` joins them](superglobals.md#http-request-headers). A header sent with an empty value (`X-Foo:`) reads as `''`, not `$default`.
+Returns the raw header value. Header names are case-insensitive. A list such as `Accept` or `X-Forwarded-For` comes back as one string — parsing it is your responsibility — and a header sent as several lines with the same name comes back as one string too, its lines joined the way [`$_SERVER` joins them](server-variables.md#http-request-headers). A header sent with an empty value (`X-Foo:`) reads as `''`, not `$default`.
 
-The name is matched as sent, without the `HTTP_` mapping of `$_SERVER`: `header('X_Api_Key')` does not return an `X-Api-Key` header. This is also how to read a header whose name contains `_` or `.`, which [`$_SERVER` leaves out](superglobals.md#http-request-headers); `headers()` lists those too.
+The name is matched as sent, without the `HTTP_` mapping of `$_SERVER`: `header('X_Api_Key')` does not return an `X-Api-Key` header. This is also how to read a header whose name contains `_` or `.`, which [`$_SERVER` leaves out](server-variables.md#http-request-headers); `headers()` lists those too.
 
 ```php
 $request->hasHeader(string $name): bool
