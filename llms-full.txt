@@ -4521,20 +4521,7 @@ $response = file_get_contents('https://api.example.com/data', false,
 
 ### Function Reference
 
-| Function | Returns | Description |
-|----------|---------|-------------|
-| `oxphp_apm_trace(name, callback, ?attributes)` | `mixed` | Execute a callback inside a span and return its value. The callback receives the span's local ID; a throw marks the span as error with an `exception` event (type and message, no stacktrace) and propagates |
-| `oxphp_apm_start(name, ?attributes)` | `int` | Open a span and return its local ID. `0` when APM is disabled |
-| `oxphp_apm_end(span_id)` | `void` | Close the span with the given local ID |
-| `oxphp_apm_attribute(key, value, ?span_id)` | `void` | Set an attribute on the current or specified span |
-| `oxphp_apm_event(name, ?attributes, ?span_id)` | `void` | Record a timestamped event on the current or specified span |
-| `oxphp_apm_error(exception, ?span_id)` | `void` | Mark the current or specified span as error and record an `exception` event. A Throwable object contributes `exception.type`, `exception.message`, and `exception.stacktrace`; a bare string argument is recorded as `exception.message` under a generic `exception.type` of `Error` (so the event stays visible in backends that group by type) |
-| `oxphp_apm_status(code, ?description, ?span_id)` | `void` | Set span status: `0` = Unset, `1` = Ok, `2` = Error |
-| `oxphp_apm_trace_id()` | `string` | Current trace ID (32 hex chars). Empty when APM is disabled |
-| `oxphp_apm_span_id()` | `string` | Current span ID (16 hex chars). Empty when no active span |
-| `oxphp_apm_header()` | `string` | W3C `traceparent` header value for the current span context |
-
-For the complete function signature reference, see [PHP Functions](../php/functions.md#oxphp_apm_start).
+The `oxphp_apm_*` functions — signatures, parameters, return values, and what each one does with APM disabled — are documented in [PHP Functions](../php/functions.md#oxphp_apm_trace).
 
 ## Docker Example
 
@@ -6273,8 +6260,8 @@ normalization — so list the literal path your framework uses.
 
 All functions live in the `OxPHP\Profile` namespace. They are always safe
 to call: if profiling isn't active for the current request, mutators are
-safe no-ops and `is_active()` returns `false`. With the profiler disabled
-(`PROFILER_ENABLED`), `start()` does nothing either.
+safe no-ops and `is_active()` returns `false`. Each one's full contract is
+in [PHP Functions](../php/functions.md#oxphpprofileis_active).
 
 ### Explicit capture around a region
 
@@ -6290,12 +6277,10 @@ function heavy_report(): array
 }
 ```
 
-`start()` is idempotent. `stop()` is too — calling it twice in a row is
-safe.
-
-> ⚠️ If the request was running in APM-only mode, `start()` **discards** the
-> spans collected so far. A request that is already profiling keeps its tree,
-> so `stop()` followed by `start()` leaves a gap in it, not a reset.
+[`start()`](../php/functions.md#oxphpprofilestart) turns capture on for the
+rest of the request, and [`stop()`](../php/functions.md#oxphpprofilestop)
+turns it off again. Read the `start()` entry before calling it in a request
+APM may already be tracing: it can discard spans.
 
 ### Point markers — mark()
 
@@ -6306,11 +6291,11 @@ mark('cache_miss');
 mark('got_auth_token', ['user_id' => (string) $user->id]);
 ```
 
-Attaches a `SpanEventKind::Mark` event to the **topmost open span**. No-op
-when no span is open. Useful for interim timestamps in a long function
-or for marking if/else branches. See
-[What a captured span contains](profiling-reference.md#what-a-captured-span-contains)
-for where events can be read.
+[`mark()`](../php/functions.md#oxphpprofilemark) attaches a timestamped
+event to the topmost open span — for interim timestamps in a long function
+or for marking if/else branches. See [What a captured span
+contains](profiling-reference.md#what-a-captured-span-contains) for where
+events can be read.
 
 ### Numeric metrics — metric()
 
@@ -6322,10 +6307,11 @@ metric('db.rows', (float) count($rows));
 metric('payload.kb', strlen($body) / 1024.0);
 ```
 
-Appends `metric.<name>=<value>` to the **attributes** of the current span.
-Unlike `mark()`, this is a plain key-value pair (no timestamp), and like
-events, attributes are in neither file format. See
-[What a captured span contains](profiling-reference.md#what-a-captured-span-contains).
+[`metric()`](../php/functions.md#oxphpprofilemetric) records a number as a
+`metric.<name>` attribute of the current span — rows fetched, payload size.
+See [What a captured span
+contains](profiling-reference.md#what-a-captured-span-contains) for where
+attributes can be read.
 
 ### Status check — is_active()
 
@@ -6337,7 +6323,9 @@ if (OxPHP\Profile\is_active()) {
 }
 ```
 
-Two TLS reads. Safe to call in hot code.
+[`is_active()`](../php/functions.md#oxphpprofileis_active) tells whether
+this request is being profiled — use it to guard work that only makes sense
+while it is.
 
 ---
 
@@ -14240,7 +14228,9 @@ oxphp_apm_end($spanId);
 oxphp_apm_error(mixed $exception, ?int $span_id = null): void
 ```
 
-Marks a span's status as error (status code 2). Use this to flag spans where an exception or failure occurred.
+Marks a span's status as error (status code 2) and records an `exception` event on it. Use this to flag spans where an exception or failure occurred.
+
+A `Throwable` contributes `exception.type`, `exception.message` and `exception.stacktrace` to the event. A bare string argument is recorded as `exception.message` under a generic `exception.type` of `Error`, so the event stays visible in backends that group by type.
 
 **Parameters:**
 - `$exception` — The exception or error (used for context; status is set regardless of type)
@@ -14369,7 +14359,7 @@ OxPHP\Profile\is_active(): bool
 
 Returns `true` when profile capture is currently active for this request — i.e. a trigger turned it on (header or sample rate) or the script called [`start()`](#oxphpprofilestart), and capture has not been ended by [`stop()`](#oxphpprofilestop). With the profiler disabled (`PROFILER_ENABLED`), triggers are not checked and `start()` does nothing, so neither turns capture on.
 
-Useful for guarding expensive instrumentation that should only run when profiling is on.
+Useful for guarding expensive instrumentation that should only run when profiling is on. The check is two TLS reads, so it is safe to call in hot code.
 
 **Returns:** `bool`.
 
@@ -14394,7 +14384,9 @@ Programmatically enables profile capture for the remainder of the current reques
 
 Does nothing while the profiler is disabled (`PROFILER_ENABLED`): the profiler records no function calls then, so the call neither turns capture on nor makes [`is_active()`](#oxphpprofileis_active) return `true`.
 
-If a profile was already active in a different mode, this call promotes it — any spans already collected in the lower mode are discarded so the captured profile is internally consistent. Use this when you want to opt a specific code path into profiling without relying on triggers.
+If a profile was already active in a different mode, this call promotes it — any spans already collected in the lower mode are discarded so the captured profile is internally consistent. A request running in APM-only mode is the common case: `start()` discards the spans it has collected so far. A request that is already profiling keeps its tree, so [`stop()`](#oxphpprofilestop) followed by `start()` leaves a gap in it, not a reset. Use this when you want to opt a specific code path into profiling without relying on triggers.
+
+`start()` is idempotent.
 
 **Returns:** `void`.
 
@@ -14416,6 +14408,8 @@ OxPHP\Profile\stop(): void
 ```
 
 Disables further span capture for this request. Currently-open spans close naturally as PHP returns from them, so the call stack remains balanced — only new spans stop being recorded.
+
+`stop()` is idempotent: calling it twice in a row is safe.
 
 **Returns:** `void`.
 
@@ -14440,6 +14434,8 @@ OxPHP\Profile\mark(string $label, ?array $attrs = null): void
 Attaches a `Mark` event to the topmost open span, with an optional attribute bag. No-op when no span is open (e.g. profiling not active, or `mark()` called at request top-level outside any instrumented frame).
 
 Attribute keys and values are coerced to strings; non-string values become an empty string.
+
+Events are in neither export file format; [What a captured span contains](../features/profiling-reference.md#what-a-captured-span-contains) says where they can be read.
 
 **Parameters:**
 
@@ -14472,7 +14468,7 @@ OxPHP\Profile\metric(string $name, float $value): void
 
 Appends a `metric.<name>` attribute to the current open span. No-op when no span is open.
 
-Unlike [`mark()`](#oxphpprofilemark) (which creates a discrete event), `metric()` writes onto the existing span's attribute set — useful for recording numeric observations tied to the surrounding operation (rows fetched, bytes processed, retry count).
+Unlike [`mark()`](#oxphpprofilemark) (which creates a discrete event), `metric()` writes a plain key-value pair, with no timestamp, onto the existing span's attribute set — useful for recording numeric observations tied to the surrounding operation (rows fetched, bytes processed, retry count). Like events, attributes are in neither export file format; see [What a captured span contains](../features/profiling-reference.md#what-a-captured-span-contains).
 
 **Parameters:**
 

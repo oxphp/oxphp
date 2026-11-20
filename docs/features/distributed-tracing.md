@@ -359,20 +359,7 @@ $response = file_get_contents('https://api.example.com/data', false,
 
 ### Function Reference
 
-| Function | Returns | Description |
-|----------|---------|-------------|
-| `oxphp_apm_trace(name, callback, ?attributes)` | `mixed` | Execute a callback inside a span and return its value. The callback receives the span's local ID; a throw marks the span as error with an `exception` event (type and message, no stacktrace) and propagates |
-| `oxphp_apm_start(name, ?attributes)` | `int` | Open a span and return its local ID. `0` when APM is disabled |
-| `oxphp_apm_end(span_id)` | `void` | Close the span with the given local ID |
-| `oxphp_apm_attribute(key, value, ?span_id)` | `void` | Set an attribute on the current or specified span |
-| `oxphp_apm_event(name, ?attributes, ?span_id)` | `void` | Record a timestamped event on the current or specified span |
-| `oxphp_apm_error(exception, ?span_id)` | `void` | Mark the current or specified span as error and record an `exception` event. A Throwable object contributes `exception.type`, `exception.message`, and `exception.stacktrace`; a bare string argument is recorded as `exception.message` under a generic `exception.type` of `Error` (so the event stays visible in backends that group by type) |
-| `oxphp_apm_status(code, ?description, ?span_id)` | `void` | Set span status: `0` = Unset, `1` = Ok, `2` = Error |
-| `oxphp_apm_trace_id()` | `string` | Current trace ID (32 hex chars). Empty when APM is disabled |
-| `oxphp_apm_span_id()` | `string` | Current span ID (16 hex chars). Empty when no active span |
-| `oxphp_apm_header()` | `string` | W3C `traceparent` header value for the current span context |
-
-For the complete function signature reference, see [PHP Functions](../php/functions.md#oxphp_apm_start).
+The `oxphp_apm_*` functions — signatures, parameters, return values, and what each one does with APM disabled — are documented in [PHP Functions](../php/functions.md#oxphp_apm_trace).
 
 ## Docker Example
 

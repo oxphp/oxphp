@@ -193,8 +193,8 @@ normalization — so list the literal path your framework uses.
 
 All functions live in the `OxPHP\Profile` namespace. They are always safe
 to call: if profiling isn't active for the current request, mutators are
-safe no-ops and `is_active()` returns `false`. With the profiler disabled
-(`PROFILER_ENABLED`), `start()` does nothing either.
+safe no-ops and `is_active()` returns `false`. Each one's full contract is
+in [PHP Functions](../php/functions.md#oxphpprofileis_active).
 
 ### Explicit capture around a region
 
@@ -210,12 +210,10 @@ function heavy_report(): array
 }
 ```
 
-`start()` is idempotent. `stop()` is too — calling it twice in a row is
-safe.
-
-> ⚠️ If the request was running in APM-only mode, `start()` **discards** the
-> spans collected so far. A request that is already profiling keeps its tree,
-> so `stop()` followed by `start()` leaves a gap in it, not a reset.
+[`start()`](../php/functions.md#oxphpprofilestart) turns capture on for the
+rest of the request, and [`stop()`](../php/functions.md#oxphpprofilestop)
+turns it off again. Read the `start()` entry before calling it in a request
+APM may already be tracing: it can discard spans.
 
 ### Point markers — mark()
 
@@ -226,11 +224,11 @@ mark('cache_miss');
 mark('got_auth_token', ['user_id' => (string) $user->id]);
 ```
 
-Attaches a `SpanEventKind::Mark` event to the **topmost open span**. No-op
-when no span is open. Useful for interim timestamps in a long function
-or for marking if/else branches. See
-[What a captured span contains](profiling-reference.md#what-a-captured-span-contains)
-for where events can be read.
+[`mark()`](../php/functions.md#oxphpprofilemark) attaches a timestamped
+event to the topmost open span — for interim timestamps in a long function
+or for marking if/else branches. See [What a captured span
+contains](profiling-reference.md#what-a-captured-span-contains) for where
+events can be read.
 
 ### Numeric metrics — metric()
 
@@ -242,10 +240,11 @@ metric('db.rows', (float) count($rows));
 metric('payload.kb', strlen($body) / 1024.0);
 ```
 
-Appends `metric.<name>=<value>` to the **attributes** of the current span.
-Unlike `mark()`, this is a plain key-value pair (no timestamp), and like
-events, attributes are in neither file format. See
-[What a captured span contains](profiling-reference.md#what-a-captured-span-contains).
+[`metric()`](../php/functions.md#oxphpprofilemetric) records a number as a
+`metric.<name>` attribute of the current span — rows fetched, payload size.
+See [What a captured span
+contains](profiling-reference.md#what-a-captured-span-contains) for where
+attributes can be read.
 
 ### Status check — is_active()
 
@@ -257,7 +256,9 @@ if (OxPHP\Profile\is_active()) {
 }
 ```
 
-Two TLS reads. Safe to call in hot code.
+[`is_active()`](../php/functions.md#oxphpprofileis_active) tells whether
+this request is being profiled — use it to guard work that only makes sense
+while it is.
 
 ---
 

@@ -791,7 +791,9 @@ oxphp_apm_end($spanId);
 oxphp_apm_error(mixed $exception, ?int $span_id = null): void
 ```
 
-Marks a span's status as error (status code 2). Use this to flag spans where an exception or failure occurred.
+Marks a span's status as error (status code 2) and records an `exception` event on it. Use this to flag spans where an exception or failure occurred.
+
+A `Throwable` contributes `exception.type`, `exception.message` and `exception.stacktrace` to the event. A bare string argument is recorded as `exception.message` under a generic `exception.type` of `Error`, so the event stays visible in backends that group by type.
 
 **Parameters:**
 - `$exception` — The exception or error (used for context; status is set regardless of type)
@@ -920,7 +922,7 @@ OxPHP\Profile\is_active(): bool
 
 Returns `true` when profile capture is currently active for this request — i.e. a trigger turned it on (header or sample rate) or the script called [`start()`](#oxphpprofilestart), and capture has not been ended by [`stop()`](#oxphpprofilestop). With the profiler disabled (`PROFILER_ENABLED`), triggers are not checked and `start()` does nothing, so neither turns capture on.
 
-Useful for guarding expensive instrumentation that should only run when profiling is on.
+Useful for guarding expensive instrumentation that should only run when profiling is on. The check is two TLS reads, so it is safe to call in hot code.
 
 **Returns:** `bool`.
 
@@ -945,7 +947,9 @@ Programmatically enables profile capture for the remainder of the current reques
 
 Does nothing while the profiler is disabled (`PROFILER_ENABLED`): the profiler records no function calls then, so the call neither turns capture on nor makes [`is_active()`](#oxphpprofileis_active) return `true`.
 
-If a profile was already active in a different mode, this call promotes it — any spans already collected in the lower mode are discarded so the captured profile is internally consistent. Use this when you want to opt a specific code path into profiling without relying on triggers.
+If a profile was already active in a different mode, this call promotes it — any spans already collected in the lower mode are discarded so the captured profile is internally consistent. A request running in APM-only mode is the common case: `start()` discards the spans it has collected so far. A request that is already profiling keeps its tree, so [`stop()`](#oxphpprofilestop) followed by `start()` leaves a gap in it, not a reset. Use this when you want to opt a specific code path into profiling without relying on triggers.
+
+`start()` is idempotent.
 
 **Returns:** `void`.
 
@@ -967,6 +971,8 @@ OxPHP\Profile\stop(): void
 ```
 
 Disables further span capture for this request. Currently-open spans close naturally as PHP returns from them, so the call stack remains balanced — only new spans stop being recorded.
+
+`stop()` is idempotent: calling it twice in a row is safe.
 
 **Returns:** `void`.
 
@@ -991,6 +997,8 @@ OxPHP\Profile\mark(string $label, ?array $attrs = null): void
 Attaches a `Mark` event to the topmost open span, with an optional attribute bag. No-op when no span is open (e.g. profiling not active, or `mark()` called at request top-level outside any instrumented frame).
 
 Attribute keys and values are coerced to strings; non-string values become an empty string.
+
+Events are in neither export file format; [What a captured span contains](../features/profiling-reference.md#what-a-captured-span-contains) says where they can be read.
 
 **Parameters:**
 
@@ -1023,7 +1031,7 @@ OxPHP\Profile\metric(string $name, float $value): void
 
 Appends a `metric.<name>` attribute to the current open span. No-op when no span is open.
 
-Unlike [`mark()`](#oxphpprofilemark) (which creates a discrete event), `metric()` writes onto the existing span's attribute set — useful for recording numeric observations tied to the surrounding operation (rows fetched, bytes processed, retry count).
+Unlike [`mark()`](#oxphpprofilemark) (which creates a discrete event), `metric()` writes a plain key-value pair, with no timestamp, onto the existing span's attribute set — useful for recording numeric observations tied to the surrounding operation (rows fetched, bytes processed, retry count). Like events, attributes are in neither export file format; see [What a captured span contains](../features/profiling-reference.md#what-a-captured-span-contains).
 
 **Parameters:**
 
