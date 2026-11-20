@@ -79,6 +79,7 @@
 - [HTTP Request API](docs/php/request-api.md): Object-oriented API for accessing HTTP request data in OxPHP, replacing PHP superglobals with a type-safe, lazy-loading interface.
 - [OPcache and JIT](docs/php/opcache.md): Configure OPcache and JIT compilation for optimal PHP performance with OxPHP, including preloading and development settings.
 - [PHP Functions](docs/php/functions.md): Complete reference for all oxphp_* PHP functions provided by OxPHP, including async, streaming, worker mode, and decorator APIs.
+- [Server Variables](docs/php/server-variables.md): Every $_SERVER key OxPHP sets: standard CGI variables, request headers, proxy and trace-context values, PATH_INFO rules, and differences from PHP-FPM.
 - [Superglobals](docs/php/superglobals.md): How OxPHP populates $_SERVER, $_GET, $_POST, $_COOKIE, $_FILES, and php://input for each request.
 - [Worker Class](docs/php/worker-class.md): Reference for the OxPHP\Server\Worker class — a unified runtime handle for worker introspection, the worker entry point, and per-thread metrics.
 

@@ -946,7 +946,7 @@ PHP reads every `.ini` file in that directory in alphabetical order and the last
 - **PHP's hard memory limit ends the whole server.** On PHP 8.4.27 / 8.5.12 and later, a request that takes its thread's memory past the hard limit PHP sets above `memory_limit` ends the whole OxPHP process, where under PHP-FPM it ends one child — see [Memory limits](docker.md#memory-limits).
 - **A native crash ends the whole server.** A segmentation fault or a bus error in PHP or in an extension ends the whole OxPHP process, with every request in flight on every worker, where under PHP-FPM it ends one child, which the master replaces. Unless the crash is a stack overflow, the server writes a line starting with `[CRASH] SIGSEGV` (or `SIGBUS`) to stderr as it goes down; bringing it back is left to the container runtime or process supervisor — `restart: unless-stopped` in the [Compose example](docker.md#production), say. An extension known to crash under PHP-FPM costs more here.
 - **`php_sapi_name()` returns `cli-server`.** Code that branches on `fpm-fcgi` needs another check: `function_exists('oxphp_request_id')`.
-- **A few `$_SERVER` keys differ.** `SERVER_ADDR`, `PATH_TRANSLATED` and `REDIRECT_STATUS` are not set, and `PHP_AUTH_USER` / `PHP_AUTH_PW` are not extracted — read `HTTP_AUTHORIZATION` — see [Differences from PHP-FPM](../php/superglobals.md#differences-from-php-fpm).
+- **A few `$_SERVER` keys differ.** `SERVER_ADDR`, `PATH_TRANSLATED` and `REDIRECT_STATUS` are not set, and `PHP_AUTH_USER` / `PHP_AUTH_PW` are not extracted — read `HTTP_AUTHORIZATION` — see [Differences from PHP-FPM](../php/server-variables.md#differences-from-php-fpm).
 - **Framing is restricted by default.** Responses carry `X-Frame-Options: SAMEORIGIN` and a matching `frame-ancestors` policy; set `FRAME_OPTIONS=off` if you manage framing elsewhere or embed the app in another origin.
 
 **5. Roll out beside the old stack.** Run OxPHP next to nginx + PHP-FPM, point a share of traffic at it through your existing load balancer, use `/health/readiness` for probes, and compare error rates and latency on `/metrics` before moving the rest.
@@ -6810,7 +6810,7 @@ With a document root, every request runs through a shared pipeline before the mo
 
 A `CONNECT` request never reaches this pipeline: it asks for a tunnel, which OxPHP does not open. It is refused before routing with `501 Not Implemented`, and an HTTP/1.1 connection closes after that answer. A malformed one gets `400 Bad Request` instead (see [Error Pages](error-pages.md#status-codes-worth-providing)), after which an HTTP/1.1 connection closes as well; an HTTP/2 one with a non-zero `content-length` never reaches OxPHP: the connection it arrived on is closed, along with every other request in flight on it.
 
-Neither does a request target in none of the forms HTTP gives it: a target with neither a leading `/` nor a `scheme://` in front, as in `GET index.php`, an HTTP/2 `:path` without a leading `/`, an HTTP/2 request with neither a `:path` nor an `:authority`, or `*` with a method other than `OPTIONS` is refused before routing with `400 Bad Request` (see [Superglobals](../php/superglobals.md#standard-variables)). An HTTP/2 request with an `:authority` and no `:path` never reaches OxPHP: the HTTP/2 layer resets its stream. An absolute-form target with an empty path, as in `GET http://example.com?page=2`, is routed as `/`.
+Neither does a request target in none of the forms HTTP gives it: a target with neither a leading `/` nor a `scheme://` in front, as in `GET index.php`, an HTTP/2 `:path` without a leading `/`, an HTTP/2 request with neither a `:path` nor an `:authority`, or `*` with a method other than `OPTIONS` is refused before routing with `400 Bad Request` (see [Superglobals](../php/server-variables.md#standard-variables)). An HTTP/2 request with an `:authority` and no `:path` never reaches OxPHP: the HTTP/2 layer resets its stream. An absolute-form target with an empty path, as in `GET http://example.com?page=2`, is routed as `/`.
 
 The classification step is the key efficiency: the disk check for static assets (`/style.css`, `/logo.png`) is performed **once** in the shared layer for `OtherExtension` URIs, so all three modes pay the same cost.
 
@@ -12475,7 +12475,7 @@ $request->isSecure(): bool
 $request->host(): string
 ```
 
-Hostname from the `Host` header. Returns an empty string when the header is absent (an HTTP/1.0 request in origin form, `GET /path`, sent without a `Host` header). Over HTTP/2 the `Host` header is the request's `:authority`, and over HTTP/1.1 and HTTP/1.0 the host of a request target in absolute form (`GET http://example.com/path`), as described in [Superglobals](superglobals.md#standard-variables).
+Hostname from the `Host` header. Returns an empty string when the header is absent (an HTTP/1.0 request in origin form, `GET /path`, sent without a `Host` header). Over HTTP/2 the `Host` header is the request's `:authority`, and over HTTP/1.1 and HTTP/1.0 the host of a request target in absolute form (`GET http://example.com/path`), as described in [Superglobals](server-variables.md#standard-variables).
 
 ```php
 $request->port(): int
@@ -12612,9 +12612,9 @@ $data = $request->payload();        // ["name" => "Alice", "role" => "admin"]
 $request->header(string $name, ?string $default = null): ?string
 ```
 
-Returns the raw header value. Header names are case-insensitive. A list such as `Accept` or `X-Forwarded-For` comes back as one string — parsing it is your responsibility — and a header sent as several lines with the same name comes back as one string too, its lines joined the way [`$_SERVER` joins them](superglobals.md#http-request-headers). A header sent with an empty value (`X-Foo:`) reads as `''`, not `$default`.
+Returns the raw header value. Header names are case-insensitive. A list such as `Accept` or `X-Forwarded-For` comes back as one string — parsing it is your responsibility — and a header sent as several lines with the same name comes back as one string too, its lines joined the way [`$_SERVER` joins them](server-variables.md#http-request-headers). A header sent with an empty value (`X-Foo:`) reads as `''`, not `$default`.
 
-The name is matched as sent, without the `HTTP_` mapping of `$_SERVER`: `header('X_Api_Key')` does not return an `X-Api-Key` header. This is also how to read a header whose name contains `_` or `.`, which [`$_SERVER` leaves out](superglobals.md#http-request-headers); `headers()` lists those too.
+The name is matched as sent, without the `HTTP_` mapping of `$_SERVER`: `header('X_Api_Key')` does not return an `X-Api-Key` header. This is also how to read a header whose name contains `_` or `.`, which [`$_SERVER` leaves out](server-variables.md#http-request-headers); `headers()` lists those too.
 
 ```php
 $request->hasHeader(string $name): bool
@@ -14630,15 +14630,11 @@ if (function_exists('oxphp_is_worker') && oxphp_is_worker()) {
 ---
 
 
-# Superglobals
-
-OxPHP populates all standard PHP superglobals before your script executes, matching the behavior PHP developers expect from traditional server setups. Every value is available from the first line of your code — no initialization required. One setting narrows that, and only that one: see [Disabling Superglobals](#disabling-superglobals).
-
-## $_SERVER
+# Server Variables
 
 OxPHP builds `$_SERVER` from the incoming HTTP request following the CGI/1.1 specification. Process environment variables are imported first; CGI variables are set afterward, so request-specific values always override any colliding environment keys.
 
-### Standard Variables
+## Standard Variables
 
 | Variable | Description | Example |
 |----------|-------------|---------|
@@ -14672,7 +14668,7 @@ Over HTTP/1.1 the host comes from the request target instead when the target is 
 
 A request target in none of the forms HTTP gives it is answered with `400 Bad Request` without reaching PHP: over HTTP/1.1 and HTTP/1.0 a target with neither a leading `/` nor a `scheme://` in front, as in `GET index.php HTTP/1.1`, read as the form RFC 9112 §3.2 keeps for `CONNECT`, which does not reach PHP either; over HTTP/2 a `:path` that does not start with `/`, which RFC 9113 §8.3.1 rules out, or none at all in a request with no `:authority` either; and over either a target of `*` with a method other than `OPTIONS`, the one method it is for. RFC 9112 §3 has a server answer an invalid request line with `400` or a redirect rather than correct it and serve the request. `OPTIONS *` is routed as a request for the path `*`, and where that runs a script, its `REQUEST_URI` is `*`. nginx refuses all of these with `400`, `OPTIONS *` included. An HTTP/2 request with an `:authority` and no `:path` never reaches OxPHP: the HTTP/2 layer resets its stream, where nginx answers `400`. A target with no `//` after its scheme, as in `GET mailto:user@example.com HTTP/1.1`, is an absolute URI, but one with no host, which every `http` and `https` URI has (RFC 9110 §4.2.1), and it is refused the same way, as nginx refuses it. A `:path` holding only a fragment, as in `#top`, arrives empty, the fragment dropped before the server sees it: without an `:authority` it is refused like a missing one, and with one it is served as a request for `/`, which nginx refuses.
 
-### HTTP Request Headers
+## HTTP Request Headers
 
 HTTP request headers are added to `$_SERVER` with an `HTTP_` prefix. Header names are converted to uppercase with dashes replaced by underscores, following CGI/1.1 conventions:
 
@@ -14689,7 +14685,7 @@ A header whose name contains an underscore (`_`) or a dot (`.`) is not added to 
 
 A header sent as several field lines with the same name — an `X-Forwarded-For` line from each of two proxies, say — is one key, its lines joined with `, ` in the order they arrived, as HTTP lets a recipient combine them (RFC 9110 §5.3), and the [request object](request-api.md#headers) holds the same value. `Cookie` lines are joined with `; `, the separator of a cookie list. A header with a byte outside ASCII on any of its lines is left out of `$_SERVER` and of the request object, the same as a header sent as one such line. `Content-Type` and `Content-Length` hold one value only and are the exception to both: `CONTENT_TYPE` and `CONTENT_LENGTH`, and the request object's values for them, are their first line, whatever the later lines hold. `Host` holds one value too, and a request that sends it on more than one line is refused, except over HTTP/2 with an `:authority`, which replaces every `Host` line that names the same host. Over HTTP/2, a request that carries an `:authority`, and over HTTP/1.1 or HTTP/1.0 one whose target is in absolute form, has that host as its `Host`, as described [above](#standard-variables).
 
-### Behind a Reverse Proxy
+## Behind a Reverse Proxy
 
 When `TRUSTED_PROXIES` is configured and the request peer is in the trusted set, OxPHP rewrites the following `$_SERVER` keys from forwarded headers (`X-Forwarded-*` or RFC 7239 `Forwarded`):
 
@@ -14708,7 +14704,7 @@ When the client address is rewritten, `REMOTE_PORT` is the client's source port 
 
 When `TRUSTED_PROXIES` is **not** set, no rewriting occurs and `REMOTE_ADDR` is always the direct peer — typically your load balancer, not the end client. Parsing `X-Forwarded-For` manually is error-prone (leftmost vs rightmost, no CIDR trust check); prefer configuring `TRUSTED_PROXIES`. See [Trusted Proxies](../security/trusted-proxies.md) for the trust algorithm and configuration syntax.
 
-### Trace Context Variables
+## Trace Context Variables
 
 When distributed tracing is enabled, OxPHP adds trace context variables to `$_SERVER`:
 
@@ -14720,7 +14716,7 @@ When distributed tracing is enabled, OxPHP adds trace context variables to `$_SE
 
 These variables are only present when a valid `traceparent` header arrives or when OxPHP generates a new trace. If tracing is not configured, these keys are absent.
 
-### Differences from PHP-FPM
+## Differences from PHP-FPM
 
 The following variables behave differently compared to a standard PHP-FPM setup:
 
@@ -14732,7 +14728,7 @@ The following variables behave differently compared to a standard PHP-FPM setup:
 | `PHP_AUTH_USER` / `PHP_AUTH_PW` / `AUTH_TYPE` | Not extracted from the `Authorization` header. Read `$_SERVER['HTTP_AUTHORIZATION']` directly. |
 | `REDIRECT_STATUS` | Not set. OxPHP does not use an internal redirect mechanism. |
 
-### Example
+## Example
 
 ```php
 <?php
@@ -14755,7 +14751,7 @@ if (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') {
 }
 ```
 
-### PATH_INFO Behavior
+## PATH_INFO Behavior
 
 `$_SERVER['PATH_INFO']` is populated automatically based on the active routing mode. There is no feature flag — the previous `SPLIT_PATH_INFO_ENABLED` env variable has been removed.
 
@@ -14767,7 +14763,7 @@ if (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS'] === 'on') {
 
 `SCRIPT_NAME` always identifies the executed script (the resolved file relative to the document root), so in normal routing `PATH_INFO` is present only when `SCRIPT_NAME` is a literal prefix of the request path. When a request is rewritten to a front controller it does not name (an application route, a directory index, a static-miss fallback), `PATH_INFO` is absent and the original path lives in `REQUEST_URI`. (The `PHP_DENY_PATHS` fallback is a deliberate exception: it sets `PATH_INFO` to the original sanitized URI so the fallback script can route on it.)
 
-#### Traditional mode examples
+### Traditional mode examples
 
 OxPHP scans the URI left-to-right for the first `.php` segment that corresponds to an actual file on disk. Everything after it becomes `PATH_INFO`:
 
@@ -14778,7 +14774,7 @@ OxPHP scans the URI left-to-right for the first `.php` segment that corresponds 
 | `/app.php` | `app.php` exists | `/app.php` | *(absent)* | `/app.php` |
 | `/missing.php/foo` | file not found | falls back to `/index.php` | — | depends on fallback |
 
-#### Framework mode examples
+### Framework mode examples
 
 Every non-static request is rewritten onto `index.php`. `PATH_INFO` is set only when the request explicitly names the entry file with a trailing segment; for application routes the original path is read from `REQUEST_URI`.
 
@@ -14790,6 +14786,23 @@ Every non-static request is rewritten onto `index.php`. `PATH_INFO` is set only 
 | `/index.php` | `/index.php` | *(absent)* |
 
 > **Note:** `PATH_TRANSLATED` is not populated. It is rarely used in practice and is not set by nginx or PHP-FPM by default.
+
+## See Also
+
+- [Superglobals](superglobals.md) — the other request superglobals and how to disable them
+- [HTTP Request API](request-api.md) — typed access to the same request data
+- [Trusted Proxies](../security/trusted-proxies.md) — which `$_SERVER` keys a trusted proxy's headers override
+
+---
+
+
+# Superglobals
+
+OxPHP populates all standard PHP superglobals before your script executes, matching the behavior PHP developers expect from traditional server setups. Every value is available from the first line of your code — no initialization required. One setting narrows that, and only that one: see [Disabling Superglobals](#disabling-superglobals).
+
+## $_SERVER
+
+OxPHP builds `$_SERVER` from the incoming request following the CGI/1.1 specification, on top of the process environment. Every key it sets, how request headers map to `HTTP_*` keys, the values behind a reverse proxy, `PATH_INFO`, and the differences from PHP-FPM are listed in [Server Variables](server-variables.md).
 
 ---
 
