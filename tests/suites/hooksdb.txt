@@ -37,9 +37,11 @@ hooksdb/test_shared_db_concurrent_queries
 # pooling off: they take turns on it, as calls through one object do. Objects it
 # gives connections of their own — with pooling on, the default, or through a
 # pconnect() that phpredis 6.3.0 does not keep persistent — do not wait for each
-# other, even beside a connection registered under their arguments. A connect()
-# that phpredis rejects before letting go of the shared connection leaves the
-# object taking turns on it.
+# other, even beside a connection registered under their arguments. For an object
+# the constructor opens, the setting its first command runs under is the one that
+# counts. A connect() that moves such an object onto a plain socket takes it off the
+# shared connection; one that phpredis rejects before letting go of that connection
+# leaves the object taking turns on it.
 hooksdb/test_shared_pconnect_two_objects
 
 # pconnect() on an object another request is reading a reply through moves it off

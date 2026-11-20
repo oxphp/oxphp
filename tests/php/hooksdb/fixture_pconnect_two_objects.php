@@ -23,6 +23,14 @@ declare(strict_types=1);
 //              connection, beside a stream an earlier object left registered under
 //              their id with pooling off;
 //   pooled-ctor — the same, both from the constructor;
+//   pooled-late — both from the constructor, the second object built with pooling
+//              off and first used with it on, which takes it a connection of its
+//              own from the pool;
+//   unpooled-late — the other way round: built with pooling on and first used
+//              with it off, which puts it on the holder's stream;
+//   ctor-connect — both from the constructor, the second object then given a
+//              connect(), which opens it a plain socket in place of the stream
+//              the constructor named;
 //   error    — both from the constructor, the second object then given a connect()
 //              that phpredis rejects for its retry interval before it lets go of
 //              anything.
@@ -39,13 +47,16 @@ declare(strict_types=1);
 //          reading it from the environment does, and the pconnect-long round as an
 //          int; phpredis names the connection by the number either way. The mixed
 //          and pooled rounds first connect an object of their own under the id and
-//          drop it, with pooling off, which leaves its stream registered;
+//          drop it, with pooling off, which leaves its stream registered. The
+//          pooled-late and unpooled-late rounds only build the object: phpredis
+//          connects it in the wait role, under that role's setting;
 //   hold — sends a CLIENT ID, then blocks on an empty list until the test pushes a
 //          value onto it, so the request stays parked in its read;
 //   wait — takes the second object: reads a key the test seeded, then its CLIENT
 //          ID. The object is destroyed with this request, where pooling is off:
 //          destroyed where it is on, phpredis would put the shared stream in its
-//          pool. The pooled rounds' objects are on pooled connections already.
+//          pool. The pooled rounds' objects, pooled-late's included, are on pooled
+//          connections already.
 //
 // Not a TestCase — the body is read by the request that started this one, so a
 // failure has to arrive as text rather than as an exception page.
@@ -55,7 +66,8 @@ $host = getenv('DB_REDIS_HOST') ?: 'hooksdb-redis';
 $role = $_GET['role'] ?? '';
 $round = $_GET['round'] ?? '';
 $pid = match ($round) {
-    'mixed', 'mixed-late', 'pooled', 'pooled-ctor', 'error' => "hooksdb-two-objects-{$round}",
+    'mixed', 'mixed-late', 'pooled', 'pooled-ctor', 'pooled-late', 'unpooled-late',
+    'ctor-connect', 'error' => "hooksdb-two-objects-{$round}",
     default => 'hooksdb-two-objects',
 };
 $pooled = $round === 'pooled' || $round === 'pooled-ctor';
@@ -119,8 +131,14 @@ try {
             $redis->pconnect($host, 6379, 2.5);
         } elseif ($round === 'ctor') {
             $redis = $construct(true);
-        } elseif ($round === 'pooled-ctor') {
+        } elseif ($round === 'pooled-ctor' || $round === 'pooled-late') {
             $redis = $construct($pid);
+        } elseif ($round === 'unpooled-late') {
+            ini_set('redis.pconnect.pooling_enabled', '1');
+            $redis = $construct($pid);
+        } elseif ($round === 'ctor-connect') {
+            $redis = $construct($pid);
+            $redis->connect($host, 6379, 3.0);
         } elseif ($round === 'error') {
             $redis = $construct($pid);
             try {
@@ -135,7 +153,7 @@ try {
         $sharedState["two_objects_{$round}_waiter"] = $redis;
         echo 'open-done';
     } elseif ($role === 'wait') {
-        if ($pooled) {
+        if ($pooled || $round === 'pooled-late') {
             ini_set('redis.pconnect.pooling_enabled', '1');
         }
         $redis = $sharedState["two_objects_{$round}_waiter"] ?? null;
