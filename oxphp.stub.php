@@ -322,7 +322,7 @@ function oxphp_async(\Closure $closure, mixed ...$args): int|false {}
  * automatically at request end (RSHUTDOWN) with a 5-second timeout.
  *
  * @param int $promise_id Promise ID returned by oxphp_async()
- * @param float|null $timeout Maximum seconds to wait, null = wait indefinitely
+ * @param float $timeout Maximum seconds to wait, 0.0 = wait indefinitely
  * @return mixed The return value of the closure
  *
  * @throws \OxPHP\Async\AsyncException If the closure threw an exception or called die()/exit()
@@ -339,7 +339,7 @@ function oxphp_async(\Closure $closure, mixed ...$args): int|false {}
  *     // task took longer than 2 seconds
  * }
  */
-function oxphp_async_await(int $promise_id, ?float $timeout = null): mixed {}
+function oxphp_async_await(int $promise_id, float $timeout = 0.0): mixed {}
 
 /**
  * Await multiple promises and return all results.
@@ -348,7 +348,7 @@ function oxphp_async_await(int $promise_id, ?float $timeout = null): mixed {}
  * associative array mapping each promise ID to its result value.
  *
  * @param int[] $promise_ids Array of promise IDs from oxphp_async()
- * @param float|null $timeout Per-promise timeout in seconds, null = no limit
+ * @param float $timeout Per-promise timeout in seconds, 0.0 = no limit
  * @return array<int, mixed> Map of promise ID => result value
  *
  * @throws \OxPHP\Async\AsyncException If any promise fails
@@ -361,7 +361,7 @@ function oxphp_async_await(int $promise_id, ?float $timeout = null): mixed {}
  * $results = oxphp_async_await_all([$p1, $p2, $p3]);
  * // [$p1 => 1, $p2 => 2, $p3 => 3]
  */
-function oxphp_async_await_all(array $promise_ids, ?float $timeout = null): array {}
+function oxphp_async_await_all(array $promise_ids, float $timeout = 0.0): array {}
 
 /**
  * Race multiple promises and return the first to complete.
@@ -373,7 +373,7 @@ function oxphp_async_await_all(array $promise_ids, ?float $timeout = null): arra
  * On timeout, all specified promises are cancelled and cannot be awaited.
  *
  * @param int[] $promise_ids Array of promise IDs from oxphp_async()
- * @param float|null $timeout Overall timeout in seconds, null = no limit
+ * @param float $timeout Overall timeout in seconds, 0.0 = no limit
  * @return array{id: int, value: mixed} The winning promise ID and its result
  *
  * @throws \OxPHP\Async\AsyncException If the winning promise threw an exception
@@ -386,7 +386,7 @@ function oxphp_async_await_all(array $promise_ids, ?float $timeout = null): arra
  * // ['id' => $p2, 'value' => ...] (whichever finished first)
  * $other = oxphp_async_await($p1); // non-winner still awaitable
  */
-function oxphp_async_await_race(array $promise_ids, ?float $timeout = null): array {}
+function oxphp_async_await_race(array $promise_ids, float $timeout = 0.0): array {}
 
 /**
  * Wait for the first FULFILLED promise (analog of JavaScript Promise.any).
@@ -404,7 +404,7 @@ function oxphp_async_await_race(array $promise_ids, ?float $timeout = null): arr
  * trail, not a queue of resumable work.
  *
  * @param int[]      $promise_ids Array of promise IDs from oxphp_async()
- * @param float|null $timeout     Overall timeout in seconds; null = no limit
+ * @param float      $timeout     Overall timeout in seconds; 0.0 = no limit
  * @return array{id: int, value: mixed} The first-fulfilled promise's id and result
  *
  * @throws \OxPHP\Async\AggregateAsyncException If every promise rejects
@@ -428,7 +428,7 @@ function oxphp_async_await_race(array $promise_ids, ?float $timeout = null): arr
  *     // Audit-only: these ids are no longer awaitable.
  * }
  */
-function oxphp_async_await_any(array $promise_ids, ?float $timeout = null): array {}
+function oxphp_async_await_any(array $promise_ids, float $timeout = 0.0): array {}
 
 /**
  * Register a PHP class as an attribute-based decorator.
@@ -648,7 +648,8 @@ namespace OxPHP\Http {
         // ── Timing ──
 
         /**
-         * Request start timestamp.
+         * When a PHP worker took this request, as $_SERVER['REQUEST_TIME_FLOAT'].
+         * Time spent waiting for a free worker is not included.
          *
          * @param bool $asFloat true for float with sub-second precision
          * @return int|float Unix timestamp
@@ -2364,10 +2365,10 @@ namespace OxPHP\Profile {
      * on the span timeline — use for significant moments (cache miss,
      * retry attempt, validation step).
      *
-     * @param string              $label Marker name ("cache.miss", "retry.attempt")
-     * @param array<string,mixed> $attrs Optional key/value attributes (string-coerced)
+     * @param string                   $label Marker name ("cache.miss", "retry.attempt")
+     * @param array<string,mixed>|null $attrs Optional key/value attributes (string-coerced)
      */
-    function mark(string $label, array $attrs = []): void {}
+    function mark(string $label, ?array $attrs = null): void {}
 
     /**
      * Append `metric.<name> = <value>` to the current span's attributes.
@@ -2456,8 +2457,8 @@ function oxphp_apm_trace(string $name, callable $callback, ?array $attributes = 
  *
  * When APM is disabled: returns 0. All functions accept 0 as no-op.
  *
- * @param string $name       Span name
- * @param array  $attributes Initial span attributes
+ * @param string     $name       Span name
+ * @param array|null $attributes Initial span attributes
  * @return int   Span ID (local to this request, not the OTel span ID)
  *
  * @example
@@ -2468,7 +2469,7 @@ function oxphp_apm_trace(string $name, callable $callback, ?array $attributes = 
  *     oxphp_apm_end($span);
  * }
  */
-function oxphp_apm_start(string $name, array $attributes = []): int {}
+function oxphp_apm_start(string $name, ?array $attributes = null): int {}
 
 /**
  * Close a span opened by oxphp_apm_start().
@@ -2506,14 +2507,14 @@ function oxphp_apm_attribute(string $key, mixed $value, ?int $span_id = null): v
  * Events are visible in tracing UIs as markers on the span timeline.
  * Use for noteworthy moments: cache misses, retries, validations.
  *
- * @param string   $name       Event name ("cache.miss", "retry.attempt")
- * @param array    $attributes Event attributes ['attempt' => 3]
- * @param int|null $span_id    Target span, or null for current span
+ * @param string     $name       Event name ("cache.miss", "retry.attempt")
+ * @param array|null $attributes Event attributes ['attempt' => 3]
+ * @param int|null   $span_id    Target span, or null for current span
  *
  * @example
  * oxphp_apm_event('cache.miss', ['key' => 'user:session:abc']);
  */
-function oxphp_apm_event(string $name, array $attributes = [], ?int $span_id = null): void {}
+function oxphp_apm_event(string $name, ?array $attributes = null, ?int $span_id = null): void {}
 
 /**
  * Record an exception on a span. Adds an "exception" event with

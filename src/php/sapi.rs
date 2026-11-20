@@ -6010,8 +6010,9 @@ unsafe extern "C" fn req_port_cb() -> u16 {
 }
 
 unsafe extern "C" fn req_start_time_cb() -> f64 {
-    // ctx.request_time is the single source of truth: when the request the
-    // thread is serving was received. No REQUEST_DATA borrow needed.
+    // ctx.request_time is the single source of truth: when a worker took the
+    // request the thread is serving, not when it arrived — a wait in the queue
+    // is not in it. No REQUEST_DATA borrow needed.
     //
     // It reads 0.0 once a request has ended — worker_send_callback,
     // RequestDataGuard::drop and the worker boot reset each put it back — but

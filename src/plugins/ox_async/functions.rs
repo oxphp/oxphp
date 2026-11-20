@@ -476,7 +476,7 @@ fn handler_await_race(call: &mut NativeCall, enabled: bool) -> Result<(), PhpErr
 
 // ─── handler_await_any ───────────────────────────────────────────────────────
 
-/// `oxphp_async_await_any(array $promise_ids, ?float $timeout = null): array`
+/// `oxphp_async_await_any(array $promise_ids, float $timeout = 0.0): array`
 ///
 /// Promise.any semantics: first FULFILLED promise wins. Rejections accumulate.
 /// If every promise rejects, the bridge throws OxPHP\Async\AggregateAsyncException

@@ -310,6 +310,17 @@ $request->cookie('%D0%BA'); // "1"     — look up by the name as sent
 
 Names are reported as sent here too. PHP rewrites `' '`, `'.'` and `'['` in every superglobal name, cookies included, so `Cookie: a.b=1` lands in `$_COOKIE` as `a_b` while `cookie('a.b')` and `cookies()['a.b']` use the name the client sent.
 
+That rewrite can also land one cookie on another's key. With `Cookie: a.b=1; a_b=2` both names become `a_b` in `$_COOKIE`, which keeps the first, while the object API keeps them apart:
+
+```php
+// Cookie: a.b=1; a_b=2
+$_COOKIE['a_b'];           // "1" — a.b, rewritten, came first
+$request->cookie('a_b');   // "2"
+$request->cookie('a.b');   // "1"
+```
+
+So, as with query parameters, do not validate a cookie through one API and read it through the other: the two can disagree on the value, not only on the name.
+
 Values are byte strings, so a signed cookie or `setcookie('sid', random_bytes(16))` round-trips as the exact bytes it was set with.
 
 ```php
@@ -405,7 +416,7 @@ The raw `X-Forwarded-For` header remains available via `$request->header('X-Forw
 $request->startTime(bool $asFloat = false): int|float
 ```
 
-Returns the Unix timestamp for when this request was received.
+Returns the Unix timestamp of when a PHP worker took this request — the same moment as `$_SERVER['REQUEST_TIME_FLOAT']`. The time the request spent waiting for a free worker is not included; the `oxphp_queue_wait_us` [metric](../operations/metrics.md) reports that wait.
 
 | Call | Returns |
 |------|---------|
@@ -415,7 +426,7 @@ Returns the Unix timestamp for when this request was received.
 ```php
 <?php
 $elapsed = microtime(true) - $request->startTime(true);
-error_log(sprintf("Request took %.3fs so far", $elapsed));
+error_log(sprintf("PHP has been handling this request for %.3fs", $elapsed));
 ```
 
 ---
@@ -548,15 +559,16 @@ if (!$file || !$file->isValid()) {
 }
 
 $detectedMime = $file->type();
-$allowed = ['application/pdf', 'image/jpeg', 'image/png'];
+// The keys are the allow-list; the extension comes from here, never from the client
+$allowed = ['application/pdf' => 'pdf', 'image/jpeg' => 'jpg', 'image/png' => 'png'];
 
-if (!in_array($detectedMime, $allowed, true)) {
+if (!isset($allowed[$detectedMime])) {
     http_response_code(415);
     echo json_encode(['error' => "File type not allowed: $detectedMime"]);
     return;
 }
 
-$file->moveTo('/var/uploads/' . bin2hex(random_bytes(8)) . '.pdf');
+$file->moveTo('/var/uploads/' . bin2hex(random_bytes(8)) . '.' . $allowed[$detectedMime]);
 ```
 
 ---
