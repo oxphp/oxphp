@@ -106,7 +106,7 @@ oxphp_worker(function () {
 
 ### Background work is not completing
 
-PHP's `max_execution_time` continues to apply after `oxphp_finish_request()` is called. If the total script execution time — including background work — exceeds the limit, the request is cancelled with a `Request cancelled (timeout)` fatal.
+PHP's `max_execution_time` continues to apply after `oxphp_finish_request()` is called. If the total script execution time — including background work — exceeds the limit, PHP ends it with the fatal error `Maximum execution time of N seconds exceeded`.
 
 **Fix:** Raise `max_execution_time` (in `php.ini` or via `set_time_limit()` from the script), or move long background tasks to a message queue:
 

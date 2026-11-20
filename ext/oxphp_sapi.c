@@ -10688,10 +10688,11 @@ static void oxphp_zend_interrupt_handler(zend_execute_data *execute_data)
         return;
     }
 
-    /* SIGALRM-driven max_execution_time: Zend sets EG(timed_out)=1
-     * alongside vm_interrupt. Convert it to the unified cancellation
-     * reason and claim the flag so zend_timeout()'s default
-     * "Maximum execution time exceeded" path doesn't also fire. */
+    /* max_execution_time: the engine checks EG(timed_out) before it calls
+     * this handler and answers it with zend_timeout() itself, so the flag is
+     * found raised here only when the timer fired between that check and this
+     * call. Convert it to the cancellation reason and claim the flag so
+     * zend_timeout() does not fire as well. */
     if (zend_atomic_bool_load_ex(&EG(timed_out))) {
         oxphp_bridge_set_cancel_reason(OXPHP_CANCEL_TIMEOUT);
         zend_atomic_bool_store_ex(&EG(timed_out), false);

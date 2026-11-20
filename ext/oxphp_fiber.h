@@ -598,7 +598,7 @@ typedef struct _oxphp_request_fiber {
      * consecutive-error breaker counts one of them and not the other:
      *
      * handler_failed — the request came apart: a zend_bailout (uncaught fatal,
-     *   OOM, stack overflow), a fiber that could not be started at all, or one
+     *   OOM), a fiber that could not be started at all, or one
      *   the request would not stop suspending from userland, which the server
      *   ends. What they share is that the request did not finish its own work
      *   and the server was not the one cutting it short; a bailout also leaves

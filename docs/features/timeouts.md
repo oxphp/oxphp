@@ -13,7 +13,7 @@ Each request passes through these phases:
 
 1. **Connection accepted** — the header timeout starts. OxPHP waits for the client to send a complete set of HTTP headers.
 2. **Headers received** — the header timeout ends. The request is dispatched to a PHP worker.
-3. **PHP processes the request** — application code runs under PHP's own `max_execution_time`, armed as a per-thread POSIX timer. When the limit is reached, the request is cancelled and the unified `Request cancelled (timeout)` fatal fires. In worker mode each request keeps a limit of its own, including one the worker takes while it is carrying others, and a request suspended in a wait when its limit runs out is ended as it resumes — see [Worker Mode → Request Deadlines](worker-mode.md#request-deadlines).
+3. **PHP processes the request** — application code runs under PHP's own `max_execution_time`, armed as a per-thread POSIX timer. When the limit is reached, PHP ends the request with its own fatal error, `Maximum execution time of N seconds exceeded`, and OxPHP answers it with `504 Gateway Timeout` in place of any status the script had set, unless the response's headers have already gone out, as a streamed response's have. In worker mode each request keeps a limit of its own, including one the worker takes while it is carrying others, and a request suspended in a wait when its limit runs out is ended as it resumes — see [Worker Mode → Request Deadlines](worker-mode.md#request-deadlines).
 4. **Response sent** — on keep-alive connections, the cycle repeats from step 1.
 
 ```text
@@ -32,11 +32,11 @@ On keep-alive connections, both timeouts apply independently to each request in 
 
 The header timeout protects against slowloris-style attacks, where a client sends headers one byte at a time to hold connections open indefinitely.
 
-PHP execution timing is delegated entirely to PHP. When `max_execution_time` is exceeded, OxPHP's unified cancellation path:
+PHP execution timing is delegated entirely to PHP. When `max_execution_time` is exceeded, PHP ends the script with the fatal error `Maximum execution time of N seconds exceeded`, and:
 
-- Sets `connection_status() & PHP_CONNECTION_TIMEOUT` so userland code can detect the cause.
-- Runs all `register_shutdown_function()` callbacks, exactly as PHP-FPM does.
-- Returns HTTP `504 Gateway Timeout` with the message `Request cancelled (timeout)` written to the error log.
+- `connection_status() & PHP_CONNECTION_TIMEOUT` is set, so userland code can detect the cause.
+- All `register_shutdown_function()` callbacks run, exactly as under PHP-FPM.
+- OxPHP returns HTTP `504 Gateway Timeout` in place of any status the script had set, unless the response's headers had already gone out, and the fatal error is written to the error log.
 
 ### Wall-clock, not CPU time
 
@@ -100,7 +100,7 @@ Adjust these values based on your application's characteristics. For SSE endpoin
 
 ## Troubleshooting
 
-### Clients receive 504 with `Request cancelled (timeout)` unexpectedly
+### Clients receive 504 and the log shows `Maximum execution time of N seconds exceeded`
 
 The PHP execution-time limit fired before the script finished.
 
