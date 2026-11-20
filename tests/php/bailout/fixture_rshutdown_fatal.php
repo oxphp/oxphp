@@ -4,9 +4,9 @@
 // adapted from PHP's own test for GHSA-g3vh-838c-65v7
 // (sapi/fpm/tests/ghsa-g3vh-838c-65v7.phpt).
 //
-// Once $_SESSION is unset, the session's own copy of its data is the last
+// Once $_SESSION is unset, the session's own reference to its data is the last
 // thing holding the stream, so the stream is closed when the session's
-// RSHUTDOWN releases that copy, outside the guard the session puts around its
+// RSHUTDOWN drops that reference, outside the guard the session puts around its
 // write, and the wrapper's stream_close() raises the fatal there. From PHP
 // 8.4.28 / 8.5.13 the engine ends the process at that point unless the server
 // catches it.

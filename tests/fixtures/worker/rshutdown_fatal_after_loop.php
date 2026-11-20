@@ -4,10 +4,10 @@
 // has armed it: a fatal error raised inside the session extension's request
 // shutdown, which a worker's thread reaches only as it exits. The trap is the
 // one bailout/fixture_rshutdown_fatal sets, adapted from PHP's own test for
-// GHSA-g3vh-838c-65v7: once $_SESSION is unset, the session's own copy of its
-// data is the last thing holding the stream, so the stream is closed when the
-// session's RSHUTDOWN releases that copy, and stream_close() raises the fatal
-// there.
+// GHSA-g3vh-838c-65v7: once $_SESSION is unset, the session's own reference to
+// its data is the last thing holding the stream, so the stream is closed when
+// the session's RSHUTDOWN drops that reference, and stream_close() raises the
+// fatal there.
 //
 // A session that failed to start would leave $_SESSION an ordinary array, and
 // the unset() would close the stream right here instead; that is written down
