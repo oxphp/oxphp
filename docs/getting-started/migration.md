@@ -58,7 +58,7 @@ PHP reads every `.ini` file in that directory in alphabetical order and the last
 
 **5. Roll out beside the old stack.** Run OxPHP next to nginx + PHP-FPM, point a share of traffic at it through your existing load balancer, use `/health/readiness` for probes, and compare error rates and latency on `/metrics` before moving the rest.
 
-**6. Turn on worker mode last.** Migrate in the default mode first; then set `WORKER_MODE_ENABLED=true` and `ENTRY_FILE` to a worker script. State that lives in static properties and long-lived connections now survives between requests — read [What gets reset between requests](../features/worker-mode.md#what-gets-reset-between-requests) before enabling it.
+**6. Turn on worker mode last.** Migrate in the default mode first; then set `WORKER_MODE_ENABLED=true` and `ENTRY_FILE` to a worker script. State that lives in static properties and long-lived connections now survives between requests — read [What gets reset between requests](../features/worker-state.md#what-gets-reset-between-requests) before enabling it.
 
 ## From FrankenPHP or RoadRunner
 

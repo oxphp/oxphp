@@ -76,7 +76,7 @@ The count goes up as a request starts, so if `bootstrap()` can suspend (`oxphp_s
 
 ### scheduleExit
 
-Application-driven worker recycling. The current request completes normally; the loop checks `isExitScheduled()` afterwards and breaks out. The supervisor brings a fresh worker up in its place, re-running the outer scope of the worker file — on the pool's next scan for a static pool, and on a dynamic one only while the pool is at or below its minimum; see [Recycling](../features/worker-mode.md#recycling).
+Application-driven worker recycling. The current request completes normally; the loop checks `isExitScheduled()` afterwards and breaks out. The supervisor brings a fresh worker up in its place, re-running the outer scope of the worker file — on the pool's next scan for a static pool, and on a dynamic one only while the pool is at or below its minimum; see [Recycling](../features/worker-recycling.md#recycling).
 
 ```php
 <?php
