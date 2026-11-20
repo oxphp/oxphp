@@ -77,6 +77,9 @@ End-to-end recipes for running popular PHP applications on OxPHP — each a comp
 - [Async Promises](features/async-promises.md) — run PHP closures on background threads and await results
 - [Decorators](features/decorators.md) — intercept function and method calls with PHP 8 attributes
 - [Distributed Tracing & APM](features/distributed-tracing.md) — W3C Trace Context, OpenTelemetry, auto-instrumentation, and PHP tracing SDK
+- [Profiling](features/profiling.md) — the built-in per-request profiler: triggers, PHP SDK, attributes, workflows and troubleshooting
+- [Profiler Reference](features/profiling-reference.md) — profiler settings, span contents, export formats, storage, routes, push and metrics
+- [Profiling Examples](features/profiling-examples.md) — complete PHP scenarios for the profiler
 - [Internal Server](features/internal-server.md) — dedicated port for health checks, Prometheus metrics, and live configuration
 
 ## Shared State
