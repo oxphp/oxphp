@@ -5570,7 +5570,9 @@ static zend_string *oxphp_redis_persistent_id(const char *address, int port, dou
                  port);
     }
 
-    /* strpprintf(), as phpredis does: %f is PHP's own formatting, not libc's. */
+    /* strpprintf(), as phpredis does, decimal point included: %f takes it from the
+     * locale. An id built before setlocale() changes it names nothing phpredis
+     * registers after that. */
     return pid != NULL ? strpprintf(0, "phpredis:%s:%s", host, pid)
                        : strpprintf(0, "phpredis:%s:%f", host, timeout);
 }
@@ -5705,8 +5707,7 @@ static zend_string *oxphp_redis_ctor_id(zend_execute_data *execute_data)
  * started through another — including one started by the call that connected it,
  * before that call's own key could name the stream. Looked up on every call rather
  * than kept: phpredis closes the stream on an error and the next connect registers
- * a new one under the same id. With pooling on the streams carry ids of their own,
- * this one names none, and the key stays the object. */
+ * a new one under the same id. */
 static void *oxphp_redis_id_key(zend_string *id, zend_object *obj)
 {
     if (id != NULL) {
@@ -5754,6 +5755,25 @@ static zif_handler oxphp_redis_orig(zend_execute_data *execute_data)
     return orig;
 }
 
+/* phpredis reads it as it connects. With pooling on, every persistent stream it opens
+ * carries an id of its own, and no two live objects share it. */
+static bool oxphp_redis_pooling_off(void)
+{
+    return zend_ini_long(ZEND_STRL("redis.pconnect.pooling_enabled"), 0) == 0;
+}
+
+/* Whether this phpredis keeps a pconnect() connection persistent in a ZTS build.
+ * 6.3.0 does not — redis_connect() turns persistence off under ZTS (redis.c) — so
+ * its pconnect() opens a plain socket even where a constructor's `persistent`
+ * option registered a stream under the same id; the development branch does. The
+ * version string cannot tell them apart, since that branch reports 6.3.0RC1, so it
+ * is learned: yes from a pconnect() that registers the stream it opened, for good;
+ * no from one that succeeds with nothing registered under its id. Until then, one
+ * that finds a stream already registered is taken to be on it — a wait it may not
+ * need rather than none where it does. */
+enum { OXPHP_REDIS_PERSISTS_UNKNOWN, OXPHP_REDIS_PERSISTS_NO, OXPHP_REDIS_PERSISTS_YES };
+static _Atomic(int) oxphp_redis_pconnect_persists = OXPHP_REDIS_PERSISTS_UNKNOWN;
+
 static ZEND_NAMED_FUNCTION(oxphp_redis_hook)
 {
     zif_handler orig = oxphp_redis_orig(execute_data);
@@ -5771,7 +5791,9 @@ static ZEND_NAMED_FUNCTION(oxphp_redis_hook)
     bool plain_open = zend_string_equals_literal_ci(name, "connect")
                       || zend_string_equals_literal_ci(name, "open");
     void *key = oxphp_redis_conn_key(obj);
-    zend_string *id = persistent_open && obj != NULL ? oxphp_redis_pconnect_id(execute_data) : NULL;
+    zend_string *id = persistent_open && obj != NULL && oxphp_redis_pooling_off()
+                          ? oxphp_redis_pconnect_id(execute_data)
+                          : NULL;
     void *opened = persistent_open ? oxphp_redis_id_key(id, obj) : key;
 
     void *busy = NULL;
@@ -5836,8 +5858,41 @@ static ZEND_NAMED_FUNCTION(oxphp_redis_hook)
         return;
     }
 
-    /* A failed pconnect() leaves the object with no connection at all. */
-    bool bound = persistent_open && Z_TYPE_P(return_value) == IS_TRUE;
+    /* An Error — ZPP's, or a ValueError for a timeout or retry interval out of
+     * range — is thrown before phpredis lets go of the connection the object is
+     * on, so the object is still on it. A connect that fails after that leaves it
+     * on none, with a RedisException or with nothing thrown. */
+    if (EG(exception) != NULL && instanceof_function(EG(exception)->ce, zend_ce_error)) {
+        if (id != NULL) zend_string_release(id);
+        return;
+    }
+
+    bool bound = false;
+    if (id != NULL && Z_TYPE_P(return_value) == IS_TRUE) {
+        void *before = opened != obj ? opened : NULL;
+        void *after = oxphp_redis_id_key(id, NULL);
+        if (after == NULL) {
+            int unknown = OXPHP_REDIS_PERSISTS_UNKNOWN;
+            if (before == NULL) {
+                atomic_compare_exchange_strong_explicit(&oxphp_redis_pconnect_persists, &unknown,
+                                                        OXPHP_REDIS_PERSISTS_NO,
+                                                        memory_order_relaxed, memory_order_relaxed);
+            }
+        } else if (after != before) {
+            /* Registered by this call, unless a lazy connect on another fiber did it
+             * while this one was parked in its own: that fiber's first command
+             * claimed it. */
+            oxphp_request_fiber *owner = oxphp_claim_owner(after);
+            if (owner == NULL || owner == oxphp_current_fiber) {
+                atomic_store_explicit(&oxphp_redis_pconnect_persists, OXPHP_REDIS_PERSISTS_YES,
+                                      memory_order_relaxed);
+                bound = true;
+            }
+        } else {
+            bound = atomic_load_explicit(&oxphp_redis_pconnect_persists, memory_order_relaxed)
+                    != OXPHP_REDIS_PERSISTS_NO;
+        }
+    }
     if (!bound && id != NULL) zend_string_release(id);
     oxphp_redis_bind(obj, bound ? id : NULL);
 }
@@ -5849,8 +5904,13 @@ static ZEND_NAMED_FUNCTION(oxphp_redis_ctor_hook)
     if (orig == NULL) return;
 
     orig(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+    /* Pooling as the constructor sees it, not as each call does: an object that
+     * connected with pooling off is still on the shared stream after a later request
+     * turns it back on. phpredis reads it at the first command, which connects; one
+     * run under the other setting is keyed by what the constructor saw. */
     if (EG(exception) == NULL && getThis() != NULL) {
-        oxphp_redis_bind(Z_OBJ_P(getThis()), oxphp_redis_ctor_id(execute_data));
+        oxphp_redis_bind(Z_OBJ_P(getThis()),
+                         oxphp_redis_pooling_off() ? oxphp_redis_ctor_id(execute_data) : NULL);
     }
 }
 
