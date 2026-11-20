@@ -82,6 +82,7 @@
 - [Graceful Shutdown](docs/operations/graceful-shutdown.md): How OxPHP handles SIGTERM and SIGINT signals to drain connections and shut down cleanly, with Kubernetes and Docker configuration examples.
 - [Health Checks](docs/operations/health-checks.md): Internal server endpoints for health monitoring, Kubernetes probes, Prometheus metrics, and runtime configuration inspection.
 - [Prometheus Metrics](docs/operations/metrics.md): Reference for all Prometheus-compatible metrics exposed by OxPHP at the /metrics endpoint, including request, connection, worker, and compression metrics.
+- [Sizing PHP Workers](docs/operations/sizing-workers.md): How many PHP workers, queue slots and waiting requests to allow, how they share the connection budget, and how OxPHP counts the CPUs its defaults use.
 
 ## Architecture
 

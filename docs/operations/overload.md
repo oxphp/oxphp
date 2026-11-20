@@ -71,4 +71,5 @@ The state goes nowhere else. There is no gauge for it — the refusal counters i
 
 - [Prometheus Metrics](metrics.md) — the admission, queue and refusal metrics these readings use
 - [Configuration Reference](configuration.md) — `QUEUE_CAPACITY`, `QUEUE_WAIT_TIMEOUT_MS` and the other admission limits
+- [Sizing PHP Workers](sizing-workers.md) — choosing the pool, queue and waiting-set sizes the gauges are read against
 - [Health Checks](health-checks.md) — what `/health/readiness` answers while the pool is stalled
