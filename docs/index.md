@@ -111,6 +111,7 @@ Process-wide concurrent primitives so workers can coordinate mutable state witho
 - [Configuration Reference](operations/configuration.md) — complete list of environment variables with defaults and descriptions
 - [Health Checks](operations/health-checks.md) — the `/health`, `/metrics`, and `/config` internal server endpoints
 - [Metrics](operations/metrics.md) — Prometheus-compatible metrics reference
+- [Diagnosing Overload](operations/overload.md) — reading the queue and admission gauges together, and the log lines written while requests are shed
 - [Graceful Shutdown](operations/graceful-shutdown.md) — drain behavior, timeouts, and shutdown sequence
 
 ## Architecture
