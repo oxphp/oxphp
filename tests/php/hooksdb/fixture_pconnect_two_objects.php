@@ -7,6 +7,10 @@ declare(strict_types=1);
 //
 //   pconnect      — pconnect() with a persistent id;
 //   pconnect-long — the same;
+//   pconnect-timeout — the second object from pconnect() with no persistent id, the
+//              holder from the constructor's `persistent` option set to true, so
+//              phpredis names both by the connect timeout — one no other round
+//              connects with;
 //   ctor     — new Redis() with the `persistent` option, which connects lazily,
 //              inside the first command;
 //   mixed    — the holder from the constructor, the second object from pconnect(),
@@ -65,11 +69,11 @@ $pconnect = static function () use ($host, $pid): Redis {
 
     return $redis;
 };
-$construct = static function (bool|string $persistent) use ($host): Redis {
+$construct = static function (bool|string $persistent, float $timeout = 3.0) use ($host): Redis {
     return new Redis([
         'host' => $host,
         'port' => 6379,
-        'connectTimeout' => 3.0,
+        'connectTimeout' => $timeout,
         'readTimeout' => 15.0,
         'persistent' => $persistent,
     ]);
@@ -83,6 +87,7 @@ try {
         $redis = match ($round) {
             'pconnect', 'pconnect-long', 'pooled' => $pconnect(),
             'ctor' => $construct(true),
+            'pconnect-timeout' => $construct(true, 2.5),
             default => $construct($pid),
         };
         $id = $redis->rawCommand('CLIENT', 'ID');
@@ -109,6 +114,9 @@ try {
         if ($round === 'pconnect') {
             $redis = new Redis();
             oxphp_test_redis_pconnect_weak($redis, $host, '6379', 3.0, $pid, 15.0);
+        } elseif ($round === 'pconnect-timeout') {
+            $redis = new Redis();
+            $redis->pconnect($host, 6379, 2.5);
         } elseif ($round === 'ctor') {
             $redis = $construct(true);
         } elseif ($round === 'pooled-ctor') {
