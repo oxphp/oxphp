@@ -8867,11 +8867,50 @@ bool oxphp_curl_turn_is_anothers(const oxphp_request_fiber *self, void *const *k
     return false;
 }
 
+/* Socket writes waiting for the fiber parked on their stream, for the close hook to
+ * find: each holds the stream across its wait, as the parked fiber does. */
+static __thread oxphp_request_fiber *oxphp_stream_waiters = NULL;
+
+void oxphp_stream_wait_enter(oxphp_request_fiber *self) {
+    if (self->stream_waiting) return;
+    self->stream_waiting = true;
+    self->stream_wait_next = oxphp_stream_waiters;
+    oxphp_stream_waiters = self;
+}
+
+void oxphp_stream_wait_leave(oxphp_request_fiber *self) {
+    if (!self->stream_waiting) return;
+
+    for (oxphp_request_fiber **link = &oxphp_stream_waiters; *link != NULL;
+         link = &(*link)->stream_wait_next) {
+        if (*link == self) {
+            *link = self->stream_wait_next;
+            break;
+        }
+    }
+    self->stream_wait_next = NULL;
+    self->stream_waiting = false;
+}
+
+void oxphp_stream_waiters_mark_closed(const struct _php_stream *stream) {
+    for (oxphp_request_fiber *waiter = oxphp_stream_waiters; waiter != NULL;
+         waiter = waiter->stream_wait_next) {
+        for (oxphp_io_op *op = &waiter->io_op; op != NULL; op = op->outer) {
+            if (op->stream == stream) op->stream_closed = true;
+        }
+    }
+}
+
+void oxphp_stream_waiters_abandon(void) {
+    oxphp_stream_waiters = NULL;
+}
+
 /* What an operation on a stream or a connect leaves on the fiber while it runs: the
  * group in `io_op` — the stream it is inside, whether that stream was freed under
  * it, whether it is a TLS loop, whether a connect is going on — the cURL call in
- * `curl_op`, its place among the calls waiting for a cURL handle, and the count of
- * holds on the thread. Each is put back by the frame
+ * `curl_op`, its place among the calls waiting for a cURL handle and among the
+ * socket writes waiting for a stream, and the count of holds on the thread. Each is
+ * put back by the frame
  * that set it, and a bailout walks past those frames without running them — so
  * every place that recovers from one has to do it, or the shutdown functions and
  * destructors that follow see an operation that is over, the name of a stream that
@@ -8886,6 +8925,8 @@ static void oxphp_fiber_forget_io_names(oxphp_request_fiber *fiber) {
     /* Its keys point into the frame the bailout left: out of the list before any
      * other fiber runs and reads them. */
     oxphp_curl_wait_leave(fiber);
+    /* A close walks a waiting write's io_op chain, which was just cut. */
+    oxphp_stream_wait_leave(fiber);
     fiber->net_park_hold = 0;
 }
 

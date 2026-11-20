@@ -2,3 +2,7 @@
 # description: Runtime hooks without the net category — the control for the net tests: TLS waits must hold the thread
 
 hooks/test_net_off_holds_thread
+
+# A write on a tcp:// stream with a fiber parked on it for its reply: without net,
+# the hook sees it from inside OpenSSL's plain path and refuses it at once.
+hooks/test_net_off_plain_write_refused
