@@ -1234,6 +1234,10 @@ namespace OxPHP\Shared {
      */
     final class Counter implements Shareable
     {
+        /**
+         * @throws CapacityException If creating the object would exceed
+         *         `SHARED_MAX_ENTRIES` or `SHARED_MAX_BYTES`.
+         */
         public function __construct(int $initial = 0) {}
 
         /** Current value (atomic load). */
@@ -1275,6 +1279,10 @@ namespace OxPHP\Shared {
      */
     final class Atomic implements Shareable
     {
+        /**
+         * @throws CapacityException If creating the object would exceed
+         *         `SHARED_MAX_ENTRIES` or `SHARED_MAX_BYTES`.
+         */
         public function __construct(int $initial = 0) {}
 
         /**
@@ -1341,6 +1349,10 @@ namespace OxPHP\Shared {
      */
     final class Flag implements Shareable
     {
+        /**
+         * @throws CapacityException If creating the object would exceed
+         *         `SHARED_MAX_ENTRIES` or `SHARED_MAX_BYTES`.
+         */
         public function __construct(bool $initial = false) {}
 
         /**
@@ -1399,6 +1411,8 @@ namespace OxPHP\Shared {
          * @param Once\FailureMode $onFactoryError What happens to OTHER callers
          *        if a `getOrInit()` factory throws. Default `Reset` (retryable);
          *        `Poison` makes the cell terminally unusable.
+         * @throws CapacityException If creating the object would exceed
+         *         `SHARED_MAX_ENTRIES` or `SHARED_MAX_BYTES`.
          */
         public function __construct(
             Once\FailureMode $onFactoryError = Once\FailureMode::Reset
@@ -1482,7 +1496,11 @@ namespace OxPHP\Shared {
      */
     final class Mutex implements Shareable
     {
-        /** @param mixed $initial Starting value. */
+        /**
+         * @param mixed $initial Starting value.
+         * @throws CapacityException If creating the object would exceed
+         *         `SHARED_MAX_ENTRIES` or `SHARED_MAX_BYTES`.
+         */
         public function __construct(mixed $initial = null) {}
 
         /**
@@ -1554,7 +1572,9 @@ namespace OxPHP\Shared {
          * @param int $capacity Maximum queued values (>= 1).
          * @throws TypeException If `$capacity` is not a positive int.
          * @throws CapacityException If the requested capacity's slot array
-         *         would exceed `SHARED_MAX_CHANNEL_BYTES` (default 64 MiB).
+         *         would exceed `SHARED_MAX_CHANNEL_BYTES` (default 64 MiB),
+         *         or creating the object would exceed `SHARED_MAX_ENTRIES`
+         *         or `SHARED_MAX_BYTES`.
          */
         public function __construct(int $capacity) {}
 
@@ -1676,6 +1696,8 @@ namespace OxPHP\Shared {
          *        OOM-safety, or null for unbounded (still bounded by the
          *        process-global `SHARED_MAX_ENTRIES` budget). Must be > 0;
          *        0 or negative throws {@see TypeException}.
+         * @throws CapacityException If creating the object would exceed
+         *         `SHARED_MAX_ENTRIES` or `SHARED_MAX_BYTES`.
          */
         public function __construct(?int $maxEntries = null) {}
 
@@ -1813,6 +1835,8 @@ namespace OxPHP\Shared {
          * @param callable|null $destroy       Called with the resource on eviction, or when the pool goes away, on the thread holding it while PHP code runs there (not at server stop, and outside worker mode not for slots still idle when the creating request ends).
          * @param int           $maxSize       Hard budget of live slots; must be > 0 (default 32).
          * @param int           $idleTimeoutMs Idle ms before a slot is eligible for eviction; 0 disables eviction (default 300_000).
+         * @throws CapacityException If creating the object would exceed
+         *         `SHARED_MAX_ENTRIES` or `SHARED_MAX_BYTES`.
          */
         public function __construct(
             callable $factory,
@@ -2295,7 +2319,11 @@ namespace OxPHP\Shared\Pool {
         /** Slots currently checked out. */
         public function inUse(): int {}
 
-        /** Free slots ready to hand out. */
+        /**
+         * Free slots, counted across every thread. An acquire takes only
+         * those idle on its own thread: a slot idle on another worker or
+         * task thread is counted here but never handed to this caller.
+         */
         public function idle(): int {}
 
         /** Callers blocked in `acquire`. */

@@ -162,6 +162,7 @@ $secrets->getOrInit(fn () => loadSecretsOrThrow());
 | `DeadlockException`      | `getOrInit()` called recursively on the same Once from its factory.|
 | `TypeException`          | A stored value is not serialisable (closure, resource).           |
 | `StaleHandleException`   | Any method on a handle whose registry entry was evicted.          |
+| `CapacityException`      | `new Once()` past `SHARED_MAX_ENTRIES` or `SHARED_MAX_BYTES`.     |
 
 If the factory itself throws, that exception propagates unchanged to the current caller. In `Reset` mode the cell stays uninitialised and the next `getOrInit` retries; in `Poison` mode the cell becomes poisoned.
 

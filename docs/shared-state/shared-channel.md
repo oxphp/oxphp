@@ -82,6 +82,10 @@ rather than aborting the process:
   The effective budget is clamped up to at least one slot, so a zero or
   too-small `SHARED_MAX_CHANNEL_BYTES` can never reject a minimal
   capacity-1 channel — it only ever caps large capacities.
+- **Per process** — like every `Shared\*` constructor, `new Channel()`
+  also throws `CapacityException` when creating it would exceed
+  `SHARED_MAX_ENTRIES` or `SHARED_MAX_BYTES` (see
+  [Configuration](shared-state.md#configuration)).
 - **Per value** — each sent value is serialised; a value whose serialised
   size exceeds `SHARED_MAX_VALUE_SIZE` (default 1 MiB) throws
   `ValueTooLargeException`. This applies to `send`, `trySend`,

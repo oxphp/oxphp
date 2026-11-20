@@ -32,9 +32,10 @@ is part of a memory-model contract distinct from a plain getter.
 
 Every container that exposes its current size does so under the name
 `count(): int`. `Channel` additionally implements `\Countable`, so
-`count($ch)` works as a native idiom for queued items. `Map` and
-`Pool` expose `count(): int` as a method but do not implement
-`\Countable` — call it directly:
+`count($ch)` works as a native idiom for queued items. `Map` exposes
+`count(): int` as a method but does not implement `\Countable` — call
+it directly. `Pool` has no `count()`: its number of live slots is one
+of the figures in the snapshot `Pool::stats()` returns:
 
 ```php
 $ch  = new OxPHP\Shared\Channel(1024);
@@ -43,12 +44,15 @@ $pool = new OxPHP\Shared\Pool($factory);
 
 count($ch);       // queued items (Channel implements \Countable)
 $map->count();    // entries
-$pool->count();   // total live slots (in-use + idle)
+$pool->stats()->size();  // total live slots (in-use + idle)
 ```
 
 No `size()`, `len()`, or `pending()` — these are forbidden on the
 public surface, regardless of which language the implementer's
-muscle memory comes from.
+muscle memory comes from. The one exception is `Pool\Stats::size()`:
+a `Stats` object is not a container but a snapshot of several counts
+of one pool, read side by side — `size()` beside `inUse()`, `idle()`
+and `maxSize()`.
 
 ### 4. Boolean-getter — `is*()` prefix
 
@@ -148,7 +152,7 @@ Every `Shared\*` instance exposes `id(): int` for logs and the
 | Read an atomic              | `load($order)`           | `Atomic::load`                          |
 | Write a value               | `set()`                  | `Map::set`                              |
 | Write an atomic             | `store($v, $order)`      | `Atomic::store`                         |
-| Number of elements          | `count(): int`           | `Map::count`, `Channel::count`, `Pool::count` |
+| Number of elements          | `count(): int`           | `Map::count`, `Channel::count`          |
 | Boolean property            | `is*(): bool`            | `Channel::isClosed`                     |
 | Conditional insert          | `setIfAbsent($k, $v)`    | `Map::setIfAbsent`                      |
 | Non-blocking wait           | `try*()`                 | `Channel::trySend`, `Mutex::tryWithLock` |
@@ -178,7 +182,8 @@ When proposing a new primitive, fill out this checklist before merging:
   `try*` methods return either a value-typed Result or throw a domain
   exception — never `null`-to-encode. Conditional-success ops follow
   the dedicated `setIfAbsent` naming instead of `try*`.
-- [ ] No `len`, `size`, `pending`, `test`, or other ad-hoc names.
+- [ ] No `len`, `size`, `pending`, `test`, or other ad-hoc names
+  (`Pool\Stats::size()` is the one named exception, see above).
 - [ ] Domain-specific verbs (`evict`, `drain`, `flush`, etc.) appear
   only when no canonical entry in the cheat sheet covers the concept.
 

@@ -170,6 +170,7 @@ if ($snapshot & FLAG_FAILED) {
 |------------------------------|------------------------------------------------------------------------|
 | `StaleHandleException`       | Any method on a handle whose registry entry was evicted.               |
 | `UninitializedException`     | `id()` on a wrapper that has not finished `__construct`.               |
+| `CapacityException`          | `new Atomic()` past `SHARED_MAX_ENTRIES` or `SHARED_MAX_BYTES`.        |
 | `InvalidOrderingException`   | An operation receives a memory ordering invalid for it.                |
 
 ## Observability
