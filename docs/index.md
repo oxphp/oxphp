@@ -60,6 +60,9 @@ End-to-end recipes for running popular PHP applications on OxPHP — each a comp
 - [Static Files](features/static-files.md) — file cache, MIME detection, ETag/Last-Modified headers, and streaming
 - [Worker Mode](features/worker-mode.md) — persistent PHP workers with automatic soft reset between requests
 - [Fiber Multiplexing](features/fiber-multiplexing.md) — handle hundreds of concurrent requests per worker thread with cooperative multitasking
+- [Runtime Hooks](features/runtime-hooks.md) — make blocking `sleep()`, socket, connect, TLS and cURL waits in unmodified code suspend the fiber instead of the worker thread
+- [Shared Connections Under Runtime Hooks](features/runtime-hooks-shared-state.md) — one database or Redis connection used by several fibers, and state a hooked wait exposes
+- [cURL Under Runtime Hooks](features/runtime-hooks-curl.md) — cURL transfers, shared handles and multi handles under the `curl` category
 - [Compression](features/compression.md) — Brotli, Zstandard and gzip for text-based responses, negotiated per client
 - [TLS](features/tls.md) — built-in TLS termination with certificate and key configuration
 - [Rate Limiting](features/rate-limiting.md) — per-IP rate limiting with configurable windows and limits
