@@ -98,15 +98,10 @@ jobs:
                 MERGE_JSON+="{\"oxphp\":\"$OXPHP\",\"php\":\"$PHP\",\"distro\":\"$DISTRO\"}"
                 # The PHP suites run on the Alpine image only: their health
                 # checks call wget, which the Debian image does not have.
-                # They build docker/dev/Dockerfile, which defaults to Alpine
-                # 3.24 whatever this cell's Alpine is. Naming that base keeps
-                # 8.4 and 8.5 on it and gives 8.6, whose tag has no -zts-, one
-                # that exists.
                 if [[ "$DISTRO" == alpine* ]]; then
-                  SUITE_BASE=$(scripts/php-base-image.sh "$PHP" alpine3.24)
                   if [[ $FIRST_S -eq 0 ]]; then SUITE_JSON+=","; fi
                   FIRST_S=0
-                  SUITE_JSON+="{\"oxphp\":\"$OXPHP\",\"php\":\"$PHP\",\"distro\":\"$DISTRO\",\"base\":\"$SUITE_BASE\"}"
+                  SUITE_JSON+="{\"oxphp\":\"$OXPHP\",\"php\":\"$PHP\",\"distro\":\"$DISTRO\"}"
                 fi
                 for ARCH in amd64 arm64; do
                   RUNNER="ubuntu-24.04"
@@ -292,16 +287,13 @@ jobs:
           retention-days: 1
 
   # ──────────────────────────────────────────────────────────────
-  # Job 2.5: subset PHP integration suite — only when build wasn't skipped
+  # Job 2.5: test profiles against the published amd64 image
   # ──────────────────────────────────────────────────────────────
-  # Same focused 6-suite scope as release.yml::php-suite — covers SAPI-class
-  # regressions from upstream PHP patches without doubling weekly cost. The
-  # `if: needs.build.result == 'success'` clause is a coarse proxy for
-  # "actually built something" — when every cell in `build` short-circuits
-  # via the digest check, GitHub still reports `result: success` because no
-  # cell failed, so the suite runs against the previously-published image.
-  # Acceptable false-positive: one extra ~5-min subset run per weekly cycle
-  # when nothing actually changed.
+  # `manifest` waits on this job. The profiles and fixtures come from the
+  # release tag; the server under test is the amd64 image `build` pushed for
+  # this cell, not a build of the tag's sources, run with the dev image's
+  # custom.ini added. A `build` cell that skipped on an unchanged base pushed
+  # nothing, and its profiles run on the image published before.
   # ──────────────────────────────────────────────────────────────
   php-suite-subset:
     needs: [plan, build]
@@ -311,6 +303,13 @@ jobs:
       matrix:
         include: ${{ fromJson(needs.plan.outputs.suite_matrix) }}
     runs-on: ubuntu-24.04
+    env:
+      # Fixed so the pull step can name the images compose looks up.
+      COMPOSE_PROJECT_NAME: weekly-gate
+      # Profiles, not suites: run_all.sh --suite runs every suite of that
+      # suite's profile, so two suites of one profile run it twice. A profile
+      # missing from a release's tag fails that cell; it is not skipped.
+      PROFILES: default pathinfo errors async async1 asynccap asyncob
     steps:
       - uses: actions/checkout@v5
         with:
@@ -323,53 +322,68 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Pull just-built amd64 image and tag as oxphp:dev
+      - name: Pull the published amd64 image and name it as each profile's image
         env:
           OXPHP_VER: ${{ matrix.oxphp }}
           PHP_MINOR: ${{ matrix.php }}
           DISTRO: ${{ matrix.distro }}
         run: |
+          set -eo pipefail
           SRC="${REGISTRY}/${IMAGE_NAME}:${OXPHP_VER}-php${PHP_MINOR}-${DISTRO}-amd64"
           docker pull "$SRC"
-          docker tag "$SRC" oxphp:dev
+          # The published image has no custom.ini. The profiles are written for
+          # the dev image, which has it: async/test_await_jit_hot_loop_leak, for
+          # one, fails without its tracing JIT.
+          CID=$(docker create "$SRC")
+          docker cp docker/custom.ini "$CID:/usr/local/etc/php/conf.d/custom.ini"
+          docker commit "$CID" weekly-gate-image
+          docker rm "$CID"
+          # The profiles have build: and neither image: nor pull_policy, so
+          # compose skips the build when <project>-<service> exists locally.
+          for p in $PROFILES; do
+            docker tag weekly-gate-image "${COMPOSE_PROJECT_NAME}-oxphp-${p}"
+          done
+          echo "GATE_IMAGE_ID=$(docker image inspect -f '{{.Id}}' weekly-gate-image)" >> "$GITHUB_ENV"
 
-      - name: Run focused PHP integration suites
-        env:
-          PHP_VERSION: ${{ matrix.php }}
-          # Read by the compose profiles from 0.16.0 on; earlier tags ignore it.
-          BASE_IMAGE: ${{ matrix.base }}
+      - name: Run the test profiles
         run: |
           set -eo pipefail
-          # Suites run against a fresh build of the released source checked out
-          # above. The list may name suites that only exist in newer versions;
-          # any suite file absent from an older released tag is skipped so this
-          # job stays green across every supported version.
-          SUITES=(
-            headers
-            cookies
-            get_post_request
-            input
-            pathinfo
-            errors
-            async
-            async1
-            asynccap
-            asyncob
-          )
           FAILED=()
-          for suite in "${SUITES[@]}"; do
-            if [ ! -f "tests/suites/${suite}.txt" ]; then
-              echo "::notice::Suite ${suite} not present in this release — skipping"
-              continue
+          for p in $PROFILES; do
+            echo "::group::Profile: $p"
+            # run_all.sh removes the containers when the profile ends, so the
+            # image each one started from is recorded while it runs. --since
+            # replays the starts that land before the listener subscribes.
+            STARTED=$(mktemp)
+            docker events --since "$(date +%s)" \
+              --filter type=container --filter event=start \
+              --filter "label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}" \
+              --filter "label=com.docker.compose.service=oxphp-${p}" \
+              --format '{{.Actor.Attributes.image}}' > "$STARTED" &
+            EVENTS_PID=$!
+            if ! ./tests/run_all.sh --no-build --profile="$p"; then
+              FAILED+=("$p")
             fi
-            echo "::group::Suite: $suite"
-            if ! ./tests/run_all.sh --no-build --suite="$suite"; then
-              FAILED+=("$suite")
+            kill "$EVENTS_PID"
+            # Compare the ID behind each recorded name: compose may have
+            # resolved another name (image:, a project of its own) or built
+            # under ours. No start recorded fails as well, since the profile
+            # may then have run in another project, on images never tagged here.
+            IMAGES=$(sort -u "$STARTED")
+            if [ -z "$IMAGES" ]; then
+              echo "::error::Profile ${p}: no oxphp-${p} container started in project ${COMPOSE_PROJECT_NAME}"
+              FAILED+=("${p}(no container)")
             fi
+            for img in $IMAGES; do
+              if [ "$(docker image inspect -f '{{.Id}}' "$img")" != "$GATE_IMAGE_ID" ]; then
+                echo "::error::Profile ${p} ran on ${img}, not the published image"
+                FAILED+=("${p}(${img})")
+              fi
+            done
             echo "::endgroup::"
           done
           if [[ ${#FAILED[@]} -gt 0 ]]; then
-            echo "FAILED suites: ${FAILED[*]}" >&2
+            echo "FAILED profiles: ${FAILED[*]}" >&2
             exit 1
           fi
 
