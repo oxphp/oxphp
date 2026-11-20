@@ -5752,7 +5752,7 @@ static zend_string *oxphp_pool_callable_missing_here(const zend_fcall_info_cache
 
 #include "Zend/zend_observer.h"
 
-/* Whether a deprecation is the one PHP raises for such a callable (8.4.27, 8.5.12).
+/* Whether a deprecation is the one PHP raises for such a callable (8.4.27, 8.5.12, 8.6.0).
  * In ["Base", "self::make"] the class of the calling frame becomes the called class,
  * and PHP deprecates the array rather than self. "static::" is left out because the
  * class named first must then extend the calling class, and no class this thread has
@@ -5777,46 +5777,20 @@ static bool oxphp_message_is_scope_callable(const zend_string *message) {
 }
 
 /* PHP resolves such a callable from the class of the nearest PHP frame, whether
- * this thread has loaded that class or not, and deprecates it as it does
- * (zend_is_callable_check_class(), zend_is_callable_check_func()). So a callable
- * built at run time, which no reading of a callback before its call finds, is seen
- * here.
- * Observers run before any error handler, whatever error_reporting says
- * (zend_error_zstr_at()), but on 8.5 a recorded error that is not fatal reaches
- * them only when replayed. OPcache records for the whole compile of a file, where
- * a stream wrapper can run, so a callable such a wrapper resolves is seen after
- * its method has run, from the frame of the include.
+ * this thread has loaded that class or not. Refuses it there: when that class or
+ * its called class is another thread's and the walk finds what this thread lacks,
+ * throws the Error naming it and returns true.
  *
  * A class in this thread's table has what its methods call on this thread, and
  * legacy code can make such calls in a loop, so only another thread's class is
- * walked.
- *
- * An exception pending when zend_is_callable_check_class() returns makes the
- * callable invalid (GH-21699), so the method does not start. ZEND_INIT_USER_CALL,
- * what call_user_func() compiles to, then throws a TypeError of its own with this
- * Error as its previous exception, as it does for an error handler that throws.
- *
- * PHP deprecates the array form later, in zend_is_callable_check_func(), and still
- * reports it valid. Callers with a resolved callable see the exception first, though
- * one that keeps the callable, such as ob_start(), calls it later with nothing here
- * to stop it. zend_call_function() resolving one itself, behind call_user_function(),
- * pushes the frame anyway. A frame running with an exception pending is not safe
- * even when it calls nothing missing: on 8.4 a `new` there unwinds from a stale
- * throw position and can end the process. So the throw raises the interrupt, and
- * the interrupt handler sends that frame to this Error before its first opcode. */
-static void oxphp_scope_callable_observer(int type, zend_string *file, uint32_t line,
-                                          zend_string *message) {
-    (void) file;
-    (void) line;
-    if (type != E_DEPRECATED || !oxphp_message_is_scope_callable(message)) {
-        return;
-    }
+ * walked. */
+static bool oxphp_scope_callable_refuse_at_frame(void) {
     zend_execute_data *frame = EG(current_execute_data);
     while (frame && (!frame->func || !ZEND_USER_CODE(frame->func->type))) {
         frame = frame->prev_execute_data;
     }
     if (!frame) {
-        return;
+        return false;
     }
     zend_class_entry *classes[] = {frame->func->common.scope, zend_get_called_scope(frame)};
     HashTable seen;
@@ -5833,11 +5807,106 @@ static void oxphp_scope_callable_observer(int type, zend_string *file, uint32_t 
         }
     }
     zend_hash_destroy(&seen);
-    if (missing) {
-        zend_throw_error(NULL, "%s", ZSTR_VAL(missing));
-        zend_string_release_ex(missing, 0);
+    if (!missing) {
+        return false;
+    }
+    zend_throw_error(NULL, "%s", ZSTR_VAL(missing));
+    zend_string_release_ex(missing, 0);
+    return true;
+}
+
+/* PHP deprecates such a callable as it resolves it (zend_is_callable_check_class(),
+ * zend_is_callable_check_func(), zend_is_method_callable() on 8.6), so a callable
+ * built at run time, which no reading of a callback before its call finds, is seen
+ * here.
+ * Observers run before any error handler, whatever error_reporting says
+ * (zend_error_zstr_at()), but on 8.5 a recorded error that is not fatal reaches
+ * them only when replayed. OPcache records for the whole compile of a file, where
+ * a stream wrapper can run, so a callable such a wrapper resolves is seen after
+ * its method has run, from the frame of the include.
+ *
+ * An exception pending when zend_is_callable_check_class() returns makes the
+ * callable invalid (GH-21699), so the method does not start. ZEND_INIT_USER_CALL,
+ * what call_user_func() compiles to, then throws a TypeError of its own with this
+ * Error as its previous exception, as it does for an error handler that throws.
+ *
+ * PHP deprecates the array form later, in the method check, and still reports it
+ * valid. Callers with a resolved callable see the exception first, though one that
+ * keeps the callable, such as ob_start(), calls it later with nothing here to stop
+ * it. zend_call_function() resolving one itself, behind call_user_function(),
+ * pushes the frame anyway. A frame running with an exception pending is not safe
+ * even when it calls nothing missing: on 8.4 a `new` there unwinds from a stale
+ * throw position and can end the process. So the throw raises the interrupt, and
+ * the interrupt handler sends that frame to this Error before its first opcode.
+ *
+ * A caller that resolves with the deprecation suppressed and calls what it resolved
+ * raises nothing here. On 8.6.0 filter_*() with FILTER_CALLBACK do
+ * (ext/filter/callback_filter.c:22,29), and oxphp_scope_callable_refuse() checks
+ * their callback before they run, along with one a filter can rewrite before they
+ * resolve it; on 8.4 and 8.5 they call it through call_user_function(). */
+static void oxphp_scope_callable_observer(int type, zend_string *file, uint32_t line,
+                                          zend_string *message) {
+    (void) file;
+    (void) line;
+    if (type == E_DEPRECATED && oxphp_message_is_scope_callable(message)
+            && oxphp_scope_callable_refuse_at_frame()) {
         zend_atomic_bool_store_ex(&EG(vm_interrupt), true);
     }
+}
+
+/* The length of the class part of "Class::method", split at the last "::" as
+ * zend_is_method_callable() splits it (8.6.0); false when there is none. */
+static bool oxphp_callable_class_part(const zend_string *callable, size_t *len) {
+    const char *colon = zend_memrchr(ZSTR_VAL(callable), ':', ZSTR_LEN(callable));
+    if (!colon || colon == ZSTR_VAL(callable) || colon[-1] != ':') {
+        return false;
+    }
+    *len = (size_t) (colon - 1 - ZSTR_VAL(callable));
+    return true;
+}
+
+static bool oxphp_names_calling_class(const char *name, size_t len, bool or_static) {
+    return (len == strlen("self") && strncasecmp(name, "self", len) == 0)
+        || (len == strlen("parent") && strncasecmp(name, "parent", len) == 0)
+        || (or_static && len == strlen("static") && strncasecmp(name, "static", len) == 0);
+}
+
+/* Whether resolving the callable raises a deprecation oxphp_message_is_scope_callable()
+ * accepts, read off its shape as zend_is_callable_at_frame() reads it (8.6.0); "static::"
+ * in the method of an array is left out for the reason given there. Whether it resolves
+ * is not checked, since resolving can run an autoloader for the class named first: a
+ * callable PHP would reject gets the refusal's Error in place of PHP's TypeError. */
+static bool oxphp_callable_is_scope_form(const zval *callable) {
+    size_t len;
+    if (Z_TYPE_P(callable) == IS_STRING) {
+        return oxphp_callable_class_part(Z_STR_P(callable), &len)
+            && oxphp_names_calling_class(Z_STRVAL_P(callable), len, true);
+    }
+    if (Z_TYPE_P(callable) != IS_ARRAY || zend_hash_num_elements(Z_ARRVAL_P(callable)) != 2) {
+        return false;
+    }
+    zval *target = zend_hash_index_find(Z_ARRVAL_P(callable), 0);
+    zval *method = zend_hash_index_find(Z_ARRVAL_P(callable), 1);
+    if (!target || !method) {
+        return false;
+    }
+    ZVAL_DEREF(target);
+    ZVAL_DEREF(method);
+    if (Z_TYPE_P(method) != IS_STRING) {
+        return false;
+    }
+    if (Z_TYPE_P(target) == IS_STRING
+            && oxphp_names_calling_class(Z_STRVAL_P(target), Z_STRLEN_P(target), true)) {
+        return true;
+    }
+    return (Z_TYPE_P(target) == IS_STRING || Z_TYPE_P(target) == IS_OBJECT)
+        && oxphp_callable_class_part(Z_STR_P(method), &len)
+        && oxphp_names_calling_class(Z_STRVAL_P(method), len, false);
+}
+
+bool oxphp_scope_callable_refuse(const zval *callable, bool may_change) {
+    return (may_change || oxphp_callable_is_scope_form(callable))
+        && oxphp_scope_callable_refuse_at_frame();
 }
 
 void oxphp_scope_callable_check_register(void) {

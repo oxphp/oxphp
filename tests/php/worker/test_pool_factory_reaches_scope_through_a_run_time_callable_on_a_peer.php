@@ -39,9 +39,34 @@ $test->assertSame('on top of an Error naming the function and its call site', $p
     . ': it belongs to a script this PHP thread has not loaded; only built-in functions and classes'
     . ' and those loaded by opcache.preload exist on every PHP thread, so the code was not run');
 
+// The same callable as a FILTER_CALLBACK of filter_var(), which throws the Error alone.
+$pool = \OxPHP\Shared\Registry::pool(
+    'worker-run-time-callable-filter-var-pool',
+    static fn () => new \OxPHP\Shared\Pool(
+        factory: [WorkerRunTimeCallableMaker::class, 'factoryThroughFilterVar'],
+        destroy: null,
+        maxSize: 2,
+    ),
+);
+$handle = $pool->acquire();
+$test->assertSame('filter_var(): the factory works on the thread that included its file', $handle->get()->v, 11);
+$handle->release();
+
+$body = @file_get_contents('http://127.0.0.1/tests/worker/pool_run_time_callable_peer.php?pool=worker-run-time-callable-filter-var-pool');
+$peer = is_string($body) ? json_decode($body, true) : null;
+$test->assertTrue('filter_var(): the other worker answered', is_array($peer));
+$test->assertSame('filter_var(): its acquire throws an Error naming the function and its call site', [$peer['result'] ?? null, $peer['previous'] ?? null], [
+    'Error: Call to undefined function worker_run_time_callable_helper() at '
+    . __DIR__ . '/pool_run_time_callable_factory.php:' . WORKER_RUN_TIME_CALLABLE_CALL_LINE
+    . ': it belongs to a script this PHP thread has not loaded; only built-in functions and classes'
+    . ' and those loaded by opcache.preload exist on every PHP thread, so the code was not run',
+    null,
+]);
+
 // Unbound while this worker thread still runs: the factory lives in this
 // thread's memory, and a pool still bound when the server stops is freed after
 // the thread has exited, which crashes the process on the way out.
 \OxPHP\Shared\Registry::remove('worker-run-time-callable-pool');
+\OxPHP\Shared\Registry::remove('worker-run-time-callable-filter-var-pool');
 
 $test->done();

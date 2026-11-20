@@ -28,6 +28,16 @@ final class WorkerRunTimeCallableMaker
             \restore_error_handler();
         }
     }
+
+    public static function factoryThroughFilterVar(): object
+    {
+        \set_error_handler(static fn (): bool => true, E_DEPRECATED);
+        try {
+            return \filter_var('x', FILTER_CALLBACK, ['options' => WORKER_RUN_TIME_CALLABLE]);
+        } finally {
+            \restore_error_handler();
+        }
+    }
 }
 
 return [WorkerRunTimeCallableMaker::class, 'factory'];
