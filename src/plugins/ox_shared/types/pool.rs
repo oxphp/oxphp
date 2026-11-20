@@ -1483,8 +1483,8 @@ impl SharedInner for PoolInner {
     }
 
     fn mem_bytes(&self) -> usize {
-        // Approximate per 26-type-pool.md §Observability. Base struct
-        // overhead + per-slot ~64B (VecDeque slot + PoolSlot). The
+        // Approximate, like every type's `oxphp_shared_bytes` figure. Base
+        // struct overhead + per-slot ~64B (VecDeque slot + PoolSlot). The
         // underlying PHP resource memory is accounted by the PHP
         // allocator, not here.
         let slots = self.size() as usize;
@@ -1807,8 +1807,8 @@ pub unsafe extern "C" fn oxphp_shared_pool_acquire(
         // + wait-histogram observation at one place. The histogram
         // sees every acquire, including uncontended (wait ≈ 0); the
         // result counter covers ok / timeout / closed. Factory failures
-        // (Generic / Type) are *not* acquire outcomes per spec —
-        // those live in the error surface, not the counter labels.
+        // (Generic / Type) are not acquire outcomes: they surface as the
+        // exception the caller gets, not as a counter label.
         let result: Result<(), crate::plugins::ox_shared::error::SharedError> = 'acquire: loop {
             if pool.foreign_to_current_thread() {
                 set_last_error(POOL_OUTSIDE_ITS_REQUEST);

@@ -169,9 +169,9 @@ Every `Shared\*` instance exposes `id(): int` for logs and the
 
 When proposing a new primitive, fill out this checklist before merging:
 
-- [ ] Every method maps to a row in the cheat sheet, or has an ADR
-  explaining the exception (see `Atomic::load/store` and
-  `Counter::set` above).
+- [ ] Every method maps to a row in the cheat sheet, or this page explains
+  the exception, as it does for `Atomic::load/store` and `Counter::set`
+  above.
 - [ ] If the type holds a collection of values, it implements
   `\Countable` and exposes `count(): int`.
 - [ ] Read methods are `get` or `load` (atomic only).

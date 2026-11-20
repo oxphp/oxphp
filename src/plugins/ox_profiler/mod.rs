@@ -365,9 +365,9 @@ impl Plugin for ProfilerPlugin {
         self.config = ProfilerConfig::from_ctx(ctx)?;
         self.enabled = self.config.enabled;
 
-        // Register the OxPHP\Profile\* PHP SDK unconditionally — per spec §6,
-        // these functions degrade to safe no-ops when no profile is active so
-        // PHP code can call them whether or not the profiler is enabled.
+        // Register the OxPHP\Profile\* PHP SDK unconditionally, so PHP code can
+        // call it whether or not the profiler is enabled: while it is disabled,
+        // start() does nothing and the rest find no profile to act on.
         php_sdk::register_functions(ctx, self.enabled)?;
 
         // ── Test-only decorator (feature `decorator-test`) ──

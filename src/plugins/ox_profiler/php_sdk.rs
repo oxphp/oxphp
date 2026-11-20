@@ -39,9 +39,9 @@ pub fn register_functions(
     // the request. Sets bridge mode to PROFILE_ALL, clears paused,
     // and promotes PROFILING_CONTEXT.mode if it was lower (preserving
     // trace_id / root_span_id). Caveat: a mid-request promotion via
-    // reset() clears any spans already collected — this matches the
-    // spec invariant that mode is set at most once per request,
-    // either by the trigger at RINIT or here from PHP.
+    // reset() clears any spans already collected, since a request's mode
+    // is meant to be set at most once — by the trigger at RINIT or here
+    // from PHP.
     //
     // A no-op while the profiler is disabled: the profiler's C
     // observer is registered only under PROFILER_ENABLED, so the

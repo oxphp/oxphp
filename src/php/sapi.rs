@@ -1828,9 +1828,11 @@ unsafe extern "C" fn oxphp_ub_write(str: *const c_char, str_length: usize) -> us
         return 0;
     }
 
-    // NOTE: no check_client_disconnected() here — it's too expensive for the hot path.
-    // Client disconnect detection happens in flush (infrequent) and via the C-level
-    // periodic deadline check (every 128 ub_write calls).
+    // No check_client_disconnected() here — too expensive for the hot path. A
+    // client that left is found out at a flush, or by the connection, which
+    // records the cancellation in the request's cell and kicks the worker
+    // (worker_registry::cancel_request); the bridge checks that cell before
+    // every write reaches this function.
 
     // After finish_request (non-streaming): discard output to avoid memory growth.
     // After finish_request (streaming): also discard — stream is closed.
@@ -3031,9 +3033,10 @@ fn php_type_to_bridge(t: &Option<PhpType>) -> (c_int, c_int) {
 
 /// Owning bundle of arrays passed to the bridge for parameter metadata.
 ///
-/// Field order matters: `_names` (which owns the C strings) must be declared
-/// before `name_ptrs` so that the strings outlive the pointer slice during
-/// the FFI call.
+/// `name_ptrs` and `default_ptrs` point into the strings `_names` and
+/// `_defaults` own, so the whole bundle must stay alive until the bridge call
+/// that reads them returns; the bridge copies the strings before it does.
+/// Field order does not matter.
 struct ParamArrays {
     _names: Vec<CString>,
     name_ptrs: Vec<*const c_char>,

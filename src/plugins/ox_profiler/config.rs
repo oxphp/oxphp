@@ -1,8 +1,8 @@
 //! Profiler configuration parsed from `PROFILER_*` env vars at plugin init.
 //!
-//! The full field set covers everything spec §9 enumerates so that the
-//! trigger layer and downstream consumers (storage, export, internal routes)
-//! can read from a stable config surface.
+//! Every `PROFILER_*` setting is parsed here, so that the trigger layer and
+//! downstream consumers (storage, export, internal routes) read one config
+//! surface.
 
 use std::path::PathBuf;
 use std::sync::Arc;
