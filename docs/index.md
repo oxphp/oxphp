@@ -59,6 +59,8 @@ End-to-end recipes for running popular PHP applications on OxPHP — each a comp
 - [Routing](features/routing.md) — three routing modes: traditional file mapping, framework front-controller, and SPA fallback. Worker mode is an orthogonal execution-model toggle and applies on top of any routing mode
 - [Static Files](features/static-files.md) — file cache, MIME detection, ETag/Last-Modified headers, and streaming
 - [Worker Mode](features/worker-mode.md) — persistent PHP workers with automatic soft reset between requests
+- [Worker State Between Requests](features/worker-state.md) — what a worker resets after each request, what persists, and where the reset stops
+- [Worker Recycling](features/worker-recycling.md) — when a worker is recycled, which failures count, and what happens to its other requests
 - [Fiber Multiplexing](features/fiber-multiplexing.md) — handle hundreds of concurrent requests per worker thread with cooperative multitasking
 - [Runtime Hooks](features/runtime-hooks.md) — make blocking `sleep()`, socket, connect, TLS and cURL waits in unmodified code suspend the fiber instead of the worker thread
 - [Shared Connections Under Runtime Hooks](features/runtime-hooks-shared-state.md) — one database or Redis connection used by several fibers, and state a hooked wait exposes

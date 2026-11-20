@@ -59,7 +59,7 @@ How to size the pool, the queue and the waiting set against each other and again
 |----------|---------|-------------|
 | `WORKER_MAX_MEMORY_MIB` | `0` | Maximum memory in MiB per worker before recycling. `0` = unlimited |
 
-Set `WORKER_MODE_ENABLED=true` and point `ENTRY_FILE` at your worker bootstrap script (e.g. `ENTRY_FILE=worker.php` or `ENTRY_FILE=../worker.php`). PHP workers then stay alive across requests, keeping bootstrap state (autoloaders, database connections) in memory. Workers are recycled automatically when they exceed `WORKER_MAX_MEMORY_MIB` or take three consecutive requests that came apart, and on demand when the application calls [`Worker::scheduleExit()`](../php/worker-class.md#scheduleexit); see [Recycling](../features/worker-mode.md#recycling) for what counts towards the third.
+Set `WORKER_MODE_ENABLED=true` and point `ENTRY_FILE` at your worker bootstrap script (e.g. `ENTRY_FILE=worker.php` or `ENTRY_FILE=../worker.php`). PHP workers then stay alive across requests, keeping bootstrap state (autoloaders, database connections) in memory. Workers are recycled automatically when they exceed `WORKER_MAX_MEMORY_MIB` or take three consecutive requests that came apart, and on demand when the application calls [`Worker::scheduleExit()`](../php/worker-class.md#scheduleexit); see [Recycling](../features/worker-recycling.md#recycling) for what counts towards the third.
 
 ## SAPI / PHP
 
