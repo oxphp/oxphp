@@ -18,7 +18,7 @@ span holds, the export formats and where runs are stored and served. The
 | `PROFILER_SAMPLE_RATE` | `0.0` | `[0.0; 1.0]`. Random sampling rate. |
 | `PROFILER_EXCLUDE_PATHS` | *(unset)* | CSV glob patterns (`PHP_DENY_PATHS` syntax) excluded from `PROFILER_SAMPLE_RATE`. The header trigger still profiles them. Example: `/_profiler,/_profiler/**,/_wdt/**`. |
 | `PROFILER_MAX_SPANS` | `50000` | Hard cap on the calls observed per request. Once it is reached no further spans are recorded, and the run is flagged `truncated`. With no depth limit set this is also the size of the tree; under `PROFILER_MAX_DEPTH` it is not, because a call the depth limit discards is counted here before the limit is applied — a truncated run then reaches disk with a fraction of this many spans. |
-| `PROFILER_MAX_DEPTH` | `0` (no cap) | Maximum nesting depth of recorded calls. A call nested deeper is not recorded, and normally neither is anything it calls — that subtree is absent from the profile rather than flattened into it. Its time is not: the call at the limit still spans everything it did, and with nothing recorded underneath it that duration reads as its own exclusive time, so a frame at the boundary looks hot in itself rather than hot in what it called. The exception to the depth rule is a function that recurses into itself more than 32 frames deep: past that the engine observer loses track of which call a return belongs to and attributes it to a shallower frame of the same function, so a call deeper than the limit can still be recorded and the durations around it should not be trusted. The effective maximum is `32`, the depth to which the engine observer tracks open calls; a larger value is accepted and clamped, and — with `PROFILER_ENABLED=true` — reported as clamped at startup. This bounds the profile, not the cost of producing it: the engine hook still runs on the deeper frames, and the calls it drops are still counted against `PROFILER_MAX_SPANS`. Spans an application pushes through the APM helpers are not subject to it. |
+| `PROFILER_MAX_DEPTH` | `0` (no cap) | Maximum nesting depth of recorded calls. A call nested deeper is not recorded, and normally neither is anything it calls — that subtree is absent from the profile rather than flattened into it. The effective maximum is `32`, the depth to which the engine observer tracks open calls; a larger value is accepted and clamped, and — with `PROFILER_ENABLED=true` — reported as clamped at startup. How a cut subtree's time is reported, the deep-recursion exception and what the limit does not save: [The depth limit](#the-depth-limit). |
 | `PROFILER_OUTPUT_DIR` | `/tmp/oxphp-profiles` | Absolute path. Must be writable by `www-data`. |
 | `PROFILER_OUTPUT_FORMATS` | `xhprof,collapsed` | CSV subset of `xhprof`, `collapsed`. An unknown name is skipped with a startup warning; a list with no known name writes both. |
 | `PROFILER_RETENTION_COUNT` | `100` | How many runs to keep (both on disk and in LRU). Background trim every 5 seconds. |
@@ -26,6 +26,25 @@ span holds, the export formats and where runs are stored and served. The
 | `PROFILER_EXPORT_URL` | *(unset)* | POST URL for each captured run. The body is exactly the `PROFILER_EXPORT_FORMAT` output. |
 | `PROFILER_EXPORT_FORMAT` | `xhprof` | `xhprof` or `collapsed`. An unknown value falls back to `xhprof` with a startup warning. |
 | `PROFILER_EXPORT_AUTH_TOKEN` | *(unset)* | Bearer token for the push target. |
+
+### The depth limit
+
+A subtree `PROFILER_MAX_DEPTH` cuts off is absent from the profile, but its
+time is not: the call at the limit still spans everything it did, and with
+nothing recorded underneath it that duration reads as its own exclusive time,
+so a frame at the boundary looks hot in itself rather than hot in what it
+called.
+
+The exception to the depth rule is a function that recurses into itself more
+than 32 frames deep: past that the engine observer loses track of which call a
+return belongs to and attributes it to a shallower frame of the same function,
+so a call deeper than the limit can still be recorded and the durations around
+it should not be trusted.
+
+The limit bounds the profile, not the cost of producing it: the engine hook
+still runs on the deeper frames, and the calls it drops are still counted
+against `PROFILER_MAX_SPANS`. Spans an application pushes through the APM
+helpers are not subject to it.
 
 ### Example production config
 
