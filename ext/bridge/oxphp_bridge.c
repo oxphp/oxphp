@@ -1367,16 +1367,26 @@ void oxphp_exception_capture(void *ex_v,
     char **out_trace, size_t *out_trace_len)
 {
     zend_object *ex = (zend_object *)ex_v;
+    *out_class = NULL;
+    *out_class_len = 0;
+    *out_message = NULL;
+    *out_message_len = 0;
+    *out_trace = NULL;
+    *out_trace_len = 0;
+
+    /* UnwindExit and GracefulExit, which the engine unwinds with for exit() and
+     * for a fiber ended while suspended, are not Throwables, and their classes
+     * are never registered: the method table is left zeroed, not empty, so the method
+     * lookup below would read through NULL.
+     * SYNC: php-src/Zend/zend_exceptions.c zend_register_default_exception() */
+    if (!instanceof_function(ex->ce, zend_ce_throwable)) return;
+
     /* Class name is length-delimited too: an anonymous class name is
      * "<parent>@anonymous\0<file>:<line>$<hash>" with an embedded NUL, so a
      * NUL-terminated read would collapse every anonymous class to the same
      * "<parent>@anonymous". Borrowed interned identifier, stable for the call. */
     *out_class = ZSTR_VAL(ex->ce->name);
     *out_class_len = ZSTR_LEN(ex->ce->name);
-    *out_message = NULL;
-    *out_message_len = 0;
-    *out_trace = NULL;
-    *out_trace_len = 0;
 
     /* message property: a plain read, safe with an exception pending (mirrors
      * the fiber-side capture). Copied into a malloc'd buffer (like the trace
@@ -1399,10 +1409,17 @@ void oxphp_exception_capture(void *ex_v,
     /* getTraceAsString() dispatches a method; Zend refuses to call with an
      * exception in flight, so always save/clear/restore EG(exception) around it
      * (unconditionally — symmetric across paths, so a live exception is never
-     * released instead of restored). The call re-enters the VM and allocates,
-     * so it can zend_bailout (longjmp) if it exhausts memory_limit or trips
-     * max_execution_time. The zend_try exists only to run our own cleanup on
-     * that path — restore EG(exception), free the message copy — and then
+     * released instead of restored). The call re-enters the VM and allocates.
+     * A spent max_execution_time ends it with a zend_bailout (longjmp), and so
+     * does a spent memory_limit where no PHP frame is running. Where one is, the
+     * engine reports the overrun at the call's entry or once it returns, as the
+     * exception exit() raises. That lands in the slot the loop below empties, so
+     * the overrun does not end the request: the caller's exception goes on in
+     * its place.
+     * SYNC: php-src/Zend/zend_execute_API.c zend_call_function();
+     *       php-src/Zend/zend_alloc.c zend_handle_delayed_oom()
+     * The zend_try exists only to run our own cleanup on
+     * a bailout — restore EG(exception), free the message copy — and then
      * re-raise the bailout: swallowing it would let the request keep executing
      * past a resource limit the engine meant to be fatal. zend_catch runs with
      * EG(bailout) already restored to the outer target, so zend_bailout() there

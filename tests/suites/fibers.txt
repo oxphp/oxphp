@@ -88,6 +88,7 @@ fibers/test_fatal_while_releasing_a_held_fiber_keeps_the_request_fiber
 fibers/test_write_cancel_in_a_decorator_keeps_the_request_fiber_for_the_release
 fibers/test_fatal_in_a_released_destructor_keeps_the_request_fiber_for_its_decorator
 fibers/test_oom_in_a_decorator_after_keeps_the_release
+fibers/test_exit_inside_a_decorated_function_keeps_the_worker
 # Application code the worker runs while it recovers from a fatal: a decorator's
 # after() that sleeps holds the thread, one that throws an exception that fatals
 # when dropped keeps the worker, a throw with no frame to unwind into is not

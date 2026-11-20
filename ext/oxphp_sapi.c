@@ -9479,7 +9479,15 @@ static void oxphp_decorator_end(zend_execute_data *execute_data, zval *retval) {
     clock_gettime(CLOCK_MONOTONIC, &ts);
     uint64_t now_ns = (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
     uint64_t elapsed_ns = now_ns - dctx->timestamp_ns;
-    int success = !EG(exception);
+    /* exit() and a fiber ended while suspended unwind the frame with an engine
+     * object that is not a Throwable (UnwindExit, GracefulExit), and the call
+     * counts as finished. A memory_limit overrun unwinds it with UnwindExit too.
+     * Once the request is past the limit, the call fails however it ended: the
+     * overrun state belongs to the thread, not to the call.
+     * SYNC: php-src/Zend/zend_alloc.c zend_handle_delayed_oom() */
+    zend_object *ex = EG(exception);
+    int success = !ex
+        || ((zend_is_unwind_exit(ex) || zend_is_graceful_exit(ex)) && !ZEND_HAS_OOM());
 
     /* Dispatch to Rust decorators (reverse order handled in Rust) */
     oxphp_decorator_end_fn_t end_fn = oxphp_bridge_get_decorator_end();

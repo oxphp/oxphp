@@ -782,7 +782,9 @@ typedef void (*oxphp_decorator_end_fn_t)(
  * because an anonymous class name embeds a NUL. `*out_message` and `*out_trace`
  * are both malloc'd copies (of `*out_message_len` / `*out_trace_len` bytes, or
  * NULL/0) that the caller MUST free() — they are length-delimited so embedded
- * NULs are preserved and they carry no borrow into `ex`.
+ * NULs are preserved and they carry no borrow into `ex`. An `ex` that is not a
+ * Throwable — the engine's UnwindExit or GracefulExit — yields NULL/0 in all six
+ * and calls nothing.
  * EG(exception) is always saved, cleared around the getTraceAsString() method
  * call (which Zend refuses with an exception pending, and which is wrapped in a
  * bailout guard), and restored — so a live in-flight exception (the decorator

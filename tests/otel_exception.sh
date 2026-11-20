@@ -44,6 +44,16 @@
 # its capture while another request runs on the same worker thread — the
 # per-fiber save/restore guard).
 #
+# Non-Throwable unwind scenarios, on a server of their own so that a crash there
+# cannot take the other scenarios' unexported spans with it: EXIT (exit() inside a
+# #[Trace] function — the span is exported without an error status or an
+# exception event, and the request's shutdown function still answers),
+# FIBER-EXIT (the same for a Fiber destroyed while it is suspended inside one),
+# OOM (a #[Trace] function that runs past memory_limit — the span is exported
+# with an error status and without an exception event), and ALIVE (that server
+# still serves after all three). The engine unwinds each of those frames with an
+# object that is not a Throwable and has no methods to call.
+#
 # A streaming/finish_request response that commits a 5xx and then throws a fatal
 # *after* its headers are on the wire does NOT carry that fatal on the root span:
 # RequestComplete dispatches synchronously (immediate access log / metrics) and
@@ -76,6 +86,7 @@ NET="oxexc-net-$$"
 COL="oxexc-col-$$"
 SRV="oxexc-srv-$$"
 WRK="oxexc-wrk-$$"
+SRVX="oxexc-srvx-$$"
 PASS=0
 FAIL=0
 
@@ -83,12 +94,12 @@ ok()  { printf '  \033[32mPASS\033[0m %s\n' "$1"; PASS=$((PASS + 1)); }
 bad() { printf '  \033[31mFAIL\033[0m %s\n' "$1"; FAIL=$((FAIL + 1)); }
 
 cleanup() {
-	docker rm -f "$COL" "$SRV" "$WRK" >/dev/null 2>&1
+	docker rm -f "$COL" "$SRV" "$WRK" "$SRVX" >/dev/null 2>&1
 	docker network rm "$NET" >/dev/null 2>&1
 }
 trap cleanup EXIT
 
-docker rm -f "$COL" "$SRV" "$WRK" >/dev/null 2>&1
+docker rm -f "$COL" "$SRV" "$WRK" "$SRVX" >/dev/null 2>&1
 docker network rm "$NET" >/dev/null 2>&1
 docker network create "$NET" >/dev/null
 
@@ -131,6 +142,17 @@ docker run -d --name "$WRK" --network "$NET" \
 	-e LOG_LEVEL=error \
 	"$IMAGE" >/dev/null
 
+# Server for the non-Throwable unwind scenarios (same collector).
+docker run -d --name "$SRVX" --network "$NET" \
+	-v "$FIX/exit.php":/var/www/html/public/exit.php:ro \
+	-v "$FIX/fiber_exit.php":/var/www/html/public/fiber_exit.php:ro \
+	-v "$FIX/oom.php":/var/www/html/public/oom.php:ro \
+	-e OTEL_ENABLED=true -e OTEL_APM_ENABLED=true \
+	-e OTEL_EXPORTER_OTLP_ENDPOINT=http://"$COL":4317 \
+	-e INTERNAL_ADDR=0.0.0.0:9090 \
+	-e LOG_LEVEL=error \
+	"$IMAGE" >/dev/null
+
 # Wait for the server's internal health endpoint (max ~30s).
 ready=0
 for _ in $(seq 1 30); do
@@ -152,6 +174,17 @@ for _ in $(seq 1 30); do
 	sleep 1
 done
 [ "$wready" = 1 ] || { echo "worker server did not become healthy"; docker logs "$WRK" | tail -20; exit 1; }
+
+# And the non-Throwable unwind server.
+xready=0
+for _ in $(seq 1 30); do
+	if docker exec "$SRVX" wget -q --spider http://127.0.0.1:9090/health 2>/dev/null; then
+		xready=1
+		break
+	fi
+	sleep 1
+done
+[ "$xready" = 1 ] || { echo "unwind server did not become healthy"; docker logs "$SRVX" | tail -20; exit 1; }
 
 # Every request is sent with a traceparent carrying a trace ID of its own, and
 # the server continues that trace: the root SERVER span and every child span the
@@ -179,6 +212,9 @@ T_WOK=00000000000000000000000000000011
 T_WSHADOW=00000000000000000000000000000012
 T_AFAIL=00000000000000000000000000000013
 T_BOK=00000000000000000000000000000014
+T_EXIT=00000000000000000000000000000015
+T_FEXIT=00000000000000000000000000000016
+T_OOM=00000000000000000000000000000017
 tp() { printf 'traceparent: 00-%s-0000000000000001-01' "$1"; }
 
 # Drive both endpoints.
@@ -260,6 +296,21 @@ BOK_BODY="$(docker run --rm --network "$NET" "$CURL_IMAGE" -H "$(tp "$T_BOK")" \
 	-s --max-time 30 "http://$WRK:80/b-ok")"
 echo "a-fail(bg)/b-ok body: $BOK_BODY"
 wait
+
+# The non-Throwable unwind scenarios. A body is captured with its status, for the
+# shutdown function's output and for the line after the fiber's destruction,
+# which only the request that ran to its end writes.
+EXIT_OUT="$(docker run --rm --network "$NET" "$CURL_IMAGE" -H "$(tp "$T_EXIT")" \
+	-s --max-time 30 -w "HTTP %{http_code}" "http://$SRVX:80/exit.php")"
+echo "exit: $(echo "$EXIT_OUT" | tr '\n' '|')"
+FEXIT_OUT="$(docker run --rm --network "$NET" "$CURL_IMAGE" -H "$(tp "$T_FEXIT")" \
+	-s --max-time 30 -w "HTTP %{http_code}" "http://$SRVX:80/fiber_exit.php")"
+echo "fiber_exit: $(echo "$FEXIT_OUT" | tr '\n' '|')"
+OOM_CODE="$(docker run --rm --network "$NET" "$CURL_IMAGE" -H "$(tp "$T_OOM")" \
+	-s -o /dev/null --max-time 30 -w "%{http_code}" "http://$SRVX:80/oom.php")"
+echo "oom HTTP $OOM_CODE"
+docker exec "$SRVX" wget -q --spider http://127.0.0.1:9090/health 2>/dev/null \
+	&& SRVX_ALIVE=1 || SRVX_ALIVE=0
 
 # Let the batch span processor flush to the collector.
 sleep 8
@@ -523,6 +574,49 @@ echo "$LOGS" | grep -qF 'shadow shutdown blew up' \
 	&& ok "worker-b: /b-ok provably overlapped /a-fail's parked phase" || bad "worker-b: overlap not proven (got '$BOK_BODY')"
 span_in "$T_AFAIL" 'GET /a-fail' | grep -qF 'exception.message: Str(scenario-b: parked capture survived)' \
 	&& ok "worker-b: parked capture survived the overlap" || bad "worker-b: parked capture survived the overlap"
+
+# Scenario EXIT: exit() inside a #[Trace] function ends the request as exit()
+# does — its shutdown function writes to a 200 — and the call is reported as one
+# that finished: the span carries neither an error status nor an exception event.
+echo "$EXIT_OUT" | grep -qF 'exit body' && echo "$EXIT_OUT" | grep -qF 'exit shutdown' \
+	&& echo "$EXIT_OUT" | grep -qF 'HTTP 200' \
+	&& ok "exit: body and shutdown output on a 200" || bad "exit: body and shutdown output on a 200 (got '$(echo "$EXIT_OUT" | tr '\n' '|')')"
+EXIT_SPAN="$(span_in "$T_EXIT" leaves)"
+[ -n "$EXIT_SPAN" ] \
+	&& ok "exit: span exported" || bad "exit: span exported"
+echo "$EXIT_SPAN" | grep -qE 'Status code *: Error' \
+	&& bad "exit: span not marked Error" || ok "exit: span not marked Error"
+echo "$EXIT_SPAN" | grep -qF 'exception.type' \
+	&& bad "exit: no exception event" || ok "exit: no exception event"
+
+# Scenario FIBER-EXIT: the same for a Fiber destroyed while suspended inside a
+# #[Trace] function; the script goes on past the destruction.
+echo "$FEXIT_OUT" | grep -qF 'fiber exit went on' && echo "$FEXIT_OUT" | grep -qF 'HTTP 200' \
+	&& ok "fiber-exit: script went on past the destruction" || bad "fiber-exit: script went on past the destruction (got '$(echo "$FEXIT_OUT" | tr '\n' '|')')"
+FEXIT_SPAN="$(span_in "$T_FEXIT" parks)"
+[ -n "$FEXIT_SPAN" ] \
+	&& ok "fiber-exit: span exported" || bad "fiber-exit: span exported"
+echo "$FEXIT_SPAN" | grep -qE 'Status code *: Error' \
+	&& bad "fiber-exit: span not marked Error" || ok "fiber-exit: span not marked Error"
+echo "$FEXIT_SPAN" | grep -qF 'exception.type' \
+	&& bad "fiber-exit: no exception event" || ok "fiber-exit: no exception event"
+
+# Scenario OOM: a #[Trace] function that runs past memory_limit fails the request
+# with a 500, and its span is marked Error. No exception event: what unwound the
+# frame was not a Throwable.
+[ "$OOM_CODE" = "500" ] \
+	&& ok "oom: request answered 500" || bad "oom: request answered 500 (got '$OOM_CODE')"
+OOM_SPAN="$(span_in "$T_OOM" eats)"
+[ -n "$OOM_SPAN" ] \
+	&& ok "oom: span exported" || bad "oom: span exported"
+echo "$OOM_SPAN" | grep -qE 'Status code *: Error' \
+	&& ok "oom: span marked Error" || bad "oom: span marked Error"
+echo "$OOM_SPAN" | grep -qF 'exception.type' \
+	&& bad "oom: no exception event on the function's span" || ok "oom: no exception event on the function's span"
+
+# Scenario ALIVE: the server that ran the three scenarios above still serves.
+[ "$SRVX_ALIVE" = 1 ] \
+	&& ok "alive: the unwind server still serves" || bad "alive: the unwind server still serves"
 
 echo
 echo "  otel_exception: $PASS passed, $FAIL failed"
