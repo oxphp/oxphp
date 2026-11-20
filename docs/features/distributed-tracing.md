@@ -150,7 +150,7 @@ When the OTel plugin is enabled, each HTTP request becomes a span exported to yo
 
 ### Span Attributes
 
-Exported spans include standard HTTP semantic convention attributes:
+Exported spans include standard HTTP semantic convention attributes and OxPHP's own `oxphp.*` attributes:
 
 | Attribute | Description |
 |-----------|-------------|
@@ -163,6 +163,9 @@ Exported spans include standard HTTP semantic convention attributes:
 | `oxphp.request_id` | OxPHP request ID |
 | `http.request.body.size` | Request body size in bytes (if non-zero) |
 | `http.response.body.size` | Response body size in bytes (if non-zero) |
+| `error.type` | The response status code as a string, on a `5xx` response. Absent otherwise |
+| `oxphp.queue_wait_us` | Microseconds the request waited for a PHP worker — for admission and in the queue — until one took it, the figure `oxphp_queue_wait_us` records. Present only when a worker took the request within its queue budget: absent on a request admission refused and on one PHP did not handle, such as a static file |
+| `oxphp.php_exec_us` | Microseconds of PHP execution. Present on every request the PHP pool or its admission answered, and `0` where no script ran — a refused request, or one whose client left before a worker ran it — so there it is not an execution time. Absent on a `500 PHP Worker Error`, where the request's answer was lost, and on a request PHP did not handle |
 | `oxphp.shed_reason` | Why admission refused the request, on a request it refused: `queue_full`, `wait_timeout`, `waiting_full` or `waiting_bytes` on a `529`, `shutting_down` on a `503`, `pool_unavailable` on a `500` — the values of the `reason` label on `oxphp_admission_refused_total`. Absent otherwise, including on a `529` the application returned itself |
 
 5xx responses are marked as error spans.
@@ -212,9 +215,11 @@ When the APM plugin is enabled, OxPHP automatically hooks 34 internal PHP functi
 | **PDO** | `PDO::__construct`, `PDO::query`, `PDO::exec`, `PDO::prepare`, `PDOStatement::execute` |
 | **mysqli** | `mysqli::__construct`, `mysqli::query`, `mysqli::prepare`, `mysqli_stmt::prepare`, `mysqli_stmt::execute` |
 | **cURL** | `curl_init`, `curl_setopt`, `curl_exec`, `curl_multi_exec` |
-| **Redis** | `Redis::connect`, `Redis::get`, `Redis::set`, `Redis::del`, `Redis::mget`, `Redis::mset`, `Redis::hget`, `Redis::hset`, `Redis::lpush`, `Redis::rpush` |
+| **Redis** | `Redis::connect`, `Redis::get`, `Redis::set`, `Redis::del`, `Redis::mget`, `Redis::mset`, `Redis::hGet`, `Redis::hSet`, `Redis::lPush`, `Redis::rPush` |
 | **Memcached** | `Memcached::get`, `Memcached::set`, `Memcached::delete`, `Memcached::getMulti`, `Memcached::setMulti` |
 | **File I/O** | `fopen`, `fread`, `fwrite`, `file_get_contents`, `file_put_contents` |
+
+A span is named after the class and method as the extension declares them, which is how this table writes them: phpredis's `hGet` gives a `Redis::hGet` span, however the call spells it.
 
 Hooks are only installed for extensions that are actually loaded. If your build does not include the Redis extension, the Redis hooks are silently skipped.
 

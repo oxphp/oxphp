@@ -463,7 +463,6 @@ paginated via `?limit=N&offset=M`.
 
 - A background task every 5 seconds deletes entries past
   `PROFILER_RETENTION_COUNT` (atomic `rename` → `index.json`).
-- Files without an `index.json` entry (orphaned by a crash) are swept.
 - The `PROFILER_DISK_MAX_PER_SEC` token bucket protects the disk: if the
   rate is higher, runs are not written and
   `oxphp_profiler_disk_drops_total` increments.

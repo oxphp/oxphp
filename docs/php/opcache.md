@@ -22,7 +22,7 @@ To enable OPcache, at minimum:
 opcache.enable=1
 ```
 
-> **Note:** The official OxPHP Docker image is based on `php:*-zts-alpine` (`php:8.6-alpine` for PHP 8.6), which compiles OPcache statically into the PHP binary. Do NOT add `zend_extension=opcache` to your INI file — the extension is already loaded, and adding that line will cause a warning on every PHP startup. Only the `[opcache]` configuration section is needed.
+> **Note:** OPcache is already loaded in the official OxPHP Docker image. On PHP 8.5 and 8.6 it is compiled into the PHP binary; on PHP 8.4 it is a shared extension that the PHP base image loads from `conf.d/docker-php-ext-opcache.ini`. Do NOT add `zend_extension=opcache` to your INI file — on 8.4 PHP reports that OPcache is already loaded, and on 8.5 and 8.6 there is no `opcache.so` to load, so either way the line costs a message on every PHP startup. Only the `[opcache]` configuration section is needed.
 
 ## Recommended Production Settings
 

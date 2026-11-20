@@ -309,8 +309,9 @@ RUN { \
         echo "extension=intl.so"; \
     } > /usr/local/etc/php/conf.d/app-extensions.ini
 
-# Production opcache. OPcache is statically compiled into the PHP ZTS base
-# (no zend_extension line needed), so this only tunes it. The image is
+# Production opcache. OPcache is built into the PHP 8.5 and 8.6 bases and, on
+# 8.4, loaded by the base's conf.d/docker-php-ext-opcache.ini, copied above —
+# no zend_extension line needed either way, so this only tunes it. The image is
 # immutable, so timestamp validation is disabled — no per-request stat(2) of
 # every script. Bump the buffers for a typical framework codebase. JIT is
 # left off (workload-dependent); enable it deliberately if you benchmark a win.

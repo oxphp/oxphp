@@ -352,8 +352,8 @@ services:
 Customize PHP settings by creating an `custom.ini` file and mounting it into the container. This is the recommended way to configure OPcache, JIT, sessions, and other PHP runtime settings.
 
 ```ini
-; Do NOT add zend_extension=opcache — OPcache is already compiled into the
-; PHP ZTS base image. The [opcache] section below configures it directly.
+; Do NOT add zend_extension=opcache — the image already loads OPcache.
+; The [opcache] section below configures it directly.
 
 [opcache]
 opcache.enable = 1
@@ -371,7 +371,7 @@ session.use_cookies = 1
 session.use_only_cookies = 1
 ```
 
-> **Note:** Do not add `zend_extension=opcache` to this file. OPcache is already built into the PHP ZTS image used by OxPHP. Adding a `zend_extension` line will produce a warning on every request startup.
+> **Note:** Do not add `zend_extension=opcache` to this file. OPcache is already loaded in the OxPHP image — compiled into PHP on 8.5 and 8.6, loaded by the PHP base image's `conf.d/docker-php-ext-opcache.ini` on 8.4 — and the extra line costs a message every time PHP starts. See [OPcache](../php/opcache.md).
 
 In development, set `opcache.validate_timestamps = 1` and `opcache.revalidate_freq = 0` so PHP picks up file changes without a container restart.
 
