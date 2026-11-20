@@ -3118,6 +3118,95 @@ void oxphp_bridge_destroy_persistent_list(void) {
     zend_hash_graceful_reverse_destroy(&EG(persistent_list));
 }
 
+/* ─── Request Shutdown Guard ───────────────────────────────── */
+
+/* From PHP 8.4.28 / 8.5.13, zend_deactivate_modules() calls _exit(1) when a
+ * bailout cuts a module's RSHUTDOWN short (GHSA-g3vh-838c-65v7): the module's
+ * globals may still point into the request heap the shutdown goes on to free.
+ * That costs FPM one child; here every PHP thread shares the process. The
+ * guard catches the bailout around each module's RSHUTDOWN, lets the shutdown
+ * go on as PHP 8.4.27 did, and records the module for the thread, which must
+ * then serve no further request: in ZTS the suspect globals are the thread's
+ * own. An OS resource only those globals still hold, such as a session file's
+ * lock, outlives the thread. */
+
+typedef struct {
+    zend_result (*original)(SHUTDOWN_FUNC_ARGS);
+    const char *name;
+} oxphp_rshutdown_entry;
+
+/* Indexed by module_number, the one thing the engine tells a module's RSHUTDOWN
+ * about the module. Written before any other thread runs PHP, read-only after. */
+static oxphp_rshutdown_entry *rshutdown_entries = NULL;
+
+static __thread const char *rshutdown_interrupted = NULL;
+
+static zend_result oxphp_guarded_request_shutdown(SHUTDOWN_FUNC_ARGS) {
+    const oxphp_rshutdown_entry *entry = &rshutdown_entries[module_number];
+    volatile zend_result rc = FAILURE;
+
+    zend_try {
+        rc = entry->original(type, module_number);
+    } zend_catch {
+        if (rshutdown_interrupted == NULL) {
+            rshutdown_interrupted = entry->name;
+        }
+    } zend_end_try();
+    return rc;
+}
+
+int oxphp_bridge_guard_request_shutdown(const char **first_unguarded) {
+    zend_module_entry *module;
+    int max_number = -1;
+    int unguarded = 0;
+
+    *first_unguarded = NULL;
+    /* A second pass would save the trampoline as an original and recurse. */
+    if (rshutdown_entries != NULL) {
+        return 0;
+    }
+    ZEND_HASH_MAP_FOREACH_PTR(&module_registry, module) {
+        if (module->request_shutdown_func != NULL && module->module_number > max_number) {
+            max_number = module->module_number;
+        }
+    } ZEND_HASH_FOREACH_END();
+    if (max_number < 0) {
+        return 0;
+    }
+    rshutdown_entries = calloc((size_t)max_number + 1, sizeof(*rshutdown_entries));
+
+    ZEND_HASH_MAP_FOREACH_PTR(&module_registry, module) {
+        if (module->request_shutdown_func == NULL) {
+            continue;
+        }
+        /* A module number can repeat: the engine numbers a module by the
+         * registry's size, which shrinks when a module missing a required
+         * dependency is dropped at startup. The trampoline could not tell the
+         * two apart, so the later one keeps its own RSHUTDOWN. */
+        if (rshutdown_entries == NULL
+            || rshutdown_entries[module->module_number].original != NULL) {
+            if (*first_unguarded == NULL) {
+                *first_unguarded = module->name;
+            }
+            unguarded++;
+            continue;
+        }
+        rshutdown_entries[module->module_number].original = module->request_shutdown_func;
+        rshutdown_entries[module->module_number].name = module->name;
+        /* The engine reads the pointer from the entry each time it calls it,
+         * through module_registry and module_request_shutdown_handlers alike. */
+        module->request_shutdown_func = oxphp_guarded_request_shutdown;
+    } ZEND_HASH_FOREACH_END();
+    return unguarded;
+}
+
+const char *oxphp_bridge_take_interrupted_request_shutdown(void) {
+    const char *name = rshutdown_interrupted;
+
+    rshutdown_interrupted = NULL;
+    return name;
+}
+
 /* ─── Async Dispatch Function Pointers ─────────────────────── */
 
 /*
@@ -3564,8 +3653,9 @@ void oxphp_bridge_set_cleanup_promises_for_fiber(oxphp_cleanup_promises_for_fibe
  * land anyway: in the zend_try of the window each of these runs in — a request
  * fiber's end for the per-fiber cleanup, the serve loop's for the drain and
  * for the per-fiber cleanup the scheduler's finalize repeats — and for the
- * thread-wide cleanup, which runs in RSHUTDOWN, in the one
- * zend_deactivate_modules() puts around each module's RSHUTDOWN. */
+ * thread-wide cleanup, which runs in RSHUTDOWN, in the one the request
+ * shutdown guard puts around each module's RSHUTDOWN: a traditional thread is
+ * then retired, and any other thread is already on its way out. */
 static void oxphp_bridge_raise_held_back_bailout(void) {
     if (oxphp_bridge_take_deferred_bailout()) {
         zend_bailout();

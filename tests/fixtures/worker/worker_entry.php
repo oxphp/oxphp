@@ -131,3 +131,11 @@ if (is_file($afterLoopArmed)) {
         json_encode(array_map(static fn (int $n): int => $n * 2, [1, 2]))
     );
 }
+
+// For recycle/test_rshutdown_fatal_*: a fatal error inside an extension's
+// request shutdown as the worker's thread exits. Armed the same way.
+$rshutdownFatalArmed = sys_get_temp_dir() . '/oxphp-entry-rshutdown-fatal.armed';
+if (is_file($rshutdownFatalArmed)) {
+    unlink($rshutdownFatalArmed);
+    include __DIR__ . '/rshutdown_fatal_after_loop.php';
+}

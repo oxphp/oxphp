@@ -30,6 +30,10 @@ services:
       # below 4 cores): tests here send a request to this server and block their
       # worker reading the response, which only a second worker can serve.
       PHP_WORKERS: "2"
+      # async/test_promise_closure_release_fatal retires the other worker while
+      # its own request holds this one: the next inner request waits in the
+      # queue for the replacement, up to half a second, with room to spare.
+      QUEUE_WAIT_TIMEOUT_MS: "10000"
     volumes:
       - ../www:/var/www/html
       - ./php:/var/www/html/public/tests

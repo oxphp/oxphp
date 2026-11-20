@@ -8,6 +8,10 @@
 # 8.5.11; later releases raise it once the callback has returned — see
 # php/bailout/test_headers_bailout.php.
 #
+# The profile also raises a fatal error inside an extension's request shutdown
+# (php/bailout/fixture_rshutdown_fatal.php) and checks that the thread which
+# took it is retired rather than ending the process.
+#
 # The profile is otherwise ordinary traditional routing; bailout.ini only caps
 # memory_limit so the test's ballast loop stays small.
 #
@@ -32,12 +36,17 @@ services:
       retries: 15
       start_period: 5s
     environment:
-      LOG_LEVEL: error
+      # warn: the suite reads the line a retired thread writes.
+      LOG_LEVEL: warn
       INTERNAL_ADDR: 0.0.0.0:9090
       # One worker, so the survival test is answered by the same thread that
       # took the fatal — that thread is the one whose request state the bug
       # left unusable.
       PHP_WORKERS: 1
+      # A thread retired after a request is replaced on the pool monitor's next
+      # tick, up to half a second later; the request after it waits in the
+      # queue for the replacement, with room to spare on a loaded runner.
+      QUEUE_WAIT_TIMEOUT_MS: "10000"
     volumes:
       - ../www:/var/www/html
       - ./php:/var/www/html/public/tests

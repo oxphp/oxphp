@@ -1,7 +1,18 @@
 # profile: bailout
-# description: PHP fatal raised inside a SAPI callback walking the request state (up to PHP 8.4.26 / 8.5.11; later releases raise it once the callback has returned)
+# description: PHP fatal raised inside a SAPI callback walking the request state (up to PHP 8.4.26 / 8.5.11; later releases raise it once the callback has returned), and inside an extension's request shutdown
 
 # The padding header travels as a single curl argument, and Linux refuses any
 # one argument over 128 KiB before curl even starts — keep it below that.
 bailout/test_headers_bailout | GET | -H "X-Pad: $(printf %0120000d 0)" | 500 |
 bailout/test_worker_survives_bailout
+
+# A fatal error inside an extension's request shutdown: PHP's own reproducer,
+# a stream that raises it when the session releases its data. The request
+# that raised it is answered, and its thread, whose session state may still
+# point into memory that request freed, serves nothing after it: the next
+# request reports a thread that started after the fatal. From PHP 8.4.28 /
+# 8.5.13 a server that does not catch the fatal is ended by PHP itself.
+bailout/fixture_rshutdown_fatal | GET | | 500 |
+bailout/test_rshutdown_fatal_retires_thread
+log ~PHP worker thread retired
+log ~"module":"session"

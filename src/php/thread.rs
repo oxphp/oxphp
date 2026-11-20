@@ -85,3 +85,42 @@ pub(crate) unsafe fn close_request() {
     crate::php::opcache_restart::request_closed();
     installed().request_frame_closed();
 }
+
+/// Make a fatal error, or an `exit()`, that cuts an extension's request shutdown
+/// short cost the thread it ran on instead of the process: from PHP 8.4.28 /
+/// 8.5.13 the engine ends the process there (GHSA-g3vh-838c-65v7). A thread
+/// learns of it from [`take_interrupted_request_shutdown`].
+///
+/// # Safety
+/// Once, after `php_module_startup`, before any other thread runs PHP.
+pub(crate) unsafe fn guard_request_shutdown() {
+    let mut first: *const std::os::raw::c_char = std::ptr::null();
+    let unguarded = bindings::oxphp_bridge_guard_request_shutdown(&mut first);
+    if unguarded > 0 {
+        // SAFETY: the bridge names a module whenever it counts one, and the
+        // name is the module entry's own, loaded until PHP shuts down.
+        let module = std::ffi::CStr::from_ptr(first).to_string_lossy();
+        tracing::warn!(
+            unguarded,
+            first_module = %module,
+            "PHP extensions left outside the request shutdown guard (a module number \
+             another already has, or no memory for its table): from PHP 8.4.28 / 8.5.13 \
+             a fatal error in their request shutdown ends the process"
+        );
+    }
+}
+
+/// The extension whose request shutdown a fatal error or an `exit()` cut short
+/// on this thread since the last call, if any. Its globals on this thread may still point into
+/// the request memory that shutdown went on to free, so a thread that gets
+/// `Some` must not open another request.
+pub(crate) fn take_interrupted_request_shutdown() -> Option<String> {
+    // SAFETY: reads and clears a slot of the calling thread's own.
+    let name = unsafe { bindings::oxphp_bridge_take_interrupted_request_shutdown() };
+    if name.is_null() {
+        return None;
+    }
+    // SAFETY: the name is the module entry's own, loaded until PHP shuts down.
+    let name = unsafe { std::ffi::CStr::from_ptr(name) };
+    Some(name.to_string_lossy().into_owned())
+}

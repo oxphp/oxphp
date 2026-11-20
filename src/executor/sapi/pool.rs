@@ -22,13 +22,14 @@ pub(super) type WorkerRequest = WorkerIncomingRequest;
 /// How a worker thread says it ended, returned from the thread and read by the
 /// pool when it finds the thread finished.
 ///
-/// The reason a worker-mode thread left its loop lives in the bridge's
+/// The reason a worker thread left its loop lives in the bridge's
 /// thread-local state, which the pool's scan cannot read; the thread's return
 /// value carries it to the scan without adding any state the two share.
 pub(super) enum WorkerExit {
-    /// The worker left its loop on purpose: it passed `WORKER_MAX_MEMORY_MIB`,
-    /// or an exit was scheduled — by `Worker::scheduleExit()` or by the runtime
-    /// itself, which logs why when it does. Reported as a recycle, not a death.
+    /// The worker left its loop on purpose, and logged why: in worker mode it
+    /// passed `WORKER_MAX_MEMORY_MIB` or an exit was scheduled, by
+    /// `Worker::scheduleExit()` or by the runtime itself; a traditional thread
+    /// retired itself after a request. Reported as a recycle, not a death.
     Recycled,
     /// Every other end. The scan never sees an end it asked for — a retired
     /// worker leaves the list before it finishes, and shutdown ends workers
