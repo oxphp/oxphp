@@ -21,7 +21,7 @@ optimization runs.
 # compose.yml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.15.0
+    image: ghcr.io/oxphp/oxphp:0.16.0
     environment:
       INTERNAL_ADDR: 0.0.0.0:9090
       PROFILER_ENABLED: "true"
