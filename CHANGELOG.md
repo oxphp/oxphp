@@ -4,6 +4,8 @@ All notable changes to OxPHP are documented in this file.
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-11-21
+
 ### Migration from 0.15.0
 
 The profiler lost most of its surface in this release, with no deprecation cycle. It keeps two triggers, two file formats and a plain HTTP push.
@@ -35,9 +37,13 @@ if ($profiled) { OxPHP\Profile\start(); }
 
 **In Worker mode, a `Request` object now throws when it is called while the worker serves a request other than the one it was created in.** Every method throws `OxPHP\Http\Exception\NoActiveRequestException` with the message `Cannot access HTTP request: this Request object belongs to another request`. That includes an object built in the worker script before `oxphp_worker()` is called and kept in a container or a static for the handlers to use; one a decorator keeps from its constructor, since in Worker mode a decorator instance lives as long as the worker (the [Decorators](docs/features/decorators.md#worker-mode-behavior) guide said it was rebuilt for every request, and now describes what happens); and one an object reads in its `__destruct()`: when the cycle collector runs that destructor during a later request, the exception is raised in that request. Call `oxphp_http_request()` inside the handler and pass the object on, as [Worker Mode](docs/php/request-api.md#worker-mode) shows. The methods of a `new OxPHP\Http\Request()` built where `oxphp_http_request()` throws — on an `oxphp_async()` thread, under `oxphp run` — now throw the exception the function throws there, instead of answering with empty values. Separately, `ReflectionClass::newInstanceWithoutConstructor()` now refuses `OxPHP\Http\Request` with a `ReflectionException`, as PHP refuses it for any final internal class that sets up its own objects; `new OxPHP\Http\Request()` still works.
 
+**`query()`, `cookie()` and `cookies()` of `oxphp_http_request()` now return what `$_GET` and `$_COOKIE` hold.** For a repeated query parameter, `query('a')` returns the last value, where it returned the first; for two cookies with one name, `cookies()` keeps the first, where it kept the last. A pair with no name is no longer listed, a cookie name with no `=` is now a cookie with an empty value, whitespace at the end of a cookie value is kept, and both stop at `max_input_vars`. Code that needs the first of a repeated parameter has to parse `queryString()` itself. See Fixed.
+
 **`RUNTIME_HOOKS=1`, `true` and `all` now also enable the new `curl` category, and `/config` and `oxphp_server_info()['runtime_hooks']` report it.** A deployment that already sets one of those starts suspending cURL transfers in Worker-mode requests and `oxphp_async()` tasks on upgrade, with no edit of its own: `curl_exec()` and `curl_multi_select()` no longer hold the worker thread while they wait, and other requests run in the meantime. What a transfer returns does not change, but two things follow from the wait no longer being private to the thread. A cURL handle that two requests or tasks share, kept in a service or a static property, is claimed by each call that runs a transfer on it or changes it, and the same call from another fiber waits until that call returns, or, for an easy handle in a multi handle, until it is out of the multi handle or the request or task that added it has ended, save `curl_multi_remove_handle()`, `curl_pause()` and `curl_setopt()` of `CURLOPT_PRIVATE` or `CURLOPT_VERBOSE`; a call that cannot wait, or is still waiting when the bound a shared database connection has runs out, is not made and throws `OxPHP\Async\AsyncException` instead; a `curl_multi_select()` holding a multi handle returns 0 before its timeout once it is all that keeps another fiber's call, other than `curl_multi_exec()` or `curl_multi_select()`, waiting. And an async task cancelled inside a transfer throws `OxPHP\Async\AsyncException` from the cURL call it is in: an HTTP transfer it ends in `curl_exec()` leaves `curl_errno()` reporting `CURLE_BAD_FUNCTION_ARGUMENT` (43), a `curl_multi_select()` leaves `curl_multi_errno()` reporting `CURLM_UNRECOVERABLE_POLL` (12). Anything that compares the reported set to the literal `["sleep","streams","net"]` now sees `["sleep","streams","net","curl"]`. To keep the previous behavior, name the categories: `RUNTIME_HOOKS=sleep,streams,net`.
 
 **In an `oxphp_async()` task, a function of your script that calls a function of its own file the task's thread has not loaded, or declares a class, is now refused as the thread enters it, even when the call sits in a branch it never takes.** Such a function used to run, and one that never reached the call ran to its end. Load what it calls with `opcache.preload`, or include the file that declares it inside the task before the call.
+
+**In Worker mode, and for a `Shared\Pool` created inside an `oxphp_async()` task, more factory and destroy callbacks are refused on a PHP thread other than the one that created the pool.** That is a callback that reaches a class each request links in its own memory, such as one whose parent class comes from `eval()`, and one that runs `eval()`, `include` or `require` in a method or closure of a class whose methods call a function, or declare a class, that the thread does not have. Such a callback ran there with the memory of the request that created the pool; it now throws `Error` from the acquire call, or is skipped as a destroy callback, and still runs on the thread that created the pool. To run it elsewhere, load the class and what it depends on with `opcache.preload`. See Changed.
 
 ### Added
 
@@ -1496,6 +1502,7 @@ and built-in observability.
 | `WORKER_MAX_MEMORY_MIB` | `0` (unlimited) | Max worker memory before restart |
 | `EXECUTOR` | `sapi` | Executor type: sapi/stub |
 
+[0.16.0]: https://github.com/oxphp/oxphp/releases/tag/v0.16.0
 [0.15.0]: https://github.com/oxphp/oxphp/releases/tag/v0.15.0
 [0.14.0]: https://github.com/oxphp/oxphp/releases/tag/v0.14.0
 [0.13.0]: https://github.com/oxphp/oxphp/releases/tag/v0.13.0
