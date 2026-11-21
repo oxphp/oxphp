@@ -860,6 +860,14 @@ typedef struct _oxphp_fiber_scheduler {
      * left it at. Taken by oxphp_scheduler_own_execution_timer(). */
     zend_long timeout_baseline;
 
+    /* The fiber.stack_size every fiber this scheduler starts gets: the
+     * directive's value when the scheduler was set up — for a worker, what its
+     * boot left it at; for the task scheduler, at the thread's first task. The
+     * directive itself stays on the thread while a request or task that set it
+     * is parked, and the pool keeps a fiber for the scheduler's life, so a
+     * fiber started from the live value would keep that size for good. */
+    size_t fiber_stack_size;
+
 #ifdef HAVE_PUTENV
     /* What putenv() had recorded when the worker's boot returned, kept out of
      * BG(putenv_ht) while the scheduler serves, and the fiber that set each name
@@ -1020,6 +1028,7 @@ void oxphp_scheduler_return_session_holder(oxphp_fiber_scheduler *sched);
  * it. */
 void oxphp_scheduler_release_thread(oxphp_fiber_scheduler *sched);
 
+/* Never NULL: an allocation that fails bails out instead of returning. */
 oxphp_request_fiber *oxphp_scheduler_create_fiber(
     oxphp_fiber_scheduler *sched,
     zend_fcall_info *fci,

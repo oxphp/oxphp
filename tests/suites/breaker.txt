@@ -286,12 +286,12 @@ breaker/test_breaker_replaced
 log ~oxphp: worker 0 request failed (fiber refused to park) — 3 in a row
 log ~Worker mode thread retired after consecutive request failures
 
-# And a request whose fiber could not be started at all: three of them, started
-# by the event loop's tick under a stack size a parked request set.
-breaker/test_breaker_fiber_start_fails | GET | | 503 |
-breaker/test_breaker_replaced
-log ~oxphp: worker 0 request failed (fiber would not start) — 3 in a row
-log ~Worker mode thread retired after consecutive request failures
+# Not a failure: a stack size a parked request set does not size the fibers the
+# event loop's tick starts for other requests in the meantime. Right after the
+# replacement above, so each of those requests gets a fiber started for it. A
+# fiber that cannot be started at all is counted all the same; the fiberstack
+# profile is where that happens.
+breaker/test_breaker_parked_stack_size
 
 # And a fatal in a destructor run as the request's ini is put back. That one
 # retires the worker on its own schedule rather than through the count, which
