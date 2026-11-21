@@ -252,6 +252,8 @@ $kernel->shutdown();
 
 ## See Also
 
+- [Worker State Between Requests](worker-state.md) — what is reset after each request, what persists, and where the reset stops
+- [Worker Recycling](worker-recycling.md) — when a worker is recycled and what happens to its other requests
 - [Routing](routing.md) — how worker mode plugs into URL routing
 - [Early Response](early-response.md) — send the response immediately and continue background processing
 - [PHP Functions](../php/functions.md) — full reference for `oxphp_worker()`, `oxphp_is_worker()`, and other built-in functions
