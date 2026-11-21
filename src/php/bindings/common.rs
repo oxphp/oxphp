@@ -294,6 +294,12 @@ extern "C" {
     /// `php_module_startup`, before any worker thread runs.
     pub fn oxphp_script_guard_install();
 
+    /// Wrap `zend_compile_file`, in front of OPcache, and `zend_compile_string`,
+    /// so a class name a compile numbers on this thread alone gives its
+    /// class-lookup slot up. Once, after `php_module_startup`, before any
+    /// worker thread runs.
+    pub fn oxphp_compile_slots_install();
+
     /// Close the calling thread's persistent resources (pooled DB connections,
     /// persistent streams). Must be the last PHP call before `ts_free_thread()`.
     pub fn oxphp_bridge_destroy_persistent_list();

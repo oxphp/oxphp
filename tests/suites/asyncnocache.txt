@@ -1,6 +1,15 @@
 # profile: asyncnocache
 # description: oxphp_async() tasks with OPcache off
 
+# A task that has the async thread compile class names of its own leaves the
+# slots it numbers them with to that thread: the next tasks, which run code
+# another PHP thread compiled, look up their own classes. First in the profile,
+# before any other task included a file on the single async thread.
+asyncnocache/test_task_class_lookup_slot_after_the_pool_thread_compiled_names
+# So does a compile there that a fatal error ends.
+asyncnocache/test_task_class_lookup_slot_after_a_compile_error_on_the_pool_thread
+# And the compile of a file a task includes.
+asyncnocache/test_task_class_lookup_slot_after_an_included_file_fails_to_compile_on_the_pool_thread
 asyncnocache/test_task_class_lookup_slot_of_another_request
 # A task that keeps running past the drain budget after the end of its request
 # cancelled it runs code from that request's memory: the end waits for it.
