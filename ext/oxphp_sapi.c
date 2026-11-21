@@ -5804,14 +5804,19 @@ static void oxphp_redis_settle(zend_object *obj)
 /* Whether this phpredis keeps a pconnect() connection persistent in a ZTS build.
  * 6.3.0 does not — redis_connect() turns persistence off under ZTS (redis.c) — so
  * its pconnect() opens a plain socket even where a constructor's `persistent`
- * option registered a stream under the same id; the development branch does. The
- * version string cannot tell them apart, since that branch reports 6.3.0RC1, so it
- * is learned: yes from a pconnect() that registers the stream it opened, or that
- * phpredis reports persistent; no only from one phpredis reports plain. Nothing
+ * option registered a stream under the same id; the development branch does from
+ * commit b37b231 on. The version string cannot tell those builds apart — the
+ * 6.3.0RC1 release and that branch on either side of the commit all report
+ * 6.3.0RC1 — so it is learned: yes from a pconnect() that registers the stream it
+ * opened, or that phpredis reports persistent; no only from one phpredis reports
+ * plain. A report replaces what was learned either way: under ZTS the answer is
+ * fixed when phpredis is built, so a report contradicts only a yes taken from a
+ * stream that another fiber's connect registered under the id meanwhile. Nothing
  * registered under the id after a pconnect() says nothing: a wrong id looks the
- * same, and a no learned from it would hold for every pconnect() after it. Until
- * then, one phpredis is not asked about that finds a stream already registered is
- * taken to be on it — a wait it may not need rather than none where it does. */
+ * same, and a no learned from it would leave every later pconnect() phpredis is not
+ * asked about unguarded. Until it is known, one phpredis is not asked about that
+ * finds a stream already registered is taken to be on it — a wait it may not need
+ * rather than none where it does. */
 enum { OXPHP_REDIS_PERSISTS_UNKNOWN, OXPHP_REDIS_PERSISTS_NO, OXPHP_REDIS_PERSISTS_YES };
 static _Atomic(int) oxphp_redis_pconnect_persists = OXPHP_REDIS_PERSISTS_UNKNOWN;
 
@@ -5947,14 +5952,8 @@ static ZEND_NAMED_FUNCTION(oxphp_redis_hook)
         void *before = opened != obj ? opened : NULL;
         void *after = oxphp_redis_id_key(id, NULL);
         int persists = oxphp_redis_reported_persists(obj, execute_data);
-        if (persists == OXPHP_REDIS_PERSISTS_YES) {
-            atomic_store_explicit(&oxphp_redis_pconnect_persists, OXPHP_REDIS_PERSISTS_YES,
-                                  memory_order_relaxed);
-        } else if (persists == OXPHP_REDIS_PERSISTS_NO) {
-            int unknown = OXPHP_REDIS_PERSISTS_UNKNOWN;
-            atomic_compare_exchange_strong_explicit(&oxphp_redis_pconnect_persists, &unknown,
-                                                    OXPHP_REDIS_PERSISTS_NO, memory_order_relaxed,
-                                                    memory_order_relaxed);
+        if (persists != OXPHP_REDIS_PERSISTS_UNKNOWN) {
+            atomic_store_explicit(&oxphp_redis_pconnect_persists, persists, memory_order_relaxed);
         } else {
             persists = atomic_load_explicit(&oxphp_redis_pconnect_persists, memory_order_relaxed);
         }
