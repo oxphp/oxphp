@@ -8,6 +8,7 @@ decorators/test_before_after_called
 decorators/test_dispatch_order
 decorators/test_context_properties
 decorators/test_rejected_exception
+decorators/test_cleanup_after_throwing_destructor
 decorators/test_stack_overflow
 decorators/test_repeatable_args
 decorators/test_exit_inside_a_decorated_function

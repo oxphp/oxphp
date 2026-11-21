@@ -130,7 +130,7 @@ docker logs <container> 2>&1 | grep '"reason":"max_memory"'
 
 Three consecutive counted failures trigger a recycle. A fatal error in the request callback is the usual one, so check your application logs for those first — not for uncaught exceptions, and not for cancelled requests, unless a fatal was reported on the cancelled request as well, before or after the cancellation. A recycle with no fatal behind it is one of the two fiber failures instead, and the `WARN` line below names which: `fiber would not start` points at `fiber.stack_size` or at the host — that C stack is mapped from the operating system rather than allocated from PHP's heap, so neither `memory_limit` nor the `WORKER_MAX_MEMORY_MIB` above is the knob for it — and `fiber refused to park` points at a `Fiber::suspend()` your own code keeps retrying.
 
-The server says so itself at `WARN`: one line per counted failure, naming the worker, where the failure came from and how many have run consecutively, and one line for the recycle that follows the third. The worker is named because the count is per worker — three lines from one worker are a recycle, three lines from three workers are not.
+The server says so itself at `WARN`: one line per counted failure, naming the worker, where the failure came from and how many have run consecutively, and one line for the recycle that follows the third. A fiber that would not start is preceded by one more, `request fiber would not start: …`, which carries the reason the engine gave. The worker is named because the count is per worker — three lines from one worker are a recycle, three lines from three workers are not.
 
 **Check:** Look for errors in the access log or structured log output:
 

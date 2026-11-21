@@ -8968,8 +8968,9 @@ static void oxphp_soft_reset(void) {
      *
      * Draining matters more on this path than on any other, because nothing
      * behind it would catch what a throwing destructor left: the request that
-     * follows gets no second reset — oxphp_fiber_init_request_state() belongs to
-     * the event-loop branch — so an exception still standing here is read as
+     * follows gets no second discard — the one ahead of a new request in
+     * oxphp_scheduler_tick() belongs to the event-loop branch — so an exception
+     * still standing here is read as
      * that request's own, zend_call_function returns without calling the
      * handler, and the 500 that comes back is blamed on an application that
      * never ran. The ceiling inside the drain matters more here too: the ini
@@ -9286,7 +9287,6 @@ static void oxphp_serve_loop(zend_fcall_info *fci, zend_fcall_info_cache *fcc)
 
                 /* Create or reuse a fiber for the request */
                 oxphp_request_fiber *fiber = oxphp_scheduler_create_fiber(&sched, fci, fcc);
-                if (!fiber) break;
 
                 /* The loop is about to disappear into the handler for as long as
                  * this request takes, and it is the only thing that publishes the
@@ -10205,8 +10205,10 @@ static void oxphp_decorator_begin(zend_execute_data *execute_data) {
                         zval_ptr_dtor(&prev_local);
                         /* Restore original exception */
                         if (EG(exception) && saved_exception) {
-                            /* Discard cleanup exception, keep original */
-                            zend_clear_exception();
+                            /* Discard cleanup exception, keep original. Drained:
+                             * its destructor can throw in its turn, and one left
+                             * standing would take the original's place. */
+                            oxphp_discard_pending_exception();
                         }
                         if (!EG(exception)) {
                             EG(exception) = saved_exception;

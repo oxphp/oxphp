@@ -1,0 +1,42 @@
+# Worker mode with a fiber.stack_size (fiberstack.ini) below the engine's
+# minimum: the engine refuses the C stack of every request fiber, so no request
+# reaches the handler, and each worker retires after the third in a row. A
+# profile of its own because nothing else can be served here.
+#
+# Standalone usage:
+#   docker compose -f compose.yml -f compose.fiberstack.yml up
+services:
+  oxphp-fiberstack:
+    build:
+      context: ..
+      dockerfile: docker/dev/Dockerfile
+      args:
+        PHP_VERSION:
+        BASE_IMAGE:
+    ports:
+      - "80"
+    networks: [test-net]
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    environment:
+      # warn: the account of each refused start and of the retire is written at
+      # that level.
+      LOG_LEVEL: warn
+      INTERNAL_ADDR: 0.0.0.0:9090
+      WORKER_MODE_ENABLED: "true"
+      ENTRY_FILE: /var/www/html/worker/worker_entry.php
+      # One worker, so three refused starts are three on the same worker.
+      PHP_WORKERS: "1"
+      # The request after a retire waits for the replacement worker to boot.
+      QUEUE_WAIT_TIMEOUT_MS: "10000"
+      OXPHP_TEST_AFTER_LOOP_LOG: "1"
+    volumes:
+      - ../www:/var/www/html
+      - ./php:/var/www/html/public/tests
+      - ./fixtures/worker:/var/www/html/worker
+      - ./fiberstack.ini:/usr/local/etc/php/conf.d/zz-fiberstack.ini:ro

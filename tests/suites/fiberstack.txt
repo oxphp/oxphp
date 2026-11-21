@@ -1,0 +1,16 @@
+# profile: fiberstack
+# description: A request fiber the engine refuses a stack is logged with the engine's reason, counted by the breaker, and leaves nothing pending for the code after the worker loop
+
+# Three requests, none of which gets a fiber, so the worker retires after the
+# third. The status is what a request answers when no fiber was started for it,
+# not what this profile is about.
+fiberstack/probe | GET | | 200 |
+fiberstack/probe | GET | | 200 |
+fiberstack/probe | GET | | 200 |
+log ~oxphp: worker 0 request fiber would not start: Fiber stack size is too small
+log ~oxphp: worker 0 request failed (fiber would not start) — 3 in a row
+log ~Worker mode thread retired after consecutive request failures
+# Written by the entry script past oxphp_worker() (OXPHP_TEST_AFTER_LOOP_LOG),
+# which an exception left pending by a refused start would skip: it would
+# surface at the call as an uncaught one instead.
+log ~oxphp-test: entry script ran past oxphp_worker()
