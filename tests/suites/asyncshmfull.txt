@@ -1,0 +1,7 @@
+# profile: asyncshmfull
+# description: oxphp_async() tasks with OPcache's shared memory full and its file cache on
+
+# Scripts OPcache loads from its file cache into the memory of the request, on
+# two PHP workers: the single async thread does not take the class it looked up
+# for one worker's name as the class of the other's.
+asyncshmfull/test_task_class_lookup_slot_of_a_script_from_the_file_cache

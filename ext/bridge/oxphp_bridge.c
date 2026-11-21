@@ -6103,7 +6103,8 @@ static _Atomic size_t oxphp_handoff_map_ptr_last;
  * from the file cache interns none, so file_cache_only is read as well. With
  * shared memory and opcache.file_cache set, OPcache also loads scripts from
  * the file cache while its shared memory is full or restarting, and numbers
- * their class names the same way; this does not tell those apart.
+ * their class names the same way; those names give their numbers up as the
+ * script loads (oxphp_compile_slots_settle()).
  */
 static void oxphp_publish_map_ptr_last(void) {
     if (zend_hash_num_elements(&CG(interned_strings)) > 0) {
@@ -6129,6 +6130,250 @@ static void oxphp_publish_map_ptr_last(void) {
  */
 static void oxphp_cover_map_ptr_last(void) {
     zend_map_ptr_extend(atomic_load(&oxphp_handoff_map_ptr_last));
+}
+
+/* === Class-lookup slots a compile numbers on this thread alone === */
+
+/* A class name keeps the MAP_PTR offset of its class-lookup slot in its
+ * refcount (zend_alloc_ce_cache(), ZSTR_VALID_CE_CACHE(), PHP 8.4 / 8.5). A
+ * name it took one from is looked up by hash from then on. */
+typedef struct {
+    size_t from;
+    size_t to;
+    size_t taken;      /* distinct numbers in [from, to) taken back, counted when `seen` is set */
+    uint8_t *seen;     /* one bit per number in [from, to), or NULL */
+} oxphp_slot_range;
+
+static void oxphp_slot_take(oxphp_slot_range *r, zend_string *name) {
+    if (!name || !ZSTR_HAS_CE_CACHE(name) || (GC_FLAGS(name) & IS_STR_PERMANENT)) {
+        return;
+    }
+    size_t index = (GC_REFCOUNT(name) - 1) / sizeof(void *);
+    if (index < r->from || index >= r->to) {
+        return;
+    }
+    SET_CE_CACHE(GC_REFCOUNT(name), NULL);
+    GC_DEL_FLAGS(name, IS_STR_CLASS_NAME_MAP_PTR);
+    GC_SET_REFCOUNT(name, 1);
+    if (r->seen) {
+        size_t bit = index - r->from;
+        if (!(r->seen[bit / 8] & (1u << (bit % 8)))) {
+            r->seen[bit / 8] |= (uint8_t)(1u << (bit % 8));
+            r->taken++;
+        }
+    }
+}
+
+static void oxphp_slot_take_type(oxphp_slot_range *r, const zend_type *type) {
+    if (ZEND_TYPE_HAS_LIST(*type)) {
+        const zend_type *member;
+        ZEND_TYPE_LIST_FOREACH(ZEND_TYPE_LIST(*type), member) {
+            oxphp_slot_take_type(r, member);
+        } ZEND_TYPE_LIST_FOREACH_END();
+    } else if (ZEND_TYPE_HAS_NAME(*type)) {
+        oxphp_slot_take(r, ZEND_TYPE_NAME(*type));
+    }
+}
+
+/* The literals are read too: they can be the same string as a name OPcache
+ * numbered in a class the walk does not reach, such as a conditional class of
+ * a file included again, whose copy OPcache does not add to the class table.
+ * A name only such a class holds is not found. */
+static void oxphp_slot_take_op_array(oxphp_slot_range *r, zend_op_array *op) {
+    if (op->type != ZEND_USER_FUNCTION) {
+        return;
+    }
+    if (op->arg_info) {
+        zend_arg_info *arg = op->arg_info;
+        zend_arg_info *end = arg + op->num_args;
+        if (op->fn_flags & ZEND_ACC_HAS_RETURN_TYPE) {
+            arg--;
+        }
+        if (op->fn_flags & ZEND_ACC_VARIADIC) {
+            end++;
+        }
+        for (; arg < end; arg++) {
+            oxphp_slot_take_type(r, &arg->type);
+        }
+    }
+    for (int i = 0; i < op->last_literal; i++) {
+        if (Z_TYPE(op->literals[i]) == IS_STRING) {
+            oxphp_slot_take(r, Z_STR(op->literals[i]));
+        }
+    }
+    for (uint32_t i = 0; i < op->num_dynamic_func_defs; i++) {
+        oxphp_slot_take_op_array(r, op->dynamic_func_defs[i]);
+    }
+}
+
+static void oxphp_slot_take_class(oxphp_slot_range *r, zend_class_entry *ce) {
+    if (ce->type != ZEND_USER_CLASS) {
+        return;
+    }
+    oxphp_slot_take(r, ce->name);
+    zend_function *fn;
+    ZEND_HASH_MAP_FOREACH_PTR(&ce->function_table, fn) {
+        oxphp_slot_take_op_array(r, &fn->op_array);
+    } ZEND_HASH_FOREACH_END();
+    zend_property_info *prop;
+    ZEND_HASH_MAP_FOREACH_PTR(&ce->properties_info, prop) {
+        oxphp_slot_take_type(r, &prop->type);
+        if (prop->hooks) {
+            for (uint32_t i = 0; i < ZEND_PROPERTY_HOOK_COUNT; i++) {
+                if (prop->hooks[i]) {
+                    oxphp_slot_take_op_array(r, &prop->hooks[i]->op_array);
+                }
+            }
+        }
+    } ZEND_HASH_FOREACH_END();
+    zend_class_constant *c;
+    ZEND_HASH_MAP_FOREACH_PTR(CE_CONSTANTS_TABLE(ce), c) {
+        oxphp_slot_take_type(r, &c->type);
+    } ZEND_HASH_FOREACH_END();
+}
+
+typedef struct {
+    size_t map_ptr_last;
+    uint32_t functions_used;
+    uint32_t classes_used;
+    uint32_t interned_used;
+} oxphp_compile_mark;
+
+static void oxphp_compile_mark_take(oxphp_compile_mark *mark) {
+    mark->map_ptr_last = CG(map_ptr_last);
+    mark->functions_used = CG(function_table)->nNumUsed;
+    mark->classes_used = CG(class_table)->nNumUsed;
+    mark->interned_used = CG(interned_strings).nNumUsed;
+}
+
+/* What a compile added: the script's code, and the functions and classes it
+ * declared on loading. */
+static void oxphp_slot_take_compiled(oxphp_slot_range *r, const oxphp_compile_mark *mark,
+                                     zend_op_array *op) {
+    if (op) {
+        oxphp_slot_take_op_array(r, op);
+    }
+    zend_function *fn;
+    ZEND_HASH_MAP_FOREACH_PTR_FROM(CG(function_table), fn, mark->functions_used) {
+        oxphp_slot_take_op_array(r, &fn->op_array);
+    } ZEND_HASH_FOREACH_END();
+    zend_class_entry *ce;
+    ZEND_HASH_MAP_FOREACH_PTR_FROM(CG(class_table), ce, mark->classes_used) {
+        oxphp_slot_take_class(r, ce);
+    } ZEND_HASH_FOREACH_END();
+}
+
+static void oxphp_slot_take_interned(oxphp_slot_range *r, uint32_t from, uint32_t to) {
+    if (zend_hash_num_elements(&CG(interned_strings)) == 0) {
+        return;
+    }
+    Bucket *b;
+    ZEND_HASH_MAP_FOREACH_BUCKET_FROM(&CG(interned_strings), b, from) {
+        if ((uint32_t)(b - CG(interned_strings).arData) >= to) {
+            break;
+        }
+        oxphp_slot_take(r, b->key);
+    } ZEND_HASH_FOREACH_END();
+}
+
+/*
+ * Class-lookup slots stay in a thread's table from their first use on, and
+ * Zend trusts one by its number alone (ZSTR_VALID_CE_CACHE). Two cases number
+ * names on one thread only, where another thread's names can carry the same
+ * numbers:
+ *
+ * - With shared memory, a script OPcache loads from its file cache into this
+ *   thread's memory, while that memory is full or restarting, gets numbers from
+ *   this thread's CG(map_ptr_last), and OPcache's own count of the numbers it
+ *   gave out (ZCSG(map_ptr_last)) does not move: the next script it caches
+ *   numbers its names from there again (zend_file_cache_script_load(),
+ *   zend_accel_get_class_name_map_ptr(), PHP 8.4 / 8.5). The names of it the
+ *   walk reaches give their slots up, here and wherever
+ *   oxphp_publish_map_ptr_last() makes another thread cover them.
+ *
+ * - Without shared memory, the names an async task's thread compiles are
+ *   numbered from the table's end, past which the names in code another thread
+ *   hands over have to stay, or the task reads a class that thread's request
+ *   never looked up. Those names give their slots up too, and the table's end
+ *   goes back when that accounts for every number the compile gave out;
+ *   otherwise some name still holds one and it stays.
+ */
+static void oxphp_compile_slots_settle(const oxphp_compile_mark *mark, zend_op_array *op,
+                                       bool bailed_out) {
+    oxphp_slot_range r = { mark->map_ptr_last, CG(map_ptr_last), 0, NULL };
+    if (r.to <= r.from) {
+        return;
+    }
+    if (oxphp_opcache_has_shm()) {
+        if (op && op->refcount == NULL && !oxphp_in_opcache_shm(op->opcodes)) {
+            oxphp_slot_take_compiled(&r, mark, op);
+        }
+        return;
+    }
+    if (!oxphp_bridge_is_async_worker()) {
+        return;
+    }
+    r.seen = ecalloc((r.to - r.from + 7) / 8, 1);
+    if (!bailed_out) {
+        oxphp_slot_take_compiled(&r, mark, op);
+    }
+    oxphp_slot_take_interned(&r, mark->interned_used, UINT32_MAX);
+    if (r.taken < r.to - r.from) {
+        oxphp_slot_take_interned(&r, 0, mark->interned_used);
+    }
+    if (r.taken == r.to - r.from) {
+        CG(map_ptr_last) = r.from;
+    }
+    efree(r.seen);
+}
+
+static zend_op_array *(*oxphp_slots_prev_compile_file)(zend_file_handle *file_handle, int type);
+static zend_op_array *(*oxphp_slots_prev_compile_string)(zend_string *source, const char *filename,
+                                                         zend_compile_position position);
+
+/* A fatal error that ends a compile leaves the numbers it gave out, and the
+ * thread lives on past it. Only the interned names are read then, and only
+ * without shared memory: early binding adds a class to the class table before
+ * linking it, which the error can cut short (zend_try_early_bind(), PHP 8.4 /
+ * 8.5). A script OPcache was loading from its file cache when the error came
+ * keeps its numbers: its names are in the loaded copy, not the interned table. */
+static zend_op_array *oxphp_slots_compile_file(zend_file_handle *file_handle, int type) {
+    oxphp_compile_mark mark;
+    oxphp_compile_mark_take(&mark);
+    zend_op_array *volatile op = NULL;
+    zend_try {
+        op = oxphp_slots_prev_compile_file(file_handle, type);
+    } zend_catch {
+        oxphp_compile_slots_settle(&mark, NULL, true);
+        zend_bailout();
+    } zend_end_try();
+    oxphp_compile_slots_settle(&mark, op, false);
+    return op;
+}
+
+static zend_op_array *oxphp_slots_compile_string(zend_string *source, const char *filename,
+                                                 zend_compile_position position) {
+    oxphp_compile_mark mark;
+    oxphp_compile_mark_take(&mark);
+    zend_op_array *volatile op = NULL;
+    zend_try {
+        op = oxphp_slots_prev_compile_string(source, filename, position);
+    } zend_catch {
+        oxphp_compile_slots_settle(&mark, NULL, true);
+        zend_bailout();
+    } zend_end_try();
+    oxphp_compile_slots_settle(&mark, op, false);
+    return op;
+}
+
+void oxphp_compile_slots_install(void) {
+    if (zend_compile_file == oxphp_slots_compile_file) {
+        return;
+    }
+    oxphp_slots_prev_compile_file = zend_compile_file;
+    zend_compile_file = oxphp_slots_compile_file;
+    oxphp_slots_prev_compile_string = zend_compile_string;
+    zend_compile_string = oxphp_slots_compile_string;
 }
 
 /* === Async Promise: Fixup run_time_cache for cross-thread execution === */

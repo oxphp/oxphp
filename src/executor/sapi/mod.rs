@@ -64,6 +64,11 @@ fn php_startup() {
     unsafe {
         bindings::oxphp_script_guard_install();
     }
+    // SAFETY: after php_module_startup, which installed OPcache's compile hook,
+    // and before any worker thread runs.
+    unsafe {
+        bindings::oxphp_compile_slots_install();
+    }
 
     // 6. The limit request parsing shares with PHP.
     // SAFETY: this is the thread that ran `php_module_startup()`, which returned

@@ -1398,6 +1398,12 @@ int oxphp_file_handle_init_fd(void *file_handle, int fd, const char *path);
  *  before any worker thread runs. */
 void oxphp_script_guard_install(void);
 
+/** Wraps zend_compile_file, in front of OPcache, and zend_compile_string, so that
+ *  a class name a compile numbers on this thread alone gives its class-lookup
+ *  slot up where another thread's names can carry the same number. Once, after
+ *  php_module_startup(), before any worker thread runs. */
+void oxphp_compile_slots_install(void);
+
 /** Close the calling thread's persistent resources. Last PHP call before ts_free_thread(). */
 void oxphp_bridge_destroy_persistent_list(void);
 
