@@ -4436,7 +4436,7 @@ Database hooks (PDO, mysqli) decorate their spans with OpenTelemetry semantic-co
 
 Hook installation uses a two-phase design for thread safety under PHP ZTS:
 
-1. **Phase 1 (MINIT)** — during module initialization, OxPHP validates each target function against the loaded extensions and captures the handler pointer each target has at that point into a read-only approved list. This runs after OxPHP's own handler replacements, so with `RUNTIME_HOOKS` enabling `streams`, the handler captured for a PDO, mysqli or Redis method that category also hooks is OxPHP's guarded one: for a query or command it claims the connection for the calling fiber, and for `PDO::__construct` it serialises persistent constructors to the same data source (see [Runtime Hooks](runtime-hooks-shared-state.md)). The span then wraps that guard. Inside worker-mode request fibers and async task fibers, where the guard can wait, the span's duration, and for a query the slow-query flag, includes any wait for a connection another request or task is using
+1. **Phase 1 (MINIT)** — during module initialization, OxPHP validates each target function against the loaded extensions and captures the handler pointer each target has at that point into a read-only approved list. This runs after OxPHP's own handler replacements, so with `RUNTIME_HOOKS` enabling `streams`, the handler captured for a PDO, mysqli or Redis method that category also hooks is OxPHP's guarded one: for a query or command it claims the connection for the calling fiber, and for `PDO::__construct` it serialises persistent constructors to the same data source (see [Shared Connections Under Runtime Hooks](runtime-hooks-shared-state.md)). The span then wraps that guard. Inside worker-mode request fibers and async task fibers, where the guard can wait, the span's duration, and for a query the slow-query flag, includes any wait for a connection another request or task is using
 2. **Phase 2 (RINIT)** — on the first request per worker thread, the approved hooks are installed into that thread's function tables
 
 This ensures each ZTS worker thread has consistent function table modifications and thread-local state.
@@ -4922,7 +4922,7 @@ OxPHP uses PHP Fibers to handle multiple HTTP requests concurrently on a single 
 
    The state of a `serialize()` or `unserialize()` call in progress, and the comparison callback of a `usort()` or similar call in progress, are kept per fiber rather than per request, a userland `Fiber` included — unless other extensions have used up the handles the engine reserves for extensions, in which case they are shared as in PHP.
 
-   Other state is, as a rule, not parked: while two requests overlap on a thread, they share it. That includes everything the application keeps for the life of the worker, such as its container and singletons, and with runtime hooks on, an overlap can begin at any hooked wait inside framework code; [Runtime Hooks](runtime-hooks-shared-state.md#hooked-waits-and-shared-application-state) covers what that means for an application.
+   Other state is, as a rule, not parked: while two requests overlap on a thread, they share it. That includes everything the application keeps for the life of the worker, such as its container and singletons, and with runtime hooks on, an overlap can begin at any hooked wait inside framework code; [Hooked waits and shared application state](runtime-hooks-shared-state.md#hooked-waits-and-shared-application-state) covers what that means for an application.
 
    The session is not on that list, but it is not shared either: `$_SESSION`, the session id and the open session behind them are one set per worker thread in PHP, so OxPHP takes them off the thread when their request suspends and puts them back when it resumes, open or closed, together with the save handler and serializer an open one was opened with. It also keeps one session open per worker at a time: while a request is paused with its session open, the scheduler admits no new request, and `session_start()` in a request it is already running waits until that session is closed. See [Worker State Between Requests](worker-state.md#a-worker-has-one-session-open-at-a-time).
 
@@ -6870,7 +6870,7 @@ With a document root, every request runs through a shared pipeline before the mo
 
 A `CONNECT` request never reaches this pipeline: it asks for a tunnel, which OxPHP does not open. It is refused before routing with `501 Not Implemented`, and an HTTP/1.1 connection closes after that answer. A malformed one gets `400 Bad Request` instead (see [Error Pages](error-pages.md#status-codes-worth-providing)), after which an HTTP/1.1 connection closes as well; an HTTP/2 one with a non-zero `content-length` never reaches OxPHP: the connection it arrived on is closed, along with every other request in flight on it.
 
-Neither does a request target in none of the forms HTTP gives it: a target with neither a leading `/` nor a `scheme://` in front, as in `GET index.php`, an HTTP/2 `:path` without a leading `/`, an HTTP/2 request with neither a `:path` nor an `:authority`, or `*` with a method other than `OPTIONS` is refused before routing with `400 Bad Request` (see [Superglobals](../php/server-variables.md#standard-variables)). An HTTP/2 request with an `:authority` and no `:path` never reaches OxPHP: the HTTP/2 layer resets its stream. An absolute-form target with an empty path, as in `GET http://example.com?page=2`, is routed as `/`.
+Neither does a request target in none of the forms HTTP gives it: a target with neither a leading `/` nor a `scheme://` in front, as in `GET index.php`, an HTTP/2 `:path` without a leading `/`, an HTTP/2 request with neither a `:path` nor an `:authority`, or `*` with a method other than `OPTIONS` is refused before routing with `400 Bad Request` (see [Server Variables](../php/server-variables.md#standard-variables)). An HTTP/2 request with an `:authority` and no `:path` never reaches OxPHP: the HTTP/2 layer resets its stream. An absolute-form target with an empty path, as in `GET http://example.com?page=2`, is routed as `/`.
 
 The classification step is the key efficiency: the disk check for static assets (`/style.css`, `/logo.png`) is performed **once** in the shared layer for `OtherExtension` URIs, so all three modes pay the same cost.
 
@@ -8762,7 +8762,7 @@ Three consequences follow:
 
 1. Sessions on one worker are open one after another, even for different clients, so a request that keeps its session open across a suspension point holds up the sessions of every other request on its worker, and every request the worker has not taken yet, for that long.
 2. A request that, with its session open, waits for something only a request the worker has not taken yet, or one waiting in `session_start()`, could provide does not get it until the session is closed: with `PHP_WORKERS=1`, an HTTP call back to the server is not served until then, and fails once the caller's timeout or the server's queue wait runs out, and a wait with no timeout of its own does not end.
-3. `session_start()` cannot wait inside a fiber a userland scheduler such as Revolt or AMPHP started, where switching is blocked, or in the cleanup a worker runs after a request has come apart (see [Where the `sleep` hooks do not suspend](runtime-hooks.md#where-the-sleep-hooks-do-not-suspend) for both), because what it would wait for runs on the same thread: there, while another request on the worker has a session open, it raises a warning and returns `false`.
+3. `session_start()` cannot wait inside a fiber a userland scheduler such as Revolt or AMPHP started, whose context OxPHP cannot resume, or in the cleanup a worker runs after a request has come apart (see [Where the `sleep` hooks do not suspend](runtime-hooks.md#where-the-sleep-hooks-do-not-suspend) for both), because what it would wait for runs on the same thread: there, while another request on the worker has a session open, it raises a warning and returns `false`.
 
 #### The save handler's lock
 
@@ -12967,7 +12967,7 @@ $request->isSecure(): bool
 $request->host(): string
 ```
 
-Hostname from the `Host` header. Returns an empty string when the header is absent (an HTTP/1.0 request in origin form, `GET /path`, sent without a `Host` header). Over HTTP/2 the `Host` header is the request's `:authority`, and over HTTP/1.1 and HTTP/1.0 the host of a request target in absolute form (`GET http://example.com/path`), as described in [Superglobals](server-variables.md#standard-variables).
+Hostname from the `Host` header. Returns an empty string when the header is absent (an HTTP/1.0 request in origin form, `GET /path`, sent without a `Host` header). Over HTTP/2 the `Host` header is the request's `:authority`, and over HTTP/1.1 and HTTP/1.0 the host of a request target in absolute form (`GET http://example.com/path`), as described in [Server Variables](server-variables.md#standard-variables).
 
 ```php
 $request->port(): int
@@ -14201,7 +14201,7 @@ Enters the persistent worker mode loop. OxPHP calls `$handler` once for each inc
 
 The worker loop exits when any of the following conditions are met:
 - The server shuts down gracefully
-- 3 consecutive requests come apart — a fatal error in the handler is the usual one, with two failures around the request's fiber counting alongside it (an uncaught exception is answered and does not count, and neither does a request the server cancelled unless a fatal was reported on it as well — see [Worker mode → Recycling](../features/worker-recycling.md#recycling))
+- 3 consecutive requests come apart — a fatal error in the handler is the usual one, with two failures around the request's fiber counting alongside it (an uncaught exception is answered and does not count, and neither does a request the server cancelled unless a fatal was reported on it as well — see [Worker Recycling](../features/worker-recycling.md#recycling))
 - The worker exceeds `WORKER_MAX_MEMORY_MIB`
 - A request was ended with an internal function's call on its stack and the worker's memory usage then grew past a threshold, not counting the fibers it created, measured between two moments with no request in flight — see [Recycling](../features/worker-recycling.md#recycling)
 - The application calls [`Worker::scheduleExit()`](worker-class.md#scheduleexit)
