@@ -29,6 +29,9 @@ asyncdecl/test_pool_destroy_calls_function_in_task
 asyncdecl/test_pool_callable_leaves_no_gc_root_in_task
 asyncdecl/test_pool_leaves_its_closure_collectable
 asyncdecl/test_pool_callable_calls_the_object_it_was_given
+# The pool holds the object its callback is called on when the callable does
+# not, or the next call would run on a freed object.
+asyncdecl/test_pool_holds_the_object_its_callback_is_called_on
 asyncdecl/test_pool_callable_copy_shares_what_its_closure_set
 asyncdecl/test_pool_internal_factory_in_task
 asyncdecl/test_pool_factory_first_run_by_request

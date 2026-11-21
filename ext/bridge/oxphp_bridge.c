@@ -7993,10 +7993,10 @@ int oxphp_shared_invoke_2_ret_stop(zval *callable,
  *  it the function and the $this the fcc points to. A closure, and
  *  the closure of [$closure, '__invoke'], is held as the pool's own
  *  copy of it (oxphp_pool_own_closure), which the fcc then points to.
- *  Any other fcc.object gets no reference of its own: it stays alive
- *  while the callable holds it — $object in [$object, 'method'],
- *  unless by reference — and not at all when the engine took it from
- *  the $this of the code creating the pool. The callable is resolved
+ *  fcc.object gets a reference of its own, as zend_fcc_addref() gives
+ *  it: the callable does not hold the object the engine took from the
+ *  $this of the code creating the pool, nor the one of
+ *  [&$object, 'method'] once $object is reassigned. The callable is resolved
  *  once, on the thread creating the pool, and called through
  *  oxphp_pool_invoke on whichever thread runs the factory or
  *  $destroy: on that thread, through the fcc; on any other, a
@@ -8457,6 +8457,12 @@ int oxphp_pool_fcc_new(void *callable_zval, void **out_fcc_heap) {
         fcc.function_handler = copy;
     }
 
+    /* Counted on this thread only: fcc_free runs in the request creating the
+     * pool, and a call on another thread does not count This. */
+    if (fcc.object) {
+        GC_ADDREF(fcc.object);
+    }
+
     oxphp_pool_fcc_t *heap = ecalloc(1, sizeof(oxphp_pool_fcc_t));
     heap->fcc = fcc;
     ZVAL_COPY_VALUE(&heap->callable_zv, &stored);
@@ -8475,6 +8481,9 @@ static int oxphp_pool_fcc_free_unguarded(void *fcc_heap) {
     if (!fcc_heap) return 0;
     oxphp_pool_fcc_t *heap = (oxphp_pool_fcc_t *)fcc_heap;
     zend_release_fcall_info_cache(&heap->fcc);
+    if (heap->fcc.object) {
+        OBJ_RELEASE(heap->fcc.object);
+    }
     zval_ptr_dtor(&heap->callable_zv);
     if (heap->refused_elsewhere) {
         zend_string_release_ex(heap->refused_elsewhere, 0);
