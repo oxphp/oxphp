@@ -2607,6 +2607,16 @@ int oxphp_pool_destroy_invoke_guarded(void *destroy_fcc_heap, void *slot_zv_heap
  * stub, as for the helpers above. */
 int oxphp_pool_park_guarded(uint64_t duration_us);
 
+/* Register the resource type whose destructor destroys the static tables a pool
+ * callback started in a request on a thread that has not declared the code. From
+ * MINIT. */
+void oxphp_pool_statics_register(int module_number);
+
+/* Open that resource for the request, when PHP's own shutdown of it destroys
+ * static tables at all. From RINIT, before the request runs PHP code: a resource
+ * opened earlier would close after it. */
+void oxphp_pool_statics_activate(void);
+
 /* Shared\Pool\Handle rust_data wrapper helpers. See
  * oxphp_bridge.c §Shared\Pool\Handle rust_data wrapper helpers
  * for the storage layout and semantics. */

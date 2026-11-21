@@ -12579,6 +12579,7 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
     oxphp_curl_hooks_install();
     oxphp_runtime_hooks_install();
     oxphp_request_body_hook_install();
+    oxphp_pool_statics_register(module_number);
 
     /* APM hook approval — validates targets against loaded extensions and
      * records the handler each one is to call. No handler replacement here;
@@ -12652,6 +12653,8 @@ PHP_RINIT_FUNCTION(oxphp_sapi)
      * arm64). RSHUTDOWN still runs zend_hash_clean() to dtor cached instances
      * while they are valid; this only forces a fresh table next request. */
     decorator_instance_cache_initialized = 0;
+
+    oxphp_pool_statics_activate();
 
     return SUCCESS;
 }
