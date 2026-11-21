@@ -1,0 +1,7 @@
+# profile: asyncstack
+# description: An async task whose fiber the engine refuses a stack fails that task, and the server goes on serving
+
+# Twice: the second request is answered by a server that has already been
+# through one refused start, on the same async worker.
+asyncstack/test_task_fiber_would_not_start
+asyncstack/test_task_fiber_would_not_start
