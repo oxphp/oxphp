@@ -8913,6 +8913,134 @@ static zend_string *oxphp_pool_rebuilt_missing_here(const oxphp_pool_fcc_t *heap
     return missing;
 }
 
+/* Code a pool callback runs on a thread that need not have declared it, whose
+ * static tables that thread keeps in its own slots. PHP's full shutdown
+ * destroys only those of the functions and classes in the thread's own tables
+ * (zend_shutdown_executor_values(), 8.4.27, 8.5.12); the fast one, taken with
+ * Zend's allocator outside a debug build, leaves every table to the heap reset,
+ * so nothing is noted then. */
+static __thread HashTable *oxphp_pool_foreign_functions;
+static __thread HashTable *oxphp_pool_foreign_classes;
+
+/* The note is released by a resource registered before the request runs any
+ * PHP code. PHP closes resources after every module's RSHUTDOWN, where a session
+ * save handler can still call the code, newest first and again from the newest
+ * when a close adds one, so this one closes after every resource whose close
+ * can run PHP code, and before PHP frees the objects the tables hold
+ * (zend_close_rsrc_list(), zend_shutdown_executor_values(), 8.4.27, 8.5.12,
+ * 8.6.0). Code that runs later finds its slot empty, not a freed table. */
+static int oxphp_pool_statics_le = -1;
+/* Set while that resource is open: nothing is noted outside it. */
+static __thread bool oxphp_pool_statics_armed;
+
+/* Whether shutdown_executor() takes the path that destroys static tables
+ * (8.4.27, 8.5.12, 8.6.0). An ASan build that ZEND_ASAN_FORCE_FAST_SHUTDOWN
+ * sends down the fast path without Zend's allocator is read as taking it, which
+ * only destroys tables that path would leave alone. */
+static bool oxphp_full_shutdown_ahead(void) {
+#if ZEND_DEBUG
+    return true;
+#else
+    return !is_zend_mm() || EG(full_tables_cleanup);
+#endif
+}
+
+static void oxphp_pool_note(HashTable **set, void *ptr) {
+    if (!*set) {
+        ALLOC_HASHTABLE(*set);
+        zend_hash_init(*set, 8, NULL, NULL, 0);
+    }
+    zend_hash_index_add_ptr(*set, (zend_ulong)(uintptr_t)ptr, ptr);
+}
+
+/* `fn`, and the classes whose methods it reaches through self, static and
+ * parent, those of them in OPcache's shared memory: only such code keeps its
+ * static tables in this thread's slots, and only it is sure to outlast this
+ * request, whose end reads the note — a closure or a class linked in another
+ * thread's request goes with that request. */
+static void oxphp_pool_note_foreign_statics(const zend_function *fn,
+                                            zend_class_entry *called_scope) {
+    if (!oxphp_pool_statics_armed) {
+        return;
+    }
+    if (fn->type == ZEND_USER_FUNCTION && !fn->common.scope && fn->op_array.static_variables
+            && oxphp_in_opcache_shm(fn)) {
+        oxphp_pool_note(&oxphp_pool_foreign_functions, (void *)fn);
+    }
+    zend_class_entry *scopes[2] = {fn->common.scope, called_scope};
+    for (int i = 0; i < 2; i++) {
+        for (zend_class_entry *ce = scopes[i]; ce; ce = ce->parent) {
+            if (ce->type == ZEND_USER_CLASS && (ce->ce_flags & ZEND_HAS_STATIC_IN_METHODS)
+                    && oxphp_in_opcache_shm(ce)) {
+                oxphp_pool_note(&oxphp_pool_foreign_classes, ce);
+            }
+        }
+    }
+}
+
+/* Only a slot numbered per thread holds this thread's table: code in the memory
+ * of a request keeps the table in itself, for whichever thread runs it. */
+static void oxphp_destroy_own_static_table(zend_op_array *op) {
+    if (op->type != ZEND_USER_FUNCTION || !ZEND_MAP_PTR_IS_OFFSET(op->static_variables_ptr)) {
+        return;
+    }
+    HashTable *ht = ZEND_MAP_PTR_GET(op->static_variables_ptr);
+    if (ht) {
+        ZEND_MAP_PTR_SET(op->static_variables_ptr, NULL);
+        zend_array_destroy(ht);
+    }
+}
+
+static void oxphp_pool_release_foreign_statics(zend_resource *res) {
+    (void)res;
+    HashTable *functions = oxphp_pool_foreign_functions;
+    HashTable *classes = oxphp_pool_foreign_classes;
+    oxphp_pool_statics_armed = false;
+    oxphp_pool_foreign_functions = NULL;
+    oxphp_pool_foreign_classes = NULL;
+    if (functions) {
+        zend_op_array *op;
+        ZEND_HASH_FOREACH_PTR(functions, op) {
+            oxphp_destroy_own_static_table(op);
+        } ZEND_HASH_FOREACH_END();
+        zend_hash_destroy(functions);
+        FREE_HASHTABLE(functions);
+    }
+    if (classes) {
+        zend_class_entry *ce;
+        ZEND_HASH_FOREACH_PTR(classes, ce) {
+            zend_op_array *op;
+            ZEND_HASH_MAP_FOREACH_PTR(&ce->function_table, op) {
+                oxphp_destroy_own_static_table(op);
+            } ZEND_HASH_FOREACH_END();
+            zend_property_info *prop;
+            ZEND_HASH_MAP_FOREACH_PTR(&ce->properties_info, prop) {
+                for (uint32_t i = 0; prop->ce == ce && prop->hooks && i < ZEND_PROPERTY_HOOK_COUNT; i++) {
+                    if (prop->hooks[i]) {
+                        oxphp_destroy_own_static_table(&prop->hooks[i]->op_array);
+                    }
+                }
+            } ZEND_HASH_FOREACH_END();
+        } ZEND_HASH_FOREACH_END();
+        zend_hash_destroy(classes);
+        FREE_HASHTABLE(classes);
+    }
+}
+
+void oxphp_pool_statics_register(int module_number) {
+    oxphp_pool_statics_le = zend_register_list_destructors_ex(
+        oxphp_pool_release_foreign_statics, NULL, "OxPHP\\Shared\\Pool static tables",
+        module_number);
+}
+
+void oxphp_pool_statics_activate(void) {
+    ZEND_ASSERT(!oxphp_pool_foreign_functions && !oxphp_pool_foreign_classes);
+    oxphp_pool_statics_armed = oxphp_full_shutdown_ahead();
+    if (oxphp_pool_statics_armed) {
+        zend_register_resource(NULL, oxphp_pool_statics_le);
+    }
+}
+
 /* Run the factory or $destroy the pool stores. Returns NULL once it has run,
  * or the message saying why this thread does not run it, which the caller
  * throws or reports. An acquire can run it on a thread that never ran its
@@ -8933,11 +9061,16 @@ static zend_string *oxphp_pool_invoke(const oxphp_pool_fcc_t *heap,
     }
     oxphp_cover_map_ptr_last();
     if (elsewhere && heap->rebuilt_from) {
+        oxphp_pool_note_foreign_statics(heap->rebuilt_from, heap->called_scope);
         oxphp_pool_call_elsewhere(heap, retval, argc, argv);
     } else if (elsewhere && heap->made_from) {
+        oxphp_pool_note_foreign_statics(heap->made_from, heap->called_scope);
         zend_call_known_function((zend_function *)heap->made_from, NULL, heap->called_scope,
             retval, argc, argv, NULL);
     } else {
+        if (elsewhere) {
+            oxphp_pool_note_foreign_statics(heap->fcc.function_handler, heap->fcc.called_scope);
+        }
         oxphp_pool_call_fcc(&heap->fcc, retval, argc, argv);
     }
     return NULL;
