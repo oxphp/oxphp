@@ -359,7 +359,7 @@ $response = file_get_contents('https://api.example.com/data', false,
 
 ### Function Reference
 
-The `oxphp_apm_*` functions — signatures, parameters, return values, and what each one does with APM disabled — are documented in [PHP Functions](../php/functions.md#oxphp_apm_trace).
+The `oxphp_apm_*` functions — signatures, parameters and return values — are documented in [PHP Functions](../php/functions.md#oxphp_apm_trace).
 
 ## Docker Example
 

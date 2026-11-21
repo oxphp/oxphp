@@ -320,5 +320,6 @@ scrape_configs:
 
 - [Health Checks](health-checks.md) — the `/health` and `/config` endpoints on the internal server
 - [Configuration Reference](configuration.md) — all environment variables including `INTERNAL_ADDR`
+- [Diagnosing Overload](overload.md) — reading the queue, admission and wait-budget metrics together during an overload
 - [Graceful Shutdown](graceful-shutdown.md) — how connection draining affects `oxphp_active_connections`
 - [Worker Mode](../features/worker-mode.md) — persistent workers and the metrics they emit

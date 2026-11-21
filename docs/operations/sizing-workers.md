@@ -7,7 +7,7 @@ description: How many PHP workers, queue slots and waiting requests to allow, ho
 
 The [PHP Workers](configuration.md#php-workers) settings bound how many requests run, queue and wait at once. This page works out values for them from the handler time and the connection budget, compares static and dynamic pools, and explains how the CPU count behind the defaults is detected.
 
-# Sizing the Waiting Set
+## Sizing the Waiting Set
 
 How many requests can *usefully* wait follows from how fast the pool retires them. With `W` workers and a handler that takes `T` milliseconds, the pool admits `W / T` requests per millisecond, so a budget of `B` milliseconds can let in about `W × B / T` waiters. Everything past that waits the whole budget and is refused anyway, holding a connection and a buffered request body the entire time.
 
@@ -21,7 +21,7 @@ Setting it near `W × B / T` turns the surplus into an immediate 529 rather than
 
 The set is bounded a second time, in bytes. Every waiter holds its request body in memory for as long as it waits, so a cap counted in requests leaves the memory they hold to the traffic: the same 1024 waiters cost nothing on bodyless `GET`s and gigabytes on uploads. `QUEUE_MAX_WAITING_BYTES` bounds that sum directly — past it a request carrying a body is refused at once rather than parked, while bodyless ones keep waiting normally. An upload-heavy application that should absorb bursts instead of shedding them wants a larger value; a container with a hard memory limit wants a smaller one. Refusals for either cap are counted separately in `oxphp_admission_refused_total` (`waiting_full` against the count, `waiting_bytes` against the memory), so the metric names the knob to reach for.
 
-# Keeping Headroom for the Accept Loop
+## Keeping Headroom for the Accept Loop
 
 A request holds its connection — and one of the `MAX_CONNECTIONS` permits — from the moment it arrives until it is answered, whatever it is doing in between. The PHP path holds requests in three places, each with a bound of its own, because a queue slot is released the moment a worker picks the request up, before the script runs:
 
@@ -41,7 +41,7 @@ For a dynamic pool (`MIN:MAX`) the running term is the minimum, the same count t
 
 The comparison counts connections while the budget is spent by requests, so an HTTP/2-heavy deployment can legitimately sit above it: one connection carries up to `H2_MAX_CONCURRENT_STREAMS` requests, so the same backlog is held by a fraction of the connections. The warning is expected there. A large pool on the stock budget reaches it too — an auto-sized pool of 39 workers gives 39 + 4992 + 4992 against 10 000 — and that one is worth acting on rather than ignoring.
 
-# Static vs Dynamic Workers
+## Static vs Dynamic Workers
 
 Set `PHP_WORKERS` to a single number for a fixed pool:
 
@@ -60,7 +60,7 @@ PHP_WORKERS=0:16   # auto-detect minimum (CPU / 4, min 1), 16 maximum
 
 In dynamic mode, OxPHP scales workers up when all are busy and scales down when workers have been idle longer than `PHP_WORKERS_IDLE_SECONDS`.
 
-# How the CPU count is detected
+## How the CPU count is detected
 
 Every default in the [Configuration Reference](configuration.md) written in terms of CPU — `TOKIO_WORKERS`, and `PHP_WORKERS` unset, `0`, or with `0` on either side of `MIN:MAX` — counts the CPUs the process is allowed to run on: its affinity mask (`taskset`, `docker run --cpuset-cpus`), lowered to the container's CPU quota where one is set (`docker run --cpus`; `cpu.max` on cgroup v2, `cpu.cfs_quota_us` on v1). A quota is rounded down and counts as at least 1, so `--cpus=1.5` counts as 1.
 

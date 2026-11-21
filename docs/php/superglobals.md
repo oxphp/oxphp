@@ -215,6 +215,7 @@ if (!oxphp_superglobals_enabled()) {
 
 ## See Also
 
+- [Server Variables](server-variables.md) -- every `$_SERVER` key OxPHP sets
 - [HTTP Request API](request-api.md) -- typed, lazy-loading request object as an alternative to superglobals
 - [PHP Functions](functions.md) -- `oxphp_request_id()`, `oxphp_worker_id()`, and other extension functions
 - [Worker Mode](../features/worker-mode.md) -- how superglobals are refreshed between worker requests

@@ -288,7 +288,7 @@ And one kind of code is not always recognised, and a callback in it then still r
 
 ### Closures and callables on another thread
 
-A closure passed as the factory or destroy callback runs on another thread with copies of its variables, and every call there starts from the values they had when the pool was created. A change a call makes to one of them lasts until the call returns, and neither the creating request nor another thread sees it: a `static $n = 0; $n++;` counter in a destroy callback counts to `1` on every such call. Nor does a call there see what the creating request changes after creating the pool, in a variable captured by reference among them. The copies are made on every call, so a large captured array costs that much each time.
+A closure passed as the factory or destroy callback — other than one made from a function or method, which [Closures made from a function or method](#closures-made-from-a-function-or-method) covers — runs on another thread with copies of its variables, and every call there starts from the values they had when the pool was created. A change a call makes to one of them lasts until the call returns, and neither the creating request nor another thread sees it: a `static $n = 0; $n++;` counter in a destroy callback counts to `1` on every such call. Nor does a call there see what the creating request changes after creating the pool, in a variable captured by reference among them. The copies are made on every call, so a large captured array costs that much each time.
 
 #### What a closure may carry
 
