@@ -270,7 +270,7 @@ SSE endpoints require PHP's execution timer to be disabled or set high. Outside 
 ```yaml
 services:
   app:
-    image: ghcr.io/oxphp/oxphp:0.15.0
+    image: ghcr.io/oxphp/oxphp:0.16.0
     ports:
       - "8080:8080"
     volumes:
