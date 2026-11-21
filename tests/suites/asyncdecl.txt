@@ -15,6 +15,10 @@ asyncdecl/test_task_named_class_not_found
 # a `static` a call has set included: one initialized by a call or a constant
 # took the whole process down before.
 asyncdecl/test_task_closure_static_set_before_dispatch
+# A task made from a function (f(...)) keeps the `static` table it was given
+# past a wait, though the async pool frees the table it handed over as soon
+# as the task first waits.
+asyncdecl/test_task_made_from_a_function_keeps_its_static_table
 
 # The factory and $destroy a task's acquire() and evict() run on its thread.
 asyncdecl/test_pool_factory_anonymous_class_in_task

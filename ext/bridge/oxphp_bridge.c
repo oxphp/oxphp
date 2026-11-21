@@ -6094,27 +6094,15 @@ static void oxphp_cover_map_ptr_last(void) {
 
 /* === Async Promise: Fixup run_time_cache for cross-thread execution === */
 
-/**
- * In PHP ZTS, run_time_cache uses ZEND_MAP_PTR — a byte offset into the
- * per-thread CG(map_ptr_base) table. When an op_array is transferred across
- * threads, the destination thread's table may be too small for the offset,
- * causing SIGBUS when the VM accesses run_time_cache.
- *
- * Fix: allocate a fresh run_time_cache via emalloc on this thread's heap
- * and store it as a DIRECT POINTER (bypassing MAP_PTR offset indirection).
- * ZEND_MAP_PTR_GET detects direct pointers (low bit clear) vs offsets
- * (low bit set) and handles both correctly.
- *
- * Set ZEND_ACC_HEAP_RT_CACHE so zend_closure_free_storage() will efree()
- * the cache when the closure is destroyed.
- */
+/* A task's closure is built from a copy of the dispatching closure, whose
+ * run-time cache is a direct pointer into the dispatching thread's memory.
+ * ZEND_ACC_HEAP_RT_CACHE makes zend_create_closure() give the closure a cache
+ * of its own from this thread's heap, which destroy_op_array() frees with it
+ * (PHP 8.4 / 8.5 zend_create_closure_ex()). Without the flag the closure would
+ * reuse that pointer, and with a NULL one take a cache from CG(arena), which
+ * on the async thread lasts as long as the thread. */
 static void oxphp_fixup_run_time_cache(zend_op_array *op) {
-    if (op->cache_size == 0) {
-        return;
-    }
-
-    void **cache = ecalloc(op->cache_size / sizeof(void *), sizeof(void *));
-    ZEND_MAP_PTR_INIT(op->run_time_cache, cache);
+    ZEND_ASSERT(ZEND_MAP_PTR_GET(op->run_time_cache) != NULL);
     op->fn_flags |= ZEND_ACC_HEAP_RT_CACHE;
 }
 
@@ -6158,10 +6146,12 @@ int oxphp_reconstruct_async_closure(
     zval *out_closure,
     zend_fcall_info *fci,
     zend_fcall_info_cache *fcc,
+    HashTable **out_own_static_vars,
     char **exc_class,
     char **exc_message
 ) {
     zend_function func;
+    *out_own_static_vars = NULL;
 
     /* The task runs on a thread that never ran the script it came from. */
     zend_string *missing = oxphp_op_array_missing_here(op_array, NULL);
@@ -6177,9 +6167,20 @@ int oxphp_reconstruct_async_closure(
      * covers, not necessarily this one's. */
     oxphp_cover_map_ptr_last();
 
-    /* Reconstruct closure from op_array + static_vars */
+    /* A closure made from a function (f(...)) uses the table its op_array's
+     * MAP_PTR points at instead of a copy (zend_create_closure_ex(), PHP 8.4 /
+     * 8.5 / 8.6), and does not free it. The pool frees `static_vars` once this
+     * call returns, while the task can reach a `static` after its first
+     * suspend, so such a closure gets a copy the task's fiber frees after the
+     * closure. */
+    HashTable *vars = static_vars;
+    if (static_vars && (op_array->fn_flags & ZEND_ACC_FAKE_CLOSURE)) {
+        vars = zend_array_dup(static_vars);
+        *out_own_static_vars = vars;
+    }
+
     memcpy(&func, op_array, sizeof(zend_op_array));
-    func.op_array.static_variables = static_vars;
+    func.op_array.static_variables = vars;
 
     /* Outside OPcache's shared memory the body, its refcount and the
      * closure's name live in the memory of the request that compiled or loaded
@@ -6195,27 +6196,16 @@ int oxphp_reconstruct_async_closure(
         func.op_array.function_name = own_name;
     }
 
-    /* Fix up run_time_cache for this thread — the MAP_PTR offset from the
-     * source thread's op_array may be invalid on the async worker's thread. */
     oxphp_fixup_run_time_cache(&func.op_array);
 
-    /* Re-init the static_variables MAP_PTR for this worker thread, pointing
-     * it at our own `static_vars`. The slot offset was memcpy'd from the
-     * source thread's op_array; on this worker thread that same offset
-     * resolves to an unrelated (foreign or stale) slot, so
-     * zend_create_closure()'s `ZEND_MAP_PTR_GET(static_variables_ptr)` returns
-     * a dangling HashTable and `zend_array_dup()`s it — a use-after-free that
-     * corrupts the heap once a captured Shared\* wrapper's refcount is
-     * mismanaged. The GET does not return NULL, so the engine's own NULL-slot
-     * fallback to op_array.static_variables never kicks in.
-     *
-     * Pointing the slot at `static_vars` makes the GET return our HT:
-     * zend_create_closure() then dups `static_vars` into a closure-owned copy
-     * that the closure frees on destruction, while the async pool retains sole
-     * ownership of the original `static_vars` and frees it exactly once after
-     * this call returns. */
-    if (static_vars) {
-        ZEND_MAP_PTR_INIT(func.op_array.static_variables_ptr, static_vars);
+    /* Copied from the dispatching closure, the MAP_PTR names that closure's
+     * table in the dispatching thread's memory. zend_create_closure() reads
+     * the table from the MAP_PTR, except on PHP 8.4 for a closure not made
+     * from a function, which reads op_array.static_variables (8.4 / 8.5 /
+     * 8.6): pointed at `vars`, both name this thread's copy. A closure not
+     * made from a function copies it into a table of its own, which it frees. */
+    if (vars) {
+        ZEND_MAP_PTR_INIT(func.op_array.static_variables_ptr, vars);
     }
 
     zend_create_closure(out_closure, &func,
@@ -6236,6 +6226,10 @@ int oxphp_reconstruct_async_closure(
 
     if (zend_fcall_info_init(out_closure, 0, fci, fcc, NULL, NULL) != SUCCESS) {
         zval_ptr_dtor(out_closure);
+        if (*out_own_static_vars) {
+            zend_array_destroy(*out_own_static_vars);
+            *out_own_static_vars = NULL;
+        }
         *exc_class = strdup("RuntimeException");
         *exc_message = strdup("Failed to initialize async closure call");
         return -1;
