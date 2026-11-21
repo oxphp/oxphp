@@ -7,3 +7,6 @@ asyncfilecache/test_task_orphan_on_another_thread_outlives_the_budget
 # The same, while another task ends on the thread that holds the parent's
 # result: only the parent's result waits.
 asyncfilecache/test_task_result_not_held_by_another_tasks_orphan
+# A Shared\Pool callback a task declares is in the memory of the request that
+# dispatched the task, and is refused on every thread but the task's.
+asyncfilecache/test_pool_callback_a_task_declares_is_refused_on_another_thread

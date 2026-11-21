@@ -269,7 +269,7 @@ On another worker thread a call from there to a function of your script still cr
 
 #### Run-time caches of code outside OPcache's shared memory
 
-For code outside OPcache's shared memory that still runs on such a thread — the cases listed under [Callbacks whose code is outside OPcache's shared memory](#callbacks-whose-code-is-outside-opcaches-shared-memory) — a closure that code declares has one run-time cache for every thread: until the closure has run a class it names throws when missing, and from then on PHP reuses the class found then, on every thread. That cache also holds whether a function of such code is checked as a task's thread enters it, decided by the first thread that runs the function: one that a worker thread, or a task's thread with nothing missing, ran first is not checked on a task's thread after that. The callback's own closure, and a method that runs as a closure of that thread's own, look a class up again on such a thread on every call, so for them a missing one always throws.
+For code outside OPcache's shared memory that still runs on such a thread — the callbacks of a pool created inside a task from code the task was handed, as under [Callbacks whose code is outside OPcache's shared memory](#callbacks-whose-code-is-outside-opcaches-shared-memory) — a closure that code declares has one run-time cache for every thread: until the closure has run a class it names throws when missing, and from then on PHP reuses the class found then, on every thread. That cache also holds whether a function of such code is checked as a task's thread enters it, decided by the first thread that runs the function: one that a worker thread, or a task's thread with nothing missing, ran first is not checked on a task's thread after that. The callback's own closure, and a method that runs as a closure of that thread's own, look a class up again on such a thread on every call, so for them a missing one always throws.
 
 ### Callbacks whose code is outside OPcache's shared memory
 
@@ -277,15 +277,14 @@ Code OPcache does not keep in its shared memory is in the memory of the request 
 
 - every script with `opcache.enable=0` or `opcache.file_cache_only=1`;
 - code passed to `eval()`;
-- a script OPcache compiles without caching it — a blacklisted one, say, one changed too recently for OPcache to cache it, under `opcache.file_update_protection`, or one compiled while OPcache's shared memory is full.
+- a script OPcache compiles without caching it — a blacklisted one, say, one changed too recently for OPcache to cache it, under `opcache.file_update_protection`, or one compiled while OPcache's shared memory is full;
+- a script OPcache reads from `opcache.file_cache` into the request's own memory, which it does while its shared memory is full or restarting.
 
 A factory or destroy callback whose code is in such memory runs only on the thread that created the pool. On every other thread it is refused before its first statement runs, the same way as under [What a callback may reach on another thread](#what-a-callback-may-reach-on-another-thread): an acquire that would run the factory throws an `Error` — saying that the code is not in OPcache's shared memory, unless [that check](#what-the-check-covers) refuses it first — and the destroy callback is skipped. So without OPcache's shared memory a pool whose factory is written in PHP makes slots only on the thread that created it.
 
 What is checked here is the function or method the call runs first. A method of a parent class or a trait whose code is outside OPcache's shared memory, called through `parent::`, `self::` or `static::` from code in it — a class in a cached file that extends one in a blacklisted file, say — does not run there either: such a class is linked in request memory and is refused for that, as under [Enums and other classes linked in request memory](#enums-and-other-classes-linked-in-request-memory).
 
 Nor is a pool created inside a task from code the task was handed covered: on that task's thread its callbacks run from the memory of the request that dispatched the task, which can end before the pool does.
-
-And one kind of code is not always recognised, and a callback in it then still runs on other threads: code that OPcache's file cache keeps in a request's memory — with `opcache.file_cache_only=1`, say — when a thread other than the one creating the pool loaded it, as for such a pool, or while PHP's own allocator is switched off with `USE_ZEND_ALLOC=0` or replaced by an extension.
 
 ### Closures and callables on another thread
 
