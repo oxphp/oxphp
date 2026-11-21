@@ -262,7 +262,7 @@ Enters the persistent worker mode loop. OxPHP calls `$handler` once for each inc
 
 The worker loop exits when any of the following conditions are met:
 - The server shuts down gracefully
-- 3 consecutive requests come apart — a fatal error in the handler is the usual one, with two failures around the request's fiber counting alongside it (an uncaught exception is answered and does not count, and neither does a request the server cancelled unless a fatal was reported on it as well — see [Worker mode → Recycling](../features/worker-recycling.md#recycling))
+- 3 consecutive requests come apart — a fatal error in the handler is the usual one, with two failures around the request's fiber counting alongside it (an uncaught exception is answered and does not count, and neither does a request the server cancelled unless a fatal was reported on it as well — see [Worker Recycling](../features/worker-recycling.md#recycling))
 - The worker exceeds `WORKER_MAX_MEMORY_MIB`
 - A request was ended with an internal function's call on its stack and the worker's memory usage then grew past a threshold, not counting the fibers it created, measured between two moments with no request in flight — see [Recycling](../features/worker-recycling.md#recycling)
 - The application calls [`Worker::scheduleExit()`](worker-class.md#scheduleexit)

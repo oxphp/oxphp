@@ -65,7 +65,7 @@ Three consequences follow:
 
 1. Sessions on one worker are open one after another, even for different clients, so a request that keeps its session open across a suspension point holds up the sessions of every other request on its worker, and every request the worker has not taken yet, for that long.
 2. A request that, with its session open, waits for something only a request the worker has not taken yet, or one waiting in `session_start()`, could provide does not get it until the session is closed: with `PHP_WORKERS=1`, an HTTP call back to the server is not served until then, and fails once the caller's timeout or the server's queue wait runs out, and a wait with no timeout of its own does not end.
-3. `session_start()` cannot wait inside a fiber a userland scheduler such as Revolt or AMPHP started, where switching is blocked, or in the cleanup a worker runs after a request has come apart (see [Where the `sleep` hooks do not suspend](runtime-hooks.md#where-the-sleep-hooks-do-not-suspend) for both), because what it would wait for runs on the same thread: there, while another request on the worker has a session open, it raises a warning and returns `false`.
+3. `session_start()` cannot wait inside a fiber a userland scheduler such as Revolt or AMPHP started, whose context OxPHP cannot resume, or in the cleanup a worker runs after a request has come apart (see [Where the `sleep` hooks do not suspend](runtime-hooks.md#where-the-sleep-hooks-do-not-suspend) for both), because what it would wait for runs on the same thread: there, while another request on the worker has a session open, it raises a warning and returns `false`.
 
 #### The save handler's lock
 
