@@ -4,6 +4,10 @@ All notable changes to OxPHP are documented in this file.
 
 ## [Unreleased]
 
+### Changed
+
+- **A `Shared\Pool` factory or destroy callback whose code OPcache's file cache holds in a request's memory is now refused on other PHP threads in two more cases: when a thread other than the one creating the pool loaded that code, and when PHP's own allocator is switched off with `USE_ZEND_ALLOC=0` or replaced by an extension.** OxPHP told such code from code in OPcache's shared memory by asking PHP's allocator whether the calling thread owned the memory, and took memory of another thread, or any memory under another allocator, for shared memory. It now checks the code's address against OPcache's shared memory itself. The same check decides how an `oxphp_async()` task treats its closure's code, so in these two cases a task now gets what code outside OPcache's shared memory gets: the end of the request that dispatched it waits for it to stop, as [Async Promises](docs/features/async-promises.md#timeouts-cancel-the-abandoned-task) describes.
+
 ### Fixed
 
 - **An `oxphp_async()` task made from a function with `static` variables, such as `oxphp_async(make(...))`, no longer uses that function's `static` table after its thread has freed it.** A closure made from a function with `f(...)` or `Closure::fromCallable()` uses the function's `static` variables rather than a copy of its own, and the task's thread freed the table it had built for such a task as soon as the task first waited or returned. A task that reached its `static` variables only after it had waited, in `oxphp_async_await()` for instance, read and wrote memory the thread had since reused for something else: a counter could start from a number another array held. Such a task now keeps a table of its own while it runs, as a task made from any other closure does.

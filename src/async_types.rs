@@ -83,7 +83,7 @@ pub struct AsyncTask {
     /// outside shared memory is flagged at dispatch, and the dispatching request
     /// then keeps its closure until the task has ended (see
     /// `PromiseCleanup::code_in_request_memory` and
-    /// `oxphp_op_array_in_request_memory`, which names the cases it cannot tell).
+    /// `oxphp_op_array_in_request_memory`).
     pub op_array_buf: *mut u8,
     /// Size of the op_array_buf (sizeof(zend_op_array)).
     pub op_array_buf_len: usize,

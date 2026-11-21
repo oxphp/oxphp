@@ -15,6 +15,7 @@
 #include <poll.h>
 #if defined(__linux__)
 #include <dlfcn.h>
+#include <pthread.h>
 #include <link.h>
 #endif
 
@@ -2100,25 +2101,63 @@ size_t oxphp_op_array_size(void) {
     return sizeof(zend_op_array);
 }
 
+/* The prefix of OPcache's zend_shared_segment and zend_smm_shared_globals
+ * (ext/opcache/zend_shared_alloc.h, the same in PHP 8.4, 8.5 and 8.6). OPcache
+ * exports smm_shared_globals but not zend_accel_in_shm(), which this repeats. */
+typedef struct {
+    size_t size;
+    size_t end;
+    size_t pos;
+    void *p;
+} oxphp_opcache_shm_segment;
+
+typedef struct {
+    oxphp_opcache_shm_segment **shared_segments;
+    int shared_segments_count;
+} oxphp_opcache_smm_globals;
+
+static oxphp_opcache_smm_globals **oxphp_opcache_smm;
+static pthread_once_t oxphp_opcache_smm_once = PTHREAD_ONCE_INIT;
+
+static void oxphp_opcache_smm_resolve(void) {
+    oxphp_opcache_smm = dlsym(RTLD_DEFAULT, "smm_shared_globals");
+}
+
+/* Whether OPcache keeps scripts in shared memory. Needs module startup done. */
+static bool oxphp_opcache_has_shm(void) {
+    pthread_once(&oxphp_opcache_smm_once, oxphp_opcache_smm_resolve);
+    return oxphp_opcache_smm && *oxphp_opcache_smm;
+}
+
+/* Whether `ptr` is in OPcache's shared memory. Needs module startup done, which
+ * loads OPcache and maps that memory; false when OPcache has none — not loaded,
+ * opcache.enable=0 or opcache.file_cache_only. */
+static bool oxphp_in_opcache_shm(const void *ptr) {
+    pthread_once(&oxphp_opcache_smm_once, oxphp_opcache_smm_resolve);
+    const oxphp_opcache_smm_globals *smm = oxphp_opcache_smm ? *oxphp_opcache_smm : NULL;
+    if (!smm) {
+        return false;
+    }
+    for (int i = 0; i < smm->shared_segments_count; i++) {
+        const oxphp_opcache_shm_segment *seg = smm->shared_segments[i];
+        if ((const char *)ptr >= (const char *)seg->p
+                && (const char *)ptr < (const char *)seg->p + seg->end) {
+            return true;
+        }
+    }
+    return false;
+}
+
 /*
- * OPcache gives an op_array it stores in shared memory no refcount; one the
- * request compiled itself — OPcache off, eval()'d code, or a file it did not
- * cache — counts its users in a refcount allocated with it. A script OPcache
- * holds for its file cache in the request's own memory, read from that cache
- * or compiled for it (opcache.file_cache_only, or shared memory full or
- * restarting), has no refcount either, but its opcodes are in this thread's
- * Zend heap. That check sees only this thread's heap, so a file-cache script
- * another thread loaded is not told apart from one in shared memory (a task
- * dispatching a closure it created from the code of the request that
- * dispatched it). Nor is one when the Zend heap is not in use: with
- * USE_ZEND_ALLOC=0 the check finds nothing, and with USE_TRACKED_ALLOC=1 too
- * it finds only the start of an allocation, while these opcodes lie inside a
- * block of the request's arena; an extension that installs its own allocator
- * handlers has the same effect.
+ * OPcache gives an op_array it stores in shared memory no refcount, and so it
+ * gives one it holds for its file cache in a request's own memory, read from
+ * that cache or compiled for it (opcache.file_cache_only, or shared memory full
+ * or restarting). Whatever is not in shared memory is in the memory of the
+ * request that compiled or loaded it.
  */
 int oxphp_op_array_in_request_memory(const void *op_array) {
     const zend_op_array *op = (const zend_op_array *)op_array;
-    return op->refcount != NULL || is_zend_ptr(op->opcodes);
+    return op->refcount != NULL || !oxphp_in_opcache_shm(op->opcodes);
 }
 
 /* ─── Worker Mode ─────────────────────────────────────────── */

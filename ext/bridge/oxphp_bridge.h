@@ -1044,7 +1044,7 @@ size_t oxphp_op_array_size(void);
 /** Return 1 when the body of this op_array (opcodes, literals, names) lives in
  * a request's memory rather than in OPcache's shared memory, so it can be freed
  * once its last user lets go of it or that request ends; 0 when it lives in
- * shared memory, and in the cases the definition notes it cannot tell. */
+ * OPcache's shared memory. */
 int oxphp_op_array_in_request_memory(const void *op_array);
 
 /** Trigger zend_bailout() — safely abort PHP execution from SAPI callbacks. */
@@ -1722,8 +1722,7 @@ uint64_t oxphp_bridge_current_fiber_id(void);
  * thread whose code its dispatcher found in request memory rather than in
  * OPcache shared memory, 0 elsewhere and when the extension is absent. Rust
  * passes it on to the tasks that task dispatches: a closure it creates is part
- * of its code, which oxphp_op_array_in_request_memory cannot always place from
- * the task's thread. */
+ * of its code. */
 typedef int (*oxphp_current_task_code_in_request_memory_fn_t)(void);
 void oxphp_bridge_set_current_task_code_in_request_memory_fn(
     oxphp_current_task_code_in_request_memory_fn_t fn);

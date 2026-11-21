@@ -4318,9 +4318,8 @@ pub unsafe extern "C" fn async_dispatch_callback(
             cleanup.closure_zval = obj_ptr;
         }
     }
-    // A closure a task created is part of that task's code, which the check
-    // cannot always place from the task's thread: it sees only this thread's
-    // heap. So what the task's own dispatcher found carries over.
+    // A closure a task created is part of that task's code, so what the task's
+    // own dispatcher found carries over.
     cleanup.code_in_request_memory = ffi::oxphp_op_array_in_request_memory(op_array) != 0
         || ffi::oxphp_bridge_current_task_code_in_request_memory() != 0;
 
