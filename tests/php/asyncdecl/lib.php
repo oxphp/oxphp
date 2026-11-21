@@ -380,3 +380,18 @@ class AsyncDeclPreScopeMagic
         return new \stdClass();
     }
 }
+
+// A `static` a task reaches only after it waited, with memory allocated in
+// between: a task made from this function runs with the table its closure was
+// given past the wait.
+function asyncdecl_pre_static_after_a_wait(bool $wait): array
+{
+    $waited = $wait ? oxphp_async_await(oxphp_async(static fn (): int => 1)) : 1;
+    $junk = [];
+    for ($i = 0; $i < 512; $i++) {
+        $junk[] = ['k' . $i => 1000 + $i];
+    }
+    static $calls = 0;
+    $calls++;
+    return [$waited, $calls, count($junk)];
+}

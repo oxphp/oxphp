@@ -750,6 +750,9 @@ typedef struct _oxphp_request_fiber {
      * oxphp_finish_request(), both get the whole drain window; the deadline
      * (hard) phase kills every suspended fiber regardless. */
     zval task_closure;              /* owned: dtor at finalize */
+    HashTable *task_static_vars;    /* owned: the `static` table task_closure uses and does
+                                     * not free (oxphp_reconstruct_async_closure), destroyed
+                                     * after it and task_retval; NULL if none */
     zend_fcall_info task_fci;
     zend_fcall_info_cache task_fcc;
     zval *task_args;                /* borrowed (Rust-owned) */

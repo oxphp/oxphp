@@ -3789,6 +3789,11 @@ static void oxphp_fiber_free_task_payload(oxphp_request_fiber *fiber) {
         zval_ptr_dtor(&fiber->task_retval);
         ZVAL_UNDEF(&fiber->task_retval);
     }
+    if (fiber->task_static_vars) {
+        HashTable *statics = fiber->task_static_vars;
+        fiber->task_static_vars = NULL;
+        zend_array_destroy(statics);
+    }
     if (fiber->task_exc_class) {
         free(fiber->task_exc_class);
         fiber->task_exc_class = NULL;
@@ -9757,6 +9762,7 @@ int64_t oxphp_async_sched_spawn(void *op_array, void *static_vars,
     fiber->task_code_in_request_memory = code_in_request_memory != 0;
     ZVAL_UNDEF(&fiber->task_retval);
     ZVAL_UNDEF(&fiber->task_closure);
+    fiber->task_static_vars = NULL;
 
     /* Link into the active list */
     fiber->prev = sched->fibers_tail;
@@ -9793,7 +9799,7 @@ int64_t oxphp_async_sched_spawn(void *op_array, void *static_vars,
     int rc = oxphp_reconstruct_async_closure(
             (zend_op_array *)op_array, (HashTable *)static_vars, closure_this,
             &fiber->task_closure, &fiber->task_fci, &fiber->task_fcc,
-            &exc_class, &exc_message);
+            &fiber->task_static_vars, &exc_class, &exc_message);
     if (this_zv) {
         zval_ptr_dtor(this_zv);
     }
@@ -10082,13 +10088,20 @@ static void oxphp_task_release_payload_guarded(oxphp_request_fiber *fiber) {
     zval closure, retval;
     ZVAL_COPY_VALUE(&closure, &fiber->task_closure);
     ZVAL_COPY_VALUE(&retval, &fiber->task_retval);
+    HashTable *statics = fiber->task_static_vars;
     ZVAL_UNDEF(&fiber->task_closure);
     ZVAL_UNDEF(&fiber->task_retval);
+    fiber->task_static_vars = NULL;
 
     oxphp_vm_stack_mark mark;
     oxphp_task_window_open(&mark);
     OXPHP_TASK_WINDOW_STEP(&mark, zval_ptr_dtor(&closure));
     OXPHP_TASK_WINDOW_STEP(&mark, zval_ptr_dtor(&retval));
+    /* Last: the closure reads the table, and so can a value the task returned
+     * that holds the closure, such as a generator. */
+    if (statics) {
+        OXPHP_TASK_WINDOW_STEP(&mark, zend_array_destroy(statics));
+    }
     oxphp_task_window_close(&mark);
 }
 

@@ -1951,9 +1951,13 @@ void oxphp_arr_add_index_zval(zval *arr, zend_ulong idx, zval *val);
 /* Reconstruct an async closure from a transferred op_array + static_vars on
  * THIS thread's heap (run_time_cache + static_variables MAP_PTR fixups for
  * cross-thread safety). Fills *out_closure (caller dtors with zval_ptr_dtor),
- * fci, fcc. Returns 0 on success; -1 on failure (fills exc_class/message with
- * malloc'd strings and dtors the closure). Used by the fiber-mode async
- * scheduler to reconstruct a task closure on the worker thread. */
+ * fci, fcc. `static_vars` stays the caller's. For a closure made from a
+ * function, *out_own_static_vars is the copy of it the closure uses and does
+ * not free: the caller destroys it with zend_array_destroy() once the closure
+ * is released; NULL otherwise. Returns 0 on success; -1 on failure (fills
+ * exc_class/message with malloc'd strings, dtors the closure and the copy).
+ * Used by the fiber-mode async scheduler to reconstruct a task closure on the
+ * worker thread. */
 int oxphp_reconstruct_async_closure(
     zend_op_array *op_array,
     HashTable *static_vars,
@@ -1961,6 +1965,7 @@ int oxphp_reconstruct_async_closure(
     zval *out_closure,
     zend_fcall_info *fci,
     zend_fcall_info_cache *fcc,
+    HashTable **out_own_static_vars,
     char **exc_class,
     char **exc_message
 );

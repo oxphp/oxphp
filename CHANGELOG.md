@@ -4,6 +4,11 @@ All notable changes to OxPHP are documented in this file.
 
 ## [Unreleased]
 
+### Fixed
+
+- **An `oxphp_async()` task made from a function with `static` variables, such as `oxphp_async(make(...))`, no longer uses that function's `static` table after its thread has freed it.** A closure made from a function with `f(...)` or `Closure::fromCallable()` uses the function's `static` variables rather than a copy of its own, and the task's thread freed the table it had built for such a task as soon as the task first waited or returned. A task that reached its `static` variables only after it had waited, in `oxphp_async_await()` for instance, read and wrote memory the thread had since reused for something else: a counter could start from a number another array held. Such a task now keeps a table of its own while it runs, as a task made from any other closure does.
+- **An `oxphp_async()` task no longer leaves a block of memory behind on its thread.** Each task's closure was given a cache for what its code looks up (properties, methods, functions, classes) that PHP never used, because PHP gives the closure a cache of its own, and nothing freed the unused one until the thread exited: at server stop, or when an OPcache restart replaces the thread. A thread of `ASYNC_WORKERS` therefore grew with every task it ran, by about 2 KB for a closure that writes and reads 40 properties and by a few dozen bytes for a small one.
+
 ## [0.16.0] - 2026-11-22
 
 ### Migration from 0.15.0
