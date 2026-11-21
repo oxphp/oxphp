@@ -132,6 +132,14 @@ if (is_file($afterLoopArmed)) {
     );
 }
 
+// For the fiberstack profile: a line in the server log that says the code after
+// the loop was reached, which an exception still pending when the loop returns
+// would skip — it surfaces at the call above as an uncaught one instead. Only
+// the profile that sets the variable writes it.
+if (getenv('OXPHP_TEST_AFTER_LOOP_LOG') === '1') {
+    error_log('oxphp-test: entry script ran past oxphp_worker()');
+}
+
 // For recycle/test_rshutdown_fatal_*: a fatal error inside an extension's
 // request shutdown as the worker's thread exits. Armed the same way.
 $rshutdownFatalArmed = sys_get_temp_dir() . '/oxphp-entry-rshutdown-fatal.armed';

@@ -1,0 +1,34 @@
+# Async tasks whose fiber cannot be started: traditional routing, one async
+# worker, and a fiber.stack_size (asyncstack.ini) below the engine's minimum, so
+# the engine refuses the C stack of every task fiber. The requests that dispatch
+# the tasks run on the worker thread's own stack and are not affected. A profile
+# of its own because the directive applies to every task the server runs.
+#
+# Standalone usage:
+#   docker compose -f compose.yml -f compose.asyncstack.yml up
+services:
+  oxphp-asyncstack:
+    build:
+      context: ..
+      dockerfile: docker/dev/Dockerfile
+      args:
+        PHP_VERSION:
+        BASE_IMAGE:
+    ports:
+      - "80"
+    networks: [test-net]
+    restart: "no"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:9090/health"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+      start_period: 5s
+    environment:
+      LOG_LEVEL: error
+      INTERNAL_ADDR: 0.0.0.0:9090
+      ASYNC_WORKERS: 1
+    volumes:
+      - ../www:/var/www/html
+      - ./php:/var/www/html/public/tests
+      - ./asyncstack.ini:/usr/local/etc/php/conf.d/zz-asyncstack.ini:ro
