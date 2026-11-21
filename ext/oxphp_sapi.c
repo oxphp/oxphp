@@ -2172,28 +2172,31 @@ static bool oxphp_contended_log_ready(int64_t *last_ns)
  * application whose error handler throws on warnings would unwind where a
  * timed-out read does not. Carries the descriptor, so a log full of these can be
  * read as one connection in trouble or as many. */
+#define OXPHP_STREAM_CLAIM_REFUSED_LOG                                                      \
+    "oxphp: refused a socket operation on fd %d because another fiber holds this stream "   \
+    "(%s). One connection is shared between concurrent fibers, so the operation fails the " \
+    "way a timeout would rather than landing inside that fiber's exchange. That can cost "  \
+    "more than the call, on either side of an exchange: a client is free to read a "        \
+    "refused operation as the server having gone, and mysqlnd does so for both — a write "  \
+    "that sends nothing and a read that comes away empty each mark the connection gone, "   \
+    "and it is answered as gone from then on, for as long as anything holds the handle. "   \
+    "phpredis closes the connection on a refused read of a reply line. Any other refused "  \
+    "read fails the call and leaves the rest of that reply unread on the connection, "      \
+    "unless phpredis goes on to read another line of it, which closes it — except in a "    \
+    "build of its development branch from commit 7ad2f79 on, which closes it on every "     \
+    "refused read. A build of that branch from commit 48a46c7 on closes it on a refused "   \
+    "write too (further refusals on this thread are logged at most once a second)"
+
 static void oxphp_stream_claim_refused_log(int fd, const char *why)
 {
     static __thread int64_t last_ns = 0;
     if (!oxphp_contended_log_ready(&last_ns)) return;
 
     /* Plain buffer rather than zend_strpprintf: this can be reached from a
-     * shutdown path with no request arena, and the message is bounded. */
-    char msg[1024];
-    snprintf(msg, sizeof(msg),
-             "oxphp: refused a socket operation on fd %d because another fiber holds this "
-             "stream (%s). One connection is shared between concurrent fibers, so the "
-             "operation fails the way a timeout would rather than landing inside that "
-             "fiber's exchange. That can cost more than the call, on either side of an "
-             "exchange: a client is free to read a refused operation as the server having "
-             "gone, and mysqlnd does so for both — a write that sends nothing and a read "
-             "that comes away empty each mark the connection gone, and it is answered as "
-             "gone from then on, for as long as anything holds the handle. phpredis closes "
-             "the connection on a refused read of a reply line. Any other refused read fails "
-             "the call and leaves the rest of that reply unread on the connection, unless "
-             "phpredis goes on to read another line of it, which closes it. Built from its "
-             "development branch, it closes it on a refused write too (further refusals on "
-             "this thread are logged at most once a second)", fd, why);
+     * shutdown path with no request arena. Sized from the text, so that only the
+     * descriptor and the reason — a short literal at every caller — add to it. */
+    char msg[sizeof(OXPHP_STREAM_CLAIM_REFUSED_LOG) + 256];
+    snprintf(msg, sizeof(msg), OXPHP_STREAM_CLAIM_REFUSED_LOG, fd, why);
     php_log_err(msg);
 }
 
@@ -2300,9 +2303,9 @@ static bool oxphp_write_may_wait(const php_stream *stream)
  * using at that moment; here the refusal is confined to the holder being parked on
  * this descriptor for its reply, which is the one window where the operation would
  * land inside its exchange. phpredis built from its development branch closes the
- * connection on a refused write, so phpredis calls are refused a level up as well,
- * while the holder is inside a call on the connection: see
- * oxphp_redis_mid_exchange(). */
+ * connection on a refused write from commit 48a46c7 on, so phpredis calls are
+ * refused a level up as well, while the holder is inside a call on the connection:
+ * see oxphp_redis_mid_exchange(). */
 static oxphp_stream_claim_result oxphp_stream_claim(php_stream *stream,
                                                    const php_netstream_data_t *sock,
                                                    oxphp_request_fiber *self, bool may_wait)
@@ -2840,8 +2843,9 @@ static ssize_t oxphp_sockop_write_plain(php_stream *stream, const char *buf, siz
              * answered from that state without touching the wire, so what is lost
              * is the connection rather than the call, for as long as anything
              * holds the handle. phpredis built from its development branch closes
-             * the connection on a write that fails, and the close wakes the holder
-             * parked on it. The read side is reached the same way this one is,
+             * the connection on a write that fails from commit 48a46c7 on, and on
+             * any read that does from 7ad2f79 on; the close wakes the holder parked
+             * on it. The read side is reached the same way this one is,
              * through the calls a claim does not stand in front of. That is what
              * makes this the last resort rather than the mechanism — a guarded
              * client's calls from a fiber are kept from reaching here by the claim
