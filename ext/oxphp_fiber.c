@@ -2789,6 +2789,24 @@ static void oxphp_task_exc_free(oxphp_request_fiber *fiber) {
     fiber->task_exc_message = NULL;
 }
 
+/* Lets go of what a fiber's switch back to the scheduler handed over: null, or
+ * the value of a foreign Fiber::suspend(), which that call's frame still holds
+ * while the fiber is suspended in it, so nothing is freed here.
+ *
+ * Registered as a possible root: the frame drops its own copy without
+ * registering one, leaving that to whoever received the value (8.4.28 / 8.5.13
+ * / 8.6.0 zend_vm_stack_free_args()), and a cycle the value closes that no
+ * collection holds in its buffer would not be collected before the executor
+ * ends. With the collector off, which still buffers the root
+ * (gc_possible_root_when_full()): a collection started here would run the
+ * destructors it finds outside any fiber — on the async worker's driver, over
+ * no frame for what they throw. */
+static void oxphp_fiber_drop_switch_value(zval *value) {
+    bool gc_was_enabled = gc_enable(false);
+    zval_ptr_dtor(value);
+    gc_enable(gc_was_enabled);
+}
+
 /* End a request or task that will not stop suspending itself. A graceful exit is
  * what the engine uses to unwind a fiber nobody will resume again: no catch block
  * matches it, so this terminates however many nested try/catch frames the retry
@@ -2835,8 +2853,7 @@ static void oxphp_fiber_end_after_refusals(oxphp_request_fiber *fiber) {
         oxphp_fiber_resume_token = fiber;
         zend_fiber_resume_exception(fiber->zf, &exit_obj, &retval);
         oxphp_fiber_resume_token = NULL;
-        /* As in oxphp_fiber_enter(). */
-        zval_ptr_dtor_nogc(&retval);
+        oxphp_fiber_drop_switch_value(&retval);
 
         if (UNEXPECTED(EG(exception))) {
             zend_clear_exception();
@@ -2912,8 +2929,7 @@ static void oxphp_fiber_refuse_foreign_suspend(oxphp_request_fiber *fiber) {
         oxphp_fiber_resume_token = fiber;
         zend_fiber_resume_exception(fiber->zf, &err, &retval);
         oxphp_fiber_resume_token = NULL;
-        /* As in oxphp_fiber_enter(). */
-        zval_ptr_dtor_nogc(&retval);
+        oxphp_fiber_drop_switch_value(&retval);
 
         if (UNEXPECTED(EG(exception))) {
             zend_clear_exception();
@@ -3006,13 +3022,7 @@ void oxphp_fiber_enter(oxphp_request_fiber *fiber, zval *value) {
         oxphp_fiber_resume_token = NULL;
     }
 
-    /* Without registering a possible root. What a foreign Fiber::suspend() hands
-     * out is still held by that call's frame while the fiber is suspended in it,
-     * so dropping it here does not free it; registered, it could be the root that
-     * fills the collector's buffer, and the collection that starts then would run
-     * the destructors it finds here, outside any fiber — on the async worker's
-     * driver, over no frame for what they throw. */
-    zval_ptr_dtor_nogc(&retval);
+    oxphp_fiber_drop_switch_value(&retval);
 
     /* The loop catches everything a handler can throw, so an exception arriving
      * here is the fiber itself unwinding (destruction, bailout forwarding). The
@@ -10001,9 +10011,10 @@ int64_t oxphp_async_sched_spawn(void *op_array, void *static_vars,
             &fiber->task_closure, &fiber->task_fci, &fiber->task_fcc,
             &fiber->task_static_vars, &exc_class, &exc_message);
     if (this_zv) {
-        /* As in oxphp_fiber_enter(), on the driver: the closure holds the proxy
-         * too where the reconstruction bound it, and where it failed first this
-         * frees the proxy, which needs no root either. */
+        /* Without registering a possible root, which on the driver could start
+         * a collection there (oxphp_fiber_drop_switch_value()), and the proxy
+         * needs none: only the closure can hold it yet, so it closes no cycle.
+         * Where the reconstruction failed first, this frees it. */
         zval_ptr_dtor_nogc(this_zv);
     }
     if (rc != 0) {

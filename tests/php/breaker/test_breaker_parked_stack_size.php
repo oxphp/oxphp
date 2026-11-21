@@ -11,18 +11,20 @@ require_once __DIR__ . '/../test_helper.php';
 // serve every request after it — so they are sized as the worker serves, not
 // by what this request set.
 //
-// 32K is enough for a fiber to start and less than the zend.reserved_stack_size
-// the engine keeps free below its call-stack limit, so a fiber sized by it
-// leaves the handler no stack at all and a request on it cannot run: on PHP 8.4
-// and 8.5 it throws "Maximum call stack size of 0 bytes" on its first call and
-// answers 500.
+// With 4K pages, 32K is enough for a fiber to start and less than the
+// zend.reserved_stack_size the engine keeps free below its call-stack limit, so
+// a fiber sized by it leaves the handler no stack at all and a request on it
+// cannot run: on PHP 8.4 and 8.5 it throws "Maximum call stack size of 0 bytes"
+// on its first call and answers 500.
 //
 // Right after a replacement worker has booted, so the pool holds only the fiber
 // this request runs on and each of the three gets a fiber started for it.
 //
 // The value is still this request's for a Fiber it starts itself, once the
 // worker has started its own in between: such a fiber gets 32K and fails its
-// first call, where one given the worker's size would run it.
+// first call, where one given the worker's size would run it. With pages
+// larger than 4K, 32K can fall below the two pages the engine maps for a fiber
+// at the least, and the start itself is refused — again only for one given 32K.
 
 $t = new TestCase('breaker_parked_stack_size', 'breaker');
 
@@ -53,9 +55,9 @@ foreach ($socks as $i => $sock) {
 
 try {
     $own = (new \Fiber(static fn (): string => 'ran'))->start();
-} catch (\Error $e) {
+} catch (\Throwable $e) {
     $own = $e->getMessage();
 }
-$t->assertContains("a Fiber of the request's own is sized by its setting", (string) $own, 'Maximum call stack size of 0 bytes');
+$t->assertMatch("a Fiber of the request's own is sized by its setting", (string) $own, '/Maximum call stack size of 0 bytes|Fiber stack size is too small/');
 
 $t->done();
