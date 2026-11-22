@@ -117,6 +117,7 @@ hooksdb/test_persistent_ctor_driver_without_liveness
 # still wait.
 hooksdb/test_persistent_ctor_gate_per_source
 hooksdb/test_persistent_ctor_gate_spellings
+hooksdb/test_persistent_ctor_gate_refuses_where_switching_is_blocked
 
 # And the state that answer is not given in, which is most of a pooled
 # connection's life: live, referenced by the handle the worker keeps, and claimed

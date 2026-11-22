@@ -72,8 +72,8 @@ $t = new TestCase('a_channel_wait_without_a_timeout_throws_where_a_request_canno
 $t->meta('results', $results);
 $t->meta('partners', $partners);
 
-$recvRefused = 'OxPHP\Shared\SharedException: Channel::recv() found nothing to receive and cannot wait without a timeout where this request or task cannot be suspended; use recvTimeout()';
-$sendRefused = 'OxPHP\Shared\SharedException: Channel::send() found the channel full and cannot wait without a timeout where this request or task cannot be suspended; use sendTimeout()';
+$recvRefused = 'OxPHP\Shared\SharedException: Channel::recv() found nothing to receive and cannot wait without a timeout where the code running cannot be suspended; use recvTimeout()';
+$sendRefused = 'OxPHP\Shared\SharedException: Channel::send() found the channel full and cannot wait without a timeout where the code running cannot be suspended; use sendTimeout()';
 foreach (['filter-recv', 'multisort-recv', 'multisort-fiber-recv', 'multisort-gc-recv', 'superglobal-recv'] as $case) {
     $t->assertSame("$case: recv() throws", $results[$case]['outcome'] ?? null, $recvRefused);
     $t->assertTrue("$case: recv() threw without waiting", ($results[$case]['elapsed'] ?? 1.0) < 0.1);

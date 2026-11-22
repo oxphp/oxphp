@@ -1558,6 +1558,51 @@ static bool oxphp_fiber_owns_current_context(oxphp_request_fiber *self)
     return EG(current_fiber_context) == &self->zf->context;
 }
 
+/* SAPI-side predicate for `oxphp_bridge_in_fiber`, and the test every suspend
+ * point of ours makes before it parks (oxphp_fiber_can_park). CAN_PARK only on
+ * the own context of a fiber the server runs a request or task on, with neither
+ * fiber switching nor the server's parking blocked.
+ *
+ * Switching is blocked where leaving the current frame is not safe: by the
+ * engine around a declare(ticks) handler and pcntl's signal dispatch, and by the
+ * server around code it runs on another call's behalf, such as a FILTER_CALLBACK
+ * or a comparison of array_multisort(). A switch there would return into a frame
+ * the engine is in the middle of running, which is why the userland Fiber
+ * methods refuse outright. oxphp_park_blocked is the server's own "do not park
+ * here", which leaves userland fibers alone. Every suspend point has a correct
+ * non-suspending fallback, so taking it keeps the program's meaning.
+ *
+ * The refusal is answered before the context is looked at, because a context
+ * nested in the fiber holds the same thread: a userland Fiber the request
+ * started and sorts in, or the destructor fiber the engine's GC resumes even
+ * where switching is blocked (Zend/zend_gc.c, 8.4.27 / 8.5.12). A wait there
+ * keeps every request and task parked on the thread from running. So does one
+ * with no such fiber current while a scheduler runs on the thread, which is code
+ * on the scheduler's own frame (see oxphp_schedulers_on_thread).
+ *
+ * A user-level `Fiber::start()` outside any oxphp fiber never sets
+ * `oxphp_current_fiber`, so the pointer alone answers that case. It does not
+ * answer the nested one: a userland fiber started inside an oxphp fiber runs on
+ * its own context while the pointer still names the outer fiber, and suspending
+ * from there corrupts both (see oxphp_fiber_owns_current_context). */
+int oxphp_in_oxphp_fiber(void) {
+    if (oxphp_current_fiber == NULL) {
+        return oxphp_schedulers_on_thread > 0 ? OXPHP_IN_FIBER_PARK_REFUSED : OXPHP_IN_FIBER_NO;
+    }
+    if (zend_fiber_switch_blocked() || oxphp_park_blocked) {
+        return OXPHP_IN_FIBER_PARK_REFUSED;
+    }
+    if (!oxphp_fiber_owns_current_context(oxphp_current_fiber)) {
+        return OXPHP_IN_FIBER_NO;
+    }
+    return OXPHP_IN_FIBER_CAN_PARK;
+}
+
+static inline bool oxphp_fiber_can_park(void)
+{
+    return oxphp_in_oxphp_fiber() == OXPHP_IN_FIBER_CAN_PARK;
+}
+
 /* Take the cancellation a resumed fiber was handed. Every suspend point answers a
  * cancellation the same way, and every one of them ends the parking of this fiber
  * in libc-level waits for good: what runs next is cleanup, and a connect in a
@@ -1575,22 +1620,13 @@ static inline bool oxphp_fiber_take_cancel(oxphp_request_fiber *self)
 
 /* Internal: register timer and suspend current fiber.
  * duration_us is the sleep duration in microseconds.
- * Returns 1 if fiber-suspended (timer expired), 0 if no fiber (use blocking
- * fallback), -1 if the task was cancelled while sleeping (caller throws). */
+ * Returns 1 if fiber-suspended (timer expired), 0 where it cannot park (use
+ * the blocking fallback), -1 if the task was cancelled while sleeping (caller
+ * throws). */
 static int oxphp_fiber_sleep_us(uint64_t duration_us)
 {
-    if (oxphp_current_fiber == NULL) return 0;
-    if (!oxphp_fiber_owns_current_context(oxphp_current_fiber)) return 0;
-    /* The engine blocks fiber switching where leaving the current frame is not
-     * safe — around a declare(ticks) handler, and around pcntl's signal
-     * dispatch. Take the blocking path there, for the same reason the userland
-     * Fiber methods refuse outright: a switch would return into a frame the
-     * engine is in the middle of running on someone else's behalf. Returning 0
-     * rather than throwing keeps the program's meaning, since every suspend
-     * point already has a correct non-suspending fallback. The other three
-     * suspend points carry the same guard, and oxphp_park_blocked beside it:
-     * the server's own "do not park here", which leaves userland fibers alone. */
-    if (zend_fiber_switch_blocked() || oxphp_park_blocked) return 0;
+    /* Not where it can park — see oxphp_in_oxphp_fiber(). */
+    if (!oxphp_fiber_can_park()) return 0;
     /* A request that ran past memory_limit is handed its error before it
      * parks, not after: the requests the thread runs meanwhile would otherwise
      * be the ones the engine reports it into — see oxphp_report_pending_oom().
@@ -1641,8 +1677,8 @@ static int oxphp_fiber_sleep_us(uint64_t duration_us)
  * has to supply the room, this fills it in.
  *
  * timeout_ns < 0 waits indefinitely. Returns 1 when a descriptor is ready,
- * 0 when not called from a fiber (or the set is unusable, or the scheduler
- * cannot watch it), -1 when the fiber was cancelled, -2 when the deadline
+ * 0 where it cannot park (or the set is unusable, or the scheduler cannot
+ * watch it), -1 when the fiber was cancelled, -2 when the deadline
  * elapsed first, and OXPHP_FIBER_DRAINED for a drain kill of a wait libcurl
  * makes (see oxphp_curl_op), which every other wait bails for.
  *
@@ -1655,10 +1691,8 @@ static int oxphp_fiber_sleep_us(uint64_t duration_us)
 static int oxphp_fiber_io_wait(struct pollfd *fds, struct oxphp_io_owner *owners,
                                uint32_t nfds, int64_t timeout_ns)
 {
-    if (oxphp_current_fiber == NULL) return 0;
-    if (!oxphp_fiber_owns_current_context(oxphp_current_fiber)) return 0;
-    /* Switching blocked — see oxphp_fiber_sleep_us. */
-    if (zend_fiber_switch_blocked() || oxphp_park_blocked) return 0;
+    /* Not where it can park — see oxphp_in_oxphp_fiber(). */
+    if (!oxphp_fiber_can_park()) return 0;
     if (fds == NULL || owners == NULL || nfds == 0 || nfds > OXPHP_MAX_WAIT_FDS) return 0;
     /* Out of memory — see oxphp_fiber_sleep_us. */
     if (oxphp_park_refused_for_oom()) return OXPHP_FIBER_UNWIND;
@@ -3803,9 +3837,8 @@ static oxphp_claim_wait_end oxphp_claim_await(void *const *keys, size_t nkeys,
     uint64_t step_us = OXPHP_STREAM_CLAIM_POLL_US;
     for (;;) {
         int rc = oxphp_fiber_sleep_us(step_us);
-        /* Nothing to suspend into — outside a fiber, or under a userland fiber
-         * scheduler whose context ours cannot resume. Blocking the thread would
-         * deadlock against the holder, which needs it. */
+        /* Cannot park here (see oxphp_in_oxphp_fiber()). Blocking the thread
+         * would deadlock against the holder, which needs it. */
         if (rc == 0) return OXPHP_CLAIM_WAIT_UNSUSPENDABLE;
         if (rc == OXPHP_FIBER_UNWIND) return OXPHP_CLAIM_WAIT_UNWOUND;
         if (rc < 0) return OXPHP_CLAIM_WAIT_CANCELLED;
@@ -3879,7 +3912,8 @@ static oxphp_stream_claim_result oxphp_db_await_owner(void *key, oxphp_request_f
             snprintf(msg, sizeof(msg),
                      "oxphp: database call on connection %p, which another fiber holds, ran "
                      "anyway because this context cannot be suspended cooperatively (a "
-                     "userland fiber scheduler owns it). The client answers for itself, "
+                     "userland fiber runs here, or fiber switching is blocked here). The "
+                     "client answers for itself, "
                      "which on a shared connection is the error it raises for a reused "
                      "connection (logged at most once a second on this thread)", key);
             php_log_err(msg);
@@ -4508,10 +4542,10 @@ static oxphp_stream_claim_result oxphp_pdo_ctor_gate_await(oxphp_request_fiber *
         }
 
         /* Out of budget, or nothing to suspend into at all — a userland fiber
-         * scheduler owns this context, and blocking the thread would deadlock
-         * against the constructor that needs it. Both leave the constructor
-         * running as it ran before this gate existed, so both say the same
-         * thing. */
+         * runs here, and blocking the thread would deadlock against the
+         * constructor that needs it. (Where switching is blocked, the caller has
+         * refused before asking.) Both leave the constructor running as it ran
+         * before this gate existed, so both say the same thing. */
         {
             static __thread int64_t last_ns = 0;
             if (oxphp_contended_log_ready(&last_ns)) {
@@ -5211,6 +5245,20 @@ static void oxphp_pdo_construct_guarded(zif_handler orig, zval *built,
         void *key = oxphp_pdo_ctor_source_key(ZEND_CALL_ARG(execute_data, 1));
         void *take = key != NULL ? key : (void *) &oxphp_pdo_ctor_any;
         bool ours = oxphp_pdo_ctor_gate_clear(self, key);
+
+        /* Where switching or parking is blocked, the fiber ahead is parked on this
+         * thread and cannot finish before this code returns, so a wait only
+         * spends the budget, and going ahead is the race in the pool the gate
+         * exists to prevent. */
+        if (!ours && oxphp_in_oxphp_fiber() == OXPHP_IN_FIBER_PARK_REFUSED) {
+            oxphp_throw_exception(
+                "PDOException",
+                "persistent connection not built: another fiber on this worker is inside "
+                "a persistent constructor this one has to wait for, and fiber switching is "
+                "blocked here, so it can neither wait nor go ahead",
+                0);
+            return;
+        }
 
         if (!ours) {
             switch (oxphp_pdo_ctor_gate_await(self, key)) {
@@ -9493,6 +9541,7 @@ static void oxphp_serve_loop(zend_fcall_info *fci, zend_fcall_info_cache *fcc)
         oxphp_scheduler_release_execution_timer(&sched);
         oxphp_scheduler_release_putenv(&sched);
         oxphp_scheduler_return_session_holder(&sched);
+        oxphp_scheduler_release_thread(&sched);
         oxphp_stream_waiters_abandon();
         zend_bailout();
     } zend_end_try();
@@ -10269,39 +10318,6 @@ static int oxphp_async_io_backoff_bridge(uint64_t ns) {
     return oxphp_async_sched_io_backoff((int64_t) ns) ? 1 : 0;
 }
 
-/* SAPI-side predicate for `oxphp_bridge_in_fiber`. While an oxphp scheduler
- * fiber runs on this thread, OXPHP_IN_FIBER_PARK_REFUSED where fiber switching
- * or the server's parking is blocked, and OXPHP_IN_FIBER_CAN_PARK otherwise on
- * that fiber's own context: where `oxphp_fiber_suspend_for_await` and the other
- * suspend points set out to park it. The two block checks are the ones those
- * suspend points make, and both sides have to keep making the same ones: a
- * caller told it can park where a suspend point refuses takes its parking path
- * and gets an error instead of the wait it asked for.
- *
- * The refusal is answered before the context is looked at, because a context
- * nested in the fiber holds the same thread: a userland Fiber the request
- * started and sorts in, or the destructor fiber the engine's GC resumes even
- * where switching is blocked (Zend/zend_gc.c, 8.4.27 / 8.5.12). A wait there
- * keeps every request and task parked on the thread from running.
- *
- * A user-level `Fiber::start()` outside any oxphp fiber never sets
- * `oxphp_current_fiber`, so the pointer alone answers that case. It does not
- * answer the nested one: a userland fiber started inside an oxphp fiber runs on
- * its own context while the pointer still names the outer fiber, and suspending
- * from there corrupts both (see oxphp_fiber_owns_current_context). */
-int oxphp_in_oxphp_fiber(void) {
-    if (oxphp_current_fiber == NULL) {
-        return OXPHP_IN_FIBER_NO;
-    }
-    if (zend_fiber_switch_blocked() || oxphp_park_blocked) {
-        return OXPHP_IN_FIBER_PARK_REFUSED;
-    }
-    if (!oxphp_fiber_owns_current_context(oxphp_current_fiber)) {
-        return OXPHP_IN_FIBER_NO;
-    }
-    return OXPHP_IN_FIBER_CAN_PARK;
-}
-
 /* Longest await timeout, in seconds, that sets a deadline: 1e9 s, about 31.7
  * years. A longer one, INF included, waits without a limit. Kept equal to
  * AWAIT_TIMEOUT_MAX_SECS in src/async_types.rs, which applies the same rule
@@ -10311,17 +10327,14 @@ int oxphp_in_oxphp_fiber(void) {
 #define OXPHP_AWAIT_TIMEOUT_MAX_S 1e9
 
 /* Fiber-aware await helper. Called from Rust handler via FFI.
- * Returns: 0 = fiber handled it (retval populated), 1 = not in fiber (caller does blocking),
+ * Returns: 0 = fiber handled it (retval populated), 1 = cannot park here (caller does blocking),
  *         -1 = error (exception details in bridge TLS), -2 = timeout,
  *         OXPHP_FIBER_UNWIND = go back to PHP (see it) */
 int oxphp_fiber_suspend_for_await(int64_t promise_id, double timeout, void *retval) {
-    if (oxphp_current_fiber == NULL
-        || !oxphp_fiber_owns_current_context(oxphp_current_fiber)) {
-        return 1; /* Not on a suspendable fiber — caller does a blocking await */
-    }
-    /* Switching blocked — see oxphp_fiber_sleep_us. Returns this function's own
-     * "not suspendable" code, not 0, which here means "done via fiber". */
-    if (zend_fiber_switch_blocked() || oxphp_park_blocked) return 1;
+    /* Not where it can park — see oxphp_in_oxphp_fiber(). Returns this
+     * function's own "not suspendable" code, not 0, which here means "done via
+     * fiber": the caller does a blocking await. */
+    if (!oxphp_fiber_can_park()) return 1;
     /* Out of memory — see oxphp_fiber_sleep_us. */
     if (oxphp_park_refused_for_oom()) return OXPHP_FIBER_UNWIND;
     /* A bailout held back for the plugin stub below (OXPHP_SHARED_RUN_GUARDED),
@@ -10387,16 +10400,13 @@ int oxphp_fiber_suspend_for_await(int64_t promise_id, double timeout, void *retv
  * (a ~1ms timer) so other fibers / nested tasks can make progress, then
  * resume. Used by the fiber-aware await_race / await_any poll loops to avoid
  * pinning the worker while waiting for one of several promises to settle.
- * Returns 1 if it suspended (in a fiber), 0 if not in a fiber (caller falls
+ * Returns 1 if it suspended (in a fiber), 0 where it cannot park (caller falls
  * back to blocking), -3 if the task was cancelled while yielded,
  * OXPHP_FIBER_UNWIND to go back to PHP (see it). */
 int oxphp_fiber_suspend_for_yield(void) {
-    if (oxphp_current_fiber == NULL
-        || !oxphp_fiber_owns_current_context(oxphp_current_fiber)) {
-        return 0; /* not on a suspendable fiber — caller falls back to blocking */
-    }
-    /* Switching blocked — see oxphp_fiber_sleep_us. */
-    if (zend_fiber_switch_blocked() || oxphp_park_blocked) return 0;
+    /* Not where it can park — see oxphp_in_oxphp_fiber(). The caller falls
+     * back to blocking. */
+    if (!oxphp_fiber_can_park()) return 0;
     /* Out of memory — see oxphp_fiber_sleep_us. */
     if (oxphp_park_refused_for_oom()) return OXPHP_FIBER_UNWIND;
     /* A bailout held back — see oxphp_fiber_suspend_for_await. */
