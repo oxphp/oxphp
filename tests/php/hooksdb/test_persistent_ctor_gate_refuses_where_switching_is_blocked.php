@@ -96,7 +96,7 @@ $t->assertTrue('premise: the black-hole constructor was inside PDO when the one 
 $t->assertSame(
     'the constructor is refused rather than built unserialised',
     $outcome,
-    'PDOException: persistent connection not built: another fiber on this worker is inside a persistent constructor this one has to wait for, and fiber switching is blocked here, so it can neither wait nor go ahead'
+    'PDOException: persistent connection not built: another fiber on this worker is inside a persistent constructor this one has to wait for, and the code running here cannot be suspended, so it can neither wait nor go ahead'
 );
 $t->assertLessThan(sprintf('and the refusal spent no wait budget (%.3fs)', (float) $elapsed), (float) $elapsed, 0.2);
 

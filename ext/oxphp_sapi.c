@@ -3912,7 +3912,7 @@ static oxphp_stream_claim_result oxphp_db_await_owner(void *key, oxphp_request_f
             snprintf(msg, sizeof(msg),
                      "oxphp: database call on connection %p, which another fiber holds, ran "
                      "anyway because this context cannot be suspended cooperatively (a "
-                     "userland fiber runs here, or fiber switching is blocked here). The "
+                     "userland fiber runs here, or switching or parking is blocked here). The "
                      "client answers for itself, "
                      "which on a shared connection is the error it raises for a reused "
                      "connection (logged at most once a second on this thread)", key);
@@ -4543,9 +4543,9 @@ static oxphp_stream_claim_result oxphp_pdo_ctor_gate_await(oxphp_request_fiber *
 
         /* Out of budget, or nothing to suspend into at all — a userland fiber
          * runs here, and blocking the thread would deadlock against the
-         * constructor that needs it. (Where switching is blocked, the caller has
-         * refused before asking.) Both leave the constructor running as it ran
-         * before this gate existed, so both say the same thing. */
+         * constructor that needs it. (Where switching or parking is blocked, the
+         * caller has refused before asking.) Both leave the constructor going
+         * ahead unserialised, so both say the same thing. */
         {
             static __thread int64_t last_ns = 0;
             if (oxphp_contended_log_ready(&last_ns)) {
@@ -5254,8 +5254,8 @@ static void oxphp_pdo_construct_guarded(zif_handler orig, zval *built,
             oxphp_throw_exception(
                 "PDOException",
                 "persistent connection not built: another fiber on this worker is inside "
-                "a persistent constructor this one has to wait for, and fiber switching is "
-                "blocked here, so it can neither wait nor go ahead",
+                "a persistent constructor this one has to wait for, and the code running "
+                "here cannot be suspended, so it can neither wait nor go ahead",
                 0);
             return;
         }
@@ -5268,9 +5268,13 @@ static void oxphp_pdo_construct_guarded(zif_handler orig, zval *built,
                     ours = true;
                     break;
                 default:
-                    /* Gave up. The constructor goes ahead unserialised, which is
-                     * what it did before any of this: refusing it would fail a
-                     * request that has done nothing wrong. A key another fiber
+                    /* Gave up: out of budget, or inside a Fiber the application
+                     * started, where no wait can help either. Not refused as
+                     * above: out of budget, that would fail this request for the
+                     * stall of the one ahead, and a Fiber is where an application
+                     * on a scheduler of its own builds every connection, where
+                     * the callbacks above are an odd place to build one. The
+                     * constructor goes ahead unserialised. A key another fiber
                      * holds is left with it, since that fiber is still inside its
                      * own constructor and still has to be able to release it. Its
                      * own key is taken if nobody holds it — the wait may have
