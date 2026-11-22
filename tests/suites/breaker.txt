@@ -316,3 +316,12 @@ log ~oxphp: worker 0 retiring: the heap grew
 breaker/test_breaker_curl_bailout >> /tests/fibers/test_curl_bailout_in_a_callback_retires_the_worker.php | GET | | 500 |
 breaker/test_breaker_curl_bailout_probe >> /tests/fibers/test_curl_bailout_in_a_callback_retires_the_worker_probe.php | GET | | 200 |
 log ~oxphp: worker 0 retiring: a request was ended inside a cURL transfer
+
+# And an exception thrown by PHP the worker runs between two slices, then
+# between two requests: the destructor of a session save handler let go of, in
+# no request. It is dropped before the worker resumes the next request or takes
+# a new one, and the server log says so for each; this profile's log level keeps
+# the line, which the fibers profile, where the test also runs, does not.
+breaker/test_breaker_exception_between_slices_is_logged >> /tests/fibers/test_exception_between_slices_stays_out_of_requests.php | GET | | 200 |
+log ~oxphp: OxphpDroppedExceptionWithThrowingDestructor: thrown by the holder's save handler destructor [resume] in
+log ~oxphp: OxphpDroppedExceptionWithThrowingDestructor: thrown by the holder's save handler destructor [admission] in

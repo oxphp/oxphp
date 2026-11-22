@@ -2413,15 +2413,14 @@ void oxphp_fatal_backtrace_release(void) {
 
 /* ─── Cycle collection from the serve loop ─────────────── */
 
-/* A line in the server log for the exception oxphp_serve_loop_drop_exception()
- * is about to drop, which no request or task is left to be handed. A
- * destructor's throw reaches here on a worker in Worker mode: the frame under
- * the windows that drop it is oxphp_worker()'s, an internal call, so the engine
- * leaves the throw standing, where with no frame at all it would handle it as
- * uncaught. At most once a second per thread. Not for the unwinds of exit() and
- * of a destructor that ran out of memory, which leave the same standing throw
- * but are no exception of the application's, and would take the second's line
- * from one that is.
+/* A line in the server log for an exception about to be dropped that no request
+ * or task is left to be handed. A destructor's throw reaches here on a worker in
+ * Worker mode: the frame under the code that drops it is oxphp_worker()'s, an
+ * internal call, so the engine leaves the throw standing, where with no frame at
+ * all it would handle it as uncaught. At most once a second per thread. Not for
+ * the unwinds of exit() and of a destructor that ran out of memory, which leave
+ * the same standing throw but are no exception of the application's, and would
+ * take the second's line from one that is.
  * SYNC: php-src 8.4.28 / 8.5.13 Zend/zend_execute_API.c zend_call_function()
  *       (its tail), Zend/zend_exceptions.c zend_throw_exception_internal(),
  *       zend_throw_unwind_exit(); Zend/zend_alloc.c zend_handle_delayed_oom() */
@@ -8239,6 +8238,7 @@ void oxphp_scheduler_resume_fiber(oxphp_fiber_scheduler *sched, oxphp_request_fi
      * last slice, left pending is not this request's either. EG(exception) is
      * thread-wide, and a fiber resumed with one standing takes it as thrown by
      * the call it parked in. Drained, as on admission (oxphp_scheduler_tick()). */
+    oxphp_log_dropped_exception();
     oxphp_discard_pending_exception();
     oxphp_session_restore(fiber);
 
@@ -8251,6 +8251,7 @@ void oxphp_scheduler_resume_fiber(oxphp_fiber_scheduler *sched, oxphp_request_fi
      * output is installed by now, so what the dropped exception's destructor
      * writes lands in its response; left standing, the exception would unwind
      * the request instead. */
+    oxphp_log_dropped_exception();
     oxphp_discard_pending_exception();
 
     /* Past the last step above that can run user code with no request current —
@@ -9517,6 +9518,7 @@ int oxphp_scheduler_tick(oxphp_fiber_scheduler *sched) {
          * throws another; and before prepare_request, since that destructor is
          * PHP run for nobody, whose output and headers would otherwise go into
          * the arriving request's response. */
+        oxphp_log_dropped_exception();
         oxphp_discard_pending_exception();
 
         oxphp_bridge_prepare_request();
