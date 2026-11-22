@@ -629,8 +629,8 @@ static void oxphp_bailout_frame_cb(int type, zend_string *file, const uint32_t l
              * hold over whatever its resumer runs next. Not inside the Fiber a
              * request or task runs as, whose suspension the scheduler refuses at
              * once, so that a Fiber started there runs as it does outside any.
-             * SYNC: php-src/Zend/zend_gc.c zend_gc_collect_cycles()
-             *       (gc_call_destructors_in_fiber) */
+             * SYNC: php-src 8.4.28 / 8.5.13 Zend/zend_gc.c
+             *       zend_gc_collect_cycles() (gc_call_destructors_in_fiber) */
             const bool switch_blocked = EG(active_fiber) != NULL
                 && (oxphp_current_fiber == NULL || EG(active_fiber) != oxphp_current_fiber->zf);
             if (switch_blocked) {
@@ -985,7 +985,7 @@ typedef struct {
 /* How many times fiber switching is blocked on this thread. The engine keeps the
  * count private and answers only whether it is above zero, so it is read by
  * lifting the blocks and putting them back; it is rarely more than one.
- * SYNC: php-src/Zend/zend_fibers.c zend_fiber_switch_blocked() */
+ * SYNC: php-src 8.4.28 / 8.5.13 Zend/zend_fibers.c zend_fiber_switch_blocked() */
 static uint32_t oxphp_switch_blocks(void) {
     uint32_t n = 0;
     while (zend_fiber_switch_blocked()) {
@@ -1019,7 +1019,7 @@ static inline void oxphp_vm_stack_save(oxphp_vm_stack_mark *mark) {
  * that call returns: a bailout out of it leaves the block up, and only the next
  * executor startup clears it, which a worker never reaches. Left up, every
  * Fiber the thread starts after it throws, and nothing on it parks.
- * SYNC: php-src/Zend/zend_vm_def.h ZEND_TICKS; ext/pcntl/pcntl.c
+ * SYNC: php-src 8.4.28 / 8.5.13 Zend/zend_vm_def.h ZEND_TICKS; ext/pcntl/pcntl.c
  *       pcntl_signal_dispatch(); Zend/zend_fibers.c zend_fiber_init() */
 static void oxphp_recovery_put_back(const oxphp_vm_stack_mark *mark) {
     ZEND_ASSERT(EG(current_fiber_context) == mark->context);
@@ -2412,13 +2412,18 @@ void oxphp_fatal_backtrace_release(void) {
  * destructor's throw reaches here on a worker in Worker mode: the frame under
  * the windows that drop it is oxphp_worker()'s, an internal call, so the engine
  * leaves the throw standing, where with no frame at all it would handle it as
- * uncaught. At most once a second per thread.
- * SYNC: php-src/Zend/zend_execute_API.c zend_call_function() (its tail),
- *       Zend/zend_exceptions.c zend_throw_exception_internal() */
+ * uncaught. At most once a second per thread. Not for the unwinds of exit() and
+ * of a destructor that ran out of memory, which leave the same standing throw
+ * but are no exception of the application's, and would take the second's line
+ * from one that is.
+ * SYNC: php-src 8.4.28 / 8.5.13 Zend/zend_execute_API.c zend_call_function()
+ *       (its tail), Zend/zend_exceptions.c zend_throw_exception_internal(),
+ *       zend_throw_unwind_exit(); Zend/zend_alloc.c zend_handle_delayed_oom() */
 static void oxphp_log_dropped_exception(void) {
     static __thread int64_t last_ns = 0;
     zend_object *ex = EG(exception);
-    if (ex == NULL || sapi_module.log_message == NULL) {
+    if (ex == NULL || sapi_module.log_message == NULL
+        || zend_is_unwind_exit(ex) || zend_is_graceful_exit(ex)) {
         return;
     }
     struct timespec ts;
@@ -2434,21 +2439,24 @@ static void oxphp_log_dropped_exception(void) {
      * known names rather than zend_read_property(), which allocates the name,
      * and the SAPI's logger rather than php_log_err(), which builds the line
      * with emalloc when error_log names a file — and then writes it only there,
-     * where this one belongs in the server log.
-     * SYNC: php-src/Zend/zend_API.c zend_read_property();
+     * where this one belongs in the server log. The message is cut short, so
+     * that a long one leaves room for where it was thrown.
+     * SYNC: php-src 8.4.28 / 8.5.13 Zend/zend_API.c zend_read_property();
      *       main/main.c php_log_err_with_severity() */
     zval rv_m, rv_f, rv_l;
     zval *mz = zend_read_property_ex(ex->ce, ex, ZSTR_KNOWN(ZEND_STR_MESSAGE), 1, &rv_m);
     zval *fz = zend_read_property_ex(ex->ce, ex, ZSTR_KNOWN(ZEND_STR_FILE), 1, &rv_f);
     zval *lz = zend_read_property_ex(ex->ce, ex, ZSTR_KNOWN(ZEND_STR_LINE), 1, &rv_l);
-    char line[1024];
+    const bool has_msg = mz && Z_TYPE_P(mz) == IS_STRING;
+    char line[2048];
     snprintf(line, sizeof(line),
-             "oxphp: %s: %s in %s:" ZEND_LONG_FMT " was thrown where no request or task "
+             "oxphp: %s: %.*s in %s:" ZEND_LONG_FMT " was thrown where no request or task "
              "was running to catch it, by code the worker ran between them (a "
              "destructor, say), and was dropped (logged at most once a second on "
              "this thread)",
              ZSTR_VAL(ex->ce->name),
-             (mz && Z_TYPE_P(mz) == IS_STRING) ? Z_STRVAL_P(mz) : "",
+             has_msg ? (int) MIN(Z_STRLEN_P(mz), 512) : 0,
+             has_msg ? Z_STRVAL_P(mz) : "",
              (fz && Z_TYPE_P(fz) == IS_STRING) ? Z_STRVAL_P(fz) : "(unknown)",
              (lz && Z_TYPE_P(lz) == IS_LONG) ? Z_LVAL_P(lz) : (zend_long) 0);
     sapi_module.log_message(line, LOG_NOTICE);
