@@ -320,6 +320,14 @@ fibers/test_a_channel_wait_without_a_timeout_throws_where_a_request_cannot_park
 fibers/test_restore_runs_no_destructor_into_the_resumed_request
 fibers/test_resume_lets_go_of_a_backtrace_its_session_release_leaves
 fibers/test_userland_fiber_keeps_its_call_cells
+fibers/test_fatal_in_a_tick_handler_lifts_the_switch_block | GET | | 504 |
+fibers/test_fatal_in_a_tick_handler_lifts_the_switch_block_probe
+fibers/test_fatal_report_in_a_fiber_refuses_to_switch | GET | | 500 |
+fibers/test_fatal_report_in_a_fiber_refuses_to_switch_probe
+fibers/test_fatal_report_outside_a_fiber_can_switch | GET | | 500 |
+fibers/test_fatal_report_outside_a_fiber_can_switch_probe
+fibers/test_channel_wait_in_a_destructor_between_requests_throws >> ?catch=1
+fibers/test_channel_wait_in_a_destructor_between_requests_throws >> ?catch=0
 
 # How close to the end of its C stack a request or a task may recurse before the
 # engine throws. The second line drives an internal function that uses a lot of

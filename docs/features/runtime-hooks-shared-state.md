@@ -135,6 +135,8 @@ That wait is bounded like the ones above, and unlike them what it costs when it 
 
 A constructor inside a userland fiber scheduler's own fiber is the one place where that budget is spent at once rather than occasionally: such a context cannot be suspended, so a constructor that finds another one already running gives up immediately instead of waiting. One that finds the way clear still takes its turn like any other, and the fibers OxPHP drives still wait for it.
 
+A constructor where a fiber switch is refused cannot wait either — such as in a `FILTER_CALLBACK` of `filter_input_array()` given a definitions array, in a `__toString()` or an error handler `array_multisort()` runs as it compares, or in a `declare(ticks)` handler — and neither can one in the cleanup a worker runs around a request's end. There the constructor it would wait for belongs to a request or task parked on the same worker thread, which cannot run until this code returns, so the wait could only spend its budget, and going ahead unserialised is the race above. Such a constructor, finding another one running, is refused with a `PDOException` (`persistent connection not built: …`) instead. One that finds the way clear takes its turn as usual.
+
 #### The liveness check and constructor options on a pooled connection
 
 The other step is the liveness check PDO makes before handing a pooled connection over: it is a ping, sent on the connection itself. One sent while the fiber holding that connection is parked on it waiting for its reply is refused, so PDO reads it as dead, drops it from the pool and opens a second connection — the request mid-exchange keeps its own connection and its reply, but what the application meant to share is no longer shared.

@@ -886,6 +886,9 @@ typedef struct _oxphp_fiber_scheduler {
     struct oxphp_io_reg *reg_slots;
     uint32_t reg_mask;
     uint32_t reg_count;
+
+    /* Whether this scheduler is counted in oxphp_schedulers_on_thread. */
+    bool on_thread;
 } oxphp_fiber_scheduler;
 
 /* ─── TLS: current fiber pointer ───────────────────────── */
@@ -907,6 +910,14 @@ extern __thread uint32_t oxphp_filter_storage_readers;
  * one also makes Fiber::start() and the rest throw, and that user code is free
  * to run a client of its own on userland fibers. */
 extern __thread uint32_t oxphp_park_blocked;
+
+/* How many fiber schedulers this thread runs: from oxphp_scheduler_init() until
+ * oxphp_scheduler_release_thread(). With one up and no request or task fiber
+ * current, the code running is on the scheduler's own frame, between slices —
+ * a destructor of what a finished request left, a collection — where nothing
+ * can park, and a request or task parked on the thread cannot run until that
+ * code returns. */
+extern __thread uint32_t oxphp_schedulers_on_thread;
 
 /* fiber_id of the currently executing request fiber, 0 outside fiber context.
  * Registered into the bridge at MINIT (oxphp_bridge_set_current_fiber_id_fn)
@@ -1004,6 +1015,10 @@ void oxphp_scheduler_destroy(oxphp_fiber_scheduler *sched);
  * teardown above: the session the request parked with open goes back on the
  * thread, for the worker script's own shutdown to write and close. */
 void oxphp_scheduler_return_session_holder(oxphp_fiber_scheduler *sched);
+/* Take the scheduler off oxphp_schedulers_on_thread; a second call does nothing.
+ * Part of the teardown above, and called on its own where a fatal error skips
+ * it. */
+void oxphp_scheduler_release_thread(oxphp_fiber_scheduler *sched);
 
 oxphp_request_fiber *oxphp_scheduler_create_fiber(
     oxphp_fiber_scheduler *sched,

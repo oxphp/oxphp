@@ -1590,19 +1590,21 @@ void oxphp_bridge_set_fiber_fd_wait(oxphp_fiber_fd_wait_fn_t fn);
 void oxphp_bridge_set_in_fiber_check(oxphp_in_fiber_check_fn_t fn);
 
 /* What `oxphp_bridge_in_fiber` answers about the calling code. */
-/* No fiber the server runs a request or task on is running on this thread (a
- * request in traditional mode, no SAPI callback registered: unit tests, bare
- * CLI without the extension), or one is, with nothing blocked, and the caller
- * is on a context nested in it, such as a userland Fiber. A wait holds the
- * thread. */
+/* No fiber the server runs a request or task on is running on this thread, and
+ * no scheduler of them is either (a request in traditional mode, no SAPI
+ * callback registered: unit tests, bare CLI without the extension), or one such
+ * fiber is, with nothing blocked, and the caller is on a context nested in it,
+ * such as a userland Fiber. A wait holds the thread. */
 #define OXPHP_IN_FIBER_NO 0
 /* On such a fiber's own context, with neither fiber switching nor the server's
  * parking blocked: the only place `oxphp_bridge_fiber_await` can suspend. */
 #define OXPHP_IN_FIBER_CAN_PARK 1
 /* Such a fiber is running, and fiber switching or the server's parking is
- * blocked, on its own context or one nested in it. A wait holds the thread, and
- * a request or task parked on it cannot run until the wait ends: where that is
- * the other end, it never answers. */
+ * blocked, on its own context or one nested in it; or none is, while a
+ * scheduler of them runs on the thread, so the caller is on that scheduler's own
+ * frame, between two slices. A wait holds the thread, and a request or task
+ * parked on it cannot run until the wait ends: where that is the other end, it
+ * never answers. */
 #define OXPHP_IN_FIBER_PARK_REFUSED 2
 
 /* One of OXPHP_IN_FIBER_*. Cheap (single function pointer call). Used by

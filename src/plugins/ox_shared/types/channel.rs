@@ -2433,17 +2433,19 @@ pub fn register_class(
     Ok(())
 }
 
-/// `send()` or `recv()` that would have to wait, called where the request or
-/// task cannot be suspended (`OXPHP_IN_FIBER_PARK_REFUSED`). Waiting there
-/// holds the thread, and a request or task parked on it cannot run until the
-/// wait ends; where that is the other end, a wait without a deadline would never
-/// return and the worker with it. A bounded wait still holds the thread, but
-/// its deadline ends it, so only the unbounded one is refused.
+/// `send()` or `recv()` that would have to wait, called where the code running
+/// cannot be suspended (`OXPHP_IN_FIBER_PARK_REFUSED`): a request or task where
+/// switching or parking is blocked, or code the worker runs between two slices
+/// of its requests, a destructor among them. Waiting there holds the thread, and
+/// a request or task parked on it cannot run until the wait ends; where that is
+/// the other end, a wait without a deadline would never return and the worker
+/// with it. A bounded wait still holds the thread, but its deadline ends it, so
+/// only the unbounded one is refused.
 fn refuse_forever_wait(method: &str, found: &str, bounded: &str) -> crate::plugin::PhpError {
     crate::plugin::PhpError::Exception {
         class: "OxPHP\\Shared\\SharedException".into(),
         message: format!(
-            "Channel::{method}() {found} and cannot wait without a timeout where this request or task cannot be suspended; use {bounded}()"
+            "Channel::{method}() {found} and cannot wait without a timeout where the code running cannot be suspended; use {bounded}()"
         ),
         code: 0,
     }

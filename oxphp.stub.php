@@ -1589,9 +1589,12 @@ namespace OxPHP\Shared {
          * @throws SharedException If the channel is empty and open and the call is made
          *         where a worker-mode request or an `oxphp_async()` task cannot
          *         be suspended — where a fiber switch is refused, or in the
-         *         cleanup a worker runs as a request ends. A wait there would
-         *         hold the thread, and the other end could be a request parked
-         *         on it; use `recvTimeout()` there.
+         *         cleanup a worker runs as a request ends — or, outside any
+         *         request or task, by code a worker-mode worker or an
+         *         `oxphp_async()` worker thread runs between the ones it serves,
+         *         such as a destructor. A wait there would hold the thread, and
+         *         the other end could be a request parked on it; use
+         *         `recvTimeout()` there.
          */
         public function recv(): Channel\RecvResult {}
 
@@ -1619,8 +1622,8 @@ namespace OxPHP\Shared {
          * @throws ValueTooLargeException If `$value`'s serialised size exceeds
          *         the per-value cap (`SHARED_MAX_VALUE_SIZE`, default 1 MiB).
          * @throws SharedException If the channel is full and the call is made
-         *         where a worker-mode request or an `oxphp_async()` task cannot
-         *         be suspended, as for {@see recv()}; use `sendTimeout()` there.
+         *         where the code running cannot be suspended, as for
+         *         {@see recv()}; use `sendTimeout()` there.
          */
         public function send(mixed $value): Channel\SendResult {}
 

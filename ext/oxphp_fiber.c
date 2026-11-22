@@ -622,18 +622,37 @@ static void oxphp_bailout_frame_cb(int type, zend_string *file, const uint32_t l
              * displaying the report can run an output handler, and another
              * request run in the meantime would make objects the snapshot does
              * not know, which the flag would then reach and the restore would
-             * not. */
+             * not. No switching out either, where the report runs inside a
+             * Fiber the application started, or the one the engine runs
+             * destructors in when it collects garbage inside a Fiber: an output
+             * handler that suspends it would leave the report half done and the
+             * hold over whatever its resumer runs next. Not inside the Fiber a
+             * request or task runs as, whose suspension the scheduler refuses at
+             * once, so that a Fiber started there runs as it does outside any.
+             * SYNC: php-src/Zend/zend_gc.c zend_gc_collect_cycles()
+             *       (gc_call_destructors_in_fiber) */
+            const bool switch_blocked = EG(active_fiber) != NULL
+                && (oxphp_current_fiber == NULL || EG(active_fiber) != oxphp_current_fiber->zf);
+            if (switch_blocked) {
+                zend_fiber_switch_block();
+            }
             oxphp_park_blocked++;
             zend_try {
                 oxphp_next_error_cb(type, file, line, message);
             } zend_catch {
                 oxphp_park_blocked--;
+                if (switch_blocked) {
+                    zend_fiber_switch_unblock();
+                }
                 if (!oxphp_destructed_snapshot_marked()) {
                     oxphp_destructed_snapshot_forget();
                 }
                 zend_bailout();
             } zend_end_try();
             oxphp_park_blocked--;
+            if (switch_blocked) {
+                zend_fiber_switch_unblock();
+            }
             oxphp_destructed_snapshot_forget();
             return;
         }
@@ -959,8 +978,25 @@ typedef struct {
     zend_execute_data *execute_data;
     zend_fiber_context *context;
     zend_fiber *active_fiber; /* what Fiber::getCurrent() answers there */
+    uint32_t switch_blocks;   /* see oxphp_switch_blocks() */
     oxphp_call_cells_mark cells;
 } oxphp_vm_stack_mark;
+
+/* How many times fiber switching is blocked on this thread. The engine keeps the
+ * count private and answers only whether it is above zero, so it is read by
+ * lifting the blocks and putting them back; it is rarely more than one.
+ * SYNC: php-src/Zend/zend_fibers.c zend_fiber_switch_blocked() */
+static uint32_t oxphp_switch_blocks(void) {
+    uint32_t n = 0;
+    while (zend_fiber_switch_blocked()) {
+        zend_fiber_switch_unblock();
+        n++;
+    }
+    for (uint32_t i = 0; i < n; i++) {
+        zend_fiber_switch_block();
+    }
+    return n;
+}
 
 static inline void oxphp_vm_stack_save(oxphp_vm_stack_mark *mark) {
     mark->stack = EG(vm_stack);
@@ -969,17 +1005,29 @@ static inline void oxphp_vm_stack_save(oxphp_vm_stack_mark *mark) {
     mark->execute_data = EG(current_execute_data);
     mark->context = EG(current_fiber_context);
     mark->active_fiber = EG(active_fiber);
+    mark->switch_blocks = oxphp_switch_blocks();
     oxphp_call_cells_note(&mark->cells);
 }
 
 /* What a step of a recovery can leave changed under the next one, back to what
- * the mark found: the current fiber (see the top of oxphp_recover()) and the
- * cells of the calls in progress on this stack. The recovery runs on the stack
- * the mark was taken on, which is the one whose cells these are. */
+ * the mark found: the current fiber (see the top of oxphp_recover()), the cells
+ * of the calls in progress on this stack, and fiber switching. The recovery runs
+ * on the stack the mark was taken on, which is the one whose cells these are.
+ *
+ * Switching, because the engine blocks it around a declare(ticks) handler and
+ * pcntl's signal dispatch with no catch of its own, and lifts the block only as
+ * that call returns: a bailout out of it leaves the block up, and only the next
+ * executor startup clears it, which a worker never reaches. Left up, every
+ * Fiber the thread starts after it throws, and nothing on it parks.
+ * SYNC: php-src/Zend/zend_vm_def.h ZEND_TICKS; ext/pcntl/pcntl.c
+ *       pcntl_signal_dispatch(); Zend/zend_fibers.c zend_fiber_init() */
 static void oxphp_recovery_put_back(const oxphp_vm_stack_mark *mark) {
     ZEND_ASSERT(EG(current_fiber_context) == mark->context);
     EG(active_fiber) = mark->active_fiber;
     oxphp_call_cells_return_to(&mark->cells);
+    for (uint32_t n = oxphp_switch_blocks(); n > mark->switch_blocks; n--) {
+        zend_fiber_switch_unblock();
+    }
 }
 
 /* Give back the one reference a frame holds on whatever it is running: the
@@ -2359,6 +2407,55 @@ void oxphp_fatal_backtrace_release(void) {
 
 /* ─── Cycle collection from the serve loop ─────────────── */
 
+/* A line in the server log for the exception oxphp_serve_loop_drop_exception()
+ * is about to drop, which no request or task is left to be handed. A
+ * destructor's throw reaches here on a worker in Worker mode: the frame under
+ * the windows that drop it is oxphp_worker()'s, an internal call, so the engine
+ * leaves the throw standing, where with no frame at all it would handle it as
+ * uncaught. At most once a second per thread.
+ * SYNC: php-src/Zend/zend_execute_API.c zend_call_function() (its tail),
+ *       Zend/zend_exceptions.c zend_throw_exception_internal() */
+static void oxphp_log_dropped_exception(void) {
+    static __thread int64_t last_ns = 0;
+    zend_object *ex = EG(exception);
+    if (ex == NULL || sapi_module.log_message == NULL) {
+        return;
+    }
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    int64_t now_ns = (int64_t) ts.tv_sec * 1000000000 + ts.tv_nsec;
+    if (last_ns != 0 && now_ns - last_ns < 1000000000) {
+        return;
+    }
+    last_ns = now_ns;
+
+    /* The line is built outside request memory, which a window can be out of: a
+     * bailout from here would leave the window past its recovery. Hence the
+     * known names rather than zend_read_property(), which allocates the name,
+     * and the SAPI's logger rather than php_log_err(), which builds the line
+     * with emalloc when error_log names a file — and then writes it only there,
+     * where this one belongs in the server log.
+     * SYNC: php-src/Zend/zend_API.c zend_read_property();
+     *       main/main.c php_log_err_with_severity() */
+    zval rv_m, rv_f, rv_l;
+    zval *mz = zend_read_property_ex(ex->ce, ex, ZSTR_KNOWN(ZEND_STR_MESSAGE), 1, &rv_m);
+    zval *fz = zend_read_property_ex(ex->ce, ex, ZSTR_KNOWN(ZEND_STR_FILE), 1, &rv_f);
+    zval *lz = zend_read_property_ex(ex->ce, ex, ZSTR_KNOWN(ZEND_STR_LINE), 1, &rv_l);
+    char line[1024];
+    snprintf(line, sizeof(line),
+             "oxphp: %s: %s in %s:" ZEND_LONG_FMT " was thrown where no request or task "
+             "was running to catch it, by code the worker ran between them (a "
+             "destructor, say), and was dropped (logged at most once a second on "
+             "this thread)",
+             ZSTR_VAL(ex->ce->name),
+             (mz && Z_TYPE_P(mz) == IS_STRING) ? Z_STRVAL_P(mz) : "",
+             (fz && Z_TYPE_P(fz) == IS_STRING) ? Z_STRVAL_P(fz) : "(unknown)",
+             (lz && Z_TYPE_P(lz) == IS_LONG) ? Z_LVAL_P(lz) : (zend_long) 0);
+    sapi_module.log_message(line, LOG_NOTICE);
+}
+
+static bool oxphp_serve_loop_drop_exception(oxphp_vm_stack_mark *mark);
+
 /* Runs the cycle collector on the serve loop's own frame and answers whether it
  * ran to its end.
  *
@@ -2414,13 +2511,8 @@ bool oxphp_serve_loop_collect_cycles(void) {
         oxphp_recover_from_bailout(&mark);
     } zend_end_try();
 
-    if (EG(exception)) {
-        zend_try {
-            oxphp_discard_pending_exception();
-        } zend_catch {
-            completed = false;
-            oxphp_recover_from_bailout(&mark);
-        } zend_end_try();
+    if (!oxphp_serve_loop_drop_exception(&mark)) {
+        completed = false;
     }
     if (oxphp_recover_from_reported_oom()) {
         completed = false;
@@ -2434,6 +2526,7 @@ bool oxphp_serve_loop_collect_cycles(void) {
 static bool oxphp_serve_loop_drop_exception(oxphp_vm_stack_mark *mark) {
     bool completed = true;
     if (EG(exception)) {
+        oxphp_log_dropped_exception();
         zend_try {
             oxphp_discard_pending_exception();
         } zend_catch {
@@ -2886,10 +2979,21 @@ int oxphp_fiber_park(oxphp_request_fiber *fiber) {
  * which one last used it. */
 static __thread uint64_t oxphp_next_fiber_id = 1;
 
+__thread uint32_t oxphp_schedulers_on_thread = 0;
+
 void oxphp_scheduler_init(oxphp_fiber_scheduler *sched) {
     memset(sched, 0, sizeof(*sched));
     sched->epfd = -1;
     sched->timer_fd = -1;
+    sched->on_thread = true;
+    oxphp_schedulers_on_thread++;
+}
+
+void oxphp_scheduler_release_thread(oxphp_fiber_scheduler *sched) {
+    if (sched->on_thread) {
+        sched->on_thread = false;
+        oxphp_schedulers_on_thread--;
+    }
 }
 
 /* Give up an output handler stack outright — the handlers, the buffers holding
@@ -4082,6 +4186,10 @@ void oxphp_scheduler_destroy(oxphp_fiber_scheduler *sched) {
         close(sched->epfd);
         sched->epfd = -1;
     }
+
+    /* Last: the teardown above runs the destructors of what the fibers held, on
+     * this frame, with a request still parked on the thread until its turn. */
+    oxphp_scheduler_release_thread(sched);
 }
 
 /* The serve loop has been ended by a fatal error raised between two slices,
