@@ -86,9 +86,17 @@ if (!class_exists('OxphpSessionDtorThrowsHandler', false)) {
 
     final class OxphpSessionDtorThrowsHandler extends OxphpSessionDtorQuietHandler
     {
+        // The variant goes into the message so that the server log line the
+        // dropped exception gets tells the two places it was dropped apart.
+        public function __construct(private readonly string $variant)
+        {
+        }
+
         public function __destruct()
         {
-            throw new OxphpDroppedExceptionWithThrowingDestructor('thrown by the holder\'s save handler destructor');
+            throw new OxphpDroppedExceptionWithThrowingDestructor(
+                'thrown by the holder\'s save handler destructor [' . $this->variant . ']'
+            );
         }
     }
 }
@@ -100,7 +108,7 @@ ini_set('session.use_strict_mode', '0');
 header('Content-Type: application/json');
 
 if ($role === 'holder') {
-    session_set_save_handler(new OxphpSessionDtorThrowsHandler(), false);
+    session_set_save_handler(new OxphpSessionDtorThrowsHandler($variant), false);
     session_start();
     $_SESSION['who'] = 'holder';
     oxphp_sleep(1.0);
