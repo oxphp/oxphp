@@ -474,6 +474,24 @@ typedef struct {
     bool in_txn;
 } oxphp_pdo_teardown;
 
+/* One call of the application's error handler, as the engine is about to make it.
+ * The engine takes the handler off the thread for the length of the call and
+ * keeps it where nothing else can reach it; this is the copy a park inside the
+ * call lends the worker. `call` is where the handler's frame goes on the fiber's
+ * VM stack, `page` the stack page that address is on — a frame that does not fit
+ * there goes first on the page linked after it — and `caller` the frame the error
+ * was raised in. A call the array has no room for goes unrecorded: deeper nesting
+ * than it holds, or one made once it is full of the copies that only the end of
+ * the request or task lets go of (see oxphp_error_handler_call_observer()). */
+#define OXPHP_ERROR_HANDLER_CALLS 8
+typedef struct {
+    zval handler;                   /* owned */
+    const zend_execute_data *call;
+    const struct _zend_vm_stack *page;
+    const zend_execute_data *caller;
+    int depth;                      /* zend_stack_count(&EG(user_error_handlers)) */
+} oxphp_error_handler_call;
+
 /* ─── Request Fiber ────────────────────────────────────── */
 
 typedef struct _oxphp_request_fiber {
@@ -798,6 +816,14 @@ typedef struct _oxphp_request_fiber {
      * the body and hash still current. Request fibers only; empty between
      * requests. See struct oxphp_superseded_parse. */
     struct oxphp_superseded_parse *superseded_parses;
+
+    /* The calls of the application's error handler this fiber has made, outermost
+     * first — the ones it is inside, and returned ones not let go of yet — and
+     * which of them lent the worker its handler at the last park (0 for none,
+     * else index + 1). See oxphp_error_handler_lend(). */
+    oxphp_error_handler_call error_handler_calls[OXPHP_ERROR_HANDLER_CALLS];
+    uint8_t error_handler_call_count;
+    uint8_t error_handler_lent;
 
     /* Linked list pointers for the scheduler's fiber list */
     struct _oxphp_request_fiber *next;
