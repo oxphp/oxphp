@@ -8962,22 +8962,24 @@ static void oxphp_soft_reset(void) {
     CG(unclean_shutdown) = 0;
     /* A core error has nothing to land in here: this runs on the worker's own
      * stack between requests, and the one error target between it and
-     * oxphp_worker()'s caller re-raises. So an exception class declaring
-     * __destruct, left pending by whatever the worker ran outside a request,
-     * used to end the serve loop instead of being discarded.
+     * oxphp_worker()'s caller re-raises. So an exception left pending by
+     * whatever the worker ran outside a request, whose class declares
+     * __destruct, has to leave the slot before it is released: released in
+     * place, its destructor is refused with a core error, which ends the serve
+     * loop.
      *
      * Draining matters more on this path than on any other, because nothing
      * behind it would catch what a throwing destructor left: the request that
      * follows gets no second discard — the one ahead of a new request in
      * oxphp_scheduler_tick() belongs to the event-loop branch — so an exception
-     * still standing here is read as
-     * that request's own, zend_call_function returns without calling the
-     * handler, and the 500 that comes back is blamed on an application that
-     * never ran. The ceiling inside the drain matters more here too: the ini
-     * rollback a few lines up disarms the execution timer and does not arm it
-     * again — where the engine keeps a timer per thread, nothing arms it before
-     * the next request starts running, and elsewhere step 5 below is what does —
-     * so this is the one discard with no deadline over it at all. */
+     * still standing here is read as that request's own, zend_call_function
+     * returns without calling the handler, and the 500 that comes back is
+     * blamed on an application that never ran. The ceiling inside the drain
+     * matters more here too: the ini rollback a few lines up disarms the
+     * execution timer and does not arm it again — where the engine keeps a
+     * timer per thread, nothing arms it before the next request starts running,
+     * and elsewhere step 5 below is what does — so this is the one discard with
+     * no deadline over it at all. */
     oxphp_discard_pending_exception();
 
     /* 1. Output: discard all buffers, re-activate clean.

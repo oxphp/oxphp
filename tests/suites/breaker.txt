@@ -325,3 +325,12 @@ log ~oxphp: worker 0 retiring: a request was ended inside a cURL transfer
 breaker/test_breaker_exception_between_slices_is_logged >> /tests/fibers/test_exception_between_slices_stays_out_of_requests.php | GET | | 200 |
 log ~oxphp: OxphpDroppedExceptionWithThrowingDestructor: thrown by the holder's save handler destructor [resume] in
 log ~oxphp: OxphpDroppedExceptionWithThrowingDestructor: thrown by the holder's save handler destructor [admission] in
+
+# And the same with an exception whose destructor raises a fatal error as the
+# worker drops it. The fatal is nobody's: the worker recovers from it and goes
+# on serving every request it holds, this one included, where without the
+# recovery it would end with all of them. The last line is the recovery's own.
+breaker/test_breaker_fatal_dropping_an_exception_between_slices >> /tests/fibers/test_exception_between_slices_stays_out_of_requests.php?dtor=fatal | GET | | 200 |
+log ~oxphp: OxphpDroppedExceptionWithFatalDestructor: thrown by the holder's save handler destructor [resume] in
+log ~oxphp: OxphpDroppedExceptionWithFatalDestructor: thrown by the holder's save handler destructor [admission] in
+log ~oxphp: worker 0: a fatal error ended the drop of an exception thrown where no request or task was running to catch it

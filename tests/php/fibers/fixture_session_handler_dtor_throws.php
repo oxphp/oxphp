@@ -11,7 +11,8 @@ declare(strict_types=1);
 // session is written and closed nothing holds the holder's handler any more,
 // and its destructor runs between two slices of the worker, in no request.
 // What that destructor throws is an exception whose own destructor throws, so
-// one discard of it leaves another standing.
+// one discard of it leaves another standing; with ?dtor=fatal, one whose own
+// destructor raises a fatal error instead, so the discard ends in one.
 //
 // ?variant=resume: the neighbour then opens its own session, which waits for
 // the holder's to close, so the next thing the worker does after the holder is
@@ -30,6 +31,7 @@ set_exception_handler(null);
 $role = (string) ($_GET['role'] ?? '');
 $variant = (string) ($_GET['variant'] ?? '');
 $marker = (string) ($_GET['marker'] ?? '');
+$dtor = (string) ($_GET['dtor'] ?? '');
 
 if (!class_exists('OxphpSessionDtorThrowsHandler', false)) {
     final class OxphpDroppedExceptionWithThrowingDestructor extends RuntimeException
@@ -37,6 +39,22 @@ if (!class_exists('OxphpSessionDtorThrowsHandler', false)) {
         public function __destruct()
         {
             throw new LogicException('thrown by the destructor of the exception the handler threw');
+        }
+    }
+
+    function oxphp_session_dtor_declare_once(): void
+    {
+        final class OxphpSessionDtorDeclaredOnce
+        {
+        }
+    }
+
+    final class OxphpDroppedExceptionWithFatalDestructor extends RuntimeException
+    {
+        public function __destruct()
+        {
+            oxphp_session_dtor_declare_once();
+            oxphp_session_dtor_declare_once();
         }
     }
 
@@ -88,15 +106,16 @@ if (!class_exists('OxphpSessionDtorThrowsHandler', false)) {
     {
         // The variant goes into the message so that the server log line the
         // dropped exception gets tells the two places it was dropped apart.
-        public function __construct(private readonly string $variant)
+        public function __construct(private readonly string $variant, private readonly string $dtor)
         {
         }
 
         public function __destruct()
         {
-            throw new OxphpDroppedExceptionWithThrowingDestructor(
-                'thrown by the holder\'s save handler destructor [' . $this->variant . ']'
-            );
+            $message = 'thrown by the holder\'s save handler destructor [' . $this->variant . ']';
+            throw $this->dtor === 'fatal'
+                ? new OxphpDroppedExceptionWithFatalDestructor($message)
+                : new OxphpDroppedExceptionWithThrowingDestructor($message);
         }
     }
 }
@@ -108,7 +127,7 @@ ini_set('session.use_strict_mode', '0');
 header('Content-Type: application/json');
 
 if ($role === 'holder') {
-    session_set_save_handler(new OxphpSessionDtorThrowsHandler($variant), false);
+    session_set_save_handler(new OxphpSessionDtorThrowsHandler($variant, $dtor), false);
     session_start();
     $_SESSION['who'] = 'holder';
     oxphp_sleep(1.0);
