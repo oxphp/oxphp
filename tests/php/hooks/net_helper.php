@@ -37,19 +37,20 @@ function net_silent_address(int $slot = 0): string
     return implode('.', $parts);
 }
 
-/** Runs fixture_curl_hold.php as a second request on this worker — through a
- *  task, because this request has to stay free to act on the handle the holder
- *  parks on — and returns the task. Its result is the fixture's JSON, decoded,
- *  or `['transport' => …]` when no answer came back. */
-function curl_hold_start(string $query)
+/** Runs fixture_curl_hold.php, or another fixture of this directory, as a second
+ *  request on this worker — through a task, because this request has to stay
+ *  free to act on the handle the holder parks on — and returns the task. Its
+ *  result is the fixture's JSON, decoded, or `['transport' => …]` when no answer
+ *  came back. */
+function curl_hold_start(string $query, string $fixture = 'fixture_curl_hold.php')
 {
-    return oxphp_async(function (string $query): array {
+    return oxphp_async(function (string $query, string $fixture): array {
         $sock = @stream_socket_client('tcp://127.0.0.1:80', $errno, $errstr, 3.0);
         if ($sock === false) {
             return ['transport' => "connect failed: {$errstr} ({$errno})"];
         }
         stream_set_timeout($sock, 12);
-        fwrite($sock, "GET /tests/hooks/fixture_curl_hold.php?{$query} HTTP/1.0\r\n"
+        fwrite($sock, "GET /tests/hooks/{$fixture}?{$query} HTTP/1.0\r\n"
             . "Host: 127.0.0.1\r\nConnection: close\r\n\r\n");
         $response = (string) stream_get_contents($sock);
         fclose($sock);
@@ -57,7 +58,7 @@ function curl_hold_start(string $query)
         $split = strpos($response, "\r\n\r\n");
         $decoded = $split === false ? null : json_decode(substr($response, $split + 4), true);
         return is_array($decoded) ? $decoded : ['transport' => $response];
-    }, $query);
+    }, $query, $fixture);
 }
 
 /** Waits up to three seconds for the holder to reach its transfer, then a little

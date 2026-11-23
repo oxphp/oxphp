@@ -8434,9 +8434,50 @@ static void oxphp_curl_end_selects(void *ctx)
     e->could_go = go;
 }
 
+/* curl_multi_exec() on a multi handle another fiber is in a call on, a loop's
+ * curl_multi_select() say, does not wait for it: it returns CURLM_OK without going
+ * into libcurl, and whichever request's curl_multi_exec() runs next moves every
+ * transfer in the handle. An HTTP client may raise a re-entry flag around its
+ * curl_multi_exec() (Symfony HttpClient 8.1.11 does, in CurlResponse::perform()), and
+ * a request suspended there would leave it raised for every other request on a
+ * shared client. $still_running gets the count of handles tracked in the multi
+ * handle, so that a loop goes on to its curl_multi_select() rather than ending. Any
+ * other arguments are ext/curl's to refuse. */
+static bool oxphp_curl_exec_passed_over(const oxphp_curl_guard *g, zend_execute_data *execute_data,
+                                        zval *return_value, const oxphp_request_fiber *self)
+{
+    if (g != &oxphp_curl_guards[OXPHP_CURL_GUARD_curl_multi_exec] || ZEND_NUM_ARGS() != 2) {
+        return false;
+    }
+    zval *mh = ZEND_CALL_ARG(execute_data, 1);
+    /* By name: ext/curl's curl_multi_ce is a symbol of ext/curl, which may be a
+     * shared extension or not loaded at all. */
+    if (Z_TYPE_P(mh) != IS_OBJECT
+        || !zend_string_equals_literal(Z_OBJCE_P(mh)->name, "CurlMultiHandle")) {
+        return false;
+    }
+    const oxphp_request_fiber *owner = oxphp_claim_owner(Z_OBJ_P(mh));
+    if (owner == NULL || owner == self) return false;
+
+    zend_long running = 0;
+    if (oxphp_curl_members != NULL) {
+        const oxphp_curl_member *member;
+        ZEND_HASH_FOREACH_PTR(oxphp_curl_members, member) {
+            if (member->multi == Z_OBJ_P(mh)) running++;
+        } ZEND_HASH_FOREACH_END();
+    }
+    /* A reference however it is called: the parameter is by reference, and
+     * zend_call_function() wraps a value passed to one (8.4.27 and 8.5.12). */
+    ZEND_TRY_ASSIGN_REF_LONG(ZEND_CALL_ARG(execute_data, 2), running);
+    RETVAL_LONG(0); /* CURLM_OK */
+    return true;
+}
+
 static void oxphp_curl_guarded(const oxphp_curl_guard *g, INTERNAL_FUNCTION_PARAMETERS)
 {
     oxphp_request_fiber *self = oxphp_current_fiber;
+    if (oxphp_curl_exec_passed_over(g, execute_data, return_value, self)) return;
+
     if (self == NULL) {
         g->orig(INTERNAL_FUNCTION_PARAM_PASSTHRU);
         oxphp_curl_track(g, execute_data, return_value, NULL);
@@ -8453,6 +8494,14 @@ static void oxphp_curl_guarded(const oxphp_curl_guard *g, INTERNAL_FUNCTION_PARA
     struct timespec started;
     bool loop_call = g == &oxphp_curl_guards[OXPHP_CURL_GUARD_curl_multi_exec]
                      || g == &oxphp_curl_guards[OXPHP_CURL_GUARD_curl_multi_select];
+    /* An earlier waiter is let in where a loop holding the handle is suspended,
+     * inside curl_multi_select() or curl_exec(). A call that does not wait inside
+     * libcurl goes ahead on free handles: suspended there, it would be in the middle
+     * of its caller's code, inside an HTTP client's perform() say (above), and the
+     * waiter gets in at the loop's next select anyway. A call that has waited
+     * keeps its place in the order. */
+    bool yields = g == &oxphp_curl_guards[OXPHP_CURL_GUARD_curl_exec]
+                  || g == &oxphp_curl_guards[OXPHP_CURL_GUARD_curl_multi_select];
     oxphp_curl_select_ender ender = { .keys = keys, .self = self };
     for (;;) {
         void *held = NULL;
@@ -8460,7 +8509,11 @@ static void oxphp_curl_guarded(const oxphp_curl_guard *g, INTERNAL_FUNCTION_PARA
             oxphp_request_fiber *owner = oxphp_claim_owner(keys[i]);
             if (owner != NULL && owner != self) held = keys[i];
         }
-        if (held == NULL && !oxphp_curl_turn_is_anothers(self, keys, (uint32_t) nkeys)) break;
+        if (held == NULL
+            && ((budget_ns == 0 && !yields)
+                || !oxphp_curl_turn_is_anothers(self, keys, (uint32_t) nkeys))) {
+            break;
+        }
 
         /* One bound for the whole call, however many rounds it takes. */
         if (budget_ns == 0) {
