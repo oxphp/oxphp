@@ -8160,10 +8160,13 @@ static oxphp_curl_guard oxphp_curl_guards[OXPHP_CURL_GUARD_COUNT] = {
  * with bit 1 set, apart from the call claim on the handle and from the odd keys of
  * the PDO constructor gate. A waiter holds the handle as its argument, so the key
  * cannot pass to another object while it waits, as the address of an entry freed
- * on removal and handed out again by the allocator could. */
+ * on removal and handed out again by the allocator could. `done` is set once the
+ * transfer is seen to have ended: libcurl writes nothing more to the handle before
+ * it is added again, into an entry of its own. */
 typedef struct {
     zend_object *multi;
     void *claim;
+    bool done;
 } oxphp_curl_member;
 
 /* Easy handle → oxphp_curl_member, weakly keyed by the easy handle, so that an
@@ -8214,6 +8217,7 @@ static void oxphp_curl_member_add(zend_object *easy, zend_object *multi,
     oxphp_curl_member *member = emalloc(sizeof(*member));
     member->multi = multi;
     member->claim = (void *) ((uintptr_t) easy | 2);
+    member->done = false;
     /* zend_weakrefs_hash_add() does not replace an entry. */
     (void) zend_weakrefs_hash_del(oxphp_curl_members, easy);
     (void) zend_weakrefs_hash_add_ptr(oxphp_curl_members, easy, member);
@@ -8273,6 +8277,21 @@ static void oxphp_curl_track(const oxphp_curl_guard *g, zend_execute_data *execu
         if (member != NULL && member->multi == multi) {
             (void) zend_weakrefs_hash_del(oxphp_curl_members, easy);
         }
+    } else if (g == &oxphp_curl_guards[OXPHP_CURL_GUARD_curl_multi_exec]) {
+        if (oxphp_curl_members == NULL || ZEND_NUM_ARGS() != 2
+            || Z_TYPE_P(return_value) != IS_LONG || Z_LVAL_P(return_value) != 0 /* CURLM_OK */) {
+            return;
+        }
+        zval *running = ZEND_CALL_ARG(execute_data, 2);
+        ZVAL_DEREF(running);
+        if (Z_TYPE_P(running) != IS_LONG || Z_LVAL_P(running) != 0) return;
+        /* libcurl counts every transfer added and not ended, one not yet started
+         * included, so 0 means each member's has ended. */
+        zend_object *multi = Z_OBJ_P(ZEND_CALL_ARG(execute_data, 1));
+        oxphp_curl_member *member;
+        ZEND_HASH_FOREACH_PTR(oxphp_curl_members, member) {
+            if (member->multi == multi) member->done = true;
+        } ZEND_HASH_FOREACH_END();
     } else if (g == &oxphp_curl_guards[OXPHP_CURL_GUARD_curl_multi_close]) {
         /* It returns nothing either way. Only a multi handle is in the table, so
          * an object the call refused finds nothing to remove. */
@@ -8283,10 +8302,11 @@ static void oxphp_curl_track(const oxphp_curl_guard *g, zend_execute_data *execu
     }
 }
 
-/* libcurl's option numbers, which ext/curl passes to PHP unchanged and libcurl
- * keeps as ABI; curl.h is not among the headers this file is built against. */
+/* libcurl's option and message numbers, which ext/curl passes to PHP unchanged and
+ * libcurl keeps as ABI; curl.h is not among the headers this file is built against. */
 #define OXPHP_CURLOPT_VERBOSE 41
 #define OXPHP_CURLOPT_PRIVATE 10103
+#define OXPHP_CURLMSG_DONE 1
 
 /* The calls that do not wait for the fiber that added the handle to take it out.
  * curl_multi_remove_handle() is how it comes out. The rest are made on a transfer
@@ -8629,17 +8649,53 @@ static const zif_handler oxphp_curl_guard_handlers[OXPHP_CURL_GUARD_COUNT] = {
  * way appends to it in place (smart_str in curl_write(), interface.c), so a string
  * read mid-way grows under whoever holds it, or is left on memory the append
  * reallocated. A transfer suspended under the hook lets anything, another request
- * included, read it mid-way; the caller gets a copy of its own. */
+ * included, read it mid-way, so the caller gets a copy of its own while the
+ * transfer may still write: a fiber is in a call on the handle, or
+ * curl_multi_add_handle() put it in a multi handle and the end of its transfer has
+ * not been seen. Not after, where the copy would double the memory the answer takes
+ * for as long as the handle keeps its buffer: the next write to it comes from a
+ * curl_exec() or curl_multi_add_handle(), which release it first
+ * (_php_curl_cleanup_handle(), interface.c). Neither a curl_exec() outside any
+ * fiber, which takes no claim, nor a transfer a server pushed, which no
+ * curl_multi_add_handle() tracks, gets the copy. */
 static zif_handler oxphp_curl_getcontent_orig = NULL;
+
+static bool oxphp_curl_content_may_grow(zend_object *easy)
+{
+    if (oxphp_claim_owner(easy) != NULL) return true;
+    const oxphp_curl_member *member = oxphp_curl_member_find(easy);
+    return member != NULL && !member->done;
+}
 
 static ZEND_NAMED_FUNCTION(oxphp_curl_getcontent)
 {
     oxphp_curl_getcontent_orig(INTERNAL_FUNCTION_PARAM_PASSTHRU);
-    if (Z_TYPE_P(return_value) == IS_STRING) {
+    if (Z_TYPE_P(return_value) == IS_STRING
+        && oxphp_curl_content_may_grow(Z_OBJ_P(ZEND_CALL_ARG(execute_data, 1)))) {
         zend_string *live = Z_STR_P(return_value);
         ZVAL_STRINGL_FAST(return_value, ZSTR_VAL(live), ZSTR_LEN(live));
         zend_string_release(live);
     }
+}
+
+/* A CURLMSG_DONE message is the end of one transfer, which a loop reading each
+ * answer as it ends sees while others in the handle still run. libcurl drops a
+ * handle's unread message when the handle is taken out (multi.c, 8.23.0), so the
+ * message is about the handle's present place in the multi handle. */
+static zif_handler oxphp_curl_info_read_orig = NULL;
+
+static ZEND_NAMED_FUNCTION(oxphp_curl_info_read)
+{
+    oxphp_curl_info_read_orig(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+    if (Z_TYPE_P(return_value) != IS_ARRAY) return;
+    const zval *msg = zend_hash_str_find(Z_ARRVAL_P(return_value), "msg", sizeof("msg") - 1);
+    const zval *easy = zend_hash_str_find(Z_ARRVAL_P(return_value), "handle", sizeof("handle") - 1);
+    if (msg == NULL || Z_TYPE_P(msg) != IS_LONG || Z_LVAL_P(msg) != OXPHP_CURLMSG_DONE
+        || easy == NULL || Z_TYPE_P(easy) != IS_OBJECT) {
+        return;
+    }
+    oxphp_curl_member *member = oxphp_curl_member_find(Z_OBJ_P(easy));
+    if (member != NULL) member->done = true;
 }
 
 /* Whether ext/curl is a shared extension that Zend loaded with RTLD_DEEPBIND,
@@ -8712,6 +8768,8 @@ static bool oxphp_curl_category_install(void)
     }
     oxphp_hook_swap("curl_multi_getcontent", sizeof("curl_multi_getcontent") - 1,
                     oxphp_curl_getcontent, &oxphp_curl_getcontent_orig);
+    oxphp_hook_swap("curl_multi_info_read", sizeof("curl_multi_info_read") - 1,
+                    oxphp_curl_info_read, &oxphp_curl_info_read_orig);
     return true;
 }
 
@@ -8726,6 +8784,9 @@ static void oxphp_curl_category_restore(void)
     oxphp_hook_restore("curl_multi_getcontent", sizeof("curl_multi_getcontent") - 1,
                        oxphp_curl_getcontent_orig);
     oxphp_curl_getcontent_orig = NULL;
+    oxphp_hook_restore("curl_multi_info_read", sizeof("curl_multi_info_read") - 1,
+                       oxphp_curl_info_read_orig);
+    oxphp_curl_info_read_orig = NULL;
 }
 
 /* Publishing the set is what makes an enabled RUNTIME_HOOKS confirmable at all:
