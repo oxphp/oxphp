@@ -4173,8 +4173,11 @@ static void oxphp_error_handler_take_back(oxphp_request_fiber *fiber) {
     const oxphp_error_handler_call *rec = &fiber->error_handler_calls[fiber->error_handler_lent - 1];
     fiber->error_handler_lent = 0;
     if (oxphp_error_handler_is(&EG(user_error_handler), &rec->handler)) {
-        /* Never the last reference: the record holds one. */
-        zval_ptr_dtor(&EG(user_error_handler));
+        /* A decrement, never the last reference since the record holds one: a
+         * release would buffer the handler as a possible cycle root, and a full
+         * buffer runs the collector, destructors and all, in the middle of the
+         * resume (see oxphp_error_handler_call_observer()). */
+        Z_TRY_DELREF(EG(user_error_handler));
         ZVAL_UNDEF(&EG(user_error_handler));
     }
 }
@@ -6173,6 +6176,16 @@ static ZEND_NAMED_FUNCTION(oxphp_fiber_loop_handler) {
          * reported here too, before this fiber's park would hand it to
          * whatever runs next on the thread. */
         oxphp_file_late_oom(fiber, &mark);
+
+        /* And the copies of the error handler once more, past the last point
+         * above that runs user code: a destructor the release of a fatal's
+         * backtrace runs can call the handler, which records a copy, and a
+         * bailout in the release above leaves the copies it had not reached.
+         * Left on the fiber, they would outlive the request. */
+        while (fiber->error_handler_call_count > 0) {
+            oxphp_fiber_late_release(fiber, &mark, oxphp_error_handler_calls_release,
+                                     "bailout releasing the request's error handler calls");
+        }
 
         /* The environment variables it set with putenv() end last, past every
          * point above that can run user code for the request. What runs later
@@ -10535,8 +10548,10 @@ int64_t oxphp_async_sched_poll_completed(void **out_retval,
 /* Releases the closure a finished task ran, what it returned and the copies of
  * the error handler its calls of it kept, each in a step of the driver's window
  * (see OXPHP_TASK_WINDOW_STEP). The driver has serialized the result by then.
- * Taken off the fiber first, so that nothing a bailout interrupts is left there
- * to be released again. */
+ * Each is off the fiber before it goes, so that nothing a bailout interrupts is
+ * released again — the copies one at a time, by the release itself, which the
+ * steps repeat until none is left: what the window leaves, the teardown after it
+ * releases under no catch. */
 static void oxphp_task_release_payload_guarded(oxphp_request_fiber *fiber) {
     zval closure, retval;
     ZVAL_COPY_VALUE(&closure, &fiber->task_closure);
@@ -10550,7 +10565,9 @@ static void oxphp_task_release_payload_guarded(oxphp_request_fiber *fiber) {
     oxphp_task_window_open(&mark);
     OXPHP_TASK_WINDOW_STEP(&mark, zval_ptr_dtor(&closure));
     OXPHP_TASK_WINDOW_STEP(&mark, zval_ptr_dtor(&retval));
-    OXPHP_TASK_WINDOW_STEP(&mark, oxphp_error_handler_calls_release(fiber));
+    while (fiber->error_handler_call_count > 0) {
+        OXPHP_TASK_WINDOW_STEP(&mark, oxphp_error_handler_calls_release(fiber));
+    }
     /* Last: the closure reads the table, and so can a value the task returned
      * that holds the closure, such as a generator. */
     if (statics) {

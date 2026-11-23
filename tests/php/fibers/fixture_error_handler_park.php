@@ -31,6 +31,14 @@ declare(strict_types=1);
 //                 page four slots at a time and past its end on some steps, where
 //                 PHP starts it on a new page. Parks inside the handler each time
 //                 until the test has had its turn.
+//   ?mode=late    leaves an argument in the backtrace of an E_USER_ERROR its
+//                 handler takes over. On PHP 8.5 and later that backtrace holds
+//                 it until the end of the request lets go of it, and its
+//                 destructor raises an error the handler hears there, once the
+//                 request's own code is over, then drops the handler: the last
+//                 thing holding an object that marks itself released as it goes.
+//                 With no such backtrace the destructor runs as the call returns.
+//                 No park.
 
 require_once __DIR__ . '/error_mode_probe.php';
 
@@ -60,6 +68,22 @@ if (!class_exists('OxphpErrorHandlerParkWrapper', false)) {
 }
 if (!in_array('oxehslot', stream_get_wrappers(), true)) {
     stream_wrapper_register('oxehslot', OxphpErrorHandlerParkWrapper::class);
+}
+
+if (!class_exists('OxphpErrorHandlerLateCaller', false)) {
+    final class OxphpErrorHandlerLateCaller
+    {
+        public function __construct(private string $run)
+        {
+        }
+
+        // Raises an error the handler hears, then drops the handler.
+        public function __destruct()
+        {
+            trigger_error("late-{$this->run}", E_USER_NOTICE);
+            restore_error_handler();
+        }
+    }
 }
 
 $run = (string) ($_GET['run'] ?? '?');
@@ -191,6 +215,27 @@ if (($_GET['mode'] ?? '') === 'next') {
     echo 'HELD:', $held ? 'yes' : 'no', "\n";
     echo 'THROWN:', $thrown, "\n";
     echo 'HEARD:', implode(',', $heard), "\n";
+
+    return;
+}
+
+if (($_GET['mode'] ?? '') === 'late') {
+    $marker = new OxphpErrorModeReleaseMarker("released-$run");
+    set_error_handler(static function (int $severity, string $message) use ($marker, $run): bool {
+        if ($message === "late-$run") {
+            OxphpErrorModeProbe::$inWindow["late-after-return-$run"] = OxphpErrorModeProbe::$inWindow["returned-$run"] ?? false;
+        }
+
+        return true;
+    });
+    unset($marker);
+    // The handler takes over the deprecation E_USER_ERROR raises as well. No
+    // error after this one: the next would let go of its backtrace.
+    (static function (OxphpErrorHandlerLateCaller $late) use ($run): void {
+        trigger_error("fatal-$run", E_USER_ERROR);
+    })(new OxphpErrorHandlerLateCaller($run));
+    OxphpErrorModeProbe::$inWindow["returned-$run"] = true;
+    echo "ARMED\n";
 
     return;
 }
