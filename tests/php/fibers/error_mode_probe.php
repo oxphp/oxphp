@@ -119,6 +119,21 @@ if (!class_exists('OxphpErrorModeProbe', false)) {
     }
 
     /** Sets OxphpErrorModeProbe::$inWindow[$key] once the last reference to it goes. */
+    final class OxphpErrorModeReleaseMarker
+    {
+        public function __construct(private string $key, private ?string $armed = null)
+        {
+        }
+
+        public function __destruct()
+        {
+            OxphpErrorModeProbe::$inWindow[$this->key] = true;
+            if ($this->armed !== null && (OxphpErrorModeProbe::$inWindow[$this->armed] ?? false)) {
+                throw new \RuntimeException('released-inside-an-error');
+            }
+        }
+    }
+
     final class OxphpErrorModeWrapper
     {
         /** @var resource|null Set by PHP on every wrapper instance. */
