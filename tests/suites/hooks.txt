@@ -308,6 +308,12 @@ hooks/test_curl_call_outside_a_fiber_is_refused_while_a_fiber_is_in_one >> ?via=
 # curl_multi_getcontent() on a transfer under way returns a string of its own, which
 # the rest of the answer neither grows nor frees.
 hooks/test_curl_multi_getcontent_mid_transfer_keeps_its_string
+hooks/test_curl_multi_getcontent_mid_transfer_keeps_its_string >> ?via=exec
+
+# Once a transfer has ended, seen by curl_multi_exec() reporting none running or by
+# its CURLMSG_DONE message, curl_multi_getcontent() makes no copy of its answer.
+hooks/test_curl_multi_getcontent_of_a_finished_transfer_makes_no_copy >> ?after=loop
+hooks/test_curl_multi_getcontent_of_a_finished_transfer_makes_no_copy >> ?after=done
 
 # Three POSTs, one worker: the request body is a stream resource, and worker mode
 # has no per-request resource list to close it. Listed three times because the

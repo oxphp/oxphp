@@ -9,37 +9,54 @@ require_once __DIR__ . '/../test_helper.php';
 // is written: ext/curl appends to the buffer it hands out, and a string sharing it
 // would grow with the transfer, or be left pointing at memory the append freed.
 // The answer comes in two parts (fixture_curl_two_parts.php); the string read
-// between them is checked once the transfer is over.
+// between them is checked once the transfer is over. By default a multi loop reads
+// it between its calls; ?via=exec reads it from the progress callback of a
+// curl_exec() on the handle, which is in no multi handle.
 
 $t = new TestCase('curl_multi_getcontent_mid_transfer_keeps_its_string', 'hooks');
 
 $ch = curl_init('http://127.0.0.1:80/tests/hooks/fixture_curl_two_parts.php');
 curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 8]);
-$mh = curl_multi_init();
-curl_multi_add_handle($mh, $ch);
 
 $first = null;
 $firstLength = 0;
 $firstHash = '';
 $runningAtFirst = 0;
-$deadline = microtime(true) + 8.0;
-do {
-    curl_multi_exec($mh, $running);
-    $content = curl_multi_getcontent($ch);
+$keep = static function ($content, int $running) use (&$first, &$firstLength, &$firstHash, &$runningAtFirst): void {
     if ($first === null && is_string($content) && $content !== '') {
         $first = $content;
         $firstLength = strlen($content);
         $firstHash = md5($content);
         $runningAtFirst = $running;
     }
-    if ($running > 0) {
-        curl_multi_select($mh, 1.0);
-    }
-} while ($running > 0 && microtime(true) < $deadline);
-unset($content);
-$final = curl_multi_getcontent($ch);
-curl_multi_remove_handle($mh, $ch);
-curl_multi_close($mh);
+};
+
+if (($_GET['via'] ?? '') === 'exec') {
+    curl_setopt_array($ch, [
+        CURLOPT_NOPROGRESS => false,
+        CURLOPT_XFERINFOFUNCTION => static function ($h, $dlTotal, $dlNow) use ($keep): int {
+            if ($dlNow > 0 && $dlNow < 150) {
+                $keep(curl_multi_getcontent($h), 1);
+            }
+            return 0;
+        },
+    ]);
+    $final = curl_exec($ch);
+} else {
+    $mh = curl_multi_init();
+    curl_multi_add_handle($mh, $ch);
+    $deadline = microtime(true) + 8.0;
+    do {
+        curl_multi_exec($mh, $running);
+        $keep(curl_multi_getcontent($ch), $running);
+        if ($running > 0) {
+            curl_multi_select($mh, 1.0);
+        }
+    } while ($running > 0 && microtime(true) < $deadline);
+    $final = curl_multi_getcontent($ch);
+    curl_multi_remove_handle($mh, $ch);
+    curl_multi_close($mh);
+}
 
 $t->meta('first_length', $firstLength);
 $t->meta('first_now', is_string($first) ? strlen($first) : null);
