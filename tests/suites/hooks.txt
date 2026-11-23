@@ -297,6 +297,14 @@ hooks/test_curl_handle_built_where_a_freed_handle_was_is_not_taken_for_it >> ?th
 hooks/test_curl_shared_client_does_not_reenter_perform >> ?arrive=perform
 hooks/test_curl_shared_client_does_not_reenter_perform >> ?arrive=add
 
+# PHP that runs in no request, a destructor the worker runs between two slices,
+# cannot wait for a handle: its call on one a parked request is in the middle of a
+# call on is refused, and curl_multi_exec() returns at once. A handle that is only
+# in a multi handle no call is on is not refused.
+hooks/test_curl_call_outside_a_fiber_is_refused_while_a_fiber_is_in_one >> ?via=easy
+hooks/test_curl_call_outside_a_fiber_is_refused_while_a_fiber_is_in_one >> ?via=multi
+hooks/test_curl_call_outside_a_fiber_is_refused_while_a_fiber_is_in_one >> ?via=member
+
 # Three POSTs, one worker: the request body is a stream resource, and worker mode
 # has no per-request resource list to close it. Listed three times because the
 # assertion is about the delta between two consecutive requests, not about any

@@ -8479,6 +8479,22 @@ static void oxphp_curl_guarded(const oxphp_curl_guard *g, INTERNAL_FUNCTION_PARA
     if (oxphp_curl_exec_passed_over(g, execute_data, return_value, self)) return;
 
     if (self == NULL) {
+        /* Code outside any fiber, a destructor the worker runs between two slices,
+         * cannot wait, so a handle another fiber is in the middle of a call on
+         * refuses it. `frame` tells such a call from a claim left by a bailout out
+         * of one, which lasts to the end of the request. The membership alone does
+         * not refuse it: it lasts until the handle is taken out, and would turn
+         * away a handle no call is using. */
+        void *keys[OXPHP_CURL_MAX_KEYS];
+        size_t total;
+        size_t nkeys = oxphp_curl_keys(g, execute_data, NULL, keys, &total);
+        for (size_t i = 0; i < nkeys; i++) {
+            const oxphp_request_fiber *owner = oxphp_claim_owner(keys[i]);
+            if (owner != NULL && owner->curl_op.frame != NULL) {
+                oxphp_curl_guard_refuse(g, OXPHP_CLAIM_WAIT_UNSUSPENDABLE, keys[i], false, 0);
+                return;
+            }
+        }
         g->orig(INTERNAL_FUNCTION_PARAM_PASSTHRU);
         oxphp_curl_track(g, execute_data, return_value, NULL);
         return;
