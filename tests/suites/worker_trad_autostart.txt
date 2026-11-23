@@ -5,3 +5,7 @@
 # next request on the thread asks again from an object its auto-started session
 # wakes up — before OxPHP's module has started that request.
 worker_trad/test_current_during_request_startup
+
+# A request whose session cannot be decoded fails to start, and the thread it
+# ran on is replaced rather than serving on what that startup left behind.
+worker_trad/test_thread_retires_after_a_failed_request_startup

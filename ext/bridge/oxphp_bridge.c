@@ -3181,6 +3181,26 @@ void oxphp_bridge_destroy_persistent_list(void) {
     zend_hash_graceful_reverse_destroy(&EG(persistent_list));
 }
 
+/* Deletes the POSIX timer the thread keeps for max_execution_time, if it still
+ * has one. PHP deletes it only in shutdown_executor(), and ts_free_thread()
+ * does not (PHP 8.4.28, 8.5.13, 8.6.0), so a thread whose last
+ * php_request_startup() failed, with no request shutdown after it, would leave
+ * its timer to the process until the process exits.
+ *
+ * Called on the exiting thread, just before oxphp_bridge_destroy_persistent_list().
+ *
+ * SYNC: php-src Zend/zend_max_execution_timer.c zend_max_execution_timer_shutdown(),
+ * which libphp does not export. */
+void oxphp_bridge_delete_execution_timer(void) {
+#ifdef ZEND_MAX_EXECUTION_TIMERS
+    if (EG(pid) != getpid()) {
+        return;
+    }
+    EG(pid) = 0;
+    timer_delete(EG(max_execution_timer_timer));
+#endif
+}
+
 /* ─── Request Shutdown Guard ───────────────────────────────── */
 
 /* From PHP 8.4.28 / 8.5.13, zend_deactivate_modules() calls _exit(1) when a
@@ -9041,6 +9061,10 @@ void oxphp_pool_statics_activate(void) {
     }
 }
 
+/* Defined by the oxphp binary; NULL under a bare `php` CLI, for the reason
+ * given at the oxphp_shared_* declarations. */
+extern void oxphp_opcache_restart_adopt(void) __attribute__((weak));
+
 /* Run the factory or $destroy the pool stores. Returns NULL once it has run,
  * or the message saying why this thread does not run it, which the caller
  * throws or reports. An acquire can run it on a thread that never ran its
@@ -9058,6 +9082,12 @@ static zend_string *oxphp_pool_invoke(const oxphp_pool_fcc_t *heap,
         /* A string of this thread's: the stored one's count is not atomic. */
         return zend_string_init(
             ZSTR_VAL(heap->refused_elsewhere), ZSTR_LEN(heap->refused_elsewhere), 0);
+    }
+    if (elsewhere && oxphp_opcache_restart_adopt) {
+        /* What runs from here is in OPcache's shared memory or built in, and
+         * the request open here holds OPcache restarts until it closes. A
+         * call refused above ran nothing, so it holds none. */
+        oxphp_opcache_restart_adopt();
     }
     oxphp_cover_map_ptr_last();
     if (elsewhere && heap->rebuilt_from) {

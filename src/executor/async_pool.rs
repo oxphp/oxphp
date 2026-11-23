@@ -67,6 +67,7 @@ impl AsyncWorkerPool {
                 shutdown: self.shutdown.clone(),
                 metrics: self.metrics.clone(),
                 workers: Arc::clone(&self.workers),
+                retry: None,
             };
             if let Err(e) = spawn_pool_thread(thread) {
                 panic!("Failed to spawn async worker {id}: {e}");
@@ -116,12 +117,80 @@ impl Drop for AsyncWorkerPool {
 /// What a pool thread runs with; a thread that retires hands it to its
 /// replacement.
 #[cfg(feature = "php")]
+#[derive(Clone)]
 struct PoolThread {
     id: usize,
     rx: crossbeam_channel::Receiver<AsyncTask>,
     shutdown: Arc<AtomicBool>,
     metrics: Option<Arc<Metrics>>,
     workers: Arc<Mutex<Vec<std::thread::JoinHandle<()>>>>,
+    /// For a replacement, how long to wait before starting the next one if
+    /// this one cannot open its PHP request. `None` for the threads the pool
+    /// starts with, which are not tried again.
+    retry: Option<std::time::Duration>,
+}
+
+/// How a pool thread's run ended.
+#[cfg(feature = "php")]
+enum PoolThreadEnd {
+    /// The pool shut down.
+    Exited,
+    /// It retired, and is to be replaced.
+    Retired,
+    /// It could not open its PHP request, and ran no task.
+    StartupFailed,
+}
+
+/// The wait before the first new try at starting a replacement pool thread.
+#[cfg(any(feature = "php", test))]
+const RETRY_FIRST: std::time::Duration = std::time::Duration::from_millis(100);
+/// The longest wait between two tries.
+#[cfg(any(feature = "php", test))]
+const RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(5);
+/// How often a wait between tries looks at the shutdown flag.
+#[cfg(any(feature = "php", test))]
+const RETRY_POLL: std::time::Duration = std::time::Duration::from_millis(50);
+
+/// Start a replacement pool thread with `spawn`, after waiting `delay`, and
+/// try again after a longer wait each time it fails, until it starts or the
+/// pool shuts down. `spawn` is given the wait its thread is to use if that
+/// thread cannot open its PHP request. False when the pool shut down first:
+/// the replacement, counted in, never runs.
+#[cfg(any(feature = "php", test))]
+fn start_replacement(
+    worker: usize,
+    mut delay: std::time::Duration,
+    shutdown: &AtomicBool,
+    mut sleep: impl FnMut(std::time::Duration),
+    mut spawn: impl FnMut(std::time::Duration) -> std::io::Result<()>,
+) -> bool {
+    loop {
+        let mut waited = std::time::Duration::ZERO;
+        while waited < delay {
+            if shutdown.load(Ordering::Relaxed) {
+                return false;
+            }
+            let step = RETRY_POLL.min(delay - waited);
+            sleep(step);
+            waited += step;
+        }
+        if shutdown.load(Ordering::Relaxed) {
+            return false;
+        }
+        let retry = (delay * 2).clamp(RETRY_FIRST, RETRY_MAX);
+        match spawn(retry) {
+            Ok(()) => return true,
+            Err(e) => {
+                tracing::error!(
+                    worker,
+                    error = %e,
+                    retry_in = ?retry,
+                    "could not start a thread to replace a retired async worker thread"
+                );
+                delay = retry;
+            }
+        }
+    }
 }
 
 /// Spawn a pool thread and add its handle to the pool's list.
@@ -136,7 +205,7 @@ fn spawn_pool_thread(thread: PoolThread) -> std::io::Result<()> {
             // thread is replaced only when it retires, so a panic that unwinds
             // it ends the process.
             let abort_on_panic = crate::executor::AbortOnUnwind("in the async pool");
-            let replace = async_worker_thread(
+            let end = async_worker_thread(
                 thread.id,
                 thread.rx.clone(),
                 thread.shutdown.clone(),
@@ -155,13 +224,27 @@ fn spawn_pool_thread(thread: PoolThread) -> std::io::Result<()> {
             // are native thread-local storage.
             interrupt.retire();
             crate::executor::sapi::release_php_thread();
-            if replace {
-                let id = thread.id;
-                if let Err(e) = spawn_pool_thread(thread) {
-                    tracing::error!(worker = id, error = %e, "could not replace a retired async worker thread");
-                    // It was counted in when this thread retired.
+            let delay = match (end, thread.retry) {
+                (PoolThreadEnd::Exited, _) => return,
+                (PoolThreadEnd::Retired, _) => std::time::Duration::ZERO,
+                (PoolThreadEnd::StartupFailed, Some(delay)) => delay,
+                // No RSHUTDOWN runs to count this thread out, and it runs no task.
+                (PoolThreadEnd::StartupFailed, None) => {
                     crate::php::sapi::async_pool_thread_stopped();
+                    return;
                 }
+            };
+            let shutdown = Arc::clone(&thread.shutdown);
+            let started =
+                start_replacement(thread.id, delay, &shutdown, std::thread::sleep, |retry| {
+                    spawn_pool_thread(PoolThread {
+                        retry: Some(retry),
+                        ..thread.clone()
+                    })
+                });
+            if !started {
+                // Counted in when this thread, or the one it replaced, retired.
+                crate::php::sapi::async_pool_thread_stopped();
             }
         })?;
     // A thread that retired has ended; until joined it keeps its stack.
@@ -222,7 +305,6 @@ impl Drop for WorkerPermitGuard {
 /// Each worker initialises TSRM, performs a single `php_request_startup()`,
 /// then loops: recv task → reset state → execute closure → deep-copy result → send → free args.
 /// On exit (shutdown, channel disconnect, or retirement), calls `php_request_shutdown()`.
-/// Returns true when the thread retired and is to be replaced.
 #[cfg(feature = "php")]
 fn async_worker_thread(
     id: usize,
@@ -230,7 +312,7 @@ fn async_worker_thread(
     shutdown: Arc<AtomicBool>,
     metrics: Option<Arc<Metrics>>,
     interrupt: &Arc<crate::php::worker_registry::InterruptTarget>,
-) -> bool {
+) -> PoolThreadEnd {
     use crate::async_types::AsyncResult;
     use crate::bridge::ffi;
     use crate::php::{bindings, sapi};
@@ -269,9 +351,7 @@ fn async_worker_thread(
     // The thread's one PHP request lasts as long as the thread.
     if !unsafe { crate::php::thread::open_request(crate::plugin::RequestScope::Thread) } {
         tracing::error!(id, "php_request_startup() failed in async worker");
-        // No RSHUTDOWN runs to count this thread out, and it runs no task.
-        sapi::async_pool_thread_stopped();
-        return false;
+        return PoolThreadEnd::StartupFailed;
     }
     // The guard in the spawn closure is not enough: a panic unwinds this frame
     // first, and `_php_thread` would tell plugins the thread is stopping while
@@ -786,7 +866,11 @@ fn async_worker_thread(
         tasks_executed,
         "Async worker thread exiting"
     );
-    replace
+    if replace {
+        PoolThreadEnd::Retired
+    } else {
+        PoolThreadEnd::Exited
+    }
 }
 
 /// Drain every task fiber that has completed: serialize its result, send it to
@@ -1009,5 +1093,94 @@ mod tests {
     fn test_pool_default_capacity() {
         let pool = AsyncWorkerPool::new(2, 0, None);
         assert!(pool.is_some());
+    }
+
+    use std::time::Duration;
+
+    /// Run `start_replacement` from `delay`, failing the first `failures`
+    /// spawns. Returns what it answered, the wait each spawn was handed, and
+    /// the time it slept.
+    fn replace(
+        delay: Duration,
+        failures: usize,
+        shutdown: &AtomicBool,
+        mut on_sleep: impl FnMut(&AtomicBool),
+    ) -> (bool, Vec<Duration>, Duration) {
+        let mut handed = Vec::new();
+        let mut slept = Duration::ZERO;
+        let started = start_replacement(
+            0,
+            delay,
+            shutdown,
+            |d| {
+                slept += d;
+                on_sleep(shutdown);
+            },
+            |retry| {
+                handed.push(retry);
+                // A wait that does not grow from zero never sleeps, and so
+                // never reaches a shutdown a test sets from its sleep.
+                assert!(handed.len() < 100, "tried again without end");
+                if handed.len() > failures {
+                    Ok(())
+                } else {
+                    Err(std::io::Error::from(std::io::ErrorKind::WouldBlock))
+                }
+            },
+        );
+        (started, handed, slept)
+    }
+
+    #[test]
+    fn replacement_is_tried_again_after_a_longer_wait_until_it_starts() {
+        let shutdown = AtomicBool::new(false);
+        let (started, handed, slept) = replace(Duration::ZERO, 3, &shutdown, |_| {});
+        assert!(started);
+        let ms = |n| Duration::from_millis(n);
+        assert_eq!(handed, [ms(100), ms(200), ms(400), ms(800)]);
+        // No wait before the first try, then the wait each failed one handed on.
+        assert_eq!(slept, ms(100 + 200 + 400));
+    }
+
+    #[test]
+    fn replacement_whose_request_failed_waits_what_it_was_handed() {
+        let shutdown = AtomicBool::new(false);
+        let (started, handed, slept) = replace(Duration::from_millis(400), 0, &shutdown, |_| {});
+        assert!(started);
+        assert_eq!(handed, [Duration::from_millis(800)]);
+        assert_eq!(slept, Duration::from_millis(400));
+    }
+
+    #[test]
+    fn replacement_wait_stops_growing_at_the_ceiling() {
+        let shutdown = AtomicBool::new(false);
+        let (started, handed, _) = replace(Duration::from_secs(4), 2, &shutdown, |_| {});
+        assert!(started);
+        assert_eq!(handed, [RETRY_MAX; 3]);
+    }
+
+    #[test]
+    fn replacement_is_given_up_once_the_pool_shuts_down() {
+        let shutdown = AtomicBool::new(false);
+        let mut sleeps = 0;
+        let (started, handed, slept) = replace(Duration::ZERO, usize::MAX, &shutdown, |flag| {
+            sleeps += 1;
+            if sleeps == 3 {
+                flag.store(true, Ordering::Relaxed);
+            }
+        });
+        assert!(!started);
+        // The second wait, 200 ms long, is cut short after its first quantum.
+        assert_eq!(handed.len(), 2);
+        assert_eq!(slept, Duration::from_millis(100) + RETRY_POLL);
+    }
+
+    #[test]
+    fn replacement_is_not_started_for_a_pool_already_shut_down() {
+        let shutdown = AtomicBool::new(true);
+        let (started, handed, slept) = replace(Duration::ZERO, 0, &shutdown, |_| {});
+        assert!(!started);
+        assert!(handed.is_empty());
+        assert_eq!(slept, Duration::ZERO);
     }
 }

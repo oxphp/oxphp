@@ -99,6 +99,12 @@ pub(crate) struct Coordinator {
     done: AtomicU64,
     holders: AtomicU64,
     uncached: AtomicU64,
+    /// The `scheduled` whose restart the lock could not be let go for. OPcache
+    /// keeps that restart pending and never runs it, so no startup tries it
+    /// again and no thread is retired for it: a retry would put each startup
+    /// through `window` exclusively, and a retired thread's replacement would
+    /// only find the lock held again.
+    stuck: AtomicU64,
     /// Request startups take it shared; the startup that runs a restart takes
     /// it exclusively, so no other startup runs during the restart.
     window: RwLock<()>,
@@ -125,8 +131,9 @@ pub(crate) struct Opened {
 
 /// The lock that keeps OPcache from running a restart on its own.
 pub(crate) trait RestartLock {
-    /// Let the next request startup run the pending restart.
-    fn release(&self);
+    /// Let the next request startup run the pending restart. False when the
+    /// lock is still held, and OPcache keeps the restart pending.
+    fn release(&self) -> bool;
     /// Keep restarts from running again.
     fn reacquire(&self);
 }
@@ -170,6 +177,7 @@ impl Coordinator {
             done: AtomicU64::new(0),
             holders: AtomicU64::new(0),
             uncached: AtomicU64::new(0),
+            stuck: AtomicU64::new(0),
             window: RwLock::new(()),
             drain_until_ms: [AtomicU64::new(0), AtomicU64::new(0)],
         }
@@ -192,7 +200,7 @@ impl Coordinator {
             if seen == self.done.load(SeqCst) {
                 return self.open_cached(seen, startup).map(|o| (o, false));
             }
-            if self.holders.load(SeqCst) != 0 {
+            if self.holders.load(SeqCst) != 0 || self.cannot_run(seen) {
                 return self.open_uncached(seen, startup).map(|o| (o, false));
             }
         }
@@ -203,11 +211,17 @@ impl Coordinator {
         if seen == self.done.load(SeqCst) {
             return self.open_cached(seen, startup).map(|o| (o, false));
         }
-        if self.holders.load(SeqCst) != 0 {
+        if self.holders.load(SeqCst) != 0 || self.cannot_run(seen) {
             return self.open_uncached(seen, startup).map(|o| (o, false));
         }
         self.holders.fetch_add(1, SeqCst);
-        lock.release();
+        if !lock.release() {
+            // OPcache sees the lock held, as under a holder: it runs this
+            // startup without the cache and leaves the restart pending.
+            self.stuck.store(seen, SeqCst);
+            self.release();
+            return self.open_uncached(seen, startup).map(|o| (o, false));
+        }
         let started = startup();
         lock.reacquire();
         if !started {
@@ -259,6 +273,11 @@ impl Coordinator {
             self.drop_uncached();
             None
         }
+    }
+
+    /// Whether `seen` is a pending restart the lock could not be let go for.
+    fn cannot_run(&self, seen: u64) -> bool {
+        seen != self.done.load(SeqCst) && self.stuck.load(SeqCst) == seen
     }
 
     fn drop_uncached(&self) {
@@ -344,6 +363,9 @@ impl Coordinator {
         if scheduled_here {
             return Some(Retire::Holding);
         }
+        if self.cannot_run(self.scheduled.load(SeqCst)) {
+            return None;
+        }
         if opened.holds {
             if self.scheduled.load(SeqCst) != opened.seen {
                 return Some(Retire::Holding);
@@ -413,10 +435,15 @@ impl Coordinator {
     }
 
     /// A restart OPcache asked for and that has not run after `timeout_ms`;
-    /// once per restart. `timeout_ms == 0` never reports.
+    /// once per restart. `timeout_ms == 0` never reports, nor does a restart
+    /// the lock could not be let go for: it never runs, and that was logged
+    /// as it happened.
     pub(crate) fn overdue(&self, now_ms: u64, timeout_ms: u64) -> Option<Overdue> {
         let asked = self.asked.load(SeqCst);
-        if timeout_ms == 0 || asked == self.done.load(SeqCst) {
+        if timeout_ms == 0
+            || asked == self.done.load(SeqCst)
+            || self.cannot_run(self.scheduled.load(SeqCst))
+        {
             return None;
         }
         let waited_ms = now_ms.saturating_sub(self.asked_at_ms.load(SeqCst));
@@ -623,6 +650,14 @@ pub(crate) fn adopt() {
     });
 }
 
+/// [`adopt`], for the C bridge to call once it has accepted a call into a
+/// `Shared\Pool` callable another thread made, and before the call runs.
+#[cfg(feature = "php")]
+#[no_mangle]
+pub extern "C" fn oxphp_opcache_restart_adopt() {
+    adopt();
+}
+
 /// Why the calling thread, whose request lasts as long as the thread, is to be
 /// replaced at its next moment with nothing in flight.
 pub(crate) fn retire_reason() -> Option<Retire> {
@@ -780,10 +815,17 @@ mod ofd {
     }
 
     impl RestartLock for OfdLock {
-        fn release(&self) {
+        fn release(&self) -> bool {
             if let Err(e) = self.set(libc::F_OFD_SETLK, libc::F_UNLCK) {
-                tracing::error!(error = %e, "could not let go of the OPcache restart lock; the pending restart will not run");
+                tracing::error!(
+                    error = %e,
+                    "could not let go of the OPcache restart lock: the pending restart will \
+                     not run, and requests that start from now on run without the cache \
+                     until the server restarts"
+                );
+                return false;
             }
+            true
         }
 
         fn reacquire(&self) {
@@ -883,14 +925,26 @@ mod tests {
     struct FakeLock {
         released: AtomicBool,
         releases: AtomicU64,
+        /// The lock cannot be let go of.
+        stuck: AtomicBool,
+        /// Taken back while it was never let go of.
+        reacquired_held: AtomicU64,
     }
 
     impl RestartLock for FakeLock {
-        fn release(&self) {
+        fn release(&self) -> bool {
+            if self.stuck.load(SeqCst) {
+                return false;
+            }
             assert!(!self.released.swap(true, SeqCst), "released twice");
             self.releases.fetch_add(1, SeqCst);
+            true
         }
         fn reacquire(&self) {
+            if self.stuck.load(SeqCst) && !self.released.load(SeqCst) {
+                self.reacquired_held.fetch_add(1, SeqCst);
+                return;
+            }
             assert!(self.released.swap(false, SeqCst), "reacquired unreleased");
         }
     }
@@ -985,6 +1039,56 @@ mod tests {
 
         let (_, restarted, released) = open(c, &lock);
         assert!(restarted && released, "the next startup tries again");
+    }
+
+    #[test]
+    fn restart_lock_that_will_not_let_go_leaves_the_restart_pending() {
+        let c = coordinator();
+        let lock = FakeLock::default();
+        c.ask(0);
+        c.publish(1);
+        lock.stuck.store(true, SeqCst);
+
+        let mut ran = false;
+        let (opened, restarted) = c
+            .open(&lock, || {
+                ran = true;
+                true
+            })
+            .expect("startup succeeds");
+        assert!(ran, "the request starts all the same");
+        assert!(
+            !restarted,
+            "OPcache cannot run the restart while the lock is held"
+        );
+        assert_eq!(c.done.load(SeqCst), 0, "the restart is still pending");
+        assert!(
+            !opened.holds && !opened.cached,
+            "the request runs without the cache, as OPcache runs it"
+        );
+        assert_eq!(c.holders.load(SeqCst), 0);
+        assert_eq!(c.uncached.load(SeqCst), 1);
+        assert_eq!(lock.reacquired_held.load(SeqCst), 0);
+        assert_eq!(
+            c.retire(opened, false),
+            None,
+            "a replacement would find the lock held again"
+        );
+        assert!(!c.close(opened));
+        assert_eq!(c.uncached.load(SeqCst), 0);
+        assert_eq!(
+            c.overdue(60_000, 2_000),
+            None,
+            "no warning that it runs once the requests have ended"
+        );
+
+        lock.stuck.store(false, SeqCst);
+        let (next, restarted, released) = open(c, &lock);
+        assert!(
+            !restarted && !released && !next.cached,
+            "the next startup does not try the lock again"
+        );
+        assert_eq!(c.done.load(SeqCst), 0);
     }
 
     #[test]
