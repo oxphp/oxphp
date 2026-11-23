@@ -305,6 +305,10 @@ hooks/test_curl_call_outside_a_fiber_is_refused_while_a_fiber_is_in_one >> ?via=
 hooks/test_curl_call_outside_a_fiber_is_refused_while_a_fiber_is_in_one >> ?via=multi
 hooks/test_curl_call_outside_a_fiber_is_refused_while_a_fiber_is_in_one >> ?via=member
 
+# curl_multi_getcontent() on a transfer under way returns a string of its own, which
+# the rest of the answer neither grows nor frees.
+hooks/test_curl_multi_getcontent_mid_transfer_keeps_its_string
+
 # Three POSTs, one worker: the request body is a stream resource, and worker mode
 # has no per-request resource list to close it. Listed three times because the
 # assertion is about the delta between two consecutive requests, not about any
