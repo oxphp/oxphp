@@ -128,10 +128,11 @@ impl Drop for ReleaseWorkerThread {
 /// globals that another thread could still write through.
 pub(crate) fn release_php_thread() {
     // SAFETY: called on the PHP thread itself, once, after its last PHP
-    // request has shut down; the list is destroyed immediately before the TSRM
-    // block that holds it is freed, and nothing on this thread touches PHP
-    // afterwards.
+    // request has shut down or failed to start; the timer is deleted and the
+    // list destroyed immediately before the TSRM block that holds them is
+    // freed, and nothing on this thread touches PHP afterwards.
     unsafe {
+        crate::php::bindings::oxphp_bridge_delete_execution_timer();
         crate::php::bindings::oxphp_bridge_destroy_persistent_list();
         crate::php::bindings::ts_free_thread();
     }

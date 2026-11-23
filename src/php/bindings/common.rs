@@ -304,6 +304,11 @@ extern "C" {
     /// persistent streams). Must be the last PHP call before `ts_free_thread()`.
     pub fn oxphp_bridge_destroy_persistent_list();
 
+    /// Delete the calling thread's `max_execution_time` timer if it still has
+    /// one, as a thread whose last request failed to start does. Just before
+    /// `oxphp_bridge_destroy_persistent_list()`.
+    pub fn oxphp_bridge_delete_execution_timer();
+
     /// Catch a bailout inside any module's RSHUTDOWN and record it for the
     /// thread. Once, after `php_module_startup`, before any other thread runs
     /// PHP. Returns how many modules were left unguarded, and the first one's

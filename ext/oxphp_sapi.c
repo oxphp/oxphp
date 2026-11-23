@@ -9249,8 +9249,24 @@ static void oxphp_serve_loop(zend_fcall_info *fci, zend_fcall_info_cache *fcc)
                      * shutdown itself begins, which is after the drain, and a
                      * fatal error in what the event runs retires the worker.
                      * The wake is taken and nothing is run; what the event had
-                     * to do stays until the worker exits. */
+                     * to do stays until the worker exits. For the same reason
+                     * an exit the wait itself scheduled for an OPcache restart
+                     * (2), decided just before the drain began, is taken back;
+                     * the wait returns 2 only when no exit was scheduled
+                     * before it. */
                     if (oxphp_bridge_is_draining()) {
+                        if (wait_rc == 2) {
+                            ctx->exit_scheduled = false;
+                            ctx->exit_reason = 0;
+                            char msg[160];
+                            snprintf(msg, sizeof(msg),
+                                     "oxphp: worker %d stays: the server began to drain "
+                                     "before it could retire for an OPcache restart",
+                                     oxphp_bridge_get_worker_id());
+                            if (sapi_module.log_message != NULL) {
+                                sapi_module.log_message(msg, LOG_NOTICE);
+                            }
+                        }
                         continue;
                     }
                     if (!oxphp_serve_loop_thread_idle()) {

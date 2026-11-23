@@ -14,3 +14,14 @@ final class WorkerTradWakeProbe
         self::$worker = \OxPHP\Server\Worker::current();
     }
 }
+
+// A session holding one of these cannot be decoded: the exception its wake-up
+// throws has no frame to land in while the request starts up, so PHP bails out
+// of php_request_startup.
+final class WorkerTradThrowOnWake
+{
+    public function __wakeup(): void
+    {
+        throw new \RuntimeException('this session cannot be woken up');
+    }
+}

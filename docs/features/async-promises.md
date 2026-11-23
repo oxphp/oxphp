@@ -143,7 +143,7 @@ Non-winning promises that were still pending at the moment of victory remain awa
 
 | Class | Thrown by | Notes |
 |-------|-----------|-------|
-| `OxPHP\Async\AsyncException`           | `oxphp_async_await()`, `oxphp_async_await_all()`, `oxphp_async_await_race()` | Single error with message and optional original-exception details. |
+| `OxPHP\Async\AsyncException`           | `oxphp_async_await()`, `oxphp_async_await_all()`, `oxphp_async_await_race()`; all four await-* for a task the [stopped pool](#the-async-worker-pool-has-stopped-the-task-will-never-run) never runs | Single error with message and optional original-exception details. |
 | `OxPHP\Async\TimeoutException`         | All four await-* on deadline | Extends `AsyncException`. For `oxphp_async_await_any()` timeouts, `getPartialErrors()` and `getCancelledPromiseIds()` are populated; for the other call sites both return `[]`. |
 | `OxPHP\Async\AggregateAsyncException`  | `oxphp_async_await_any()` when every promise rejects | Extends `AsyncException`. Provides `getErrors()` (positional, keyed 0..N-1), `getErrorMap()` (id-keyed), `getPromiseIds()`. |
 
@@ -343,6 +343,10 @@ $userId = $user->getId();
 $userName = $user->getName();
 $promise = oxphp_async(function () use ($userId, $userName) { ... });
 ```
+
+### "the async worker pool has stopped; the task will never run"
+
+An await that blocks its thread — in a worker-mode request an await suspends the request's fiber instead — throws `OxPHP\Async\AsyncException` with the message `Async task failed: [OxPHP\Async\AsyncException] the async worker pool has stopped; the task will never run`, at once and whatever its timeout, when the task it waits for is still on the queue and every async worker thread has stopped, so none will ever start it. The pool stops when the server shuts down, after the drain of HTTP requests has ended or timed out, and in worker mode the worker's code after `oxphp_worker()` returns runs later still, so an await there meets this error. It also stops when every thread fails to start its PHP request as the server starts (`php_request_startup() failed in async worker` in the log). A task that answered before the pool stopped is still returned, and the promises `oxphp_async_await_race()` or `oxphp_async_await_any()` was given that had not settled stay awaitable.
 
 ### Await hangs in traditional mode
 

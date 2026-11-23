@@ -76,6 +76,14 @@
 # engine's flag once the request's frames are given back, and not in a
 # classic process (L2).
 #
+# Scenario M (an await after the async pool has stopped): once oxphp_worker()
+# returns, the worker awaits tasks still queued behind two that keep both async
+# worker threads busy past the stop, so the pool never starts them. It awaits
+# once the pool has stopped, with and without a timeout and through every await
+# function: each must throw at once, without the timeout's timer — the runtime
+# that drives it has shut down — and without waiting for an answer that never
+# comes. An await of a task that answered before the stop still returns it.
+#
 # NOT wired into run_all.sh or CI (like tests/cli_run.sh) — run manually after
 # touching the drain machinery (fiber sweep, cancel plumbing, drain latches).
 #
@@ -103,6 +111,7 @@ DRAIN_K="drain_k_$$"
 DRAIN_K2="drain_k2_$$"
 DRAIN_L="drain_l_$$"
 DRAIN_L2="drain_l2_$$"
+DRAIN_M="drain_m_$$"
 # Ephemeral free port unless the caller pins one via PORT=.
 PORT="${PORT:-$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1]);s.close()')}"
 PASS=0
@@ -113,7 +122,7 @@ ok()   { printf '  \033[32mPASS\033[0m %s\n' "$1"; PASS=$((PASS + 1)); }
 bad()  { printf '  \033[31mFAIL\033[0m %s\n' "$1"; FAIL=$((FAIL + 1)); }
 
 cleanup() {
-	docker rm -f "$DRAIN_A" "$DRAIN_B" "$DRAIN_C" "$DRAIN_D" "$DRAIN_E" "$DRAIN_F" "$DRAIN_G" "$DRAIN_H" "$DRAIN_I" "$DRAIN_J" "$DRAIN_J2" "$DRAIN_J3" "$DRAIN_K" "$DRAIN_K2" "$DRAIN_L" "$DRAIN_L2" >/dev/null 2>&1
+	docker rm -f "$DRAIN_A" "$DRAIN_B" "$DRAIN_C" "$DRAIN_D" "$DRAIN_E" "$DRAIN_F" "$DRAIN_G" "$DRAIN_H" "$DRAIN_I" "$DRAIN_J" "$DRAIN_J2" "$DRAIN_J3" "$DRAIN_K" "$DRAIN_K2" "$DRAIN_L" "$DRAIN_L2" "$DRAIN_M" >/dev/null 2>&1
 	rm -rf "$TMP"
 }
 trap cleanup EXIT
@@ -802,6 +811,31 @@ if start_classic "$DRAIN_L2" 10; then
 else
 	bad "L2: container failed to start"; docker logs "$DRAIN_L2" 2>&1 | tail -5
 fi
+
+# ── Scenario M: an await after the async pool has stopped ───
+if start_container "$DRAIN_M" 30 info 1 worker_pool_stop_await.php; then
+	ok "M: container up"
+	docker kill -s TERM "$DRAIN_M" >/dev/null
+	ELAPSED=$(wait_exit_seconds "$DRAIN_M" 40)
+	logs="$(docker logs "$DRAIN_M" 2>&1)"
+	status=$(docker inspect -f '{{if .State.Running}}still running{{else}}{{.State.ExitCode}}{{end}}' "$DRAIN_M" 2>/dev/null)
+	printf '%s' "$logs" | grep -Eq 'panicked|\[CRASH\]' \
+		&& bad "M: the stop crashed: $(printf '%s' "$logs" | grep -E 'panicked|\[CRASH\]' | head -1)" \
+		|| ok "M: no crash in the log"
+	THREW=$(printf '%s' "$logs" | grep -c 'drain-await: .* threw OxPHP.*AsyncException: Async task failed: .OxPHP.*AsyncException. the async worker pool has stopped; the task will never run')
+	[ "$THREW" = "5" ] \
+		&& ok "M: every await of a task the pool never started threw the stopped-pool AsyncException" \
+		|| bad "M: $THREW of 5 awaits threw AsyncException: $(printf '%s' "$logs" | grep 'drain-await:' | tr '\n' '|')"
+	printf '%s' "$logs" | grep -q 'drain-await: await of a task that answered before the stop returned 7' \
+		&& ok "M: a task that answered before the stop still gave its answer" \
+		|| bad "M: the answer that came before the stop was lost: $(printf '%s' "$logs" | grep 'drain-await: await of a task that answered' | head -1)"
+	[ "$status" = "0" ] \
+		&& ok "M: exited with status 0, ${ELAPSED}s after SIGTERM" \
+		|| bad "M: exit status $status, ${ELAPSED}s after SIGTERM"
+else
+	bad "M: container failed to start"; docker logs "$DRAIN_M" 2>&1 | tail -5
+fi
+docker rm -f "$DRAIN_M" >/dev/null 2>&1
 
 echo
 echo "== result: $PASS passed, $FAIL failed =="

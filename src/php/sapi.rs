@@ -3216,7 +3216,8 @@ fn worker_recv_blocking() -> WorkerWait {
 /// Populates SAPI TLS with the new request data.
 /// Returns 0 on success (request ready), 1 when the thread's `PhpThreadWaker`
 /// was woken with no request (the serve loop then calls
-/// `worker_idle_callback`), -1 on shutdown (channel closed or this worker
+/// `worker_idle_callback`), 2 when it was woken and has scheduled the worker's
+/// exit for an OPcache restart, -1 on shutdown (channel closed or this worker
 /// retired by the scale manager).
 ///
 /// # Safety
@@ -3225,8 +3226,9 @@ fn worker_recv_blocking() -> WorkerWait {
 unsafe extern "C" fn worker_wait_callback() -> std::os::raw::c_int {
     crate::php::opcache_restart::thread_ready(crate::php::opcache_restart::ThreadKind::Worker);
     loop {
-        if retire_for_opcache_restart() {
-            return 1;
+        let retiring = retire_for_opcache_restart();
+        if retiring != 0 {
+            return retiring;
         }
         match worker_recv_blocking() {
             WorkerWait::Request(req) => match req.take_from_queue() {
@@ -3240,8 +3242,7 @@ unsafe extern "C" fn worker_wait_callback() -> std::os::raw::c_int {
                 Pickup::Abandoned => {}
             },
             WorkerWait::Woken => {
-                retire_for_opcache_restart();
-                return 1;
+                return retire_for_opcache_restart().max(1);
             }
             WorkerWait::Shutdown => return -1, // channel closed or retired = shutdown
         }
@@ -3249,19 +3250,24 @@ unsafe extern "C" fn worker_wait_callback() -> std::os::raw::c_int {
 }
 
 /// Schedule this worker's exit when an OPcache restart needs its request
-/// gone, and say whether it did. Called only with no request in flight; the
-/// serve loop takes the exit after the wake branch, and the pool replaces the
-/// worker. Not during the drain, for the reason the serve loop retires no
-/// worker then.
-fn retire_for_opcache_restart() -> bool {
+/// gone. Returns the wait's code for it: 2 when it scheduled the exit, 1 when
+/// one was scheduled already, 0 when the worker stays. Called only with no
+/// request in flight; the serve loop takes the exit at its wake branch, and
+/// the pool replaces the worker. Not during the drain, for the reason the
+/// serve loop retires no worker then: a drain that begins before the wake
+/// branch takes back an exit scheduled here.
+fn retire_for_opcache_restart() -> std::os::raw::c_int {
     let Some(why) = crate::php::opcache_restart::retire_reason() else {
-        return false;
+        return 0;
     };
     // SAFETY: on a worker thread inside its serve loop, whose bridge context
     // these read and write.
     unsafe {
         if bindings::oxphp_bridge_is_draining() {
-            return false;
+            return 0;
+        }
+        if bindings::oxphp_bridge_is_exit_scheduled() {
+            return 1;
         }
         tracing::info!(
             worker = bindings::oxphp_bridge_get_worker_id(),
@@ -3269,11 +3275,11 @@ fn retire_for_opcache_restart() -> bool {
         );
         bindings::oxphp_bridge_schedule_exit();
     }
-    true
+    2
 }
 
 /// Worker idle callback — called from the C serve loop after
-/// `worker_wait_callback` returned 1, with no request in flight: raises the
+/// `worker_wait_callback` returned 1 or 2, with no request in flight: raises the
 /// plugins' `thread_idle` event.
 ///
 /// # Safety
@@ -4174,6 +4180,40 @@ fn async_pool_stopped() -> bool {
     *ASYNC_POOL_STOPPED.borrow()
 }
 
+/// Why a blocking await of the tasks' answers ended.
+enum Waited<T> {
+    Answered(T),
+    TimedOut,
+    /// Every pool thread has stopped before the answer came: the task is
+    /// still queued, and will never run.
+    PoolStopped,
+}
+
+/// The error an await of a task the pool will never run raises.
+const ASYNC_POOL_STOPPED_ERROR: &str = "the async worker pool has stopped; the task will never run";
+
+/// Block the calling thread until `answer` is ready, every pool thread has
+/// stopped, or `dur` has passed. In that order: an answer ready when the wait
+/// is polled is taken over the stop — one that lands between the two polls is
+/// left in its receiver for the caller — and the timer is polled only while
+/// the pool runs: the pool stops before the runtime that drives the timer
+/// shuts down, and polling a timer after that panics.
+fn block_on_answer<F: std::future::Future>(
+    handle: &tokio::runtime::Handle,
+    dur: Option<std::time::Duration>,
+    answer: F,
+) -> Waited<F::Output> {
+    let mut stopped = ASYNC_POOL_STOPPED.subscribe();
+    handle.block_on(async {
+        tokio::select! {
+            biased;
+            answered = answer => Waited::Answered(answered),
+            _ = stopped.wait_for(|stopped| *stopped) => Waited::PoolStopped,
+            () = tokio::time::sleep(dur.unwrap_or_default()), if dur.is_some() => Waited::TimedOut,
+        }
+    })
+}
+
 // ─── Async In-Flight Cap ─────────────────────────────────────
 
 /// Process-global bound on `queued + running` async tasks. Installed once
@@ -4610,61 +4650,58 @@ pub unsafe extern "C" fn await_dispatch_callback(
         }
     };
 
-    // Block on result — use tokio::runtime::Handle::block_on for timeout support
-    let mut result = if let Some(dur) = await_timeout(timeout) {
-        match ASYNC_TOKIO_HANDLE.get() {
-            Some(handle) => {
-                // Borrow rx so it survives the timeout and can be stranded.
-                match handle.block_on(async { tokio::time::timeout(dur, &mut rx).await }) {
-                    Ok(Ok(r)) => r,
-                    Ok(Err(_)) => {
-                        // Channel closed — task was dropped
-                        cleanup_promise(id);
-                        set_bridge_internal_error("promise channel closed unexpectedly");
-                        return -1;
+    // Borrow rx so it survives a timeout and can be stranded.
+    let answered = match ASYNC_TOKIO_HANDLE.get() {
+        Some(handle) => match block_on_answer(handle, await_timeout(timeout), &mut rx) {
+            Waited::Answered(answered) => answered,
+            // The answer can land after `rx` was polled and before the stop
+            // was: the task's send comes before its thread counts itself out.
+            Waited::PoolStopped => match rx.try_recv() {
+                Ok(answer) => Ok(answer),
+                Err(_) => {
+                    cleanup_promise(id);
+                    if bailout_held_back() {
+                        return ffi::OXPHP_FIBER_UNWIND;
                     }
-                    Err(_) => {
-                        // Timeout — signal cancellation so the async worker stops.
-                        // The cancelled flag tells the worker to stop early (the
-                        // worker's scheduler loop polls it to unwind a SUSPENDED
-                        // fiber).
-                        // Release: pairs with the worker's Acquire load of the
-                        // cancel flag (scheduler poll and the C interrupt handler).
-                        cancelled
-                            .cancelled
-                            .store(true, std::sync::atomic::Ordering::Release);
-                        // The flag alone reaches only a suspended fiber; a
-                        // CPU-bound one needs the cross-thread interrupt kick.
-                        unsafe { kick_worker_interrupt(&cancelled) };
-                        // The task may still be running. Strand the receiver so
-                        // the request-end drain waits for it (within its budget)
-                        // before releasing what the task captured.
-                        stash_stranded(id, rx, cancelled);
-                        return -2;
-                    }
+                    set_bridge_internal_error(ASYNC_POOL_STOPPED_ERROR);
+                    return -1;
                 }
+            },
+            Waited::TimedOut => {
+                // Timeout — signal cancellation so the async worker stops.
+                // The cancelled flag tells the worker to stop early (the
+                // worker's scheduler loop polls it to unwind a SUSPENDED
+                // fiber).
+                // Release: pairs with the worker's Acquire load of the
+                // cancel flag (scheduler poll and the C interrupt handler).
+                cancelled
+                    .cancelled
+                    .store(true, std::sync::atomic::Ordering::Release);
+                // The flag alone reaches only a suspended fiber; a
+                // CPU-bound one needs the cross-thread interrupt kick.
+                // SAFETY: an await callback, which the bridge calls on the
+                // awaiting PHP thread.
+                unsafe { kick_worker_interrupt(&cancelled) };
+                // The task may still be running. Strand the receiver so
+                // the request-end drain waits for it (within its budget)
+                // before releasing what the task captured.
+                stash_stranded(id, rx, cancelled);
+                return -2;
             }
-            None => {
-                // No tokio handle — fall back to blocking recv
-                match rx.blocking_recv() {
-                    Ok(r) => r,
-                    Err(_) => {
-                        cleanup_promise(id);
-                        set_bridge_internal_error("promise channel closed unexpectedly");
-                        return -1;
-                    }
-                }
+        },
+        // No runtime to wait in, and no pool either.
+        None => rx.blocking_recv(),
+    };
+    let mut result = match answered {
+        Ok(r) => r,
+        Err(_) => {
+            // Channel closed — task was dropped
+            cleanup_promise(id);
+            if bailout_held_back() {
+                return ffi::OXPHP_FIBER_UNWIND;
             }
-        }
-    } else {
-        // No timeout — blocking recv
-        match rx.blocking_recv() {
-            Ok(r) => r,
-            Err(_) => {
-                cleanup_promise(id);
-                set_bridge_internal_error("promise channel closed unexpectedly");
-                return -1;
-            }
+            set_bridge_internal_error("promise channel closed unexpectedly");
+            return -1;
         }
     };
 
@@ -4793,13 +4830,11 @@ pub unsafe extern "C" fn await_race_dispatch_callback(
     };
 
     // Race rxs by polling them through a `&mut [Receiver]` borrow rather
-    // than consuming the Vec via `select_all`. This is the soundness fix
-    // for the timeout path: when `tokio::time::timeout` fires, it drops
-    // the inner future, releasing the borrow — but `rxs` itself stays
-    // owned by this function so we can stash the surviving receivers in
-    // PROMISE_STRANDED. The previous `select_all(rxs)` design dropped the
-    // receivers along with the timeout future, leaving RSHUTDOWN unable
-    // to wait for the still-running workers before unfreezing captures.
+    // than consuming the Vec via `select_all`, so that on a timeout, when
+    // the wait drops the race future, `rxs` stays owned by this function
+    // and the surviving receivers can be stashed in PROMISE_STRANDED:
+    // dropping them with the future would leave RSHUTDOWN unable to wait
+    // for the still-running workers before unfreezing captures.
     //
     // oneshot::Receiver<T> is Unpin, so `Pin::new(&mut rxs[i])` is sound.
     let race_result = {
@@ -4811,17 +4846,11 @@ pub unsafe extern "C" fn await_race_dispatch_callback(
             }
             Poll::Pending
         });
-        if let Some(dur) = await_timeout(timeout) {
-            // Construct `Sleep` inside `block_on` so the runtime context is
-            // established before the timer driver registers.
-            handle.block_on(async move { tokio::time::timeout(dur, race_fut).await })
-        } else {
-            Ok(handle.block_on(race_fut))
-        }
+        block_on_answer(handle, await_timeout(timeout), race_fut)
     };
 
     match race_result {
-        Ok((winner_idx, recv_result)) => {
+        Waited::Answered((winner_idx, recv_result)) => {
             let winner_id = id_map[winner_idx];
 
             // Restore non-winning receivers to PROMISE_MAP. Use swap_remove on
@@ -4878,7 +4907,15 @@ pub unsafe extern "C" fn await_race_dispatch_callback(
                 -1
             }
         }
-        Err(_timeout) => {
+        Waited::PoolStopped => {
+            // None of them will settle; left to the request's promise cleanup.
+            for ((id, rx), cancelled) in id_map.into_iter().zip(rxs).zip(cancel_map) {
+                store_promise(id, rx, cancelled);
+            }
+            set_bridge_internal_error(ASYNC_POOL_STOPPED_ERROR);
+            -1
+        }
+        Waited::TimedOut => {
             // Timeout — the poll_fn future was dropped, releasing its
             // `&mut rxs` borrow. `rxs` itself survived (it's owned here),
             // so we can stash the still-pending (id, rx, cancelled)
@@ -5262,7 +5299,7 @@ pub unsafe extern "C" fn await_any_dispatch_callback(
 
     // Race loop. The future borrows `&mut rxs`, `&mut id_vec`, `&mut
     // cancel_vec`, and `&mut collected` rather than owning them — so
-    // when `tokio::time::timeout` drops it on timeout, the residue
+    // when the wait drops it on a timeout or the pool's stop, the residue
     // (still-pending promises and accumulated rejections) survives in
     // outer scope. swap_remove inside the loop keeps the three vecs
     // parallel with each rejection consumed.
@@ -5317,21 +5354,14 @@ pub unsafe extern "C" fn await_any_dispatch_callback(
         Winner(u64, AsyncResult),
         AllRejected,
         Timeout,
+        PoolStopped,
     }
 
-    let outcome = if let Some(dur) = await_timeout(timeout) {
-        // Construct `Sleep` inside `block_on` so the runtime context is
-        // established before the timer driver registers.
-        match handle.block_on(async move { tokio::time::timeout(dur, race_fut).await }) {
-            Ok(Ok((id, r))) => AnyOutcome::Winner(id, r),
-            Ok(Err(())) => AnyOutcome::AllRejected,
-            Err(_elapsed) => AnyOutcome::Timeout,
-        }
-    } else {
-        match handle.block_on(race_fut) {
-            Ok((id, r)) => AnyOutcome::Winner(id, r),
-            Err(()) => AnyOutcome::AllRejected,
-        }
+    let outcome = match block_on_answer(handle, await_timeout(timeout), race_fut) {
+        Waited::Answered(Ok((id, r))) => AnyOutcome::Winner(id, r),
+        Waited::Answered(Err(())) => AnyOutcome::AllRejected,
+        Waited::TimedOut => AnyOutcome::Timeout,
+        Waited::PoolStopped => AnyOutcome::PoolStopped,
     };
 
     // Push collected rejections in input-array position order into the
@@ -5420,10 +5450,19 @@ pub unsafe extern "C" fn await_any_dispatch_callback(
             ffi::oxphp_bridge_aggregate_throw();
             -3
         }
+        AnyOutcome::PoolStopped => {
+            // As on a winner: the rest are put back, and the rejections
+            // collected are left to the request's promise cleanup.
+            for ((id, rx), cancelled) in id_vec.into_iter().zip(rxs).zip(cancel_vec) {
+                store_promise(id, rx, cancelled);
+            }
+            set_bridge_internal_error(ASYNC_POOL_STOPPED_ERROR);
+            -1
+        }
         AnyOutcome::Timeout => {
             // Stash (id, rx, cancelled) tuples for every still-pending
-            // promise into PROMISE_STRANDED. After race_fut was dropped
-            // by tokio::time::timeout, id_vec/rxs/cancel_vec hold exactly
+            // promise into PROMISE_STRANDED. After the wait dropped
+            // race_fut, id_vec/rxs/cancel_vec hold exactly
             // these — race_fut had already swap_removed each promise it
             // managed to record as a rejection. RSHUTDOWN's cleanup
             // callback block_on's each stranded rx (5 s per promise)

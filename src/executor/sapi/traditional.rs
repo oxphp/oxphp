@@ -231,14 +231,15 @@ fn worker_thread(
                 let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     execute_request(&wr.script, wr.response_tx)
                 }));
+                let startup_failed = matches!(result, Ok(Err(_)));
                 match result {
-                    Ok(Some(response)) => {
+                    Ok(Ok(Some(response)) | Err(response)) => {
                         // Response not sent early — recover the sender from TLS.
                         if let Some((_start, tx)) = sapi::take_early_tx() {
                             let _ = tx.send(response);
                         }
                     }
-                    Ok(None) => {
+                    Ok(Ok(None)) => {
                         // Early send already happened via oxphp_finish_request().
                     }
                     Err(_) => {
@@ -255,7 +256,7 @@ fn worker_thread(
                         break;
                     }
                 }
-                if retire_after_request(&thread_name) {
+                if retire_after_request(&thread_name, startup_failed) {
                     exit = WorkerExit::Recycled;
                     break;
                 }
@@ -290,13 +291,14 @@ fn worker_thread(
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             execute_request(&wr.script, wr.response_tx)
                         }));
+                        let startup_failed = matches!(result, Ok(Err(_)));
                         match result {
-                            Ok(Some(response)) => {
+                            Ok(Ok(Some(response)) | Err(response)) => {
                                 if let Some((_start, tx)) = sapi::take_early_tx() {
                                     let _ = tx.send(response);
                                 }
                             }
-                            Ok(None) => {
+                            Ok(Ok(None)) => {
                                 // Early send already happened.
                             }
                             Err(_) => {
@@ -311,7 +313,7 @@ fn worker_thread(
                                 break;
                             }
                         }
-                        if retire_after_request(&thread_name) {
+                        if retire_after_request(&thread_name, startup_failed) {
                             exit = WorkerExit::Recycled;
                             break;
                         }
@@ -327,12 +329,21 @@ fn worker_thread(
     exit
 }
 
-/// Whether the request just served left this thread unfit for another: a fatal
-/// error, or an `exit()` in code it ran, cut an extension's request shutdown
-/// short, and that extension's state on this thread may still point into the
-/// request's freed memory. The thread then leaves its loop with the response
-/// already sent, and the pool starts a replacement.
-fn retire_after_request(thread_name: &str) -> bool {
+/// Whether the request just served left this thread unfit for another: its PHP
+/// request startup failed, which leaves what the startup had set up with no
+/// request shutdown to undo it; or a fatal error, or an `exit()` in code it
+/// ran, cut an extension's request shutdown short, and that extension's state
+/// on this thread may still point into the request's freed memory. The thread
+/// then leaves its loop with the response already sent, and the pool starts a
+/// replacement.
+fn retire_after_request(thread_name: &str, startup_failed: bool) -> bool {
+    if startup_failed {
+        tracing::warn!(
+            worker = %thread_name,
+            "PHP worker thread retired: its PHP request startup failed"
+        );
+        return true;
+    }
     let Some(module) = crate::php::thread::take_interrupted_request_shutdown() else {
         return false;
     };
@@ -370,11 +381,16 @@ impl Drop for RequestDataGuard {
 
 /// Execute a PHP script. If `oxphp_finish_request()` was called during execution,
 /// the response is sent early via the `response_tx` oneshot and `None` is returned.
-/// Otherwise, the full `ScriptResponse` is returned for the caller to send.
+/// Otherwise, the full `ScriptResponse` is returned for the caller to send. `Err`
+/// carries the response to a request whose PHP request startup failed: the
+/// thread serves no other, as PHP-FPM and CGI end the process there.
+// The `Ok` side carries the same response, so boxing the `Err` would not make
+// the result any smaller.
+#[allow(clippy::result_large_err)]
 fn execute_request(
     request: &ScriptRequest,
     response_tx: tokio::sync::oneshot::Sender<ScriptResponse>,
-) -> Option<ScriptResponse> {
+) -> Result<Option<ScriptResponse>, ScriptResponse> {
     let start = Instant::now();
 
     // Fast-path: client disconnected after `take_from_queue` read the cancel
@@ -383,7 +399,7 @@ fn execute_request(
     if request.cancel_state.get() != crate::bridge::cancel::CancelReason::None {
         note_if_abandoned(request);
         let _ = response_tx.send(crate::types::ScriptResponse::client_closed());
-        return None;
+        return Ok(None);
     }
 
     // Open the script and check where the opened file lives before any PHP
@@ -396,7 +412,7 @@ fn execute_request(
             Ok(verified) => verified,
             Err(error) => {
                 let _ = response_tx.send(refuse_script(&request.script_path, error));
-                return None;
+                return Ok(None);
             }
         };
 
@@ -505,7 +521,7 @@ fn execute_request(
 
     // Every request on this thread is a PHP request of its own.
     if !unsafe { crate::php::thread::open_request(RequestScope::EachRequest) } {
-        return Some(ScriptResponse {
+        return Err(ScriptResponse {
             status: 500,
             body: Bytes::from_static(b"php_request_startup() failed"),
             // A failing RINIT (e.g. an extension) can record a fatal in
@@ -541,11 +557,11 @@ fn execute_request(
             crate::php::thread::close_request();
         }
         drop(request_open);
-        return Some(ScriptResponse {
+        return Ok(Some(ScriptResponse {
             status: 500,
             body: Bytes::from_static(b"Internal Server Error"),
             ..Default::default()
-        });
+        }));
     }
 
     file_handle.primary_script = true;
@@ -577,7 +593,7 @@ fn execute_request(
     // Clear buffers to drop STREAM_TX (closes channel → ends stream on client side).
     if sapi::was_early_sent() {
         sapi::clear_buffers();
-        return None;
+        return Ok(None);
     }
     // Past the early return on purpose: a client closing a response it
     // already has is not one that gave up waiting — see `note_if_abandoned`.
@@ -629,7 +645,7 @@ fn execute_request(
     #[cfg(not(any(feature = "plugin-apm", feature = "plugin-profiler")))]
     let profile_tree: Option<std::sync::Arc<crate::profiling::SpanTree>> = None;
 
-    Some(ScriptResponse {
+    Ok(Some(ScriptResponse {
         status,
         headers,
         body,
@@ -641,5 +657,5 @@ fn execute_request(
         cancel_reason: request.cancel_state.get() as u8,
         refused: false,
         shed_reason: None,
-    })
+    }))
 }

@@ -1186,7 +1186,8 @@ uint64_t    oxphp_req_seq(void);
 /* ─── Worker Mode ─────────────────────────────────────────── */
 
 /** Rust callback: blocks until the next request arrives or a plugin wakes the
- * thread. Returns 0 (request ready), 1 (woken, no request) or -1 (shutdown). */
+ * thread. Returns 0 (request ready), 1 (woken, no request), 2 (woken, and the
+ * worker's exit scheduled for an OPcache restart) or -1 (shutdown). */
 typedef int (*oxphp_worker_wait_fn_t)(void);
 
 /** Rust callback: sends current response back to HTTP layer, returns 0 on success. */
@@ -1217,11 +1218,12 @@ bool oxphp_bridge_is_worker_mode(void);
 void oxphp_bridge_reset_request_ctx(void);
 
 /** Call Rust worker_wait callback. Returns 0 (request ready), 1 (woken with
- * no request: call oxphp_bridge_thread_idle) or -1 (shutdown). */
+ * no request: call oxphp_bridge_thread_idle), 2 (as 1, with the worker's exit
+ * scheduled for an OPcache restart) or -1 (shutdown). */
 int oxphp_bridge_worker_wait(void);
 
 /** Call Rust worker_idle callback, from the serve loop with no request in
- * flight, after oxphp_bridge_worker_wait returned 1. */
+ * flight, after oxphp_bridge_worker_wait returned 1 or 2. */
 void oxphp_bridge_thread_idle(void);
 
 /** Call Rust worker_send callback. Returns 0 on success. */
@@ -1406,6 +1408,11 @@ void oxphp_compile_slots_install(void);
 
 /** Close the calling thread's persistent resources. Last PHP call before ts_free_thread(). */
 void oxphp_bridge_destroy_persistent_list(void);
+
+/** Delete the calling thread's max_execution_time timer if it still has one: a
+ *  thread whose last request failed to start keeps it. Just before
+ *  oxphp_bridge_destroy_persistent_list(). */
+void oxphp_bridge_delete_execution_timer(void);
 
 /** Wrap every loaded module's RSHUTDOWN so that a bailout inside it is caught
  *  and recorded for the thread instead of reaching the engine, which from PHP
