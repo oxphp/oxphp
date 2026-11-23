@@ -33,6 +33,10 @@ $sharedState['report_switch_worker'] = true;
 unset($sharedState['report_switch'], $sharedState['report_switch_resumed_early']);
 
 $fiber = new Fiber(static function () use (&$sharedState): void {
+    // PHP 8.6.0 starts a Fiber at error_reporting 0 when the directive is unset
+    // (zend_fiber_execute()); the fatal is then not displayed, so the output
+    // handler below never sees it.
+    error_reporting(E_ALL);
     ob_start(static function (string $buffer) use (&$sharedState): string {
         if (!isset($sharedState['report_switch']) && str_contains($buffer, 'OxphpReportSwitchFatal')) {
             try {
