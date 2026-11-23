@@ -758,7 +758,9 @@ typedef struct _oxphp_request_fiber {
     zval *task_args;                /* borrowed (Rust-owned) */
     uint32_t task_argc;
     zval task_retval;               /* ZVAL_UNDEF until completed */
-    char *task_exc_class;           /* malloc'd, NULL if none */
+    char *task_exc_class;           /* malloc'd, or a static fallback when that copy
+                                     * failed, so freed only by oxphp_task_exc_free();
+                                     * NULL if none */
     char *task_exc_message;         /* malloc'd, NULL if none */
     bool task_code_in_request_memory; /* whoever dispatched this task found its code in
                                      * request memory, not in OPcache shared memory

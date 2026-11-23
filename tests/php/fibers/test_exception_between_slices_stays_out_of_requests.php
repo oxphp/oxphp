@@ -15,11 +15,18 @@ require_once __DIR__ . '/session_inner_request.php';
 // that throws in its turn, and a discard that clears it once leaves that one
 // standing in its place.
 //
+// With ?dtor=fatal the exception's destructor raises a fatal error as the
+// worker drops it. That error is nobody's either: the worker recovers from it
+// and goes on to run both requests, rather than ending with every request it
+// holds, this one included.
+//
 // See fixture_session_handler_dtor_throws.php for the roles.
 
-$run = static function (string $variant, string $holderId, string $neighbourId) use (&$sharedState): array {
+$dtor = (string) ($_GET['dtor'] ?? '');
+
+$run = static function (string $variant, string $holderId, string $neighbourId) use (&$sharedState, $dtor): array {
     $marker = '/tmp/oxphp-session-dtor-throws-late-' . bin2hex(random_bytes(4));
-    $query = 'variant=' . $variant . '&marker=' . rawurlencode($marker);
+    $query = 'variant=' . $variant . '&dtor=' . rawurlencode($dtor) . '&marker=' . rawurlencode($marker);
 
     unset($sharedState['session_dtor_throws_parked'], $sharedState['session_dtor_throws_late']);
     $neighbourSock = session_inner_send(

@@ -74,9 +74,8 @@ __thread oxphp_request_fiber *oxphp_fiber_starting = NULL;
 __thread oxphp_request_fiber *oxphp_fiber_resume_token = NULL;
 
 /* The thread's fiber.stack_size, set aside while zend_fiber_start sizes a fiber
- * of ours with its scheduler's, and put back before the fiber runs anything:
- * by the loop handler's first lines, or by oxphp_fiber_enter() when the start
- * fails. */
+ * of ours with its scheduler's, and put back before the fiber runs anything, or
+ * once the start has failed. */
 static __thread size_t oxphp_fiber_stack_size_live = 0;
 
 /* FiberError is what the engine itself throws for every illegal fiber switch, so
@@ -2936,9 +2935,7 @@ static void oxphp_fiber_refuse_foreign_suspend(oxphp_request_fiber *fiber) {
     }
 }
 
-/* Defined with the rest of the task scheduler; used by a task whose fiber
- * would not start and by the task arm of the loop handler, the two places the
- * halves of this file meet. */
+/* Defined with the rest of the task scheduler. */
 static void task_capture_exception(oxphp_request_fiber *fiber);
 
 /* The frame a fiber is started over where the scheduler has none of its own:
@@ -8193,10 +8190,7 @@ void oxphp_scheduler_start_fiber(oxphp_fiber_scheduler *sched, oxphp_request_fib
  * worker exits. The shutdown list goes last, so it takes the registrations made
  * by the destructors the steps before it ran.
  *
- * Unguarded, as the discard of a stale exception ahead of a new request in
- * oxphp_scheduler_tick() is, and with the same exposure: a fatal a destructor
- * raises here ends the serve loop, as one raised by a stale exception's
- * destructor does there. */
+ * Unguarded: a fatal a destructor raises here ends the serve loop. */
 static void oxphp_fiber_release_what_stands(void) {
     oxphp_fiber_release_header_callback();
     oxphp_end_request_superglobals();
@@ -8211,6 +8205,31 @@ static void oxphp_fiber_release_what_stands(void) {
         BG(user_shutdown_function_names) = NULL;
         zend_hash_destroy(shutdown_functions);
         FREE_HASHTABLE(shutdown_functions);
+    }
+}
+
+/* Drops what stands in EG(exception) before the scheduler admits or resumes a
+ * request, recovering from a fatal that a destructor the drop runs raises.
+ * Unguarded, that fatal would end the serve loop and every request the worker
+ * holds. The worker carries on instead, as it does after the fatal of a
+ * deferred drain in the tick: the fatal is nobody's, and the recovery takes the
+ * destructed flag it put on every live object back off them. Logged, because
+ * nothing else would say it happened. */
+static void oxphp_scheduler_drop_exception(void) {
+    if (EXPECTED(EG(exception) == NULL)) {
+        return;
+    }
+    oxphp_vm_stack_mark mark;
+    oxphp_vm_stack_save(&mark);
+    if (!oxphp_serve_loop_drop_exception(&mark)) {
+        char msg[256];
+        snprintf(msg, sizeof(msg),
+                 "oxphp: worker %d: a fatal error ended the drop of an exception "
+                 "thrown where no request or task was running to catch it",
+                 oxphp_bridge_get_worker_id());
+        if (sapi_module.log_message != NULL) {
+            sapi_module.log_message(msg, LOG_NOTICE);
+        }
     }
 }
 
@@ -8238,8 +8257,7 @@ void oxphp_scheduler_resume_fiber(oxphp_fiber_scheduler *sched, oxphp_request_fi
      * last slice, left pending is not this request's either. EG(exception) is
      * thread-wide, and a fiber resumed with one standing takes it as thrown by
      * the call it parked in. Drained, as on admission (oxphp_scheduler_tick()). */
-    oxphp_log_dropped_exception();
-    oxphp_discard_pending_exception();
+    oxphp_scheduler_drop_exception();
     oxphp_session_restore(fiber);
 
     sched->current = fiber;
@@ -8251,8 +8269,7 @@ void oxphp_scheduler_resume_fiber(oxphp_fiber_scheduler *sched, oxphp_request_fi
      * output is installed by now, so what the dropped exception's destructor
      * writes lands in its response; left standing, the exception would unwind
      * the request instead. */
-    oxphp_log_dropped_exception();
-    oxphp_discard_pending_exception();
+    oxphp_scheduler_drop_exception();
 
     /* Past the last step above that can run user code with no request current —
      * the save handler a session lets go of, a destructor an ini handler drops
@@ -9518,8 +9535,7 @@ int oxphp_scheduler_tick(oxphp_fiber_scheduler *sched) {
          * throws another; and before prepare_request, since that destructor is
          * PHP run for nobody, whose output and headers would otherwise go into
          * the arriving request's response. */
-        oxphp_log_dropped_exception();
-        oxphp_discard_pending_exception();
+        oxphp_scheduler_drop_exception();
 
         oxphp_bridge_prepare_request();
 
