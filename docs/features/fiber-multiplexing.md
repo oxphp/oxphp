@@ -20,6 +20,7 @@ OxPHP uses PHP Fibers to handle multiple HTTP requests concurrently on a single 
    - output buffers, where output started (`headers_sent($file, $line)`), the `ob_implicit_flush()` setting and whether output has gone out;
    - the VM stack;
    - the last error `error_get_last()` reports, with its `trace` on PHP 8.5 and later;
+   - the mode a call such as `new PDO()` or `new SplFileObject()` runs its open in, in which PHP turns a warning the open raises into the call's exception instead of handing it to the error handler;
    - the request's shutdown functions;
    - `connection_status()`;
    - what `http_get_last_response_headers()` reports;

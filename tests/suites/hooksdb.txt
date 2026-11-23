@@ -119,6 +119,11 @@ hooksdb/test_persistent_ctor_gate_per_source
 hooksdb/test_persistent_ctor_gate_spellings
 hooksdb/test_persistent_ctor_gate_refuses_where_switching_is_blocked
 
+# A plain constructor parked on a server that never answers takes the error mode
+# PDO connects in with it: the request served meanwhile keeps its own error
+# handler, and the constructor raises its own warning as its PDOException.
+hooksdb/test_error_mode_stays_with_a_request_parked_in_new_pdo
+
 # And the state that answer is not given in, which is most of a pooled
 # connection's life: live, referenced by the handle the worker keeps, and claimed
 # by nobody, because a claim runs from a request's first query to the end of that
