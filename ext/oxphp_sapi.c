@@ -8624,6 +8624,24 @@ static const zif_handler oxphp_curl_guard_handlers[OXPHP_CURL_GUARD_COUNT] = {
 #undef X
 };
 
+/* ext/curl's curl_multi_getcontent() returns the CURLOPT_RETURNTRANSFER buffer
+ * itself (RETURN_STR_COPY, multi.c 8.4.27 and 8.5.12), and a transfer still under
+ * way appends to it in place (smart_str in curl_write(), interface.c), so a string
+ * read mid-way grows under whoever holds it, or is left on memory the append
+ * reallocated. A transfer suspended under the hook lets anything, another request
+ * included, read it mid-way; the caller gets a copy of its own. */
+static zif_handler oxphp_curl_getcontent_orig = NULL;
+
+static ZEND_NAMED_FUNCTION(oxphp_curl_getcontent)
+{
+    oxphp_curl_getcontent_orig(INTERNAL_FUNCTION_PARAM_PASSTHRU);
+    if (Z_TYPE_P(return_value) == IS_STRING) {
+        zend_string *live = Z_STR_P(return_value);
+        ZVAL_STRINGL_FAST(return_value, ZSTR_VAL(live), ZSTR_LEN(live));
+        zend_string_release(live);
+    }
+}
+
 /* Whether ext/curl is a shared extension that Zend loaded with RTLD_DEEPBIND,
  * which makes the libcurl it brings in bind poll() to libc's ahead of the
  * bridge's; the bridge checks only the global binding and cannot see that. The
@@ -8692,6 +8710,8 @@ static bool oxphp_curl_category_install(void)
         oxphp_hook_swap(oxphp_curl_guards[i].name, oxphp_curl_guards[i].name_len,
                         oxphp_curl_guard_handlers[i], &oxphp_curl_guards[i].orig);
     }
+    oxphp_hook_swap("curl_multi_getcontent", sizeof("curl_multi_getcontent") - 1,
+                    oxphp_curl_getcontent, &oxphp_curl_getcontent_orig);
     return true;
 }
 
@@ -8703,6 +8723,9 @@ static void oxphp_curl_category_restore(void)
                            oxphp_curl_guards[i].orig);
         oxphp_curl_guards[i].orig = NULL;
     }
+    oxphp_hook_restore("curl_multi_getcontent", sizeof("curl_multi_getcontent") - 1,
+                       oxphp_curl_getcontent_orig);
+    oxphp_curl_getcontent_orig = NULL;
 }
 
 /* Publishing the set is what makes an enabled RUNTIME_HOOKS confirmable at all:
