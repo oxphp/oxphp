@@ -100,7 +100,14 @@ $t->assertSame(
 );
 $t->assertLessThan(sprintf('and the refusal spent no wait budget (%.3fs)', (float) $elapsed), (float) $elapsed, 0.2);
 
-$fiber = new Fiber(static fn (): array => $construct('ctor-userland'));
+// PHP 8.6.0 starts a Fiber at error_reporting 0 when php.ini does not set it,
+// and at 0 a deprecation that skipped the handler is not printed either: the
+// constructor would pass there whichever mode it ran in.
+$fiber = new Fiber(static function () use ($construct): array {
+    error_reporting(E_ALL);
+
+    return $construct('ctor-userland');
+});
 [$outcome, $elapsed, $holderInside] = $fiber->start() ?? $fiber->getReturn();
 $t->assertTrue('premise: the holder was still inside for the one in a Fiber', $holderInside);
 $t->assertSame('one in a Fiber this request started goes ahead instead', $outcome, 'built');

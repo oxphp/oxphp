@@ -372,6 +372,12 @@ typedef struct {
     zval last_fatal_error_backtrace;
 #endif
 
+    /* The mode `new PDO()`, `new SplFileObject()` and the like open in, which
+     * skips the user error handler and turns a warning into an exception: a
+     * request that parks inside such an open would otherwise leave it on the
+     * worker for every request run in the window. Holds no reference. */
+    zend_error_handling error_handling;
+
     /* This request's share of the profiler observer: the mode it is recording
      * under, its span counter, its truncation flag and the mirror of the frames
      * it has open. One slot per worker thread like everything else here, and

@@ -6319,6 +6319,23 @@ void oxphp_url_rewriter_reset(void) {
     oxphp_url_rewriter_free(&BG(url_adapt_output_ex));
 }
 
+/* The error mode a request or task parks with, which `new PDO()`,
+ * `new SplFileObject()` and the like switch to for the length of their open:
+ * the user error handler skipped, a warning turned into an exception. Taken off
+ * the thread at every park, so what the worker runs in the window raises its
+ * errors in the normal mode, and put back on resume. Two such opens on one
+ * worker need not end in the reverse of the order they began, and each restores
+ * what it found on entry — so left on the thread, one that began inside the
+ * other's window and ended after it would put that window's mode back for every
+ * request the worker serves after. */
+static void oxphp_error_mode_park(oxphp_request_fiber *fiber) {
+    zend_replace_error_handling(EH_NORMAL, NULL, &fiber->php_state.error_handling);
+}
+
+static void oxphp_error_mode_unpark(oxphp_request_fiber *fiber) {
+    zend_restore_error_handling(&fiber->php_state.error_handling);
+}
+
 void oxphp_fiber_save_php_state(oxphp_request_fiber *fiber) {
     /* First, as the restore takes it back last: what the steps below can run, a
      * destructor an ini handler drops, must raise into no operation of this
@@ -6390,6 +6407,7 @@ void oxphp_fiber_save_php_state(oxphp_request_fiber *fiber) {
     ZVAL_COPY_VALUE(&fiber->php_state.last_fatal_error_backtrace, &EG(last_fatal_error_backtrace));
     ZVAL_UNDEF(&EG(last_fatal_error_backtrace));
 #endif
+    oxphp_error_mode_park(fiber);
 
     /* Step 1c: and the shutdown functions it registered, by the same move once
      * more. The registry is thread-wide, and the end of a request runs
@@ -6726,6 +6744,7 @@ void oxphp_fiber_restore_php_state(oxphp_request_fiber *fiber) {
     ZVAL_COPY_VALUE(&EG(last_fatal_error_backtrace), &fiber->php_state.last_fatal_error_backtrace);
     ZVAL_UNDEF(&fiber->php_state.last_fatal_error_backtrace);
 #endif
+    oxphp_error_mode_unpark(fiber);
 
     /* And the shutdown functions it registered. */
     BG(user_shutdown_function_names) = fiber->php_state.shutdown_functions;
@@ -7853,6 +7872,10 @@ void oxphp_fiber_init_request_state(void) {
     }
     PG(last_error_type) = 0;
     PG(last_error_lineno) = 0;
+    /* And the error mode, which init_executor() resets for every request a PHP
+     * that ends them starts: a fatal inside `new PDO()` or the like never
+     * reaches the restore that ends its window. */
+    zend_replace_error_handling(EH_NORMAL, NULL, NULL);
 #if PHP_VERSION_ID >= 80600
     /* As for stream_last_errors(), and for the operations a bailout left open.
      * The engine only clears these in php_request_shutdown(), which a worker
@@ -9878,6 +9901,7 @@ static void oxphp_task_start_fiber(oxphp_fiber_scheduler *sched, oxphp_request_f
 #endif
     oxphp_fiber_enter(fiber, NULL);
     oxphp_task_last_error_park(fiber);
+    oxphp_error_mode_park(fiber);
     oxphp_stream_errors_park(fiber);
     oxphp_fiber_park_autoloading(fiber);
 
@@ -9903,10 +9927,12 @@ static void oxphp_task_resume_fiber(oxphp_fiber_scheduler *sched,
     oxphp_fiber_install_stack_limits(fiber);
 
     oxphp_task_last_error_unpark(fiber);
+    oxphp_error_mode_unpark(fiber);
     oxphp_stream_errors_unpark(fiber);
     oxphp_fiber_unpark_autoloading(fiber);
     oxphp_fiber_enter(fiber, value);
     oxphp_task_last_error_park(fiber);
+    oxphp_error_mode_park(fiber);
     oxphp_stream_errors_park(fiber);
     oxphp_fiber_park_autoloading(fiber);
 

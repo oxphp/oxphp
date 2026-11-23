@@ -83,6 +83,14 @@ fibers/test_stream_errors_stay_with_their_request
 fibers/test_stream_errors_do_not_reach_the_next_request
 fibers/test_stream_errors_do_not_reach_the_next_request_probe
 fibers/test_async_task_stream_errors_stay_with_the_task
+# The mode an open such as new PDO() or new SplFileObject() runs in — a warning
+# becomes an exception, the error handler is skipped — goes with a request or a
+# task that parks inside it, and a fatal inside it is not left to what runs next.
+# The fixture line fatals inside such an open for the test after it.
+fibers/test_error_mode_stays_with_a_parked_request
+fibers/test_async_task_error_mode_stays_with_the_task
+fibers/fixture_error_mode >> ?open=oxehpark%3A%2F%2Ffatal%2Fsuite | GET | | 500 |
+fibers/test_fatal_inside_an_error_mode_window_spares_what_runs_next
 fibers/test_write_cancel_in_a_fiber_releases_frames
 fibers/test_fatal_while_releasing_a_held_fiber_keeps_the_request_fiber
 fibers/test_write_cancel_in_a_decorator_keeps_the_request_fiber_for_the_release

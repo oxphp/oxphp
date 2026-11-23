@@ -9046,6 +9046,8 @@ static void oxphp_soft_reset(void) {
     PG(last_error_type) = 0;
     PG(last_error_lineno) = 0;
     PG(connection_status) = PHP_CONNECTION_NORMAL;
+    /* As oxphp_fiber_init_request_state() does on the event-loop path. */
+    zend_replace_error_handling(EH_NORMAL, NULL, NULL);
 #if PHP_VERSION_ID >= 80600
     /* As oxphp_fiber_init_request_state() does on the event-loop path. */
     php_stream_error_state_cleanup();
