@@ -289,6 +289,14 @@ hooks/test_curl_easy_handle_out_of_its_multi_is_not_held >> ?how=end
 hooks/test_curl_handle_built_where_a_freed_handle_was_is_not_taken_for_it >> ?then=park
 hooks/test_curl_handle_built_where_a_freed_handle_was_is_not_taken_for_it >> ?then=add
 
+# An HTTP client every request shares may keep a flag over its whole perform(), as
+# Symfony HttpClient's CurlHttpClient does, so no request may be suspended inside
+# it: curl_multi_exec() on a multi handle another request holds returns at once,
+# and a loop lets a waiting call in at its curl_multi_select(), not at its
+# curl_multi_exec().
+hooks/test_curl_shared_client_does_not_reenter_perform >> ?arrive=perform
+hooks/test_curl_shared_client_does_not_reenter_perform >> ?arrive=add
+
 # Three POSTs, one worker: the request body is a stream resource, and worker mode
 # has no per-request resource list to close it. Listed three times because the
 # assertion is about the delta between two consecutive requests, not about any

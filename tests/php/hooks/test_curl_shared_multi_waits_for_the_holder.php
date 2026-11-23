@@ -13,8 +13,9 @@ $t = new TestCase('curl_shared_multi_waits_for_the_holder', 'hooks');
 // multi handle until that transfer is done. libcurl refuses every call on a multi
 // handle while another call on it is still running, with
 // CURLM_RECURSIVE_API_CALL, so each of the second request's calls waits until the
-// first one's current call has returned. Both transfers complete, and every call
-// succeeds.
+// first one's current call has returned; curl_multi_exec() instead returns at once
+// and leaves the transfers to whichever request's curl_multi_exec() runs next. Both
+// transfers complete, and every call succeeds.
 $peer = net_peer_ip();
 $holder = curl_hold_start('mode=multi&delay=2000');
 

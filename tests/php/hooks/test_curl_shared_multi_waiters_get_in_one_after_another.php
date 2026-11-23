@@ -10,13 +10,28 @@ $t = new TestCase('curl_shared_multi_waiters_get_in_one_after_another', 'hooks')
 // Two requests wait for a shared multi handle that a third one's 4 s loop holds.
 // Both get it between the loop's calls, in the order they came, long before the
 // loop ends: neither stands aside for the other.
+// The loop holds the handle in a curl_multi_exec() whose progress callback is
+// suspended, which no waiting call ends early, so both calls start while it is
+// held. One made while the handle is free between the loop's calls has not waited,
+// and may go ahead of a waiting call that has not yet seen the handle free.
 $peer = net_peer_ip();
-unset($sharedState['curl_adder_waiting']);
-$holder = curl_hold_start('mode=multi&delay=4000');
+unset($sharedState['curl_adder_waiting'], $sharedState['curl_cb_park'], $sharedState['curl_cb_parked']);
+$holder = curl_hold_start('mode=multi&delay=4000&cbpark=1500');
 
 $parked = curl_hold_parked($sharedState) && isset($sharedState['curl_mh']);
 $t->assertTrue('the holding request reached its curl_multi_select() loop and is parked in it', $parked);
 if (!$parked) {
+    $t->done();
+}
+
+$sharedState['curl_cb_park'] = true;
+$deadline = microtime(true) + 3.0;
+while (!isset($sharedState['curl_cb_parked']) && microtime(true) < $deadline) {
+    oxphp_usleep(5_000);
+}
+$t->assertTrue("the holding request is suspended inside its curl_multi_exec(), in the transfer's progress callback",
+    isset($sharedState['curl_cb_parked']));
+if (!isset($sharedState['curl_cb_parked'])) {
     $t->done();
 }
 
@@ -57,6 +72,11 @@ $removed = is_int($added) ? curl_multi_remove_handle($mh, $ch) : null;
 $second = oxphp_async_await($adder, 12.0);
 $held = oxphp_async_await($holder, 12.0);
 
+$letGo = $sharedState['curl_cb_parked'][1] ?? -INF;
+$t->assertTrue(sprintf('both started to wait before the holder let the handle go (%.3f s and %.3f s before)',
+        $letGo - $adderStarted, $letGo - $started),
+    $adderStarted < $letGo && $started < $letGo);
+
 $t->assertSame("the second request's curl_multi_add_handle() succeeded", $second['added'] ?? $second, CURLM_OK);
 $t->assertTrue(sprintf('within %.3f s', $second['add_took'] ?? INF), ($second['add_took'] ?? INF) <= 2.5);
 $t->assertSame("this request's curl_multi_add_handle() succeeded", $added, CURLM_OK);
@@ -73,6 +93,6 @@ $t->assertSame('curl_multi_remove_handle() succeeded', $removed, CURLM_OK);
 $t->assertSame("the holder's transfer got its whole answer", $held['body'] ?? $held, 'curl-done:/4000/holder');
 
 unset($sharedState['curl_mh'], $sharedState['curl_ch'], $sharedState['curl_parked'],
-    $sharedState['curl_adder_waiting']);
+    $sharedState['curl_adder_waiting'], $sharedState['curl_cb_park'], $sharedState['curl_cb_parked']);
 
 $t->done();

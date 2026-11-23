@@ -45,7 +45,10 @@ declare(strict_types=1);
 // began in $sharedState['curl_select_started'], and reports each one as
 // [started, ended, returned] in `selects`. `?fiber=1` (multi mode) makes
 // each curl_multi_exec() inside a userland Fiber, where the fiber cannot be
-// suspended. `?cb=1` (member mode) has the
+// suspended. `?cbpark=` (multi mode) is the milliseconds the transfer's progress
+// callback suspends the loop for, inside curl_multi_exec() and so holding the multi
+// handle, the first time it runs after $sharedState['curl_cb_park'] is raised; it
+// keeps [began, ended] in $sharedState['curl_cb_parked']. `?cb=1` (member mode) has the
 // progress callback call curl_setopt() on its handle once, in whichever request
 // drives the transfer, and store how long that took in $sharedState['curl_cb_took'].
 // `?warned=1` (member mode) adds the handle under an exception: an error handler
@@ -63,6 +66,21 @@ try {
     curl_setopt_array($ch, [CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 8]);
 
     if ($mode === 'multi') {
+        $cbPark = (int) ($_GET['cbpark'] ?? 0);
+        if ($cbPark > 0) {
+            curl_setopt_array($ch, [
+                CURLOPT_NOPROGRESS => false,
+                CURLOPT_XFERINFOFUNCTION => static function () use (&$sharedState, $cbPark): int {
+                    if ($sharedState['curl_cb_park'] ?? false) {
+                        $sharedState['curl_cb_park'] = false;
+                        $sharedState['curl_cb_parked'] = [microtime(true), null];
+                        usleep($cbPark * 1000);
+                        $sharedState['curl_cb_parked'][1] = microtime(true);
+                    }
+                    return 0;
+                },
+            ]);
+        }
         $mh = curl_multi_init();
         curl_multi_add_handle($mh, $ch);
         $sharedState['curl_mh'] = $mh;

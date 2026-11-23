@@ -9346,11 +9346,12 @@ bool oxphp_claim_tagged_held_by_other(oxphp_request_fiber *self) {
  *
  * A waiting fiber polls only while the holder is suspended, and a loop of
  * curl_multi_exec() and curl_multi_select() suspends only inside a call holding the
- * multi handle; so a call that finds its handles free still lets in an earlier
- * waiting call on one of them. Only one that could have all of its handles, or the
- * loop stalls behind a waiter held up elsewhere; only an earlier one, or two waiters
- * step aside for each other. Connection claims need none of this: they are held to
- * the end of the request. */
+ * multi handle; so a curl_multi_select() or curl_exec() that finds its handles free
+ * still lets in an earlier waiting call on one of them. Any other call does so only
+ * once it has waited (oxphp_curl_guarded() says why). Only one that could have all
+ * of its handles, or the loop stalls behind a waiter held up elsewhere; only an
+ * earlier one, or two waiters step aside for each other. Connection claims need
+ * none of this: they are held to the end of the request. */
 static __thread oxphp_request_fiber *oxphp_curl_waiters = NULL;
 static __thread uint64_t oxphp_curl_tickets = 0;
 

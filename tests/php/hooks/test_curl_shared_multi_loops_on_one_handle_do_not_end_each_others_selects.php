@@ -13,12 +13,13 @@ $t = new TestCase('curl_shared_multi_loops_on_one_handle_do_not_end_each_others_
 // between two of its calls, as a client does while its callbacks wait on I/O:
 // after curl_multi_select(), or with ?arrive=select after curl_multi_exec(), as
 // Guzzle and Symfony HttpClient run theirs, so that the call each loop comes back
-// with is a curl_multi_select(). A loop's own calls wait for the select the other
-// loop is in rather than end it: a curl_multi_select() returns when a transfer of
-// either request has data, so ending it gains nothing, and if each loop ended the
-// other's, the two would hand the handle back and forth every 20 ms, neither
-// waiting for data. Nor does a loop's curl_multi_select() end the other's: the
-// select it ends would only be traded for its own.
+// with is a curl_multi_select(). A loop's own calls do not end the select the
+// other loop is in — its curl_multi_select() waits for it, its curl_multi_exec()
+// returns at once: a curl_multi_select() returns when a transfer of either request
+// has data, so ending it gains nothing, and if each loop ended the other's, the two
+// would hand the handle back and forth every 20 ms, neither waiting for data. Nor
+// does a loop's curl_multi_select() end the other's: the select it ends would only
+// be traded for its own.
 $afterExec = ($_GET['arrive'] ?? '') === 'select';
 $peer = net_peer_ip();
 $holder = curl_hold_start('mode=multi&delay=3000&select=1&yield=' . ($afterExec ? 'exec' : '1'));
