@@ -7,3 +7,5 @@ superglobals_off/test_payload_json | POST | -H "Content-Type: application/json" 
 superglobals_off/test_payload_json_scalar | POST | -H "Content-Type: application/json" -d '"hello"' | |
 superglobals_off/test_body_superglobals | POST | -H "Content-Type: application/x-www-form-urlencoded" -d "a=1&b=two" -b "c=cookieval" | |
 superglobals_off/test_suppressed_superglobals >> ?q=val | GET | | |
+http_object/test_query_arrays >> ?a%5B%5D=1&a%5B%5D=2&f%5Bs%5D%5Bt%5D=x&a.b=1&k=1&k%5B%5D=2&%5B%5D=z&n%5B2%5D=x&n%5B%5D=y&sp+ace=1&=orphan&d%5B=1&m%5Bx=1
+superglobals_off/test_request_script_params

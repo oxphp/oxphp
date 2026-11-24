@@ -30,21 +30,16 @@ $t->assertSame('query()[plus] turns "+" into a space', $all['plus'] ?? null, 'a 
 $t->assertSame('query()[amp] decodes %26 inside a value', $all['amp'] ?? null, 'a&b');
 $t->assertKeyExists('query() array is keyed by the decoded key', $all, 'ключ');
 
-// === The names PHP mangles are a deliberate divergence, not an oversight ===
-// php_register_variable_ex rewrites ' ', '.' and '[' in superglobal keys;
-// query() reports the name the client sent. Pinned so the difference stays
-// intentional and cannot drift back by accident.
+// === Names are mangled the way $_GET mangles them ===
 $t->assertKeyExists('$_GET mangles "a.b" into "a_b"', $_GET, 'a_b');
-$t->assertKeyMissing('$_GET has no literal "a.b"', $_GET, 'a.b');
-$t->assertSame('query() keeps the name as sent', $req->query('a.b'), '1');
-$t->assertKeyExists('query() array keeps "a.b"', $all, 'a.b');
+$t->assertKeyExists('query() array has "a_b" too', $all, 'a_b');
+$t->assertSame("query('a_b') reads it", $req->query('a_b'), '1');
+$t->assertNull("query('a.b') finds nothing", $req->query('a.b'));
 
-// === Parity on names that survive PHP's key mangling ===
-// Restricted on purpose: for a mangled name the two APIs are expected to
-// differ, so a blanket comparison would assert the wrong thing.
-foreach (['name', 'plus', 'space', 'amp', 'ключ', 'dup'] as $k) {
+// === The whole array is $_GET ===
+$t->assertSame('query() === $_GET', $all, $_GET);
+foreach (['name', 'plus', 'space', 'amp', 'ключ', 'dup', 'a_b'] as $k) {
     $t->assertSame("query('$k') === \$_GET['$k']", $req->query($k), $_GET[$k] ?? null);
-    $t->assertSame("query()['$k'] === \$_GET['$k']", $all[$k] ?? null, $_GET[$k] ?? null);
 }
 
 // === A repeated name reads as its last occurrence, in both forms ===

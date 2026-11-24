@@ -190,7 +190,7 @@ It reaches fewer of these arrays than the name suggests. The request body and th
 
 | What | With `SUPERGLOBALS_ENABLED=false` |
 |------|-----|
-| `$_GET` | Empty |
+| `$_GET` | Empty; `oxphp_http_request()->query()` holds what it would have |
 | `$_SERVER` | During a request, four keys and no more: `REQUEST_TIME`, `REQUEST_TIME_FLOAT`, `argc` and `argv`, every one of them registered by PHP itself rather than by the server. No `REQUEST_METHOD`, no `REQUEST_URI`, no `HTTP_*`, no process environment. **Worker mode bootstraps differently:** the code above `oxphp_worker()` runs before any request and sees a `$_SERVER` built as though the setting were on — the whole process environment included, plus a placeholder `REQUEST_URI` of `/` |
 | `$_POST`, `$_FILES`, `$_COOKIE` | Populated as usual |
 | `$_REQUEST` | Populated — merged by PHP as always (see [`$_REQUEST`](#_request)); only what `$_GET` would have contributed is missing |
@@ -200,7 +200,7 @@ It reaches fewer of these arrays than the name suggests. The request body and th
 | `session_start()` and other `session_*()` functions | Native PHP functions |
 | `oxphp_http_request()` | Available — every method answers, including `query()` and `payload()` |
 
-Code that routes on `$_SERVER['REQUEST_URI']` finds nothing there under this setting and has to read `oxphp_http_request()->path()` instead. In a worker entry script that applies to the handler; the bootstrap above it sees the placeholder `/` described in the table, which is not a route either.
+Code that routes on `$_SERVER['REQUEST_URI']` finds nothing there under this setting and has to read `oxphp_http_request()->path()` instead. In a worker entry script that applies to the handler; the bootstrap above it sees the placeholder `/` described in the table, which is not a route either. The script and connection keys (`SCRIPT_NAME`, `SCRIPT_FILENAME`, `PATH_INFO`, `REMOTE_PORT`, the deny-fallback and trace-context keys) have request methods of their own, and `DOCUMENT_ROOT` is `oxphp_server_info()['document_root']` — see [SUPERGLOBALS_ENABLED](request-api.md#superglobals_enabled).
 
 You can check the current setting at runtime:
 

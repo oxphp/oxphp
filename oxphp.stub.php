@@ -59,10 +59,12 @@ function oxphp_http_request(): \OxPHP\Http\RequestInterface {}
  *
  * @example
  * if (!oxphp_superglobals_enabled()) {
- *     // query parameters and the request keys of $_SERVER live here instead
+ *     // what $_GET and the request keys of $_SERVER held is read here instead
  *     $request = oxphp_http_request();
- *     $page = $request->query('page', 1);
- *     $uri  = $request->path();
+ *     $page   = $request->query('page', 1);
+ *     $uri    = $request->path();
+ *     $script = $request->scriptName();
+ *     $root   = oxphp_server_info()['document_root'];
  * }
  */
 function oxphp_superglobals_enabled(): bool {}
@@ -101,16 +103,21 @@ function oxphp_worker_id(): int {}
  * The request_time is a Unix timestamp with microsecond precision,
  * set before php_request_startup() for accurate timing.
  *
+ * The document_root is the directory the server serves from, the value
+ * $_SERVER['DOCUMENT_ROOT'] carries in a request, including with
+ * SUPERGLOBALS_ENABLED=false and outside any request. With DOCUMENT_ROOT
+ * switched off it is the entry file's directory; under `oxphp run` it is null.
+ *
  * The runtime_hooks list names the hook categories this process installed at
  * startup ("sleep", "streams", "net", "curl"), empty when RUNTIME_HOOKS enabled
  * none. It says the handlers were replaced, not that they suspend anything:
  * outside a fiber they delegate to the builtins they replaced.
  *
- * @return array{version: string, worker_id: int, request_time: float, worker_mode: bool, runtime_hooks: list<string>}
+ * @return array{version: string, worker_id: int, request_time: float, worker_mode: bool, document_root: ?string, runtime_hooks: list<string>}
  *
  * @example
  * $info = oxphp_server_info();
- * // ["version" => "0.16.0", "worker_id" => 3, "request_time" => 1740000000.123, "worker_mode" => false, "runtime_hooks" => []]
+ * // ["version" => "0.16.0", "worker_id" => 3, "request_time" => 1740000000.123, "worker_mode" => false, "document_root" => "/var/www/html/public", "runtime_hooks" => []]
  */
 function oxphp_server_info(): array {}
 
@@ -511,18 +518,40 @@ namespace OxPHP\Http {
         // ── Query Parameters ($_GET replacement) ──
 
         /**
-         * Access query string parameters.
+         * Access query string parameters, parsed as PHP parses them for
+         * $_GET, whether or not SUPERGLOBALS_ENABLED or variables_order has
+         * PHP fill $_GET.
          *
-         * Names stay flat, as the client sent them: ?a[]=1 is the parameter
-         * named "a[]", not an array. Read $_GET for array parameters.
+         * The query string goes through the parser parse_str() uses, the one
+         * PHP builds $_GET with. ?a[]=1&a[]=2 is the list ["1", "2"],
+         * ?f[s]=x nests, a repeated name holds its last value, and "." and
+         * " " in a name become "_", so ?a.b=1 is read as query('a_b').
+         * max_input_vars, max_input_nesting_level, arg_separator.input and
+         * the filter extension's default filter apply as they do to $_GET.
          *
-         * A repeated name holds its last value: ?a=1&a=2 reads as "2", as
-         * $_GET['a'] does. Parsing stops after max_input_vars pairs, the limit
-         * PHP applies to $_GET.
+         * When PHP fills $_GET (SUPERGLOBALS_ENABLED and a G in
+         * variables_order, both the default), this is the array it built
+         * when the request started, as it was then: a write to $_GET does
+         * not reach it, and nothing is parsed or warned about again.
+         *
+         * Otherwise the string is parsed here, and the parse raises the
+         * warnings parse_str() raises, through the script's error handler:
+         * past max_input_vars, and past max_input_nesting_level when
+         * display_errors is off. A handler that throws makes this call
+         * throw, and the client decides whether either limit is passed: a
+         * query string of a few hundred bytes nests past the default. To
+         * have the warning reported as with no handler installed, make the
+         * first call under a handler that returns false.
+         *
+         * A call that finds no array cached on this Request object takes or
+         * parses one and caches it as it returns; a call the handler makes
+         * throw caches nothing. A second oxphp_http_request() has a cache of
+         * its own.
          *
          * @param string|null $key Specific key, or null for all params
          * @param mixed $default Returned when key is absent
-         * @return mixed Array of all params, or single value, or $default
+         * @return mixed Array of all params, or one param (a string or an
+         *               array), or $default
          */
         public function query(?string $key = null, mixed $default = null): mixed;
 
@@ -644,6 +673,50 @@ namespace OxPHP\Http {
 
         /** Client IP address (REMOTE_ADDR). */
         public function ip(): string;
+
+        /**
+         * Client port (REMOTE_PORT). When TRUSTED_PROXIES takes the address
+         * from a forwarding header, the port comes from the same entry, and
+         * is 0 when that entry carries none.
+         */
+        public function remotePort(): int;
+
+        // ── Script ──
+
+        /**
+         * The script's path under the document root, as SCRIPT_NAME and
+         * DOCUMENT_URI carry it. PHP_SELF is
+         * scriptName() . (pathInfo() ?? '').
+         */
+        public function scriptName(): string;
+
+        /** The script's absolute path on disk (SCRIPT_FILENAME). */
+        public function scriptFilename(): string;
+
+        /**
+         * The rest of the URI path after the script name, percent-decoded
+         * (PATH_INFO): "/news" for /index.php/news, null when there is none.
+         * On a request PHP_DENY_PATHS or .oxphpdeny sent to the
+         * PHP_DENY_FALLBACK script, the denied path, which $_SERVER also
+         * carries as OXPHP_DENIED_PATH.
+         */
+        public function pathInfo(): ?string;
+
+        /**
+         * The pattern that sent this request to the PHP_DENY_FALLBACK script
+         * (OXPHP_DENIED_PATTERN); null on any other request.
+         */
+        public function deniedPattern(): ?string;
+
+        // ── Tracing ──
+
+        /**
+         * The request's W3C trace context: the ids $_SERVER carries as
+         * OXPHP_TRACE_ID, OXPHP_SPAN_ID and OXPHP_PARENT_SPAN_ID. Null when
+         * trace context is off: it is on with TRACE_CONTEXT=true or
+         * OTEL_ENABLED=true. A new object on every call.
+         */
+        public function traceContext(): ?TraceContextInterface;
 
         // ── Timing ──
 
@@ -806,6 +879,29 @@ namespace OxPHP\Http {
     }
 
     /**
+     * A request's W3C trace context ids, fixed when the request arrived. The
+     * object holds the values themselves, so it reads the same after the
+     * request has ended.
+     */
+    interface TraceContextInterface
+    {
+        /**
+         * 32 lowercase hex chars: the trace id of the incoming traceparent,
+         * or a new one when no valid traceparent came in.
+         */
+        public function traceId(): string;
+
+        /** 16 lowercase hex chars: the span this server opened for the request. */
+        public function spanId(): string;
+
+        /**
+         * The span id of the incoming traceparent; null when no valid one
+         * came in, where OXPHP_PARENT_SPAN_ID carries "".
+         */
+        public function parentSpanId(): ?string;
+    }
+
+    /**
      * Mutable key-value container for request attributes.
      *
      * Used by middleware to attach data to the request (auth user, locale,
@@ -861,6 +957,12 @@ namespace OxPHP\Http {
         public function file(string $name): ?UploadedFileInterface {}
         public function files(?string $name = null): array {}
         public function ip(): string {}
+        public function remotePort(): int {}
+        public function scriptName(): string {}
+        public function scriptFilename(): string {}
+        public function pathInfo(): ?string {}
+        public function deniedPattern(): ?string {}
+        public function traceContext(): ?TraceContextInterface {}
         public function startTime(bool $asFloat = false): int|float {}
         public function attributes(): AttributesInterface {}
         public function session(): ?SessionInterface {}
@@ -887,6 +989,14 @@ namespace OxPHP\Http {
         public function error(): int {}
         public function isValid(): bool {}
         public function moveTo(string $path): bool {}
+    }
+
+    /** @internal Native implementation — use TraceContextInterface for type hints. */
+    final class TraceContext implements TraceContextInterface
+    {
+        public function traceId(): string {}
+        public function spanId(): string {}
+        public function parentSpanId(): ?string {}
     }
 
     /** @internal Native implementation — use AttributesInterface for type hints. */

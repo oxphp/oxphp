@@ -11,3 +11,5 @@ apm/test_trace_id_format
 apm/test_span_id_format
 apm/test_header_format
 apm/test_nested_spans
+apm/test_request_trace_context >> ?case=fresh
+apm/test_request_trace_context >> ?case=incoming | GET | -H "traceparent: 00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01" | |

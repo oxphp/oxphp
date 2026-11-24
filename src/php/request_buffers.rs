@@ -1,7 +1,7 @@
 //! Buffers a worker thread keeps from one request to the next.
 //!
-//! A request's `$_SERVER`, headers, cookies and query pairs are dozens of short
-//! strings that all die together. Owned one string at a time they are most of
+//! A request's `$_SERVER`, headers and cookies are dozens of short strings
+//! that all die together. Owned one string at a time they are most of
 //! the allocations a request makes; kept in buffers that outlive the request
 //! they cost none once the buffers have reached the size the traffic needs.
 //!

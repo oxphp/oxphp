@@ -74,6 +74,10 @@ $t->assertContains('intruder ran with its own query string', $resp, '"tag":"intr
 
 $t->assertSame('path() survived the suspend', $request->path(), $before['path']);
 $t->assertSame('query() survived the suspend', $request->query('probe'), $before['probe']);
+// A new object has no array kept yet, so its first query() takes the one PHP
+// built for this request, which the suspension carried along with $_GET.
+$t->assertSame('a first query() after the suspend reads this request',
+    oxphp_http_request()->query('probe'), $before['probe']);
 $t->assertSame('headers() survived the suspend', $request->headers(), $before['headers']);
 $t->assertSame('cookies() survived the suspend', $request->cookies(), $before['cookies']);
 $t->assertSame('body() survived the suspend', $request->body(), $before['body']);

@@ -73,6 +73,8 @@ When `TRACE_CONTEXT=true`, three `$_SERVER` variables are available in your PHP 
 | `OXPHP_SPAN_ID` | OxPHP's span ID for this request (16 hex chars) | `00f067aa0ba902b7` |
 | `OXPHP_PARENT_SPAN_ID` | Incoming parent span ID (16 hex chars, empty if new trace) | `a3ce929d0e0e4736` |
 
+The same ids are on the request object, with `SUPERGLOBALS_ENABLED=false` too: `oxphp_http_request()->traceContext()` returns them as `traceId()`, `spanId()` and `parentSpanId()`, the last `null` rather than empty for a new trace, and returns `null` itself when trace context is off. See [Trace Context](../php/request-api.md#trace-context).
+
 Use these to propagate trace context to downstream services:
 
 ```php

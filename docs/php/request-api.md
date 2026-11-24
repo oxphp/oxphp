@@ -21,6 +21,8 @@ OxPHP provides an object-oriented API for accessing HTTP request data. Instead o
   - [Raw Body](#raw-body)
   - [File Uploads](#file-uploads)
   - [Client](#client)
+  - [Script](#script)
+  - [Trace Context](#trace-context)
   - [Timing](#timing)
   - [Attributes](#attributes)
   - [Session](#session)
@@ -153,27 +155,29 @@ The version number only: `"1.1"` or `"2"`.
 $request->query(?string $key = null, mixed $default = null): mixed
 ```
 
-Access query string parameters.
+Access query string parameters. `query()` parses the query string as PHP parses it for `$_GET`, with the parser `parse_str()` uses, whether or not `SUPERGLOBALS_ENABLED` or `variables_order` has PHP fill `$_GET`.
 
 | Call | Returns |
 |------|---------|
-| `$request->query()` | All parameters as a flat array of name-value pairs |
-| `$request->query('page')` | The value of `page`, or `null` if absent |
+| `$request->query()` | All parameters, as PHP files them in `$_GET` |
+| `$request->query('page')` | The value of `page` (a string, or an array for `page[]=` or `page[x]=`), or `null` if absent |
 | `$request->query('page', 1)` | The value of `page`, or `1` if absent |
 
-> **Names stay flat.** Bracket notation is not expanded into nested arrays: `?tags[]=php&tags[]=async` yields a flat entry named `tags[]` rather than a `tags` array. Use `$_GET` for array parameters. A repeated name holds its last value, in `query('name')` and `query()` alike: `?a=1&a=2` reads as `'2'`, as `$_GET['a']` does.
-
 ```php
-// Request: GET /search?q=oxphp&tags[]=php&tags[]=async
-$q    = $request->query('q');      // "oxphp"
-$tags = $_GET['tags'];             // ["php", "async"]
+// Request: GET /search?q=oxphp&tags[]=php&tags[]=async&filter[status]=open
+$request->query('q');       // "oxphp"
+$request->query('tags');    // ["php", "async"]
+$request->query('filter');  // ["status" => "open"]
+$request->query('tags[]');  // null — the parameter is named "tags"
 ```
 
-Found values are always strings. `$default` is returned as-is when the key is absent. A parameter sent without a value (`?flag`) and one sent empty (`?flag=`) both read as `''`, not `null`. A pair with no name (`?=x`) is left out, as it is of `$_GET`.
+A repeated name holds its last value: `?a=1&a=2` reads as `'2'`, and `?k=1&k[]=2` reads `k` as `['2']`. `$default` is returned as-is when the key is absent. A parameter sent without a value (`?flag`) and one sent empty (`?flag=`) both read as `''`, not `null`. A pair with no name (`?=x`) is left out.
+
+A call that finds no array kept on its `Request` object parses the string and keeps the array as it returns; a second `oxphp_http_request()` parses again.
 
 #### Decoding
 
-Names and values are percent-decoded, and `+` is read as a space — the same rules PHP applies when building `$_GET`:
+Names and values are percent-decoded, and `+` is read as a space:
 
 ```php
 // Request: GET /search?q=%D0%9F%D1%80%D0%B8%D0%B2%D0%B5%D1%82&tag=a+b
@@ -183,17 +187,38 @@ $request->query('tag');  // "a b"
 
 Values are byte strings, so an escape encoding something that is not valid UTF-8 survives intact — a signed token or a binary id can still be verified against the bytes as sent. `queryString()` remains the way to read the query string exactly as it arrived, undecoded.
 
-Names are reported as the client sent them, where `$_GET` reports them as PHP files them. PHP rewrites `' '`, `'.'` and `'['` in superglobal names, so `?a.b=1` lands in `$_GET` as `a_b`:
+Names are filed the way PHP files every superglobal name. Leading spaces are dropped, `' '` and `'.'` become `'_'`, a `'['` with no closing `']'` becomes `'_'`, and a name ends at a `NUL` byte (`%00`). So `?a.b=1` is read as `query('a_b')`:
 
 ```php
-// Request: GET /?a.b=1
-$_GET['a_b'];            // "1"
-$request->query('a.b');  // "1"
+// Request: GET /?a.b=1&sp+ace=1
+$request->query('a_b');     // "1"
+$request->query('a.b');     // null
+$request->query('sp_ace');  // "1"
 ```
 
-A name is also kept whole where PHP would cut it — PHP handles superglobal names as C strings, so `?a%00b=1` becomes `$_GET['a']` while `query()` keeps `a\0b`. Do not read that as a reason to validate through one API and read through the other: the truncation lets one parameter land on another's key, so `?a=1&a%00x=2` gives `$_GET['a'] === '2'` where `query('a') === '1'`, and the two disagree on the value rather than merely on the set of names.
+#### Limits
 
-At most `max_input_vars` pairs are parsed, the limit PHP applies to `$_GET`. Each repeat of a name counts, and so does a pair with no name. PHP raises a warning when it stops building `$_GET` at the limit. Where it does not build `$_GET`, as with `SUPERGLOBALS_ENABLED=false`, nothing warns, and `query()` holds the pairs up to the limit without saying that more were sent.
+`max_input_vars`, `max_input_nesting_level` and `arg_separator.input` apply as they do to `$_GET`, and so does the `filter` extension's `filter.default`. Every pair counts toward `max_input_vars`, a repeat of a name and a pair with no name included.
+
+When PHP fills `$_GET` (`SUPERGLOBALS_ENABLED` on and a `G` in `variables_order`, both the default), `query()` returns the array PHP built for it when the request started, as it was then. A write to `$_GET` does not reach `query()`, and `query()` parses nothing and raises nothing: whatever the parse had to warn about, PHP warned about once, while building `$_GET`.
+
+Otherwise `query()` parses the string itself, and the parse raises the warnings `parse_str()` raises, through the script's error handler:
+
+- `Input variables exceeded N`, past `max_input_vars`, where the parse stops;
+- `Input variable nesting level exceeded N`, past `max_input_nesting_level` and only while `display_errors` is off. The parse drops that parameter and whatever was already filed under its name, and goes on.
+
+If the handler throws, as framework handlers that turn warnings into `ErrorException` do, `query()` and `query($key)` throw and keep nothing, so the next call to find no array kept parses the string again and warns again. Without such a handler the warning is reported like any other, and `query()` holds what the parse kept.
+
+The client decides whether a limit is passed: a query string of a few hundred bytes nests past the default level of 64. Code that calls `query()` under a throwing handler can make the first call under one that returns `false`, which has the warning reported as with no handler installed:
+
+```php
+set_error_handler(static fn (): bool => false);
+try {
+    $params = $request->query();
+} finally {
+    restore_error_handler();
+}
+```
 
 ---
 
@@ -308,7 +333,7 @@ $request->cookie('sep');    // "a+b"   — unlike query(), "+" is not a space
 $request->cookie('%D0%BA'); // "1"     — look up by the name as sent
 ```
 
-Names are reported as sent here too. PHP rewrites `' '`, `'.'` and `'['` in every superglobal name, cookies included, so `Cookie: a.b=1` lands in `$_COOKIE` as `a_b` while `cookie('a.b')` and `cookies()['a.b']` use the name the client sent.
+Cookie names are reported as sent, unlike query parameter names. PHP rewrites `' '`, `'.'` and `'['` in every superglobal name, cookies included, so `Cookie: a.b=1` lands in `$_COOKIE` as `a_b` while `cookie('a.b')` and `cookies()['a.b']` use the name the client sent.
 
 That rewrite can also land one cookie on another's key. With `Cookie: a.b=1; a_b=2` both names become `a_b` in `$_COOKIE`, which keeps the first, while the object API keeps them apart:
 
@@ -319,7 +344,7 @@ $request->cookie('a_b');   // "2"
 $request->cookie('a.b');   // "1"
 ```
 
-So, as with query parameters, do not validate a cookie through one API and read it through the other: the two can disagree on the value, not only on the name.
+So do not validate a cookie through one API and read it through the other: the two can disagree on the value, not only on the name.
 
 Values are byte strings, so a signed cookie or `setcookie('sid', random_bytes(16))` round-trips as the exact bytes it was set with.
 
@@ -402,11 +427,68 @@ foreach ($photos as $photo) {
 
 ```php
 $request->ip(): string
+$request->remotePort(): int
 ```
 
 Returns the client IP address. When `TRUSTED_PROXIES` is configured and the request peer is in the trusted set, this is the rightmost untrusted address from `X-Forwarded-For` or RFC 7239 `Forwarded` — or, when `TRUSTED_PROXIES` names `cloudflare` and the forwarding chain shows the request arrived from a Cloudflare edge, the `CF-Connecting-IP` address. Otherwise it is the direct peer IP — typically your load balancer, not the end client.
 
 The raw `X-Forwarded-For` header remains available via `$request->header('X-Forwarded-For')` for advanced cases, but parsing it manually is rarely correct (leftmost vs rightmost, no CIDR trust check). Configure `TRUSTED_PROXIES` instead — see [Trusted Proxies](../security/trusted-proxies.md).
+
+`remotePort()` returns the client's port, the value of `$_SERVER['REMOTE_PORT']`. It follows the address: when `TRUSTED_PROXIES` takes the address from a forwarding header, the port comes from the same entry, and is `0` when that entry carries none.
+
+---
+
+### Script
+
+```php
+$request->scriptName(): string
+$request->scriptFilename(): string
+$request->pathInfo(): ?string
+$request->deniedPattern(): ?string
+```
+
+These return the script keys of `$_SERVER`, with or without `SUPERGLOBALS_ENABLED`:
+
+| Method | `$_SERVER` key | Example for `GET /index.php/news` |
+|--------|----------------|-----------------------------------|
+| `scriptName()` | `SCRIPT_NAME`, `DOCUMENT_URI` | `"/index.php"` |
+| `scriptFilename()` | `SCRIPT_FILENAME` | `"/var/www/html/public/index.php"` |
+| `pathInfo()` | `PATH_INFO` | `"/news"` |
+| `deniedPattern()` | `OXPHP_DENIED_PATTERN` | `null` |
+
+`scriptName()` is the script's path under the document root. A worker entry outside the document root is named by its file name alone, `"/worker.php"`. `PHP_SELF` is `scriptName() . ($request->pathInfo() ?? '')`.
+
+`pathInfo()` is the percent-decoded rest of the path after the script name, and `null` when there is none: on `/index.php`, and on an app route that framework mode rewrites to the entry. See [PATH_INFO Behavior](../features/routing.md#path_info-behavior) for when a request has one.
+
+On a request that `PHP_DENY_PATHS` or `.oxphpdeny` sends to the `PHP_DENY_FALLBACK` script, `scriptName()` and `scriptFilename()` name the fallback script, `pathInfo()` is the denied path, which `$_SERVER` also carries as `OXPHP_DENIED_PATH`, and `deniedPattern()` is the pattern that matched. On every other request `deniedPattern()` is `null`. See [PHP Deny](../security/php-deny.md#php-script).
+
+The document root is not a request value; read it from [`oxphp_server_info()['document_root']`](functions.md#oxphp_server_info).
+
+---
+
+### Trace Context
+
+```php
+$request->traceContext(): ?TraceContextInterface
+```
+
+Returns the request's W3C trace context, or `null` when trace context is off. It is on with `TRACE_CONTEXT=true` or `OTEL_ENABLED=true` — see [Distributed Tracing](../features/distributed-tracing.md).
+
+| Method | `$_SERVER` key | Value |
+|--------|----------------|-------|
+| `traceId()` | `OXPHP_TRACE_ID` | 32 lowercase hex chars: the incoming trace id, or a new one when no valid `traceparent` came in |
+| `spanId()` | `OXPHP_SPAN_ID` | 16 lowercase hex chars: the span this server opened for the request |
+| `parentSpanId()` | `OXPHP_PARENT_SPAN_ID` | 16 lowercase hex chars from the incoming `traceparent`, or `null` when no valid one came in (`$_SERVER` carries `""`) |
+
+```php
+<?php
+$ctx = oxphp_http_request()->traceContext();
+if ($ctx !== null) {
+    error_log(sprintf('[trace=%s span=%s] order created', $ctx->traceId(), $ctx->spanId()));
+}
+```
+
+The object holds the ids themselves rather than reading the request, so it can be kept and read after the request has ended. Each call builds a new one.
 
 ---
 
@@ -664,6 +746,8 @@ So this setting is not a way to keep request data out of PHP's globals, and it i
 
 Code that routes on `$_SERVER['REQUEST_URI']` finds nothing there under this setting and has to read `oxphp_http_request()->path()` instead. In a worker entry script that applies to the handler; the bootstrap above it sees the placeholder `/` described in the table, which is not a route either.
 
+What `$_GET` would have held is `query()`. The script and connection keys have methods of their own: `scriptName()`, `scriptFilename()`, `pathInfo()` and `deniedPattern()` under [Script](#script), `remotePort()` under [Client](#client), and the `OXPHP_TRACE_*` ids under [Trace Context](#trace-context). `DOCUMENT_ROOT` is `oxphp_server_info()['document_root']`, which does not depend on a request.
+
 Use `oxphp_superglobals_enabled()` to check the current setting at runtime:
 
 ```php
@@ -715,10 +799,12 @@ oxphp-stubs/
 │   ├── SessionInterface.php
 │   ├── UploadedFileInterface.php
 │   ├── AttributesInterface.php
+│   ├── TraceContextInterface.php
 │   ├── Request.php
 │   ├── Session.php
 │   ├── UploadedFile.php
 │   ├── Attributes.php
+│   ├── TraceContext.php
 │   └── Exception/
 │       ├── NoActiveRequestException.php
 │       ├── AsyncContextException.php

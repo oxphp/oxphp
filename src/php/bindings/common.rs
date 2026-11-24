@@ -350,9 +350,6 @@ extern "C" {
         start_time_fn: Option<unsafe extern "C" fn() -> f64>,
         is_secure_fn: Option<unsafe extern "C" fn() -> c_int>,
         content_type_fn: Option<unsafe extern "C" fn(*mut usize) -> *const c_char>,
-        query_param_fn: Option<
-            unsafe extern "C" fn(*const c_char, usize, *mut usize) -> *const c_char,
-        >,
         headers_all_fn: Option<
             unsafe extern "C" fn(
                 unsafe extern "C" fn(*const c_char, usize, *const c_char, usize, *mut c_void),
@@ -365,15 +362,19 @@ extern "C" {
                 *mut c_void,
             ),
         >,
-        query_params_all_fn: Option<
-            unsafe extern "C" fn(
-                unsafe extern "C" fn(*const c_char, usize, *const c_char, usize, *mut c_void),
-                *mut c_void,
-            ),
-        >,
         body_fn: Option<unsafe extern "C" fn(*mut usize) -> *const u8>,
         seq_fn: Option<unsafe extern "C" fn() -> u64>,
+        script_name_fn: Option<unsafe extern "C" fn(*mut usize) -> *const c_char>,
+        script_filename_fn: Option<unsafe extern "C" fn(*mut usize) -> *const c_char>,
+        path_info_fn: Option<unsafe extern "C" fn(*mut usize) -> *const c_char>,
+        remote_port_fn: Option<unsafe extern "C" fn() -> u16>,
+        denied_pattern_fn: Option<unsafe extern "C" fn(*mut usize) -> *const c_char>,
+        trace_id_fn: Option<unsafe extern "C" fn(*mut usize) -> *const c_char>,
+        span_id_fn: Option<unsafe extern "C" fn(*mut usize) -> *const c_char>,
+        parent_span_id_fn: Option<unsafe extern "C" fn(*mut usize) -> *const c_char>,
     );
+    /// Copies `len` bytes at `root`; call once, before PHP threads start.
+    pub fn oxphp_bridge_set_document_root(root: *const c_char, len: usize);
 
     // ─── Worker mode ────────────────────────────────────
 

@@ -84,6 +84,7 @@ static __thread bool oxphp_serve_in_progress = false;
 static zend_class_entry *oxphp_http_session_ce = NULL;
 static zend_class_entry *oxphp_http_attributes_ce = NULL;
 static zend_class_entry *oxphp_http_uploaded_file_ce = NULL;
+static zend_class_entry *oxphp_http_trace_context_ce = NULL;
 
 /* Decorator system class entries */
 static zend_class_entry *oxphp_decorator_interface_ce = NULL;
@@ -96,6 +97,7 @@ static zend_class_entry *oxphp_http_request_iface_ce = NULL;
 static zend_class_entry *oxphp_http_session_iface_ce = NULL;
 static zend_class_entry *oxphp_http_uploaded_file_iface_ce = NULL;
 static zend_class_entry *oxphp_http_attributes_iface_ce = NULL;
+static zend_class_entry *oxphp_http_trace_context_iface_ce = NULL;
 
 /* Custom object handlers to block cloning */
 static zend_object_handlers oxphp_http_request_handlers;
@@ -518,10 +520,34 @@ ZEND_METHOD(OxPHP_Http_Request, startTime) {
 
 /* ─── Query methods ───────────────────────────────────────── */
 
+/* Parse `len` bytes of form-urlencoded data into a new array at `out` with
+ * treat_data(PARSE_STRING), the call parse_str() makes.  treat_data() works on
+ * its own copy, so whatever the error handler it can call does, `data` is not
+ * read again.  When the handler throws from a warning the parse raises, `out`
+ * is released and left UNDEF and false comes back: the caller caches nothing,
+ * so the next call parses and warns again. */
+static bool oxphp_http_parse_urlencoded(const char *data, size_t len, zval *out) {
+    array_init(out);
+    sapi_module.treat_data(PARSE_STRING, estrndup(data, len), out);
+    if (EG(exception)) {
+        zval_ptr_dtor(out);
+        ZVAL_UNDEF(out);
+        return false;
+    }
+    return true;
+}
+
+/* Whether PHP built $_GET out of this request's query string: the string is
+ * handed to PHP only with SUPERGLOBALS_ENABLED, and PHP parses it only with 'G'
+ * in variables_order.
+ * SYNC: php-src/main/php_variables.c php_auto_globals_create_get() */
+static bool oxphp_http_php_built_get(void) {
+    return oxphp_bridge_get_superglobals_enabled() && PG(variables_order)
+        && (strchr(PG(variables_order), 'G') || strchr(PG(variables_order), 'g'));
+}
+
 /* {{{ OxPHP\Http\Request::query(?string $key = null, mixed $default = null): mixed
- * When called with a key, does a single bridge lookup (fast path).
- * When called without arguments, builds the full array via visitor.
- * Names stay flat: "?a[]=1" is the parameter named "a[]", not an array. */
+ * The query string parsed as PHP parses it for $_GET, cached on the object. */
 ZEND_METHOD(OxPHP_Http_Request, query) {
     zend_string *key = NULL;
     zval *def = NULL;
@@ -532,34 +558,152 @@ ZEND_METHOD(OxPHP_Http_Request, query) {
     ZEND_PARSE_PARAMETERS_END();
     OXPHP_HTTP_REQUEST_GUARD();
 
-    if (key) {
-        /* Single key lookup — direct bridge call, no array build */
-        size_t len = 0;
-        const char *val = oxphp_req_query_param(ZSTR_VAL(key), ZSTR_LEN(key), &len);
-        if (val) {
-            RETURN_STRINGL(val, len);
-        }
-        if (def) {
-            RETURN_COPY(def);
-        }
-        RETURN_NULL();
-    }
-
-    /* No key — return full parsed query array.
-     * Check if we have a cached version in the object property. */
+    /* array_walk() over the object turns every property slot into a
+     * reference, and zend_read_property() hands the slot back as it is. */
     zval *cached = zend_read_property(oxphp_http_request_ce, Z_OBJ_P(ZEND_THIS),
         "_query_cache", sizeof("_query_cache")-1, 1, NULL);
-    if (cached && Z_TYPE_P(cached) == IS_ARRAY) {
-        RETURN_COPY(cached);
+    ZVAL_DEREF(cached);
+    zval parsed;
+    ZVAL_UNDEF(&parsed);
+    if (Z_TYPE_P(cached) != IS_ARRAY) {
+        /* The engine's slot and not the $_GET symbol, which a write from the
+         * script separates: taken from there, the string is not parsed a
+         * second time and its warnings are not raised a second time. */
+        zval *get = &PG(http_globals)[TRACK_VARS_GET];
+        if (oxphp_http_php_built_get() && Z_TYPE_P(get) == IS_ARRAY) {
+            ZVAL_COPY(&parsed, get);
+        } else {
+            size_t qs_len = 0;
+            const char *qs = oxphp_req_query_string(&qs_len);
+            if (qs && qs_len > 0) {
+                if (!oxphp_http_parse_urlencoded(qs, qs_len, &parsed)) {
+                    RETURN_THROWS();
+                }
+            } else {
+                array_init(&parsed);
+            }
+        }
+        /* The store can be refused by a typed reference the script bound the
+         * slot to, and can run a destructor of the old value that writes the
+         * slot again, so this call answers from its own array. */
+        zend_update_property(oxphp_http_request_ce, Z_OBJ_P(ZEND_THIS),
+            "_query_cache", sizeof("_query_cache")-1, &parsed);
+        if (EG(exception)) {
+            zval_ptr_dtor(&parsed);
+            RETURN_THROWS();
+        }
+        cached = &parsed;
     }
 
-    /* Build array from flat pairs via bridge visitor. */
-    array_init(return_value);
-    oxphp_req_query_params_all(headers_visitor, return_value);
+    if (!key) {
+        if (Z_ISUNDEF(parsed)) {
+            RETURN_COPY(cached);
+        }
+        RETURN_COPY_VALUE(&parsed);
+    }
 
-    /* Cache on the object for subsequent calls */
-    zend_update_property(oxphp_http_request_ce, Z_OBJ_P(ZEND_THIS),
-        "_query_cache", sizeof("_query_cache")-1, return_value);
+    /* A canonical numeric name is an integer key, as in $_GET. */
+    zval *found = zend_symtable_find(Z_ARRVAL_P(cached), key);
+    if (found) {
+        /* array_walk_recursive() leaves the cached elements references. */
+        RETVAL_COPY_DEREF(found);
+    } else if (def) {
+        RETVAL_COPY(def);
+    }
+    zval_ptr_dtor(&parsed);
+}
+/* }}} */
+
+/* ─── Script and client methods ──────────────────────────── */
+
+/* {{{ OxPHP\Http\Request::scriptName(): string */
+ZEND_METHOD(OxPHP_Http_Request, scriptName) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    OXPHP_HTTP_REQUEST_GUARD();
+    size_t len = 0;
+    const char *val = oxphp_req_script_name(&len);
+    if (val) {
+        RETURN_STRINGL(val, len);
+    }
+    RETURN_EMPTY_STRING();
+}
+/* }}} */
+
+/* {{{ OxPHP\Http\Request::scriptFilename(): string */
+ZEND_METHOD(OxPHP_Http_Request, scriptFilename) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    OXPHP_HTTP_REQUEST_GUARD();
+    size_t len = 0;
+    const char *val = oxphp_req_script_filename(&len);
+    if (val) {
+        RETURN_STRINGL(val, len);
+    }
+    RETURN_EMPTY_STRING();
+}
+/* }}} */
+
+/* {{{ OxPHP\Http\Request::pathInfo(): ?string */
+ZEND_METHOD(OxPHP_Http_Request, pathInfo) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    OXPHP_HTTP_REQUEST_GUARD();
+    size_t len = 0;
+    const char *val = oxphp_req_path_info(&len);
+    if (val) {
+        RETURN_STRINGL(val, len);
+    }
+    RETURN_NULL();
+}
+/* }}} */
+
+/* {{{ OxPHP\Http\Request::remotePort(): int */
+ZEND_METHOD(OxPHP_Http_Request, remotePort) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    OXPHP_HTTP_REQUEST_GUARD();
+    RETURN_LONG((zend_long)oxphp_req_remote_port());
+}
+/* }}} */
+
+/* {{{ OxPHP\Http\Request::deniedPattern(): ?string */
+ZEND_METHOD(OxPHP_Http_Request, deniedPattern) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    OXPHP_HTTP_REQUEST_GUARD();
+    size_t len = 0;
+    const char *val = oxphp_req_denied_pattern(&len);
+    if (val) {
+        RETURN_STRINGL(val, len);
+    }
+    RETURN_NULL();
+}
+/* }}} */
+
+/* {{{ OxPHP\Http\Request::traceContext(): ?OxPHP\Http\TraceContextInterface
+ * A new snapshot on each call; null with trace context off, which is the one
+ * case the trace id is empty. */
+ZEND_METHOD(OxPHP_Http_Request, traceContext) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    OXPHP_HTTP_REQUEST_GUARD();
+    size_t trace_len = 0;
+    const char *trace = oxphp_req_trace_id(&trace_len);
+    if (!trace || trace_len == 0) {
+        RETURN_NULL();
+    }
+    size_t span_len = 0;
+    const char *span = oxphp_req_span_id(&span_len);
+    size_t parent_len = 0;
+    const char *parent = oxphp_req_parent_span_id(&parent_len);
+
+    object_init_ex(return_value, oxphp_http_trace_context_ce);
+    zend_object *obj = Z_OBJ_P(return_value);
+    zend_update_property_stringl(oxphp_http_trace_context_ce, obj,
+        "traceId", sizeof("traceId")-1, trace, trace_len);
+    if (span) {
+        zend_update_property_stringl(oxphp_http_trace_context_ce, obj,
+            "spanId", sizeof("spanId")-1, span, span_len);
+    }
+    if (parent && parent_len > 0) {
+        zend_update_property_stringl(oxphp_http_trace_context_ce, obj,
+            "parentSpanId", sizeof("parentSpanId")-1, parent, parent_len);
+    }
 }
 /* }}} */
 
@@ -639,8 +783,9 @@ ZEND_METHOD(OxPHP_Http_Request, payload) {
                  * treat_data() is what parse_str() calls: it works on its own
                  * copy and writes only to `parsed`, which leaves $_POST,
                  * php://input and a later request_parse_body() as they were. */
-                array_init(&parsed);
-                sapi_module.treat_data(PARSE_STRING, estrndup((const char *)body_data, body_len), &parsed);
+                if (!oxphp_http_parse_urlencoded((const char *)body_data, body_len, &parsed)) {
+                    RETURN_THROWS();
+                }
             } else if (urlencoded || oxphp_content_type_is(ct, ct_len, ZEND_STRL("multipart/form-data"))) {
                 /* Form data — the body is not parsed here at all, $_POST is
                  * taken as PHP built it.  Not gated on SUPERGLOBALS_ENABLED:
@@ -663,13 +808,6 @@ ZEND_METHOD(OxPHP_Http_Request, payload) {
                     ZVAL_COPY(&parsed, post);
                 }
             }
-        }
-
-        /* A handler that threw from the max_input_vars warning leaves part of
-         * the body here; cached, it would answer the next call as the whole. */
-        if (EG(exception)) {
-            zval_ptr_dtor(&parsed);
-            RETURN_THROWS();
         }
 
         zend_update_property(oxphp_http_request_ce, Z_OBJ_P(ZEND_THIS),
@@ -1309,6 +1447,37 @@ ZEND_METHOD(OxPHP_Http_UploadedFile, moveTo) {
 /* }}} */
 
 /* ═══════════════════════════════════════════════════════════════
+ *  OxPHP\Http\TraceContext — ZEND_METHOD implementations
+ * ═══════════════════════════════════════════════════════════════ */
+
+/* {{{ OxPHP\Http\TraceContext::traceId(): string */
+ZEND_METHOD(OxPHP_Http_TraceContext, traceId) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    zval *val = zend_read_property(oxphp_http_trace_context_ce, Z_OBJ_P(ZEND_THIS),
+        "traceId", sizeof("traceId")-1, 1, NULL);
+    RETURN_COPY_DEREF(val);
+}
+/* }}} */
+
+/* {{{ OxPHP\Http\TraceContext::spanId(): string */
+ZEND_METHOD(OxPHP_Http_TraceContext, spanId) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    zval *val = zend_read_property(oxphp_http_trace_context_ce, Z_OBJ_P(ZEND_THIS),
+        "spanId", sizeof("spanId")-1, 1, NULL);
+    RETURN_COPY_DEREF(val);
+}
+/* }}} */
+
+/* {{{ OxPHP\Http\TraceContext::parentSpanId(): ?string */
+ZEND_METHOD(OxPHP_Http_TraceContext, parentSpanId) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    zval *val = zend_read_property(oxphp_http_trace_context_ce, Z_OBJ_P(ZEND_THIS),
+        "parentSpanId", sizeof("parentSpanId")-1, 1, NULL);
+    RETURN_COPY_DEREF(val);
+}
+/* }}} */
+
+/* ═══════════════════════════════════════════════════════════════
  *  End of supporting classes
  * ═══════════════════════════════════════════════════════════════ */
 
@@ -1393,6 +1562,14 @@ PHP_FUNCTION(oxphp_server_info)
     add_assoc_long(return_value, "worker_id", oxphp_bridge_get_worker_id());
     add_assoc_double(return_value, "request_time", oxphp_bridge_get_request_time());
     add_assoc_bool(return_value, "worker_mode", oxphp_bridge_is_worker_mode());
+
+    size_t root_len = 0;
+    const char *root = oxphp_bridge_get_document_root(&root_len);
+    if (root) {
+        add_assoc_stringl(return_value, "document_root", root, root_len);
+    } else {
+        add_assoc_null(return_value, "document_root");
+    }
 
     zval runtime_hooks;
     oxphp_runtime_hooks_to_array(&runtime_hooks);
@@ -10553,6 +10730,25 @@ ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_req_files, 0, 0, IS_ARRAY, 0)
     ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, name, IS_STRING, 1, "null")
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_req_scriptName, 0, 0, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_req_scriptFilename, 0, 0, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_req_pathInfo, 0, 0, IS_STRING, 1)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_req_remotePort, 0, 0, IS_LONG, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_req_deniedPattern, 0, 0, IS_STRING, 1)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_req_traceContext, 0, 0,
+    OxPHP\\Http\\TraceContextInterface, 1)
+ZEND_END_ARG_INFO()
+
 /* ─── Request method entries ─────────────────────────────── */
 static const zend_function_entry oxphp_http_request_methods[] = {
     ZEND_ME(OxPHP_Http_Request, method,              arginfo_req_method,              ZEND_ACC_PUBLIC)
@@ -10581,6 +10777,12 @@ static const zend_function_entry oxphp_http_request_methods[] = {
     ZEND_ME(OxPHP_Http_Request, session,             arginfo_req_session,             ZEND_ACC_PUBLIC)
     ZEND_ME(OxPHP_Http_Request, file,                arginfo_req_file,                ZEND_ACC_PUBLIC)
     ZEND_ME(OxPHP_Http_Request, files,               arginfo_req_files,               ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_Request, scriptName,          arginfo_req_scriptName,          ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_Request, scriptFilename,      arginfo_req_scriptFilename,      ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_Request, pathInfo,            arginfo_req_pathInfo,            ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_Request, remotePort,          arginfo_req_remotePort,          ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_Request, deniedPattern,       arginfo_req_deniedPattern,       ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_Request, traceContext,        arginfo_req_traceContext,        ZEND_ACC_PUBLIC)
     PHP_FE_END
 };
 
@@ -10672,6 +10874,24 @@ static const zend_function_entry oxphp_http_uploaded_file_methods[] = {
     PHP_FE_END
 };
 
+/* ─── TraceContext arginfo and method entries ──────────────── */
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_tc_traceId, 0, 0, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_tc_spanId, 0, 0, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_tc_parentSpanId, 0, 0, IS_STRING, 1)
+ZEND_END_ARG_INFO()
+
+static const zend_function_entry oxphp_http_trace_context_methods[] = {
+    ZEND_ME(OxPHP_Http_TraceContext, traceId,      arginfo_tc_traceId,      ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_TraceContext, spanId,       arginfo_tc_spanId,       ZEND_ACC_PUBLIC)
+    ZEND_ME(OxPHP_Http_TraceContext, parentSpanId, arginfo_tc_parentSpanId, ZEND_ACC_PUBLIC)
+    PHP_FE_END
+};
+
 /* ─── Interface method entries ──────────────────────────── */
 
 static const zend_function_entry oxphp_http_attributes_iface_methods[] = {
@@ -10704,6 +10924,13 @@ static const zend_function_entry oxphp_http_uploaded_file_iface_methods[] = {
     PHP_FE_END
 };
 
+static const zend_function_entry oxphp_http_trace_context_iface_methods[] = {
+    ZEND_ABSTRACT_ME(TraceContextInterface, traceId,      arginfo_tc_traceId)
+    ZEND_ABSTRACT_ME(TraceContextInterface, spanId,       arginfo_tc_spanId)
+    ZEND_ABSTRACT_ME(TraceContextInterface, parentSpanId, arginfo_tc_parentSpanId)
+    PHP_FE_END
+};
+
 static const zend_function_entry oxphp_http_request_iface_methods[] = {
     ZEND_ABSTRACT_ME(RequestInterface, method,              arginfo_req_method)
     ZEND_ABSTRACT_ME(RequestInterface, path,                arginfo_req_path)
@@ -10731,6 +10958,12 @@ static const zend_function_entry oxphp_http_request_iface_methods[] = {
     ZEND_ABSTRACT_ME(RequestInterface, session,             arginfo_req_session)
     ZEND_ABSTRACT_ME(RequestInterface, file,                arginfo_req_file)
     ZEND_ABSTRACT_ME(RequestInterface, files,               arginfo_req_files)
+    ZEND_ABSTRACT_ME(RequestInterface, scriptName,          arginfo_req_scriptName)
+    ZEND_ABSTRACT_ME(RequestInterface, scriptFilename,      arginfo_req_scriptFilename)
+    ZEND_ABSTRACT_ME(RequestInterface, pathInfo,            arginfo_req_pathInfo)
+    ZEND_ABSTRACT_ME(RequestInterface, remotePort,          arginfo_req_remotePort)
+    ZEND_ABSTRACT_ME(RequestInterface, deniedPattern,       arginfo_req_deniedPattern)
+    ZEND_ABSTRACT_ME(RequestInterface, traceContext,        arginfo_req_traceContext)
     PHP_FE_END
 };
 
@@ -12381,6 +12614,10 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
             oxphp_http_uploaded_file_iface_methods);
         oxphp_http_uploaded_file_iface_ce = zend_register_internal_interface(&tmp_ce);
 
+        INIT_NS_CLASS_ENTRY(tmp_ce, "OxPHP\\Http", "TraceContextInterface",
+            oxphp_http_trace_context_iface_methods);
+        oxphp_http_trace_context_iface_ce = zend_register_internal_interface(&tmp_ce);
+
         INIT_NS_CLASS_ENTRY(tmp_ce, "OxPHP\\Http", "RequestInterface",
             oxphp_http_request_iface_methods);
         oxphp_http_request_iface_ce = zend_register_internal_interface(&tmp_ce);
@@ -12465,6 +12702,39 @@ PHP_MINIT_FUNCTION(oxphp_sapi)
             "_type", sizeof("_type")-1, ZEND_ACC_PROTECTED);
         zend_declare_property_null(oxphp_http_uploaded_file_ce,
             "_movedTo", sizeof("_movedTo")-1, ZEND_ACC_PROTECTED);
+    }
+
+    /* OxPHP\Http\TraceContext */
+    {
+        zend_class_entry tmp_ce;
+        INIT_NS_CLASS_ENTRY(tmp_ce, "OxPHP\\Http", "TraceContext",
+            oxphp_http_trace_context_methods);
+        oxphp_http_trace_context_ce = zend_register_internal_class(&tmp_ce);
+        oxphp_http_trace_context_ce->ce_flags |= ZEND_ACC_FINAL | ZEND_ACC_NOT_SERIALIZABLE;
+        zend_class_implements(oxphp_http_trace_context_ce, 1, oxphp_http_trace_context_iface_ce);
+
+        /* Typed as the getters return: array_walk() gives a reference to a
+         * typed property its type, so a write through it is coerced or
+         * refused and the getters' return types hold. */
+        zval def;
+        zend_string *name;
+
+        ZVAL_EMPTY_STRING(&def);
+        name = zend_string_init("traceId", sizeof("traceId")-1, 1);
+        zend_declare_typed_property(oxphp_http_trace_context_ce, name, &def,
+            ZEND_ACC_PROTECTED, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_STRING));
+        zend_string_release(name);
+
+        name = zend_string_init("spanId", sizeof("spanId")-1, 1);
+        zend_declare_typed_property(oxphp_http_trace_context_ce, name, &def,
+            ZEND_ACC_PROTECTED, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_STRING));
+        zend_string_release(name);
+
+        ZVAL_NULL(&def);
+        name = zend_string_init("parentSpanId", sizeof("parentSpanId")-1, 1);
+        zend_declare_typed_property(oxphp_http_trace_context_ce, name, &def,
+            ZEND_ACC_PROTECTED, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_STRING | MAY_BE_NULL));
+        zend_string_release(name);
     }
 
     /* OxPHP\Shared\Shareable interface is registered earlier in MINIT
