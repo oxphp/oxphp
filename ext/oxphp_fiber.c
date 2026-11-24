@@ -4047,6 +4047,13 @@ static bool oxphp_error_handler_call_frame(const zend_execute_data *ex,
     return page->prev == rec->page;
 }
 
+typedef enum {
+    OXPHP_ERROR_HANDLER_CALL_RETURNED,
+    OXPHP_ERROR_HANDLER_CALL_RUNNING,
+    /* Code PHP called from C runs where the call would, and is not told from it. */
+    OXPHP_ERROR_HANDLER_CALL_UNSURE,
+} oxphp_error_handler_call_state;
+
 /* Whether the call is still running on the chain from `from` down to the
  * fiber's bottom: the frame entered from the one the error was raised in — a
  * chain holds at most one — standing where the call's frame was to go, entered
@@ -4056,24 +4063,35 @@ static bool oxphp_error_handler_call_frame(const zend_execute_data *ex,
  * well. A call that has returned leaves an address a later frame can reuse. A
  * callback C makes from a frame where the error's was — a stream wrapper's
  * stream_open() under fopen() — lands there too; with the four arguments it
- * passes for the call unless the handler is a Closure. Missed while the call
- * runs: the destructors of its frame's own variables, which the engine runs once
- * the frame is off the chain, and a call that reaches the handler through
- * __call(), whose frame then holds two arguments. */
-static bool oxphp_error_handler_call_live(const oxphp_error_handler_call *rec,
-                                          const zend_execute_data *from,
-                                          const zend_execute_data *bottom) {
+ * passes for the call unless the handler is a Closure.
+ *
+ * Unsure where a frame entered from C stands there in another shape. The call
+ * runs in two such: a call that reaches the handler through __call(), whose
+ * frame holds two arguments, and the destructors of its frame's own variables,
+ * which the engine runs once the frame is off the chain, entered from the frame
+ * it was. A destructor or magic method run later from that frame, the call long
+ * returned, looks the same.
+ * SYNC: php-src Zend/zend_vm_def.h ZEND_CALL_TRAMPOLINE — 8.4.28 :8890-8915,
+ *       8.5.13 :8977-9002, 8.6.0 :9097-9122; zend_leave_helper. */
+static oxphp_error_handler_call_state oxphp_error_handler_call_state_of(
+        const oxphp_error_handler_call *rec, const zend_execute_data *from,
+        const zend_execute_data *bottom) {
     for (const zend_execute_data *ex = from; ex != NULL && ex != bottom; ex = ex->prev_execute_data) {
-        if (ex->prev_execute_data == rec->caller) {
-            return oxphp_error_handler_call_frame(ex, rec)
-                && (ZEND_CALL_INFO(ex) & ZEND_CALL_TOP)
+        if (ex->prev_execute_data != rec->caller) {
+            continue;
+        }
+        if (!(ZEND_CALL_INFO(ex) & ZEND_CALL_TOP)) {
+            return OXPHP_ERROR_HANDLER_CALL_RETURNED;
+        }
+        return oxphp_error_handler_call_frame(ex, rec)
                 && ZEND_CALL_NUM_ARGS(ex) == 4
                 && (Z_TYPE(rec->handler) != IS_OBJECT
                     || Z_OBJCE(rec->handler) != zend_ce_closure
-                    || ex->func == zend_get_closure_method_def(Z_OBJ(rec->handler)));
-        }
+                    || ex->func == zend_get_closure_method_def(Z_OBJ(rec->handler)))
+            ? OXPHP_ERROR_HANDLER_CALL_RUNNING
+            : OXPHP_ERROR_HANDLER_CALL_UNSURE;
     }
-    return false;
+    return OXPHP_ERROR_HANDLER_CALL_RETURNED;
 }
 
 /* Only for code that runs in the request or task fiber itself: the calls are
@@ -4112,7 +4130,8 @@ static void oxphp_error_handler_call_observer(int type, zend_string *file, uint3
     for (uint8_t i = 0; i < fiber->error_handler_call_count; i++) {
         oxphp_error_handler_call *rec = &fiber->error_handler_calls[i];
         if (oxphp_error_handler_is(&rec->handler, &EG(user_error_handler))
-                && !oxphp_error_handler_call_live(rec, EG(current_execute_data), fiber->zf->stack_bottom)) {
+                && oxphp_error_handler_call_state_of(rec, EG(current_execute_data), fiber->zf->stack_bottom)
+                    == OXPHP_ERROR_HANDLER_CALL_RETURNED) {
             Z_TRY_DELREF(rec->handler);
             continue;
         }
@@ -4120,6 +4139,7 @@ static void oxphp_error_handler_call_observer(int type, zend_string *file, uint3
     }
     fiber->error_handler_call_count = kept;
     if (kept == OXPHP_ERROR_HANDLER_CALLS) {
+        fiber->error_handler_call_missed = true;
         return;
     }
     oxphp_error_handler_call *rec = &fiber->error_handler_calls[fiber->error_handler_call_count++];
@@ -4133,22 +4153,29 @@ static void oxphp_error_handler_call_observer(int type, zend_string *file, uint3
 /* At a park inside a call: the handler goes back on the thread for what the
  * worker runs meanwhile, while the thread is as the call left it — no handler,
  * at the depth the call began at. One set or restored since is the worker's
- * already. The innermost call still running decides. */
+ * already. The innermost call that may still be running decides, since the
+ * handler it was made with is the one that stands once it returns; so one the
+ * walk is unsure of lends nothing, and once a call has gone unrecorded, no park
+ * lends. */
 static void oxphp_error_handler_lend(oxphp_request_fiber *fiber) {
     fiber->error_handler_lent = 0;
     /* Its frames are walked from where it suspended, which names live frames
      * only while it is suspended. */
     if (fiber->error_handler_call_count == 0
+            || fiber->error_handler_call_missed
             || Z_TYPE(EG(user_error_handler)) != IS_UNDEF
             || fiber->zf->context.status != ZEND_FIBER_STATUS_SUSPENDED) {
         return;
     }
     for (int i = fiber->error_handler_call_count - 1; i >= 0; i--) {
         const oxphp_error_handler_call *rec = &fiber->error_handler_calls[i];
-        if (!oxphp_error_handler_call_live(rec, fiber->zf->execute_data, fiber->zf->stack_bottom)) {
+        oxphp_error_handler_call_state state =
+            oxphp_error_handler_call_state_of(rec, fiber->zf->execute_data, fiber->zf->stack_bottom);
+        if (state == OXPHP_ERROR_HANDLER_CALL_RETURNED) {
             continue;
         }
-        if (rec->depth == zend_stack_count(&EG(user_error_handlers))) {
+        if (state == OXPHP_ERROR_HANDLER_CALL_RUNNING
+                && rec->depth == zend_stack_count(&EG(user_error_handlers))) {
             ZVAL_COPY(&EG(user_error_handler), &rec->handler);
             fiber->error_handler_lent = (uint8_t) (i + 1);
         }
@@ -4182,6 +4209,7 @@ static void oxphp_error_handler_take_back(oxphp_request_fiber *fiber) {
  * teardown. Letting go of a copy can run a destructor. */
 static void oxphp_error_handler_calls_release(oxphp_request_fiber *fiber) {
     fiber->error_handler_lent = 0;
+    fiber->error_handler_call_missed = false;
     while (fiber->error_handler_call_count > 0) {
         zval dead;
         ZVAL_COPY_VALUE(&dead, &fiber->error_handler_calls[fiber->error_handler_call_count - 1].handler);
@@ -10122,9 +10150,11 @@ static void oxphp_task_last_error_unpark(oxphp_request_fiber *fiber) {
  * Task-side mirror of oxphp_scheduler_start_fiber; a task carries no HTTP
  * request state, so the C-stack bounds are all it installs, and its last error
  * and the class names it is autoloading all it takes back out. A new task
- * starts with no last error: the driver also runs PHP outside every slice and
- * window, in the destructors of what it frees, and what that leaves standing is
- * not the task's. */
+ * starts with no last error, and in the normal error mode as a request does: the
+ * driver runs PHP between tasks too, in the destructors of what it frees, and
+ * what that leaves standing is not the task's — a fatal there inside `new PDO()`,
+ * caught by the driver's window, leaves that call's mode. A resume needs no
+ * reset: it puts the task's own mode back. */
 static void oxphp_task_start_fiber(oxphp_fiber_scheduler *sched, oxphp_request_fiber *fiber) {
     /* As oxphp_scheduler_start_fiber() does, for the task's sake. */
     oxphp_recover_from_reported_oom();
@@ -10136,6 +10166,7 @@ static void oxphp_task_start_fiber(oxphp_fiber_scheduler *sched, oxphp_request_f
     oxphp_fiber_install_stack_limits(fiber);
 
     oxphp_task_last_error_release();
+    zend_replace_error_handling(EH_NORMAL, NULL, NULL);
 #if PHP_VERSION_ID >= 80600
     php_stream_error_state_cleanup();
 #endif
@@ -10583,9 +10614,11 @@ static void oxphp_task_release_payload_guarded(oxphp_request_fiber *fiber) {
     oxphp_task_window_open(&mark);
     OXPHP_TASK_WINDOW_STEP(&mark, zval_ptr_dtor(&closure));
     OXPHP_TASK_WINDOW_STEP(&mark, zval_ptr_dtor(&retval));
-    while (fiber->error_handler_call_count > 0) {
+    /* Once even with no copy kept: the mark of a call gone unrecorded can outlast
+     * the copies, and the next task on this fiber would lend nothing. */
+    do {
         OXPHP_TASK_WINDOW_STEP(&mark, oxphp_error_handler_calls_release(fiber));
-    }
+    } while (fiber->error_handler_call_count > 0);
     /* Last: the closure reads the table, and so can a value the task returned
      * that holds the closure, such as a generator. */
     if (statics) {

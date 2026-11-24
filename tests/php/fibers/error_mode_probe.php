@@ -134,6 +134,19 @@ if (!class_exists('OxphpErrorModeProbe', false)) {
         }
     }
 
+    /** Fatals inside an open that runs in the mode turning warnings into exceptions, as the last reference to it goes. */
+    final class OxphpErrorModeFatalOnRelease
+    {
+        public function __construct(private string $tag)
+        {
+        }
+
+        public function __destruct()
+        {
+            OxphpErrorModeProbe::open("oxehpark://fatal/{$this->tag}");
+        }
+    }
+
     final class OxphpErrorModeWrapper
     {
         /** @var resource|null Set by PHP on every wrapper instance. */
