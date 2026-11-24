@@ -35,6 +35,18 @@ if ($scriptName !== '' && $path === $scriptName) {
     $t->assertKeyMissing('PATH_INFO absent for app route', $_SERVER, 'PATH_INFO');
 }
 
+// The request methods carry the same script keys, on every path this fixture
+// is reached by.
+$req = oxphp_http_request();
+$t->assertSame('scriptName() === SCRIPT_NAME', $req->scriptName(), $scriptName);
+$t->assertSame('scriptFilename() === SCRIPT_FILENAME', $req->scriptFilename(), $_SERVER['SCRIPT_FILENAME'] ?? null);
+$t->assertSame('pathInfo() === PATH_INFO', $req->pathInfo(), $_SERVER['PATH_INFO'] ?? null);
+$t->assertSame(
+    'scriptName() . pathInfo() === PHP_SELF',
+    $req->scriptName() . ($req->pathInfo() ?? ''),
+    $_SERVER['PHP_SELF'] ?? null
+);
+
 // Reached by an absolute-form target with an empty path,
 // `GET http://fw.example?case=empty-path`: the path is equivalent to `/`, and
 // REQUEST_URI carries it in front of the query.

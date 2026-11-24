@@ -1152,12 +1152,18 @@ void oxphp_bridge_set_request_accessors(
     oxphp_req_double_fn_t   start_time_fn,
     oxphp_req_bool_fn_t     is_secure_fn,
     oxphp_req_str_fn_t      content_type_fn,
-    oxphp_req_str_key_fn_t  query_param_fn,
     oxphp_req_pairs_fn_t    headers_all_fn,
     oxphp_req_pairs_fn_t    cookies_all_fn,
-    oxphp_req_pairs_fn_t    query_params_all_fn,
     oxphp_req_body_fn_t     body_fn,
-    oxphp_req_u64_fn_t      seq_fn
+    oxphp_req_u64_fn_t      seq_fn,
+    oxphp_req_str_fn_t      script_name_fn,
+    oxphp_req_str_fn_t      script_filename_fn,
+    oxphp_req_str_fn_t      path_info_fn,
+    oxphp_req_u16_fn_t      remote_port_fn,
+    oxphp_req_str_fn_t      denied_pattern_fn,
+    oxphp_req_str_fn_t      trace_id_fn,
+    oxphp_req_str_fn_t      span_id_fn,
+    oxphp_req_str_fn_t      parent_span_id_fn
 );
 
 /** Convenience getters — call through registered function pointers. */
@@ -1175,13 +1181,31 @@ const char* oxphp_req_protocol_version(size_t *out_len);
 double      oxphp_req_start_time(void);
 int         oxphp_req_is_secure(void);
 const char* oxphp_req_content_type(size_t *out_len);
-const char* oxphp_req_query_param(const char *key, size_t key_len, size_t *out_len);
 void        oxphp_req_headers_all(oxphp_req_pairs_cb_t cb, void *user_data);
 void        oxphp_req_cookies_all(oxphp_req_pairs_cb_t cb, void *user_data);
-void        oxphp_req_query_params_all(oxphp_req_pairs_cb_t cb, void *user_data);
 const uint8_t* oxphp_req_body(size_t *out_len);
 /** The request the thread is serving, unique in the process; 0 for none. */
 uint64_t    oxphp_req_seq(void);
+/** SCRIPT_NAME and SCRIPT_FILENAME of the request, whatever SUPERGLOBALS_ENABLED says. */
+const char* oxphp_req_script_name(size_t *out_len);
+const char* oxphp_req_script_filename(size_t *out_len);
+/** PATH_INFO; NULL when the request has none. */
+const char* oxphp_req_path_info(size_t *out_len);
+uint16_t    oxphp_req_remote_port(void);
+/** The PHP_DENY_* pattern that sent the request to the deny fallback script;
+ *  NULL on any other request. */
+const char* oxphp_req_denied_pattern(size_t *out_len);
+/** Trace ids: empty when trace context is off, and the parent also when no
+ *  traceparent came in. */
+const char* oxphp_req_trace_id(size_t *out_len);
+const char* oxphp_req_span_id(size_t *out_len);
+const char* oxphp_req_parent_span_id(size_t *out_len);
+
+/** The document root the server serves from, as $_SERVER['DOCUMENT_ROOT']
+ *  carries it. Set once by the serve frontend before PHP threads start, never
+ *  by `oxphp run`; until then, and in that frontend, the getter returns NULL. */
+void        oxphp_bridge_set_document_root(const char *root, size_t len);
+const char* oxphp_bridge_get_document_root(size_t *out_len);
 
 /* ─── Worker Mode ─────────────────────────────────────────── */
 

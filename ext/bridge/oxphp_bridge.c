@@ -2213,12 +2213,18 @@ static oxphp_req_str_fn_t     g_req_protocol_version_fn = NULL;
 static oxphp_req_double_fn_t  g_req_start_time_fn = NULL;
 static oxphp_req_bool_fn_t    g_req_is_secure_fn = NULL;
 static oxphp_req_str_fn_t     g_req_content_type_fn = NULL;
-static oxphp_req_str_key_fn_t g_req_query_param_fn = NULL;
 static oxphp_req_pairs_fn_t   g_req_headers_all_fn = NULL;
 static oxphp_req_pairs_fn_t   g_req_cookies_all_fn = NULL;
-static oxphp_req_pairs_fn_t   g_req_query_params_all_fn = NULL;
 static oxphp_req_body_fn_t    g_req_body_fn = NULL;
 static oxphp_req_u64_fn_t     g_req_seq_fn = NULL;
+static oxphp_req_str_fn_t     g_req_script_name_fn = NULL;
+static oxphp_req_str_fn_t     g_req_script_filename_fn = NULL;
+static oxphp_req_str_fn_t     g_req_path_info_fn = NULL;
+static oxphp_req_u16_fn_t     g_req_remote_port_fn = NULL;
+static oxphp_req_str_fn_t     g_req_denied_pattern_fn = NULL;
+static oxphp_req_str_fn_t     g_req_trace_id_fn = NULL;
+static oxphp_req_str_fn_t     g_req_span_id_fn = NULL;
+static oxphp_req_str_fn_t     g_req_parent_span_id_fn = NULL;
 
 void oxphp_bridge_set_request_accessors(
     oxphp_req_str_fn_t      method_fn,
@@ -2235,12 +2241,18 @@ void oxphp_bridge_set_request_accessors(
     oxphp_req_double_fn_t   start_time_fn,
     oxphp_req_bool_fn_t     is_secure_fn,
     oxphp_req_str_fn_t      content_type_fn,
-    oxphp_req_str_key_fn_t  query_param_fn,
     oxphp_req_pairs_fn_t    headers_all_fn,
     oxphp_req_pairs_fn_t    cookies_all_fn,
-    oxphp_req_pairs_fn_t    query_params_all_fn,
     oxphp_req_body_fn_t     body_fn,
-    oxphp_req_u64_fn_t      seq_fn
+    oxphp_req_u64_fn_t      seq_fn,
+    oxphp_req_str_fn_t      script_name_fn,
+    oxphp_req_str_fn_t      script_filename_fn,
+    oxphp_req_str_fn_t      path_info_fn,
+    oxphp_req_u16_fn_t      remote_port_fn,
+    oxphp_req_str_fn_t      denied_pattern_fn,
+    oxphp_req_str_fn_t      trace_id_fn,
+    oxphp_req_str_fn_t      span_id_fn,
+    oxphp_req_str_fn_t      parent_span_id_fn
 ) {
     g_req_method_fn = method_fn;
     g_req_path_fn = path_fn;
@@ -2256,12 +2268,18 @@ void oxphp_bridge_set_request_accessors(
     g_req_start_time_fn = start_time_fn;
     g_req_is_secure_fn = is_secure_fn;
     g_req_content_type_fn = content_type_fn;
-    g_req_query_param_fn = query_param_fn;
     g_req_headers_all_fn = headers_all_fn;
     g_req_cookies_all_fn = cookies_all_fn;
-    g_req_query_params_all_fn = query_params_all_fn;
     g_req_body_fn = body_fn;
     g_req_seq_fn = seq_fn;
+    g_req_script_name_fn = script_name_fn;
+    g_req_script_filename_fn = script_filename_fn;
+    g_req_path_info_fn = path_info_fn;
+    g_req_remote_port_fn = remote_port_fn;
+    g_req_denied_pattern_fn = denied_pattern_fn;
+    g_req_trace_id_fn = trace_id_fn;
+    g_req_span_id_fn = span_id_fn;
+    g_req_parent_span_id_fn = parent_span_id_fn;
 }
 
 /* Convenience wrappers — call through registered function pointers */
@@ -2307,23 +2325,70 @@ int oxphp_req_is_secure(void) {
 const char* oxphp_req_content_type(size_t *out_len) {
     return g_req_content_type_fn ? g_req_content_type_fn(out_len) : NULL;
 }
-const char* oxphp_req_query_param(const char *key, size_t key_len, size_t *out_len) {
-    return g_req_query_param_fn ? g_req_query_param_fn(key, key_len, out_len) : NULL;
-}
 void oxphp_req_headers_all(oxphp_req_pairs_cb_t cb, void *user_data) {
     if (g_req_headers_all_fn) g_req_headers_all_fn(cb, user_data);
 }
 void oxphp_req_cookies_all(oxphp_req_pairs_cb_t cb, void *user_data) {
     if (g_req_cookies_all_fn) g_req_cookies_all_fn(cb, user_data);
 }
-void oxphp_req_query_params_all(oxphp_req_pairs_cb_t cb, void *user_data) {
-    if (g_req_query_params_all_fn) g_req_query_params_all_fn(cb, user_data);
-}
 const uint8_t* oxphp_req_body(size_t *out_len) {
     return g_req_body_fn ? g_req_body_fn(out_len) : NULL;
 }
 uint64_t oxphp_req_seq(void) {
     return g_req_seq_fn ? g_req_seq_fn() : 0;
+}
+const char* oxphp_req_script_name(size_t *out_len) {
+    return g_req_script_name_fn ? g_req_script_name_fn(out_len) : NULL;
+}
+const char* oxphp_req_script_filename(size_t *out_len) {
+    return g_req_script_filename_fn ? g_req_script_filename_fn(out_len) : NULL;
+}
+const char* oxphp_req_path_info(size_t *out_len) {
+    return g_req_path_info_fn ? g_req_path_info_fn(out_len) : NULL;
+}
+uint16_t oxphp_req_remote_port(void) {
+    return g_req_remote_port_fn ? g_req_remote_port_fn() : 0;
+}
+const char* oxphp_req_denied_pattern(size_t *out_len) {
+    return g_req_denied_pattern_fn ? g_req_denied_pattern_fn(out_len) : NULL;
+}
+const char* oxphp_req_trace_id(size_t *out_len) {
+    return g_req_trace_id_fn ? g_req_trace_id_fn(out_len) : NULL;
+}
+const char* oxphp_req_span_id(size_t *out_len) {
+    return g_req_span_id_fn ? g_req_span_id_fn(out_len) : NULL;
+}
+const char* oxphp_req_parent_span_id(size_t *out_len) {
+    return g_req_parent_span_id_fn ? g_req_parent_span_id_fn(out_len) : NULL;
+}
+
+/* ─── Document Root ─── */
+/* Global, not __thread, for the reason the runtime hooks report above is:
+ * written once on the startup thread before any PHP thread is spawned. */
+static char  *g_document_root = NULL;
+static size_t g_document_root_len = 0;
+
+void oxphp_bridge_set_document_root(const char *root, size_t len) {
+    free(g_document_root);
+    g_document_root = NULL;
+    g_document_root_len = 0;
+    if (root == NULL) {
+        return;
+    }
+    g_document_root = malloc(len + 1);
+    if (g_document_root == NULL) {
+        return;
+    }
+    memcpy(g_document_root, root, len);
+    g_document_root[len] = '\0';
+    g_document_root_len = len;
+}
+
+const char* oxphp_bridge_get_document_root(size_t *out_len) {
+    if (out_len) {
+        *out_len = g_document_root_len;
+    }
+    return g_document_root;
 }
 
 /* ─── Worker Mode ─── */

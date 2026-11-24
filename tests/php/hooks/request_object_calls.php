@@ -36,4 +36,10 @@ return [
     'session'             => static fn(Request $r) => $r->session(),
     'file'                => static fn(Request $r) => $r->file('upload'),
     'files'               => static fn(Request $r) => $r->files(),
+    'scriptName'          => static fn(Request $r) => $r->scriptName(),
+    'scriptFilename'      => static fn(Request $r) => $r->scriptFilename(),
+    'pathInfo'            => static fn(Request $r) => $r->pathInfo(),
+    'remotePort'          => static fn(Request $r) => $r->remotePort(),
+    'deniedPattern'       => static fn(Request $r) => $r->deniedPattern(),
+    'traceContext'        => static fn(Request $r) => $r->traceContext(),
 ];

@@ -174,6 +174,7 @@ Returns an associative array with server and request metadata.
 | `worker_id` | `int` | Same value as `oxphp_worker_id()` |
 | `request_time` | `float` | Unix timestamp with microsecond precision of when a PHP worker took the request, as `$_SERVER['REQUEST_TIME_FLOAT']`; time spent waiting for a free worker is not included |
 | `worker_mode` | `bool` | Whether the current process runs in worker mode |
+| `document_root` | `?string` | The directory the server serves from, the value of `$_SERVER['DOCUMENT_ROOT']` in a request; with `DOCUMENT_ROOT` switched off, the entry file's directory. The same in every request, in a worker's bootstrap and with `SUPERGLOBALS_ENABLED=false`; `null` under [`oxphp run`](../getting-started/cli.md) |
 | `runtime_hooks` | `array` | The runtime-hook categories this process installed at startup, as a list of category names (`["sleep", "streams", "net", "curl"]`). Empty when `RUNTIME_HOOKS` enabled nothing — see [Runtime Hooks](../features/runtime-hooks.md#checking-that-hooks-are-active) |
 
 **Example:**
@@ -186,6 +187,7 @@ $info = oxphp_server_info();
 //     "worker_id"     => 3,
 //     "request_time"  => 1738800000.123456,
 //     "worker_mode"   => true,
+//     "document_root" => "/var/www/html/public",
 //     "runtime_hooks" => ["sleep", "streams", "net", "curl"],
 // ]
 

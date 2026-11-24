@@ -88,6 +88,8 @@ The script is validated at startup — it must exist, canonicalize inside `DOCUM
 | `OXPHP_DENIED_PATH` | Original sanitized URI, with a leading `/` (same form as `PATH_INFO`) |
 | `OXPHP_DENIED_PATTERN` | The glob pattern that matched |
 
+The request object carries both, with `SUPERGLOBALS_ENABLED=false` as well: `oxphp_http_request()->pathInfo()` is the denied path and `deniedPattern()` the pattern, which is `null` on any request that did not reach the script this way — see [Script](../php/request-api.md#script).
+
 For a `PHP_DENY_PATHS` match, `OXPHP_DENIED_PATTERN` is stored **without** a leading `/` (glob-normalized), while `OXPHP_DENIED_PATH` keeps the `/` of the request URI; `ltrim($_SERVER['OXPHP_DENIED_PATH'], '/')` puts both in the same form. For a `.oxphpdeny` rule the pattern is the line as written in the file (`/composer.*`, `*.sql`), leading `/` included when the line has one — a script that answers both should not assume either form.
 
 Example honeypot:

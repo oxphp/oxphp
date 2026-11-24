@@ -4,8 +4,28 @@ All notable changes to OxPHP are documented in this file.
 
 ## [Unreleased]
 
+### Migration from 0.16.0
+
+**`$request->query()` now parses the query string as PHP parses it for `$_GET`.** Bracketed names build arrays, and names are filed the way PHP files them, so code that looked a parameter up by the name the client sent has to use the name PHP gives it:
+
+| Request | Before | Now |
+|---|---|---|
+| `?tags[]=a&tags[]=b` | `query('tags[]')` → `'b'` | `query('tags')` → `['a', 'b']` |
+| `?a.b=1` | `query('a.b')` → `'1'` | `query('a_b')` → `'1'` |
+| `?a%00b=1` | `query("a\0b")` → `'1'` | `query('a')` → `'1'` |
+
+A value can now be an array, so code that passes `query('x')` on where a string is required should check its type, as it would for `$_GET['x']`. With `SUPERGLOBALS_ENABLED=false`, or without a `G` in `variables_order`, `query()` parses the string itself, and past `max_input_vars`, or past `max_input_nesting_level` while `display_errors` is off, the parse raises a warning: an error handler that turns warnings into exceptions makes `query()` throw.
+
+**A class of your own that implements `OxPHP\Http\RequestInterface`, such as a test double, has to implement six more methods:** `scriptName(): string`, `scriptFilename(): string`, `pathInfo(): ?string`, `remotePort(): int`, `deniedPattern(): ?string` and `traceContext(): ?\OxPHP\Http\TraceContextInterface`. Until it does, PHP refuses to load the class with a fatal error.
+
+### Added
+
+- **Request methods for the script, client and trace-context keys of `$_SERVER`, readable with `SUPERGLOBALS_ENABLED=false`, where nothing returned them.** `scriptName()` returns `SCRIPT_NAME` (also `DOCUMENT_URI`), `scriptFilename()` `SCRIPT_FILENAME`, `pathInfo()` `PATH_INFO` or `null` when the request has none, and `remotePort()` `REMOTE_PORT`. On a request sent to the `PHP_DENY_FALLBACK` script, `pathInfo()` is the denied path and `deniedPattern()` the pattern that matched; on any other, `deniedPattern()` is `null`. `traceContext()` returns the `OXPHP_TRACE_ID`, `OXPHP_SPAN_ID` and `OXPHP_PARENT_SPAN_ID` ids as an `OxPHP\Http\TraceContextInterface`, with `parentSpanId()` `null` rather than empty for a new trace, or `null` when trace context is off. See [Script](docs/php/request-api.md#script) and [Trace Context](docs/php/request-api.md#trace-context).
+- **`oxphp_server_info()['document_root']`, the value `$_SERVER['DOCUMENT_ROOT']` carries in a request.** It is the same outside a request and with `SUPERGLOBALS_ENABLED=false`, and `null` under `oxphp run`. See [`oxphp_server_info()`](docs/php/functions.md#oxphp_server_info).
+
 ### Changed
 
+- **Breaking: `$request->query()` parses the query string as PHP parses it for `$_GET`, with `SUPERGLOBALS_ENABLED=false` as well.** It kept every name as the client sent it, so `?tags[]=a&tags[]=b` came back as one entry named `tags[]` holding `'b'`, and with the superglobals off no API returned an array parameter at all. It now parses the query string with the parser that builds `$_GET`, the one `parse_str()` uses: `?tags[]=a&tags[]=b` reads as `['tags' => ['a', 'b']]`, `?a.b=1` as `a_b`, and `max_input_vars`, `max_input_nesting_level`, `arg_separator.input` and `filter.default` apply. Where PHP builds `$_GET`, with the superglobals on and a `G` in `variables_order`, it returns that array as it was when the request started, and parses and warns about nothing again. Otherwise it parses the string itself: past `max_input_vars`, or past `max_input_nesting_level` while `display_errors` is off, the parse raises the warning `parse_str()` raises, through the script's error handler, so under a handler that throws, as frameworks install, `query()` throws `ErrorException` and keeps nothing. See Migration from 0.16.0 and [Query Parameters](docs/php/request-api.md#query-parameters).
 - **A `Shared\Pool` factory or destroy callback whose code OPcache's file cache holds in a request's memory is now refused on other PHP threads in two more cases: when a thread other than the one creating the pool loaded that code, and when PHP's own allocator is switched off with `USE_ZEND_ALLOC=0` or replaced by an extension.** OxPHP told such code from code in OPcache's shared memory by asking PHP's allocator whether the calling thread owned the memory, and took memory of another thread, or any memory under another allocator, for shared memory. It now checks the code's address against OPcache's shared memory itself. The same check decides how an `oxphp_async()` task treats its closure's code, so in these two cases a task now gets what code outside OPcache's shared memory gets: the end of the request that dispatched it waits for it to stop, as [Async Promises](docs/features/async-promises.md#timeouts-cancel-the-abandoned-task) describes.
 
 ### Fixed

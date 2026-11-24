@@ -15,9 +15,7 @@ use crate::executor::idle_clock::LastActive;
 use crate::metrics::{WorkerMetrics, WorkerStats};
 use crate::php::bindings::{self, *};
 use crate::php::request_buffers::{reset_string, take_output, PackedPairs, RawPairs, ReusedCStr};
-use crate::php::request_decode::{
-    header_field_value, parse_cookie_pairs, parse_query_pairs, value_ptr,
-};
+use crate::php::request_decode::{header_field_value, parse_cookie_pairs, value_ptr};
 use crate::php::response_spool::{self, Spool, Spooled};
 use crate::php::stream_wait::{NoRoom, StreamSender};
 use crate::plugin::php::{PluginNativeFunction, PluginNativeFunctionDef};
@@ -443,13 +441,25 @@ pub(crate) struct RequestData {
     headers_raw: PackedPairs,
     /// Parsed cookies as (raw name, decoded value) byte pairs.
     cookies_parsed: PackedPairs,
-    /// Parsed query parameters as (decoded name, decoded value) byte pairs.
-    ///
-    /// Decoded up front rather than sliced out of `query_string_raw` on
-    /// demand: the accessor callbacks hand a borrowed pointer back to C, so
-    /// the decoded bytes need an owner that lives as long as the request.
-    /// `max_input_vars` limits how far that can go.
-    query_parsed: PackedPairs,
+    /// SCRIPT_NAME. Whatever fills this and the fields below pushes the
+    /// `$_SERVER` keys from them, so the two cannot disagree.
+    script_name_str: String,
+    /// SCRIPT_FILENAME.
+    script_filename_str: String,
+    /// PATH_INFO, read only while `has_path_info`: a present PATH_INFO may
+    /// be empty.
+    path_info_str: String,
+    has_path_info: bool,
+    /// The deny pattern that matched, read only while `denied`.
+    denied_pattern_str: String,
+    denied: bool,
+    /// REMOTE_PORT.
+    remote_port: u16,
+    /// Trace ids; all three empty with trace context off, and the parent also
+    /// when no `traceparent` came in.
+    trace_id_str: String,
+    span_id_str: String,
+    parent_span_id_str: String,
 }
 
 impl RequestData {
@@ -481,7 +491,16 @@ impl RequestData {
             is_secure: false,
             headers_raw: PackedPairs::default(),
             cookies_parsed: PackedPairs::default(),
-            query_parsed: PackedPairs::default(),
+            script_name_str: String::new(),
+            script_filename_str: String::new(),
+            path_info_str: String::new(),
+            has_path_info: false,
+            denied_pattern_str: String::new(),
+            denied: false,
+            remote_port: 0,
+            trace_id_str: String::new(),
+            span_id_str: String::new(),
+            parent_span_id_str: String::new(),
         }
     }
 
@@ -566,22 +585,30 @@ fn request_host(req: &ScriptRequest) -> Option<&str> {
 /// sees SCRIPT_FILENAME, DOCUMENT_ROOT, etc. during bootstrap.
 pub fn set_boot_server_vars(script_path: &std::path::Path, document_root: &std::path::Path) {
     REQUEST_DATA.with(|rd| {
-        let mut data = rd.borrow_mut();
+        let mut guard = rd.borrow_mut();
+        // Through a plain reference, or the fields could not be borrowed apart.
+        let data = &mut *guard;
         data.server_vars.clear();
+        // A `Request` built before `oxphp_worker()` is live for the boot.
+        reset_string(&mut data.script_name_str);
+        data.script_name_str.push('/');
+        reset_string(&mut data.script_filename_str);
+        data.script_filename_str
+            .push_str(&script_path.to_string_lossy());
 
         let vars = &mut data.server_vars;
 
         // NOTE: Process environment variables are registered directly from the
         // static snapshot in oxphp_register_server_variables() (zero-clone path).
 
-        push_server_var(vars, "SCRIPT_FILENAME", &script_path.to_string_lossy());
+        push_server_var(vars, "SCRIPT_FILENAME", &data.script_filename_str);
         push_server_var(vars, "DOCUMENT_ROOT", &document_root.to_string_lossy());
         push_server_var(vars, "SERVER_SOFTWARE", SERVER_SOFTWARE);
         push_server_var(vars, "SERVER_PROTOCOL", "HTTP/1.1");
         push_server_var(vars, "REQUEST_METHOD", "GET");
         push_server_var(vars, "REQUEST_URI", "/");
-        push_server_var(vars, "SCRIPT_NAME", "/");
-        push_server_var(vars, "PHP_SELF", "/");
+        push_server_var(vars, "SCRIPT_NAME", &data.script_name_str);
+        push_server_var(vars, "PHP_SELF", &data.script_name_str);
         push_server_var(vars, "SERVER_NAME", "localhost");
         push_server_var(vars, "SERVER_PORT", "80");
         push_server_var(vars, "REMOTE_ADDR", "127.0.0.1");
@@ -961,6 +988,67 @@ pub fn set_request_data(req: &ScriptRequest) {
     }
 }
 
+/// Fill the script fields of `data`: SCRIPT_NAME, SCRIPT_FILENAME, PATH_INFO
+/// and the deny metadata.
+fn fill_script_fields(data: &mut RequestData, req: &ScriptRequest) {
+    reset_string(&mut data.script_name_str);
+    reset_string(&mut data.path_info_str);
+    reset_string(&mut data.denied_pattern_str);
+
+    if let Some(meta) = &req.denied_meta {
+        // Deny-fallback: a different script runs than the URI requested.
+        // SCRIPT_NAME must identify the fallback script (CGI contract), not
+        // the attacker-requested URI. PATH_INFO carries the original sanitized
+        // URI (with leading `/` per CGI/1.1 §4.1.6) so the fallback can route
+        // on it.
+        //
+        // `fallback_script_uri` is precomputed at config load using the
+        // canonical DOCUMENT_ROOT — deriving it here via
+        // `strip_prefix(&req.document_root)` would be wrong because the raw
+        // `DOCUMENT_ROOT` may differ from its canonical form (e.g. `/tmp` vs
+        // `/private/tmp` on macOS, or any symlinked deployment), causing a
+        // silent fallback to the attacker URI.
+        data.script_name_str.push_str(&meta.fallback_script_uri);
+        // `meta.path` is stored without the leading slash.
+        data.path_info_str.reserve(1 + meta.path.len());
+        data.path_info_str.push('/');
+        data.path_info_str.push_str(&meta.path);
+        data.has_path_info = true;
+        data.denied_pattern_str.push_str(&meta.pattern);
+        data.denied = true;
+    } else {
+        // SCRIPT_NAME is the resolved script path relative to the document
+        // root — both decoded, since `script_path` is built by joining the
+        // *decoded* sanitized URI onto `document_root`, so it cannot be sliced
+        // out of the percent-encoded URI.
+        let script_name = req
+            .script_path
+            .strip_prefix(&*req.document_root)
+            .ok()
+            .map(|rel| rel.to_string_lossy())
+            .unwrap_or_else(|| {
+                // Worker script configured outside the document root — fall
+                // back to its basename.
+                req.script_path
+                    .file_name()
+                    .map(|f| f.to_string_lossy())
+                    .unwrap_or_default()
+            });
+        data.script_name_str.reserve(1 + script_name.len());
+        data.script_name_str.push('/');
+        data.script_name_str.push_str(&script_name);
+        data.has_path_info = req.path_info.is_some();
+        if let Some(path_info) = &req.path_info {
+            data.path_info_str.push_str(path_info);
+        }
+        data.denied = false;
+    }
+
+    reset_string(&mut data.script_filename_str);
+    data.script_filename_str
+        .push_str(&req.script_path.to_string_lossy());
+}
+
 /// Everything [`set_request_data`] does short of writing `SG(request_info)` —
 /// the one step that needs the engine started on the calling thread.
 fn fill_request_data(req: &ScriptRequest) {
@@ -990,6 +1078,16 @@ fn fill_request_data(req: &ScriptRequest) {
         // Format remote IP once — reused for both server_vars and object API
         data.remote_addr_str.clear();
         let _ = write!(data.remote_addr_str, "{}", req.remote_addr.ip());
+        data.remote_port = req.remote_addr.port();
+
+        fill_script_fields(data, req);
+
+        data.trace_id_str.clear();
+        data.trace_id_str.push_str(&req.trace_id);
+        data.span_id_str.clear();
+        data.span_id_str.push_str(&req.span_id);
+        data.parent_span_id_str.clear();
+        data.parent_span_id_str.push_str(&req.parent_span_id);
 
         if !sg_enabled {
             // Skip server_vars population — object API fields below are always populated.
@@ -1020,78 +1118,24 @@ fn fill_request_data(req: &ScriptRequest) {
             };
             push_server_var(vars, "SERVER_PROTOCOL", protocol);
 
-            // SCRIPT_NAME, PHP_SELF, PATH_INFO, DOCUMENT_URI
-            if let Some(meta) = &req.denied_meta {
-                // Deny-fallback: a different script runs than the URI requested.
-                // SCRIPT_NAME must identify the fallback script (CGI contract),
-                // not the attacker-requested URI. PATH_INFO carries the original
-                // sanitized URI (with leading `/` per CGI/1.1 §4.1.6) so the
-                // fallback can route on it. OXPHP_DENIED_* expose matcher
-                // metadata for logging / SIEM integration.
-                //
-                // `fallback_script_uri` is precomputed at config load using
-                // the canonical DOCUMENT_ROOT — deriving it here via
-                // `strip_prefix(&req.document_root)` would be wrong because
-                // the raw `DOCUMENT_ROOT` may differ from its canonical form
-                // (e.g. `/tmp` vs `/private/tmp` on macOS, or any symlinked
-                // deployment), causing a silent fallback to the attacker URI.
-                let script_name = meta.fallback_script_uri.as_str();
-
-                // `original_path` = `/` + sanitized URI. `meta.path` is stored
-                // without the leading slash, so we prepend it once into a
-                // pre-sized buffer instead of paying for `format!`'s
-                // intermediate `Arguments` machinery.
-                let mut original_path = String::with_capacity(meta.path.len() + 1);
-                original_path.push('/');
-                original_path.push_str(&meta.path);
-
-                // `php_self` = `script_name` ++ `original_path`. Same trick.
-                let mut php_self = String::with_capacity(script_name.len() + original_path.len());
-                php_self.push_str(script_name);
-                php_self.push_str(&original_path);
-
-                push_server_var(vars, "SCRIPT_NAME", script_name);
-                push_server_var(vars, "PHP_SELF", &php_self);
-                push_server_var(vars, "DOCUMENT_URI", script_name);
-                push_server_var(vars, "PATH_INFO", &original_path);
-                push_server_var(vars, "OXPHP_DENIED_PATH", &original_path);
-                push_server_var(vars, "OXPHP_DENIED_PATTERN", &meta.pattern);
+            push_server_var(vars, "SCRIPT_NAME", &data.script_name_str);
+            push_server_var(vars, "DOCUMENT_URI", &data.script_name_str);
+            if data.has_path_info {
+                push_server_var_fmt(
+                    vars,
+                    "PHP_SELF",
+                    format_args!("{}{}", data.script_name_str, data.path_info_str),
+                );
+                push_server_var(vars, "PATH_INFO", &data.path_info_str);
             } else {
-                // SCRIPT_NAME is the resolved script path relative to the
-                // document root — both decoded, since `script_path` is built by
-                // joining the *decoded* sanitized URI onto `document_root`, so
-                // it cannot be sliced out of the percent-encoded URI.
-                let script_name = req
-                    .script_path
-                    .strip_prefix(&*req.document_root)
-                    .ok()
-                    .map(|rel| rel.to_string_lossy())
-                    .unwrap_or_else(|| {
-                        // Worker script configured outside the document root —
-                        // fall back to its basename.
-                        req.script_path
-                            .file_name()
-                            .map(|f| f.to_string_lossy())
-                            .unwrap_or_default()
-                    });
-
-                push_server_var_fmt(vars, "SCRIPT_NAME", format_args!("/{script_name}"));
-                push_server_var_fmt(vars, "DOCUMENT_URI", format_args!("/{script_name}"));
-
-                if let Some(ref path_info) = req.path_info {
-                    push_server_var_fmt(
-                        vars,
-                        "PHP_SELF",
-                        format_args!("/{script_name}{path_info}"),
-                    );
-                    push_server_var(vars, "PATH_INFO", path_info);
-                } else {
-                    push_server_var_fmt(vars, "PHP_SELF", format_args!("/{script_name}"));
-                }
+                push_server_var(vars, "PHP_SELF", &data.script_name_str);
+            }
+            if data.denied {
+                push_server_var(vars, "OXPHP_DENIED_PATH", &data.path_info_str);
+                push_server_var(vars, "OXPHP_DENIED_PATTERN", &data.denied_pattern_str);
             }
 
-            // SCRIPT_FILENAME: absolute filesystem path to the script
-            push_server_var(vars, "SCRIPT_FILENAME", &req.script_path.to_string_lossy());
+            push_server_var(vars, "SCRIPT_FILENAME", &data.script_filename_str);
 
             // DOCUMENT_ROOT
             push_server_var(vars, "DOCUMENT_ROOT", &req.document_root.to_string_lossy());
@@ -1102,11 +1146,7 @@ fn fill_request_data(req: &ScriptRequest) {
 
             // Connection info
             push_server_var(vars, "REMOTE_ADDR", &data.remote_addr_str);
-            push_server_var_fmt(
-                vars,
-                "REMOTE_PORT",
-                format_args!("{}", req.remote_addr.port()),
-            );
+            push_server_var_fmt(vars, "REMOTE_PORT", format_args!("{}", data.remote_port));
 
             // HTTPS indicator (CGI/1.1: "on" when TLS is active)
             // Check forwarded proto first, then direct TLS
@@ -1190,10 +1230,10 @@ fn fill_request_data(req: &ScriptRequest) {
             }
 
             // Trace context variables (when tracing is enabled)
-            if !req.trace_id.is_empty() {
-                push_server_var(vars, "OXPHP_TRACE_ID", &req.trace_id);
-                push_server_var(vars, "OXPHP_SPAN_ID", &req.span_id);
-                push_server_var(vars, "OXPHP_PARENT_SPAN_ID", &req.parent_span_id);
+            if !data.trace_id_str.is_empty() {
+                push_server_var(vars, "OXPHP_TRACE_ID", &data.trace_id_str);
+                push_server_var(vars, "OXPHP_SPAN_ID", &data.span_id_str);
+                push_server_var(vars, "OXPHP_PARENT_SPAN_ID", &data.parent_span_id_str);
             }
         } // end if sg_enabled
 
@@ -1243,12 +1283,6 @@ fn fill_request_data(req: &ScriptRequest) {
         reset_string(&mut data.query_string_raw);
         data.query_string_raw.push_str(query_string);
 
-        // `queryString()` keeps reporting the raw form above; the object API's
-        // query() reads the decoded pairs so it agrees with $_GET.
-        let max_input_vars = MAX_INPUT_VARS.load(Ordering::Relaxed);
-        data.query_parsed.reset();
-        parse_query_pairs(query_string, max_input_vars, &mut data.query_parsed);
-
         data.protocol_version_str.clear();
         data.protocol_version_str.push_str(match req.version {
             http::Version::HTTP_09 => "0.9",
@@ -1288,6 +1322,7 @@ fn fill_request_data(req: &ScriptRequest) {
         data.cookies_parsed.reset();
         if let Some(cookie_hdr) = req.headers.get(header::COOKIE) {
             if let Ok(cookie_str) = cookie_hdr.to_str() {
+                let max_input_vars = MAX_INPUT_VARS.load(Ordering::Relaxed);
                 parse_cookie_pairs(cookie_str, max_input_vars, &mut data.cookies_parsed);
             }
         }
@@ -1431,7 +1466,16 @@ pub fn clear_request_data() {
         data.is_secure = false;
         data.headers_raw.reset();
         data.cookies_parsed.reset();
-        data.query_parsed.reset();
+        reset_string(&mut data.script_name_str);
+        reset_string(&mut data.script_filename_str);
+        reset_string(&mut data.path_info_str);
+        data.has_path_info = false;
+        reset_string(&mut data.denied_pattern_str);
+        data.denied = false;
+        data.remote_port = 0;
+        data.trace_id_str.clear();
+        data.span_id_str.clear();
+        data.parent_span_id_str.clear();
     });
 
     // Clear SG(request_info) and bridge context so PHP doesn't hold stale references.
@@ -6042,6 +6086,44 @@ req_str_callback!(req_host_cb, host_str);
 req_str_callback!(req_query_string_cb, query_string_raw);
 req_str_callback!(req_ip_cb, remote_addr_str);
 req_str_callback!(req_protocol_version_cb, protocol_version_str);
+req_str_callback!(req_script_name_cb, script_name_str);
+req_str_callback!(req_script_filename_cb, script_filename_str);
+req_str_callback!(req_trace_id_cb, trace_id_str);
+req_str_callback!(req_span_id_cb, span_id_str);
+req_str_callback!(req_parent_span_id_cb, parent_span_id_str);
+
+/// Like `req_str_callback!`, for a field the request may not have: NULL
+/// unless `$present` is set, so an empty value still reads as present.
+macro_rules! req_opt_str_callback {
+    ($name:ident, $field:ident, $present:ident) => {
+        unsafe extern "C" fn $name(out_len: *mut usize) -> *const c_char {
+            REQUEST_DATA.with(|rd| {
+                let data = rd.borrow();
+                if !data.active || !data.$present {
+                    *out_len = 0;
+                    return std::ptr::null();
+                }
+                let (ptr, len) = value_ptr(data.$field.as_bytes());
+                *out_len = len;
+                ptr
+            })
+        }
+    };
+}
+
+req_opt_str_callback!(req_path_info_cb, path_info_str, has_path_info);
+req_opt_str_callback!(req_denied_pattern_cb, denied_pattern_str, denied);
+
+unsafe extern "C" fn req_remote_port_cb() -> u16 {
+    REQUEST_DATA.with(|rd| {
+        let data = rd.borrow();
+        if data.active {
+            data.remote_port
+        } else {
+            0
+        }
+    })
+}
 
 unsafe extern "C" fn req_port_cb() -> u16 {
     REQUEST_DATA.with(|rd| {
@@ -6141,38 +6223,6 @@ unsafe extern "C" fn req_cookie_cb(
     })
 }
 
-unsafe extern "C" fn req_query_param_cb(
-    key: *const c_char,
-    key_len: usize,
-    out_len: *mut usize,
-) -> *const c_char {
-    REQUEST_DATA.with(|rd| {
-        let data = rd.borrow();
-        if !data.active {
-            *out_len = 0;
-            return std::ptr::null();
-        }
-        // Both sides are decoded bytes, so a key like `%D0%BA%D0%BB%D1%8E%D1%87`
-        // is found by the name PHP callers actually pass — and a name that is
-        // not valid UTF-8 compares correctly instead of being assumed.
-        let search = std::slice::from_raw_parts(key as *const u8, key_len);
-        // The last of a repeated name, as in `query()` and, for a plain name, `$_GET`
-        // (PHP 8.4.27, 8.5.12).
-        let found = data
-            .query_parsed
-            .iter()
-            .filter(|(k, _)| *k == search)
-            .last();
-        if let Some((_, v)) = found {
-            let (ptr, len) = value_ptr(v);
-            *out_len = len;
-            return ptr;
-        }
-        *out_len = 0;
-        std::ptr::null()
-    })
-}
-
 type PairsCb = unsafe extern "C" fn(*const c_char, usize, *const c_char, usize, *mut c_void);
 
 /// Hand every pair of a request-data list to `cb`, with the `REQUEST_DATA`
@@ -6212,10 +6262,6 @@ unsafe extern "C" fn req_cookies_all_cb(cb: PairsCb, user_data: *mut c_void) {
     visit_request_pairs(|data| data.cookies_parsed.as_raw(), cb, user_data);
 }
 
-unsafe extern "C" fn req_query_params_all_cb(cb: PairsCb, user_data: *mut c_void) {
-    visit_request_pairs(|data| data.query_parsed.as_raw(), cb, user_data);
-}
-
 unsafe extern "C" fn req_body_cb(out_len: *mut usize) -> *const u8 {
     REQUEST_DATA.with(|rd| {
         let data = rd.borrow();
@@ -6239,10 +6285,9 @@ unsafe extern "C" fn req_seq_cb() -> u64 {
     })
 }
 
-/// How many query parameters and cookies a request's object API holds.
-///
-/// PHP's `max_input_vars` limits `$_GET` and `$_COOKIE` by the same count
-/// (PHP 8.4.27, 8.5.12). Holds PHP's default until [`read_max_input_vars`] has run.
+/// How many cookies a request's object API holds: PHP's `max_input_vars`,
+/// which limits `$_COOKIE` (PHP 8.4.27, 8.5.12). Holds PHP's default until
+/// [`read_max_input_vars`] has run.
 static MAX_INPUT_VARS: AtomicUsize = AtomicUsize::new(1000);
 
 /// Take the limit from PHP, once, after `php_module_startup()`.
@@ -6262,6 +6307,16 @@ pub unsafe fn read_max_input_vars() {
     // the setting.
     let limit = unsafe { bindings::oxphp_bridge_max_input_vars() };
     MAX_INPUT_VARS.store(limit, Ordering::Relaxed);
+}
+
+/// Hand `oxphp_server_info()` the document root `$_SERVER['DOCUMENT_ROOT']`
+/// carries. Call once, before PHP threads start: the bridge reads it without
+/// synchronisation.
+pub fn publish_document_root(root: &std::path::Path) {
+    let root = root.to_string_lossy();
+    // SAFETY: `root` is valid for `root.len()` bytes for the call, and the
+    // bridge copies them; no PHP thread exists yet to read the slot.
+    unsafe { bindings::oxphp_bridge_set_document_root(root.as_ptr().cast(), root.len()) };
 }
 
 /// Register all request accessor callbacks with the bridge.
@@ -6286,12 +6341,18 @@ pub fn register_request_accessors() {
             Some(req_start_time_cb),
             Some(req_is_secure_cb),
             Some(req_content_type_cb),
-            Some(req_query_param_cb),
             Some(req_headers_all_cb),
             Some(req_cookies_all_cb),
-            Some(req_query_params_all_cb),
             Some(req_body_cb),
             Some(req_seq_cb),
+            Some(req_script_name_cb),
+            Some(req_script_filename_cb),
+            Some(req_path_info_cb),
+            Some(req_remote_port_cb),
+            Some(req_denied_pattern_cb),
+            Some(req_trace_id_cb),
+            Some(req_span_id_cb),
+            Some(req_parent_span_id_cb),
         );
     }
 }
@@ -6788,7 +6849,7 @@ mod tests {
     #[test]
     fn denied_path_server_var_keeps_leading_slash() {
         // `OXPHP_DENIED_PATH` must carry a leading `/` — the same form as
-        // `PATH_INFO`, both built from the one `original_path` buffer. A
+        // `PATH_INFO`, both pushed from the one PATH_INFO field. A
         // SIEM/honeypot fallback script compares this value verbatim, so
         // silently dropping the `/` would blind path-based alert rules. The
         // matched glob in `OXPHP_DENIED_PATTERN` stays glob-normalized (no
@@ -6860,6 +6921,153 @@ mod tests {
         // is thread-local and the harness runs each test on its own thread.
     }
 
+    /// What a string accessor hands the C side, or `None` for NULL.
+    fn read_accessor(
+        accessor: unsafe extern "C" fn(*mut usize) -> *const c_char,
+    ) -> Option<String> {
+        let mut len = 0usize;
+        // SAFETY: the accessors only read this thread's `REQUEST_DATA` and
+        // write `len`, which outlives the call.
+        let ptr = unsafe { accessor(&mut len) };
+        if ptr.is_null() {
+            return None;
+        }
+        // SAFETY: a non-NULL result points at `len` readable bytes owned by
+        // the slot, which nothing changes before the copy below.
+        let bytes = unsafe { std::slice::from_raw_parts(ptr.cast::<u8>(), len) };
+        Some(String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    /// The object API reads the fields `$_SERVER` is filled from, so the two
+    /// agree on every key they share.
+    #[test]
+    fn script_accessors_and_server_vars_agree() {
+        // SAFETY: writes one process-wide flag and touches nothing else.
+        unsafe { bindings::oxphp_bridge_set_superglobals_enabled(true) };
+        let mut req = queued_request(None).script;
+        req.script_path = std::path::Path::new("/var/www/html/app/index.php").into();
+        req.path_info = Some("/a b".to_string());
+        req.remote_addr = "10.0.0.1:54321".parse().unwrap();
+        req.trace_id = "0af7651916cd43dd8448eb211c80319c".into();
+        req.span_id = "00f067aa0ba902b7".into();
+        req.parent_span_id = "b7ad6b7169203331".into();
+        // Not `set_request_data`: see `denied_path_server_var_keeps_leading_slash`.
+        fill_request_data(&req);
+
+        let script_name = "/app/index.php";
+        assert_eq!(
+            read_accessor(req_script_name_cb).as_deref(),
+            Some(script_name)
+        );
+        assert_eq!(server_var_values("SCRIPT_NAME"), [script_name]);
+        assert_eq!(server_var_values("DOCUMENT_URI"), [script_name]);
+        assert_eq!(read_accessor(req_path_info_cb).as_deref(), Some("/a b"));
+        assert_eq!(server_var_values("PATH_INFO"), ["/a b"]);
+        assert_eq!(server_var_values("PHP_SELF"), ["/app/index.php/a b"]);
+        let filename = "/var/www/html/app/index.php";
+        assert_eq!(
+            read_accessor(req_script_filename_cb).as_deref(),
+            Some(filename)
+        );
+        assert_eq!(server_var_values("SCRIPT_FILENAME"), [filename]);
+        // SAFETY: reads this thread's `REQUEST_DATA` only.
+        assert_eq!(unsafe { req_remote_port_cb() }, 54321);
+        assert_eq!(server_var_values("REMOTE_PORT"), ["54321"]);
+        assert_eq!(read_accessor(req_denied_pattern_cb), None);
+        assert!(server_var_values("OXPHP_DENIED_PATH").is_empty());
+        for (accessor, key, id) in [
+            (
+                req_trace_id_cb as unsafe extern "C" fn(*mut usize) -> *const c_char,
+                "OXPHP_TRACE_ID",
+                "0af7651916cd43dd8448eb211c80319c",
+            ),
+            (req_span_id_cb, "OXPHP_SPAN_ID", "00f067aa0ba902b7"),
+            (
+                req_parent_span_id_cb,
+                "OXPHP_PARENT_SPAN_ID",
+                "b7ad6b7169203331",
+            ),
+        ] {
+            assert_eq!(read_accessor(accessor).as_deref(), Some(id), "{key}");
+            assert_eq!(server_var_values(key), [id]);
+        }
+    }
+
+    /// The slot is reused, so a field one request set must not answer for the
+    /// next: a deny fallback's pattern, its PATH_INFO, a trace id.
+    #[test]
+    fn script_fields_do_not_outlive_their_request() {
+        // SAFETY: writes one process-wide flag and touches nothing else.
+        unsafe { bindings::oxphp_bridge_set_superglobals_enabled(true) };
+        let mut denied = queued_request(None).script;
+        denied.script_path = std::path::Path::new("/var/www/html/_security/denied.php").into();
+        denied.denied_meta = Some(Arc::new(crate::config::DeniedMeta {
+            path: "uploads/shell.php".to_string(),
+            pattern: "uploads/**".to_string(),
+            fallback_script_uri: "/_security/denied.php".to_string(),
+            source: crate::config::DenySource::PhpDenyPaths,
+        }));
+        denied.trace_id = "0af7651916cd43dd8448eb211c80319c".into();
+        fill_request_data(&denied);
+        assert_eq!(
+            read_accessor(req_denied_pattern_cb).as_deref(),
+            Some("uploads/**")
+        );
+        assert_eq!(
+            read_accessor(req_path_info_cb).as_deref(),
+            Some("/uploads/shell.php")
+        );
+        assert_eq!(
+            read_accessor(req_script_name_cb).as_deref(),
+            Some("/_security/denied.php")
+        );
+        assert_eq!(
+            server_var_values("PHP_SELF"),
+            ["/_security/denied.php/uploads/shell.php"]
+        );
+
+        let mut plain = queued_request(None).script;
+        // Present but empty: PATH_INFO is still registered, as "".
+        plain.path_info = Some(String::new());
+        fill_request_data(&plain);
+        assert_eq!(read_accessor(req_denied_pattern_cb), None);
+        assert!(server_var_values("OXPHP_DENIED_PATTERN").is_empty());
+        assert_eq!(read_accessor(req_path_info_cb).as_deref(), Some(""));
+        assert_eq!(server_var_values("PATH_INFO"), [""]);
+        assert_eq!(
+            read_accessor(req_script_name_cb).as_deref(),
+            Some("/index.php")
+        );
+        assert_eq!(read_accessor(req_trace_id_cb).as_deref(), Some(""));
+        assert!(server_var_values("OXPHP_TRACE_ID").is_empty());
+
+        let mut no_path_info = queued_request(None).script;
+        no_path_info.path_info = None;
+        fill_request_data(&no_path_info);
+        assert_eq!(read_accessor(req_path_info_cb), None);
+        assert!(server_var_values("PATH_INFO").is_empty());
+        assert_eq!(server_var_values("PHP_SELF"), ["/index.php"]);
+    }
+
+    /// A `Request` built in the worker script before `oxphp_worker()` is live.
+    #[test]
+    fn boot_script_accessors_agree_with_server_vars() {
+        set_boot_server_vars(
+            std::path::Path::new("/var/www/html/worker.php"),
+            std::path::Path::new("/var/www/html"),
+        );
+        assert_eq!(read_accessor(req_script_name_cb).as_deref(), Some("/"));
+        assert_eq!(server_var_values("SCRIPT_NAME"), ["/"]);
+        assert_eq!(
+            read_accessor(req_script_filename_cb).as_deref(),
+            Some("/var/www/html/worker.php")
+        );
+        assert_eq!(
+            server_var_values("SCRIPT_FILENAME"),
+            ["/var/www/html/worker.php"]
+        );
+    }
+
     /// A worker clears its slot only on exit, so what one oversized request left
     /// has to go when the next request fills the slot.
     #[test]
@@ -6903,7 +7111,6 @@ mod tests {
                     ("server_vars", &data.server_vars),
                     ("headers_raw", &data.headers_raw),
                     ("cookies_parsed", &data.cookies_parsed),
-                    ("query_parsed", &data.query_parsed),
                 ] {
                     let (bytes, pairs) = list.capacities();
                     assert!(bytes <= RETAINED_BYTES, "{name} kept {bytes} bytes");
@@ -7158,14 +7365,12 @@ mod tests {
         let mut req = queued_request(None).script;
         req.headers
             .insert(header::COOKIE, HeaderValue::from_static("a=1"));
-        req.uri = http::Uri::from_static("/?q=1");
         // Not `set_request_data`: see `denied_path_server_var_keeps_leading_slash`.
         fill_request_data(&req);
 
-        let walks: [(&str, unsafe extern "C" fn(PairsCb, *mut c_void)); 3] = [
+        let walks: [(&str, unsafe extern "C" fn(PairsCb, *mut c_void)); 2] = [
             ("headers", req_headers_all_cb),
             ("cookies", req_cookies_all_cb),
-            ("query", req_query_params_all_cb),
         ];
         for (name, walk) in walks {
             let mut seen: Vec<bool> = Vec::new();

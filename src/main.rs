@@ -191,6 +191,7 @@ fn main() -> Result<(), types::BoxError> {
         // an HTTP-frontend concern (not a plugin artifact), so it lives here
         // rather than in the shared pre-MINIT bootstrap below.
         oxphp::php::sapi::register_request_accessors();
+        oxphp::php::sapi::publish_document_root(&config.server.document_root);
 
         // Register plugin functions / classes / decorators with Zend before
         // MINIT (shared with the `oxphp run` frontend, single source of order).

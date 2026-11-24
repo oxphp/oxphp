@@ -360,6 +360,11 @@ out="$(docker run --rm -e ASYNC_WORKERS=1 "$IMAGE" sh -c '
 [ "$out" = "0:tasks=0,0 " ] \
 	&& ok "failed stdout write on a pool thread: task and script go on" || bad "pool thread failed write (got '$out')"
 
+# 8s. oxphp_server_info() has a document_root key, null here: the CLI role
+#     serves no document root.
+out="$(docker run --rm "$IMAGE" oxphp run -r 'var_export(array_key_exists("document_root", $i = oxphp_server_info()) ? $i["document_root"] : "missing");')"
+[ "$out" = "NULL" ] && ok "oxphp_server_info()['document_root'] is null" || bad "document_root under oxphp run (got '$out')"
+
 # 9. regression: HTTP serve role still boots and answers, and still runs a
 #    script in the script's own directory, as PHP-FPM does.
 name="oxphp-serve-smoke-$$"
