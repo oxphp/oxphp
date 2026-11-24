@@ -299,11 +299,15 @@ hooks/test_curl_shared_client_does_not_reenter_perform >> ?arrive=add
 
 # PHP that runs in no request, a destructor the worker runs between two slices,
 # cannot wait for a handle: its call on one a parked request is in the middle of a
-# call on is refused, and curl_multi_exec() returns at once. A handle that is only
-# in a multi handle no call is on is not refused.
+# call on is refused, curl_multi_exec() included. A handle that is only in a multi
+# handle no call is on is not refused.
 hooks/test_curl_call_outside_a_fiber_is_refused_while_a_fiber_is_in_one >> ?via=easy
 hooks/test_curl_call_outside_a_fiber_is_refused_while_a_fiber_is_in_one >> ?via=multi
 hooks/test_curl_call_outside_a_fiber_is_refused_while_a_fiber_is_in_one >> ?via=member
+
+# curl_multi_exec() given an easy handle another request is in curl_exec() on is not
+# taken for a multi handle and returned from at once: ext/curl refuses the argument.
+hooks/test_curl_multi_exec_given_a_held_easy_handle_throws_a_type_error
 
 # curl_multi_getcontent() on a transfer under way returns a string of its own, which
 # the rest of the answer neither grows nor frees.

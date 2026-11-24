@@ -18,8 +18,9 @@ declare(strict_types=1);
 //   ?via=easy   the parked request is in curl_exec() on curl_ch: curl_setopt()
 //               of CURLOPT_RETURNTRANSFER on it, and curl_multi_exec() given it.
 //   ?via=multi  the parked request is in curl_multi_select() on curl_mh, curl_ch
-//               in it: curl_setopt() of CURLOPT_URL on curl_ch, and
-//               curl_multi_exec() on curl_mh.
+//               in it: curl_setopt() of CURLOPT_URL on curl_ch, and a loop of
+//               curl_multi_exec() on curl_mh run while it reports a transfer
+//               running, cut off after 1000 calls.
 //   ?via=member curl_setopt() of CURLOPT_URL on $sharedState['curl_member'], in a
 //               multi handle no call is on, added by a request that is in
 //               curl_exec() on another handle.
@@ -121,11 +122,15 @@ if ($role === 'holder') {
         } else {
             $mh = $sharedState['curl_mh'];
             $out['setopt'] = $attempt(static fn () => curl_setopt($ch, CURLOPT_URL, 'http://127.0.0.1:1/intruder'));
-            $running = -1;
-            $out['multi_exec'] = $attempt(static function () use ($mh, &$running): int {
-                return curl_multi_exec($mh, $running);
+            $calls = 0;
+            $out['multi_exec'] = $attempt(static function () use ($mh, &$calls): int {
+                do {
+                    $calls++;
+                    $status = curl_multi_exec($mh, $running);
+                } while ($running > 0 && $status === CURLM_OK && $calls < 1000);
+                return $status;
             });
-            $out['running'] = $running;
+            $out['multi_exec_calls'] = $calls;
         }
         $sharedState['curl_outside'] = $out;
     };
