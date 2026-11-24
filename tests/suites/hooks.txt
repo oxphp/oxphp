@@ -309,6 +309,11 @@ hooks/test_curl_call_outside_a_fiber_is_refused_while_a_fiber_is_in_one >> ?via=
 # taken for a multi handle and returned from at once: ext/curl refuses the argument.
 hooks/test_curl_multi_exec_given_a_held_easy_handle_throws_a_type_error
 
+# curl_multi_exec() on a multi handle another request holds is refused, rather than
+# returned from at once, where the fiber cannot be suspended, inside a userland Fiber
+# say: a loop there could not let the holder go on.
+hooks/test_curl_multi_exec_from_a_userland_fiber_is_refused_while_a_fiber_is_in_one
+
 # curl_multi_getcontent() on a transfer under way returns a string of its own, which
 # the rest of the answer neither grows nor frees.
 hooks/test_curl_multi_getcontent_mid_transfer_keeps_its_string

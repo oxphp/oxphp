@@ -8478,6 +8478,10 @@ static bool oxphp_curl_exec_passed_over(const oxphp_curl_guard *g, zend_execute_
     }
     const oxphp_request_fiber *owner = oxphp_claim_owner(Z_OBJ_P(mh));
     if (owner == NULL || owner == self) return false;
+    /* Where this fiber cannot be suspended, in a userland Fiber say, neither can the
+     * loop's wait, so the holder would never go on: the call waits as the others
+     * do, which refuses it there. */
+    if (!oxphp_fiber_can_park()) return false;
 
     zend_long running = 0;
     if (oxphp_curl_members != NULL) {
@@ -8500,11 +8504,12 @@ static void oxphp_curl_guarded(const oxphp_curl_guard *g, INTERNAL_FUNCTION_PARA
         /* Code outside any fiber, a destructor the worker runs between two slices,
          * cannot wait, so a handle another fiber is in the middle of a call on
          * refuses it. `frame` tells such a call from a claim left by a bailout out
-         * of one, which lasts to the end of the request. The membership alone does
-         * not refuse it: it lasts until the handle is taken out, and would turn
-         * away a handle no call is using. curl_multi_exec() is refused too rather
-         * than passed over: the holder cannot go on before this code returns, so a
-         * loop run until no transfer is left would never end. */
+         * of one, which lasts to the end of the request, unless its owner has
+         * since gone into another call, a shutdown function's say. The membership
+         * alone does not refuse it: it lasts until the handle is taken out, and
+         * would turn away a handle no call is using. curl_multi_exec() is refused
+         * too rather than passed over: the holder cannot go on before this code
+         * returns, so a loop run until no transfer is left would never end. */
         void *keys[OXPHP_CURL_MAX_KEYS];
         size_t total;
         size_t nkeys = oxphp_curl_keys(g, execute_data, NULL, keys, &total);
