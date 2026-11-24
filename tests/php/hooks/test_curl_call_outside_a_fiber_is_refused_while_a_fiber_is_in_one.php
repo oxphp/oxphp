@@ -14,12 +14,13 @@ require_once __DIR__ . '/../fibers/session_inner_request.php';
 //
 //   ?via=easy   the handle is in curl_exec(): curl_setopt() on it would have the
 //               rest of the answer printed instead of returned. curl_multi_exec()
-//               given that easy handle is refused the same way, rather than taken
-//               for a multi handle another request holds and returned from at once.
+//               given that easy handle is refused the same way.
 //   ?via=multi  the easy handle is in a multi handle the parked request is in
 //               curl_multi_select() on: curl_setopt() on the easy handle is
-//               refused as well, and curl_multi_exec() on the multi handle
-//               returns CURLM_OK at once, its transfer still running.
+//               refused as well, and so is the first curl_multi_exec() of a loop
+//               on the multi handle. Returned from at once, as inside a fiber, it
+//               would report the transfer running for as long as the loop went
+//               on, and the parked request cannot run before the loop ends.
 //   ?via=member the call is on an easy handle in a multi handle no call is on,
 //               added by this request, which is in curl_exec() on another handle
 //               meanwhile: being in a multi handle is not being in a call, so the
@@ -86,10 +87,10 @@ if ($via === 'member') {
 
 if ($via === 'multi') {
     $t->assertTrue('the request was in curl_multi_select() at the time', $outside['in_select'] ?? false);
-    $t->assertSame('curl_multi_exec() returned CURLM_OK', $outside['multi_exec'] ?? null, 'returned ' . CURLM_OK);
-    $t->assertTrue('and reported the transfer as running', ($outside['running'] ?? 0) >= 1);
+    $t->assertContains('curl_multi_exec() on the multi handle is refused', $outside['multi_exec'] ?? '', 'another fiber is in the middle of a cURL call');
+    $t->assertSame('at the first call of the loop', $outside['multi_exec_calls'] ?? null, 1);
 } elseif ($via === 'easy') {
-    $t->assertContains('curl_multi_exec() given the easy handle is refused, not returned from', $outside['multi_exec'] ?? '', 'OxPHP\Async\AsyncException');
+    $t->assertContains('curl_multi_exec() given the easy handle is refused as well', $outside['multi_exec'] ?? '', 'OxPHP\Async\AsyncException');
 }
 
 $t->assertSame("the holder's transfer got its whole answer", $held['body'] ?? $held, 'curl-done:/3000/holder');

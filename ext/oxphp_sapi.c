@@ -8454,12 +8454,12 @@ static void oxphp_curl_end_selects(void *ctx)
     e->could_go = go;
 }
 
-/* curl_multi_exec() on a multi handle another fiber is in a call on, a loop's
- * curl_multi_select() say, does not wait for it: it returns CURLM_OK without going
- * into libcurl, and whichever request's curl_multi_exec() runs next moves every
- * transfer in the handle. An HTTP client may raise a re-entry flag around its
- * curl_multi_exec() (Symfony HttpClient 8.1.11 does, in CurlResponse::perform()), and
- * a request suspended there would leave it raised for every other request on a
+/* curl_multi_exec() in a fiber, on a multi handle another fiber is in a call on, a
+ * loop's curl_multi_select() say, does not wait for it: it returns CURLM_OK without
+ * going into libcurl, and whichever request's curl_multi_exec() runs next moves
+ * every transfer in the handle. An HTTP client may raise a re-entry flag around its
+ * curl_multi_exec() (Symfony HttpClient 8.1.11 does, in CurlResponse::perform()),
+ * and a request suspended there would leave it raised for every other request on a
  * shared client. $still_running gets the count of handles tracked in the multi
  * handle, so that a loop goes on to its curl_multi_select() rather than ending. Any
  * other arguments are ext/curl's to refuse. */
@@ -8496,15 +8496,15 @@ static bool oxphp_curl_exec_passed_over(const oxphp_curl_guard *g, zend_execute_
 static void oxphp_curl_guarded(const oxphp_curl_guard *g, INTERNAL_FUNCTION_PARAMETERS)
 {
     oxphp_request_fiber *self = oxphp_current_fiber;
-    if (oxphp_curl_exec_passed_over(g, execute_data, return_value, self)) return;
-
     if (self == NULL) {
         /* Code outside any fiber, a destructor the worker runs between two slices,
          * cannot wait, so a handle another fiber is in the middle of a call on
          * refuses it. `frame` tells such a call from a claim left by a bailout out
          * of one, which lasts to the end of the request. The membership alone does
          * not refuse it: it lasts until the handle is taken out, and would turn
-         * away a handle no call is using. */
+         * away a handle no call is using. curl_multi_exec() is refused too rather
+         * than passed over: the holder cannot go on before this code returns, so a
+         * loop run until no transfer is left would never end. */
         void *keys[OXPHP_CURL_MAX_KEYS];
         size_t total;
         size_t nkeys = oxphp_curl_keys(g, execute_data, NULL, keys, &total);
@@ -8519,6 +8519,7 @@ static void oxphp_curl_guarded(const oxphp_curl_guard *g, INTERNAL_FUNCTION_PARA
         oxphp_curl_track(g, execute_data, return_value, NULL);
         return;
     }
+    if (oxphp_curl_exec_passed_over(g, execute_data, return_value, self)) return;
 
     /* Read without touching them: the original handler is still the one that
      * validates and consumes the arguments. */
@@ -8804,12 +8805,13 @@ static void oxphp_curl_category_restore(void)
  * "Installed" is the claim, and it is narrower than "in effect". Where there are
  * no fibers every hook delegates to the handler it replaced, so a traditional-mode
  * or CLI process reports the same set as a worker-mode one while behaving
- * natively throughout. Within the streams category it is narrower still: the
- * socket-read part can be dropped on its own (the php_log_err below is the only
- * signal for that, and with PHP's error_log unset it reaches the server's log as
- * a warn, which LOG_LEVEL=error hides, and stderr under the CLI SAPIs) while
- * stream_select() and the database entry points stay hooked, and the category is
- * reported either way. */
+ * natively, but for curl_multi_getcontent(), which copies what a transfer in a
+ * multi handle has written while it may still write. Within the streams category
+ * it is narrower still: the socket-read part can be dropped on its own (the
+ * php_log_err below is the only signal for that, and with PHP's error_log unset it
+ * reaches the server's log as a warn, which LOG_LEVEL=error hides, and stderr
+ * under the CLI SAPIs) while stream_select() and the database entry points stay
+ * hooked, and the category is reported either way. */
 static void oxphp_runtime_hooks_install(void)
 {
     bool sleep_installed = false;
