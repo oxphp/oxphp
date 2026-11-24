@@ -39,6 +39,20 @@ declare(strict_types=1);
 //                 thing holding an object that marks itself released as it goes.
 //                 With no such backtrace the destructor runs as the call returns.
 //                 No park.
+//   ?mode=saturate has nine handler objects, not Closures, each set, heard once
+//                 from the same statement and removed — one more call than the
+//                 server keeps a record of while the copies of removed handlers
+//                 are kept. The ninth parks inside its call, whose frame lands
+//                 where the eighth's did.
+//   ?mode=via-call has a handler that, inside its call, puts back the one under
+//                 it and installs one PHP reaches through __call(), then raises
+//                 an error that one hears and parks in. Reports the handler that
+//                 stands once both calls have returned, then puts the worker's
+//                 back.
+//   ?mode=inner-returned has a handler that, inside its call, installs one of its
+//                 own, raises an error in its own frame that one hears, takes it
+//                 off again and parks in a plain call. Leaves the worker's
+//                 handlers as it found them.
 
 require_once __DIR__ . '/error_mode_probe.php';
 
@@ -82,6 +96,40 @@ if (!class_exists('OxphpErrorHandlerLateCaller', false)) {
         {
             trigger_error("late-{$this->run}", E_USER_NOTICE);
             restore_error_handler();
+        }
+    }
+}
+
+if (!class_exists('OxphpErrorHandlerCollector', false)) {
+    final class OxphpErrorHandlerCollector
+    {
+        public function __construct(public readonly int $id, private string $run, private ?\Closure $park)
+        {
+        }
+
+        public function __invoke(int $severity, string $message, string $file = '', int $line = 0): bool
+        {
+            if ($this->park !== null && $message === "collect-{$this->run}") {
+                ($this->park)('saturated');
+            }
+
+            return true;
+        }
+    }
+
+    final class OxphpErrorHandlerViaCall
+    {
+        public function __construct(private string $run, private \Closure $park)
+        {
+        }
+
+        public function __call(string $name, array $args): bool
+        {
+            if (($args[1] ?? '') === "inner-{$this->run}") {
+                ($this->park)('via-call');
+            }
+
+            return true;
         }
     }
 }
@@ -236,6 +284,57 @@ if (($_GET['mode'] ?? '') === 'late') {
     })(new OxphpErrorHandlerLateCaller($run));
     OxphpErrorModeProbe::$inWindow["returned-$run"] = true;
     echo "ARMED\n";
+
+    return;
+}
+
+if (($_GET['mode'] ?? '') === 'saturate') {
+    for ($i = 1; $i <= 9; $i++) {
+        set_error_handler(new OxphpErrorHandlerCollector($i, $run, $i === 9 ? $park : null));
+        trigger_error("collect-$run", E_USER_NOTICE);
+        restore_error_handler();
+    }
+    echo "DONE\n";
+
+    return;
+}
+
+if (($_GET['mode'] ?? '') === 'via-call') {
+    $viaCall = new OxphpErrorHandlerViaCall($run, $park);
+    set_error_handler(static function (int $severity, string $message) use ($run, $viaCall): bool {
+        if ($message === "outer-$run") {
+            restore_error_handler();
+            set_error_handler([$viaCall, 'viaCall']);
+            trigger_error("inner-$run", E_USER_NOTICE);
+        }
+
+        return true;
+    });
+    trigger_error("outer-$run", E_USER_NOTICE);
+    $after = set_error_handler(null);
+    restore_error_handler();
+    echo 'HANDLER-AFTER:', is_array($after) && $after[0] === $viaCall ? 'via-call' : get_debug_type($after), "\n";
+    restore_error_handler();
+    echo "DONE\n";
+
+    return;
+}
+
+if (($_GET['mode'] ?? '') === 'inner-returned') {
+    set_error_handler(static function (int $severity, string $message) use ($run, $park): bool {
+        if ($message === "outer-$run") {
+            set_error_handler(static fn (): bool => true);
+            // Raised by the engine in this frame, where the inner handler's call is entered from.
+            $unset = $notSet;
+            restore_error_handler();
+            $park('inner-returned');
+        }
+
+        return true;
+    });
+    trigger_error("outer-$run", E_USER_NOTICE);
+    restore_error_handler();
+    echo "DONE\n";
 
     return;
 }

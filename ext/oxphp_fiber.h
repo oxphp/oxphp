@@ -482,7 +482,9 @@ typedef struct {
  * there goes first on the page linked after it — and `caller` the frame the error
  * was raised in. A call the array has no room for goes unrecorded: deeper nesting
  * than it holds, or one made once it is full of the copies that only the end of
- * the request or task lets go of (see oxphp_error_handler_call_observer()). */
+ * the request or task lets go of (see oxphp_error_handler_call_observer()). No
+ * park lends after that, until the request or task ends: the unrecorded call can
+ * stand where a recorded one did and be taken for it. */
 #define OXPHP_ERROR_HANDLER_CALLS 8
 typedef struct {
     zval handler;                   /* owned */
@@ -818,10 +820,12 @@ typedef struct _oxphp_request_fiber {
     /* The calls of the application's error handler this fiber has made, outermost
      * first — the ones it is inside, and returned ones not let go of yet — and
      * which of them lent the worker its handler at the last park (0 for none,
-     * else index + 1). See oxphp_error_handler_lend(). */
+     * else index + 1), and whether a call has gone unrecorded since the request
+     * or task began. See oxphp_error_handler_lend(). */
     oxphp_error_handler_call error_handler_calls[OXPHP_ERROR_HANDLER_CALLS];
     uint8_t error_handler_call_count;
     uint8_t error_handler_lent;
+    bool error_handler_call_missed;
 
     /* Linked list pointers for the scheduler's fiber list */
     struct _oxphp_request_fiber *next;
