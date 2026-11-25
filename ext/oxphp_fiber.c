@@ -4051,6 +4051,49 @@ static bool oxphp_error_handler_call_frame(const zend_execute_data *ex,
     return page->prev == rec->page;
 }
 
+/* Whether a frame running `func` can be a call of the handler: for a Closure,
+ * one running that very closure; else one running a function of the name the
+ * callable gives, read off it rather than resolved, which could autoload. A
+ * trait's method copied in under an alias carries the alias. A function of the
+ * same name — another object's __invoke() among them — is not told from it.
+ * SYNC: php-src Zend/zend_API.c zend_is_callable_check_func() — 8.4.28
+ *       :3924/:3945, 8.5.13 :3882/:3903 — and 8.6.0 zend_is_method_callable()
+ *       :3879 with Zend/zend_execute.c zend_fetch_function() :4528 (the name
+ *       after the last "::", a leading "\" skipped); Zend/zend_inheritance.c
+ *       zend_add_trait_method() — 8.4.28 :2392, 8.5.13 :2421, 8.6.0 :2422. */
+static bool oxphp_error_handler_runs_as(const zval *handler, const zend_function *func) {
+    if (Z_TYPE_P(handler) == IS_OBJECT) {
+        if (Z_OBJCE_P(handler) == zend_ce_closure) {
+            return func == zend_get_closure_method_def(Z_OBJ_P(handler));
+        }
+        return func->common.function_name != NULL
+            && zend_string_equals_literal_ci(func->common.function_name, "__invoke");
+    }
+    const zval *name = handler;
+    if (Z_TYPE_P(handler) == IS_ARRAY) {
+        name = zend_hash_index_find(Z_ARRVAL_P(handler), 1);
+        if (name == NULL) {
+            return false;
+        }
+        ZVAL_DEREF(name);
+    }
+    if (Z_TYPE_P(name) != IS_STRING || func->common.function_name == NULL) {
+        return false;
+    }
+    const char *str = Z_STRVAL_P(name);
+    size_t len = Z_STRLEN_P(name);
+    const char *colon = zend_memrchr(str, ':', len);
+    if (colon != NULL) {
+        len -= (size_t) (colon + 1 - str);
+        str = colon + 1;
+    } else if (len > 0 && str[0] == '\\') {
+        str++;
+        len--;
+    }
+    return zend_binary_strcasecmp(ZSTR_VAL(func->common.function_name),
+                                  ZSTR_LEN(func->common.function_name), str, len) == 0;
+}
+
 typedef enum {
     OXPHP_ERROR_HANDLER_CALL_RETURNED,
     OXPHP_ERROR_HANDLER_CALL_RUNNING,
@@ -4061,13 +4104,12 @@ typedef enum {
 /* Whether the call is still running on the chain from `from` down to the
  * fiber's bottom: the frame entered from the one the error was raised in — a
  * chain holds at most one — standing where the call's frame was to go, entered
- * from C with the engine's four arguments, and running that very closure where
- * the handler is one. Found by the frame it was entered from rather than by
- * where it stands: a frame the handler itself calls can start the next page as
- * well. A call that has returned leaves an address a later frame can reuse. A
- * callback C makes from a frame where the error's was — a stream wrapper's
- * stream_open() under fopen() — lands there too; with the four arguments it
- * passes for the call unless the handler is a Closure.
+ * from C with the engine's four arguments, and running the handler's function.
+ * Found by the frame it was entered from rather than by where it stands: a frame
+ * the handler itself calls can start the next page as well. A call that has
+ * returned leaves an address a later frame can reuse. A callback C makes from a
+ * frame where the error's was — a stream wrapper's stream_open() under fopen() —
+ * lands there too, with the four arguments, but runs a function of its own.
  *
  * Unsure where a frame entered from C stands there in another shape. The call
  * runs in two such: a call that reaches the handler through __call(), whose
@@ -4089,9 +4131,7 @@ static oxphp_error_handler_call_state oxphp_error_handler_call_state_of(
         }
         return oxphp_error_handler_call_frame(ex, rec)
                 && ZEND_CALL_NUM_ARGS(ex) == 4
-                && (Z_TYPE(rec->handler) != IS_OBJECT
-                    || Z_OBJCE(rec->handler) != zend_ce_closure
-                    || ex->func == zend_get_closure_method_def(Z_OBJ(rec->handler)))
+                && oxphp_error_handler_runs_as(&rec->handler, ex->func)
             ? OXPHP_ERROR_HANDLER_CALL_RUNNING
             : OXPHP_ERROR_HANDLER_CALL_UNSURE;
     }

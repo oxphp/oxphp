@@ -16,7 +16,14 @@ declare(strict_types=1);
 //                 handler's had. Leaves the worker's handlers as it found them.
 //   ?mode=callable has a handler that is not a Closure heard once and return,
 //                 then parks as the last park of `phases` does, in a callback
-//                 that C calls with one argument rather than four.
+//                 that C calls with one argument rather than four. With
+//                 &via=open, in a stream wrapper's open instead, which C calls
+//                 with the four a handler gets.
+//   ?mode=forms   parks once, inside a handler that is not a Closure, of the
+//                 callable form &form= names: a method named in another case, a
+//                 static method as a "Class::method" string, a function named
+//                 with a leading backslash, an invokable object, or a trait's
+//                 method under an alias.
 //   ?mode=drop    has a handler heard once, then drops it: the handler is the
 //                 last thing holding an object that marks itself released as it
 //                 goes. No park.
@@ -134,6 +141,52 @@ if (!class_exists('OxphpErrorHandlerCollector', false)) {
     }
 }
 
+if (!class_exists('OxphpErrorHandlerForms', false)) {
+    trait OxphpErrorHandlerFormsTrait
+    {
+        public function heard(int $severity, string $message): bool
+        {
+            return OxphpErrorHandlerForms::onError($severity, $message);
+        }
+    }
+
+    final class OxphpErrorHandlerForms
+    {
+        use OxphpErrorHandlerFormsTrait {
+            heard as aliased;
+        }
+
+        public static string $form = '';
+        public static string $run = '';
+        public static ?\Closure $park = null;
+
+        public static function onError(int $severity, string $message): bool
+        {
+            if ($message !== 'park-' . self::$run) {
+                throw new \ErrorException('form-handler:' . self::$form . ':' . $message);
+            }
+            (self::$park)('form');
+
+            return true;
+        }
+
+        public function handle(int $severity, string $message): bool
+        {
+            return self::onError($severity, $message);
+        }
+
+        public function __invoke(int $severity, string $message): bool
+        {
+            return self::onError($severity, $message);
+        }
+    }
+
+    function oxphp_error_handler_forms_handler(int $severity, string $message): bool
+    {
+        return OxphpErrorHandlerForms::onError($severity, $message);
+    }
+}
+
 $run = (string) ($_GET['run'] ?? '?');
 $phases = ($_GET['mode'] ?? '') === 'phases';
 $reentered = 0;
@@ -192,13 +245,38 @@ if (($_GET['mode'] ?? '') === 'callable') {
     trigger_error("heard-$run", E_USER_NOTICE);
     restore_error_handler();
     set_error_handler(null);
-    // array_map() takes as many arguments as trigger_error() above, so its
-    // callback's frame lands where the handler's did, entered from C over a frame
-    // where the error was raised.
-    array_map($park, ['callback']);
+    // array_map() and fopen() take as many arguments as trigger_error() above,
+    // so the frame of the callback they run lands where the handler's did,
+    // entered from C over a frame where the error was raised.
+    if (($_GET['via'] ?? '') === 'open') {
+        OxphpErrorHandlerParkWrapper::$park = $park;
+        $stream = fopen('oxehslot://callback', 'r');
+        fclose($stream);
+    } else {
+        array_map($park, ['callback']);
+    }
     restore_error_handler();
     restore_error_handler();
     echo 'HEARD:', $handlerObject->heard, "\n";
+    echo "DONE\n";
+
+    return;
+}
+
+if (($_GET['mode'] ?? '') === 'forms') {
+    $handlerObject = new OxphpErrorHandlerForms();
+    OxphpErrorHandlerForms::$form = (string) ($_GET['form'] ?? '');
+    OxphpErrorHandlerForms::$run = $run;
+    OxphpErrorHandlerForms::$park = $park;
+    set_error_handler(match (OxphpErrorHandlerForms::$form) {
+        'method' => [$handlerObject, 'HANDLE'],
+        'static' => 'OxphpErrorHandlerForms::onError',
+        'function' => '\oxphp_error_handler_forms_handler',
+        'invoke' => $handlerObject,
+        'alias' => [$handlerObject, 'aliased'],
+    });
+    trigger_error("park-$run", E_USER_WARNING);
+    restore_error_handler();
     echo "DONE\n";
 
     return;
