@@ -31,15 +31,16 @@ if ($ctx !== null) {
 
     // array_walk() hands out references to the properties behind the getters.
     // They are typed, so a write of another type does not reach them. One
-    // property per snapshot: the first TypeError ends the walk.
+    // property per snapshot: the first TypeError ends the walk. PHP 8.6
+    // deprecates passing an object to array_walk() but still walks it.
     foreach (['traceId', 'spanId', 'parentSpanId'] as $getter) {
         $walked = oxphp_http_request()->traceContext();
         $t->assertThrows("array_walk() writing an int behind $getter() throws", static function () use ($walked, $getter): void {
-            array_walk($walked, static function (&$v, string $k) use ($getter): void {
+            ignoring_deprecations(static fn () => array_walk($walked, static function (&$v, string $k) use ($getter): void {
                 if (str_ends_with($k, "\0$getter")) {
                     $v = 1;
                 }
-            });
+            }));
         }, \TypeError::class);
         $t->assertSame("$getter() still returns its id", $walked->$getter(), $ctx->$getter());
     }

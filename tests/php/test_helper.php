@@ -218,3 +218,18 @@ class TestCase
         ]);
     }
 }
+
+/**
+ * Runs $fn with E_DEPRECATED ignored, for a call whose deprecation is not what
+ * the test looks for. Other errors raised inside $fn reach PHP's own handler
+ * rather than TestCase's, which would throw them.
+ */
+function ignoring_deprecations(callable $fn): mixed
+{
+    set_error_handler(static fn (): bool => true, E_DEPRECATED);
+    try {
+        return $fn();
+    } finally {
+        restore_error_handler();
+    }
+}
