@@ -8810,13 +8810,14 @@ static void oxphp_curl_category_restore(void)
  * "Installed" is the claim, and it is narrower than "in effect". Where there are
  * no fibers every hook delegates to the handler it replaced, so a traditional-mode
  * or CLI process reports the same set as a worker-mode one while behaving
- * natively, but for curl_multi_getcontent(), which copies what a transfer in a
- * multi handle has written while it may still write. Within the streams category
- * it is narrower still: the socket-read part can be dropped on its own (the
- * php_log_err below is the only signal for that, and with PHP's error_log unset it
- * reaches the server's log as a warn, which LOG_LEVEL=error hides, and stderr
- * under the CLI SAPIs) while stream_select() and the database entry points stay
- * hooked, and the category is reported either way. */
+ * natively, but for curl_multi_getcontent() where the curl category is installed,
+ * which copies what a transfer in a multi handle has written while it may still
+ * write. Within the streams category it is narrower still: the socket-read part
+ * can be dropped on its own (the php_log_err below is the only signal for that,
+ * and with PHP's error_log unset it reaches the server's log as a warn, which
+ * LOG_LEVEL=error hides, and stderr under the CLI SAPIs) while stream_select()
+ * and the database entry points stay hooked, and the category is reported either
+ * way. */
 static void oxphp_runtime_hooks_install(void)
 {
     bool sleep_installed = false;
