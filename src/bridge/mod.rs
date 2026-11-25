@@ -26,8 +26,8 @@ pub use mock as ffi;
 /// This reports what was *installed*, which is not the same as what is in
 /// effect: where there are no fibers every hook delegates to the handler it
 /// replaced, so a traditional-mode process reports the categories it swapped while behaving
-/// natively, but for `curl_multi_getcontent()`, which copies what a transfer in a multi
-/// handle has written while it may still write.
+/// natively, but for `curl_multi_getcontent()` when `curl` is among them, which copies what a
+/// transfer in a multi handle has written while it may still write.
 ///
 /// The extension parses `RUNTIME_HOOKS` and publishes the result; nothing here
 /// reads the variable, so there is no second copy of that grammar to drift.
