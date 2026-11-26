@@ -589,9 +589,10 @@ fn execute_request(
     }
     drop(request_open);
 
-    // If the response was already sent early (finish_request or streaming), we're done.
-    // Clear buffers to drop STREAM_TX (closes channel → ends stream on client side).
+    // If the response was already sent early (finish_request or streaming), we're done,
+    // once a stream has its last chunk — what the script wrote after its last flush.
     if sapi::was_early_sent() {
+        sapi::finish_stream();
         sapi::clear_buffers();
         return Ok(None);
     }

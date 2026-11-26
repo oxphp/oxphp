@@ -3022,6 +3022,14 @@ static bool oxphp_flush_may_wait(void) {
 void oxphp_bridge_flush(void *server_context) {
     check_cancelled_c();
     if (rust_flush) {
+        /* A stream's flush is where its headers go out, so PHP is told here,
+         * as PHP-FPM's flush tells it: headers_sent() turns true, the default
+         * Content-Type and a header_register_callback() callback join the
+         * headers first. Called here rather than from the Rust side because
+         * the callback is userland, and may end the request with a bailout. */
+        if (ctx.stream_mode) {
+            sapi_send_headers();
+        }
         /* A stream whose queue is full hands its output back rather than
          * waiting for room, and the wait is made here: by parking the request
          * where it can be parked, so that the worker runs its other requests

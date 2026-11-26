@@ -18,6 +18,7 @@ OxPHP registers its functions through the `oxphp_sapi` extension, which loads au
 - [oxphp_is_worker()](#oxphp_is_worker)
 - [oxphp_worker()](#oxphp_worker)
 - [oxphp_is_streaming()](#oxphp_is_streaming)
+- [oxphp_stream_start()](#oxphp_stream_start)
 - [oxphp_stream_flush()](#oxphp_stream_flush)
 - [oxphp_sleep()](#oxphp_sleep)
 - [oxphp_usleep()](#oxphp_usleep)
@@ -209,6 +210,8 @@ Flushes the response to the client and continues PHP execution in the background
 
 > **Note:** The PHP worker thread remains occupied until the script finishes. Keep background work short or offload heavy processing to a queue.
 
+In streaming mode it ends the stream: the output not flushed yet goes out as the last chunk, and the client sees the response end while the script goes on. It does not wait for the client to read that chunk.
+
 **Example:**
 
 ```php
@@ -302,7 +305,7 @@ $app->terminate();
 oxphp_is_streaming(): bool
 ```
 
-Returns whether the current request is in streaming mode. Streaming mode activates on the first call to `oxphp_stream_flush()` or automatically when PHP sets `Content-Type: text/event-stream`.
+Returns whether the current request is in streaming mode. A request enters streaming mode at [`oxphp_stream_start()`](#oxphp_stream_start), at its first [`oxphp_stream_flush()`](#oxphp_stream_flush), or when it sets `Content-Type: text/event-stream`, and stays in it from then on, whether or not it has flushed anything yet.
 
 **Returns:** `true` if streaming mode is active, `false` otherwise.
 
@@ -320,17 +323,49 @@ if (oxphp_is_streaming()) {
 
 ---
 
+## oxphp_stream_start()
+
+```php
+oxphp_stream_start(): bool
+```
+
+Puts the current request in streaming mode without sending anything. The status and headers go out with the request's first flush — `flush()`, `oxphp_stream_flush()`, `oxphp_finish_request()`, or the flush PHP makes after each write under `ob_implicit_flush()` — and each later flush sends the output written since as an HTTP chunk.
+
+Until that first flush the request is answered as any other. `header()` and `http_response_code()` work until output first leaves PHP's output buffers, as under any server. A request that ends, or fails, before its first flush gets an ordinary response: with a `Content-Length`, compressed as any other response is, and with the status a failure gives it, such as a 500 for an uncaught exception.
+
+Use it for a response written as it is produced whose `Content-Type` is not `text/event-stream` — which enters streaming mode by itself — such as a CSV export or a large JSON document. Calling it again does nothing.
+
+**Returns:** `true` on success, `false` if `oxphp_finish_request()` was already called.
+
+> **Note:** Once it is called, the request counts as a stream when the server drains: rather than being given the drain window, it is ended where an event stream would be. See [Behaviour on shutdown](../features/sse.md#behaviour-on-shutdown).
+
+**Example:**
+
+```php
+<?php
+oxphp_stream_start();
+header('Content-Type: text/csv');
+header('Content-Disposition: attachment; filename="export.csv"');
+
+foreach ($rows as $row) {
+    echo implode(',', $row), "\n";
+    flush();
+}
+```
+
+---
+
 ## oxphp_stream_flush()
 
 ```php
 oxphp_stream_flush(): bool
 ```
 
-Activates streaming mode and flushes any buffered output to the client as an HTTP chunk. On the first call, HTTP headers are sent immediately and streaming begins. Each subsequent call flushes output written since the last flush.
+Activates streaming mode and flushes any buffered output to the client as an HTTP chunk. The first flush of a stream sends its HTTP headers: after it `header()` has no effect, `headers_sent()` returns `true`, and a callback set with `header_register_callback()` has run. Each subsequent call flushes output written since the last flush.
 
 **Returns:** `true` on success, `false` if `oxphp_finish_request()` was already called.
 
-> **Note:** Streaming mode also activates automatically when PHP sets `Content-Type: text/event-stream`. In that case you can use PHP's built-in `flush()`, but call `ob_end_flush()` first to bypass PHP's output buffering layer.
+> **Note:** Streaming mode is also entered by [`oxphp_stream_start()`](#oxphp_stream_start), which sends nothing, and automatically when PHP sets `Content-Type: text/event-stream`. In either case you can use PHP's built-in `flush()`, but call `ob_end_flush()` first to bypass PHP's output buffering layer.
 
 **Example:**
 
@@ -1128,26 +1163,27 @@ print_r($functions);
 //     [5]  => oxphp_finish_request
 //     [6]  => oxphp_is_worker
 //     [7]  => oxphp_is_streaming
-//     [8]  => oxphp_stream_flush
-//     [9]  => oxphp_sleep
-//     [10] => oxphp_usleep
-//     [11] => oxphp_worker
-//     [12] => oxphp_register_decorator
-//     [13] => oxphp_async
-//     [14] => oxphp_async_await
-//     [15] => oxphp_async_await_all
-//     [16] => oxphp_async_await_race
-//     [17] => oxphp_async_await_any
-//     [18] => oxphp_apm_trace
-//     [19] => oxphp_apm_start
-//     [20] => oxphp_apm_end
-//     [21] => oxphp_apm_attribute
-//     [22] => oxphp_apm_event
-//     [23] => oxphp_apm_error
-//     [24] => oxphp_apm_status
-//     [25] => oxphp_apm_trace_id
-//     [26] => oxphp_apm_span_id
-//     [27] => oxphp_apm_header
+//     [8]  => oxphp_stream_start
+//     [9]  => oxphp_stream_flush
+//     [10] => oxphp_sleep
+//     [11] => oxphp_usleep
+//     [12] => oxphp_worker
+//     [13] => oxphp_register_decorator
+//     [14] => oxphp_async
+//     [15] => oxphp_async_await
+//     [16] => oxphp_async_await_all
+//     [17] => oxphp_async_await_race
+//     [18] => oxphp_async_await_any
+//     [19] => oxphp_apm_trace
+//     [20] => oxphp_apm_start
+//     [21] => oxphp_apm_end
+//     [22] => oxphp_apm_attribute
+//     [23] => oxphp_apm_event
+//     [24] => oxphp_apm_error
+//     [25] => oxphp_apm_status
+//     [26] => oxphp_apm_trace_id
+//     [27] => oxphp_apm_span_id
+//     [28] => oxphp_apm_header
 // )
 ```
 

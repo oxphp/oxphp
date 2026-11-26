@@ -1624,6 +1624,25 @@ PHP_FUNCTION(oxphp_is_streaming)
 }
 /* }}} */
 
+/* {{{ oxphp_stream_start(): bool
+ * Put the request in streaming mode without sending anything: its headers and
+ * status go out with its first flush, and a request that never flushes is
+ * answered as an ordinary response. Returns false once the request is
+ * finished. */
+PHP_FUNCTION(oxphp_stream_start)
+{
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    if (oxphp_bridge_is_finished()) {
+        RETURN_FALSE;
+    }
+
+    oxphp_bridge_set_stream_mode(true);
+
+    RETURN_TRUE;
+}
+/* }}} */
+
 /* {{{ oxphp_stream_flush(): bool
  * Activate streaming mode (if not already active), flush PHP output buffers,
  * and send buffered output as a chunk to the client.
@@ -11380,6 +11399,9 @@ ZEND_END_ARG_INFO()
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_is_streaming, 0, 0, _IS_BOOL, 0)
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_stream_start, 0, 0, _IS_BOOL, 0)
+ZEND_END_ARG_INFO()
+
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_oxphp_stream_flush, 0, 0, _IS_BOOL, 0)
 ZEND_END_ARG_INFO()
 
@@ -11407,6 +11429,7 @@ static const zend_function_entry oxphp_sapi_functions[] = {
     PHP_FE(oxphp_finish_request,    arginfo_oxphp_finish_request)
     PHP_FE(oxphp_is_worker,          arginfo_oxphp_is_worker)
     PHP_FE(oxphp_is_streaming,      arginfo_oxphp_is_streaming)
+    PHP_FE(oxphp_stream_start,      arginfo_oxphp_stream_start)
     PHP_FE(oxphp_stream_flush,      arginfo_oxphp_stream_flush)
     PHP_FE(oxphp_sleep,             arginfo_oxphp_sleep)
     PHP_FE(oxphp_usleep,            arginfo_oxphp_usleep)

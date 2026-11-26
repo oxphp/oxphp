@@ -22,6 +22,7 @@ PHP_FUNCTION(oxphp_worker_id);
 PHP_FUNCTION(oxphp_server_info);
 PHP_FUNCTION(oxphp_finish_request);
 PHP_FUNCTION(oxphp_is_streaming);
+PHP_FUNCTION(oxphp_stream_start);
 PHP_FUNCTION(oxphp_stream_flush);
 PHP_FUNCTION(oxphp_sleep);
 PHP_FUNCTION(oxphp_usleep);

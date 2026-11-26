@@ -4895,7 +4895,7 @@ If you call `oxphp_finish_request()` before any `echo` output, the client receiv
 - All output (`echo`, `print`, `var_dump`) after the first call is silently discarded.
 - In worker mode, the worker remains occupied until the entire callback completes, including all post-response code.
 - The request timeout continues to apply to background code running after `oxphp_finish_request()`.
-- `oxphp_finish_request()` and `oxphp_stream_flush()` are mutually exclusive: calling `oxphp_finish_request()` before starting a stream prevents streaming, and calling it after `oxphp_stream_flush()` closes the stream.
+- `oxphp_finish_request()` and streaming are mutually exclusive: calling `oxphp_finish_request()` before starting a stream prevents streaming (`oxphp_stream_start()` and `oxphp_stream_flush()` then return `false`), and calling it in streaming mode ends the stream — the output not flushed yet goes out as its last chunk, and the client sees the response end while the script goes on.
 
 ## See Also
 
@@ -4977,7 +4977,7 @@ These functions do **not** suspend the fiber:
 
 | Function | Behavior |
 |----------|----------|
-| `oxphp_finish_request()` | Sends the complete response and continues PHP execution. Does not yield — except in a streaming response, where it flushes the output not sent yet and waits for room as `oxphp_stream_flush()` does |
+| `oxphp_finish_request()` | Sends the complete response and continues PHP execution. Does not yield. In a streaming response it ends the stream, handing the output not sent yet to the server as the last chunk without waiting for room in the stream's buffer — though under `ob_implicit_flush()` the flushes its output buffers make as it closes them wait as `oxphp_stream_flush()` does |
 
 > **Note:** PHP's built-in `sleep()` and `usleep()` block the entire worker thread by default. Either use `oxphp_sleep()` / `oxphp_usleep()`, or set `RUNTIME_HOOKS=sleep` to make the native builtins suspend the fiber as well — useful when third-party code calls `sleep()` directly. The `oxphp_*` pair and the hooked builtins alike suspend only where a fiber switch is possible; where it is not, they wait on the worker thread instead, and the hooked builtins hand the call to the native `sleep()`/`usleep()` there, so the wait is the builtin's and so is what `sleep()` gives back when a signal cuts it short. That covers a `declare(ticks)` handler, pcntl's signal dispatch, a request's input build, a `FILTER_CALLBACK` from `filter_input_array()`, `array_multisort()` while it compares, and the destructors run after a request comes apart — an open list, carried in full under [Runtime Hooks](runtime-hooks.md#where-hooks-do-not-suspend). A fiber the application starts itself, by `new Fiber` or through a scheduler it drives, is a separate case: OxPHP cannot resume a context it does not own, so a sleep inside one holds a worker thread, and that share of the load has to be sized as if the hook were off. To confirm the server picked the setting up, read `runtime_hooks` from `oxphp_server_info()` or from the internal server's `/config`; an unrecognised environment variable is not an error anywhere. See [Runtime Hooks](runtime-hooks.md#checking-that-hooks-are-active).
 
@@ -7593,7 +7593,7 @@ When the server receives SIGTERM (a rolling deploy, a `docker stop`, a Kubernete
 
 Ordinary (non-streaming) requests in flight at SIGTERM are not interrupted: they get the whole drain window to finish normally, and only requests still running when `DRAIN_TIMEOUT_SECONDS` (default 25) expires are cancelled, with ~2 more seconds to unwind. Set the orchestrator's termination grace period above `DRAIN_TIMEOUT_SECONDS` + 2, plus the longest blocking call a request can be in at the deadline — see [Graceful Shutdown](../operations/graceful-shutdown.md#shutdown-sequence).
 
-"Streaming" here means any response that has already flushed chunked output — the server cannot tell a finite streaming download from an infinite event stream, so a large flushed download in flight at SIGTERM is ended early too, not just SSE. A request that called `oxphp_finish_request()` before SIGTERM counts as ordinary: its response is complete, and its remaining background work gets the drain window.
+"Streaming" here means any response in streaming mode: one that has flushed chunked output, and one that has called `oxphp_stream_start()` or set `Content-Type: text/event-stream` but not flushed anything yet — the server cannot tell a finite streaming download from an infinite event stream, so a large flushed download in flight at SIGTERM is ended early too, not just SSE. A request that called `oxphp_finish_request()` before SIGTERM counts as ordinary: its response is complete, and its remaining background work gets the drain window.
 
 A handler blocked inside a single long-running **native** call (a native `sleep()`, a heavy `preg_match`, a blocking database query) cannot be interrupted until that call returns. In worker mode prefer the cooperative `oxphp_sleep()` in streaming loops — it yields to the fiber scheduler and is woken immediately on shutdown. Outside worker mode `oxphp_sleep()` falls back to a regular blocking sleep, so the stream reacts to shutdown at its next `flush` after the sleep returns.
 
@@ -14071,6 +14071,7 @@ OxPHP registers its functions through the `oxphp_sapi` extension, which loads au
 - [oxphp_is_worker()](#oxphp_is_worker)
 - [oxphp_worker()](#oxphp_worker)
 - [oxphp_is_streaming()](#oxphp_is_streaming)
+- [oxphp_stream_start()](#oxphp_stream_start)
 - [oxphp_stream_flush()](#oxphp_stream_flush)
 - [oxphp_sleep()](#oxphp_sleep)
 - [oxphp_usleep()](#oxphp_usleep)
@@ -14262,6 +14263,8 @@ Flushes the response to the client and continues PHP execution in the background
 
 > **Note:** The PHP worker thread remains occupied until the script finishes. Keep background work short or offload heavy processing to a queue.
 
+In streaming mode it ends the stream: the output not flushed yet goes out as the last chunk, and the client sees the response end while the script goes on. It does not wait for the client to read that chunk.
+
 **Example:**
 
 ```php
@@ -14355,7 +14358,7 @@ $app->terminate();
 oxphp_is_streaming(): bool
 ```
 
-Returns whether the current request is in streaming mode. Streaming mode activates on the first call to `oxphp_stream_flush()` or automatically when PHP sets `Content-Type: text/event-stream`.
+Returns whether the current request is in streaming mode. A request enters streaming mode at [`oxphp_stream_start()`](#oxphp_stream_start), at its first [`oxphp_stream_flush()`](#oxphp_stream_flush), or when it sets `Content-Type: text/event-stream`, and stays in it from then on, whether or not it has flushed anything yet.
 
 **Returns:** `true` if streaming mode is active, `false` otherwise.
 
@@ -14373,17 +14376,49 @@ if (oxphp_is_streaming()) {
 
 ---
 
+## oxphp_stream_start()
+
+```php
+oxphp_stream_start(): bool
+```
+
+Puts the current request in streaming mode without sending anything. The status and headers go out with the request's first flush — `flush()`, `oxphp_stream_flush()`, `oxphp_finish_request()`, or the flush PHP makes after each write under `ob_implicit_flush()` — and each later flush sends the output written since as an HTTP chunk.
+
+Until that first flush the request is answered as any other. `header()` and `http_response_code()` work until output first leaves PHP's output buffers, as under any server. A request that ends, or fails, before its first flush gets an ordinary response: with a `Content-Length`, compressed as any other response is, and with the status a failure gives it, such as a 500 for an uncaught exception.
+
+Use it for a response written as it is produced whose `Content-Type` is not `text/event-stream` — which enters streaming mode by itself — such as a CSV export or a large JSON document. Calling it again does nothing.
+
+**Returns:** `true` on success, `false` if `oxphp_finish_request()` was already called.
+
+> **Note:** Once it is called, the request counts as a stream when the server drains: rather than being given the drain window, it is ended where an event stream would be. See [Behaviour on shutdown](../features/sse.md#behaviour-on-shutdown).
+
+**Example:**
+
+```php
+<?php
+oxphp_stream_start();
+header('Content-Type: text/csv');
+header('Content-Disposition: attachment; filename="export.csv"');
+
+foreach ($rows as $row) {
+    echo implode(',', $row), "\n";
+    flush();
+}
+```
+
+---
+
 ## oxphp_stream_flush()
 
 ```php
 oxphp_stream_flush(): bool
 ```
 
-Activates streaming mode and flushes any buffered output to the client as an HTTP chunk. On the first call, HTTP headers are sent immediately and streaming begins. Each subsequent call flushes output written since the last flush.
+Activates streaming mode and flushes any buffered output to the client as an HTTP chunk. The first flush of a stream sends its HTTP headers: after it `header()` has no effect, `headers_sent()` returns `true`, and a callback set with `header_register_callback()` has run. Each subsequent call flushes output written since the last flush.
 
 **Returns:** `true` on success, `false` if `oxphp_finish_request()` was already called.
 
-> **Note:** Streaming mode also activates automatically when PHP sets `Content-Type: text/event-stream`. In that case you can use PHP's built-in `flush()`, but call `ob_end_flush()` first to bypass PHP's output buffering layer.
+> **Note:** Streaming mode is also entered by [`oxphp_stream_start()`](#oxphp_stream_start), which sends nothing, and automatically when PHP sets `Content-Type: text/event-stream`. In either case you can use PHP's built-in `flush()`, but call `ob_end_flush()` first to bypass PHP's output buffering layer.
 
 **Example:**
 
@@ -15181,26 +15216,27 @@ print_r($functions);
 //     [5]  => oxphp_finish_request
 //     [6]  => oxphp_is_worker
 //     [7]  => oxphp_is_streaming
-//     [8]  => oxphp_stream_flush
-//     [9]  => oxphp_sleep
-//     [10] => oxphp_usleep
-//     [11] => oxphp_worker
-//     [12] => oxphp_register_decorator
-//     [13] => oxphp_async
-//     [14] => oxphp_async_await
-//     [15] => oxphp_async_await_all
-//     [16] => oxphp_async_await_race
-//     [17] => oxphp_async_await_any
-//     [18] => oxphp_apm_trace
-//     [19] => oxphp_apm_start
-//     [20] => oxphp_apm_end
-//     [21] => oxphp_apm_attribute
-//     [22] => oxphp_apm_event
-//     [23] => oxphp_apm_error
-//     [24] => oxphp_apm_status
-//     [25] => oxphp_apm_trace_id
-//     [26] => oxphp_apm_span_id
-//     [27] => oxphp_apm_header
+//     [8]  => oxphp_stream_start
+//     [9]  => oxphp_stream_flush
+//     [10] => oxphp_sleep
+//     [11] => oxphp_usleep
+//     [12] => oxphp_worker
+//     [13] => oxphp_register_decorator
+//     [14] => oxphp_async
+//     [15] => oxphp_async_await
+//     [16] => oxphp_async_await_all
+//     [17] => oxphp_async_await_race
+//     [18] => oxphp_async_await_any
+//     [19] => oxphp_apm_trace
+//     [20] => oxphp_apm_start
+//     [21] => oxphp_apm_end
+//     [22] => oxphp_apm_attribute
+//     [23] => oxphp_apm_event
+//     [24] => oxphp_apm_error
+//     [25] => oxphp_apm_status
+//     [26] => oxphp_apm_trace_id
+//     [27] => oxphp_apm_span_id
+//     [28] => oxphp_apm_header
 // )
 ```
 
@@ -15856,7 +15892,7 @@ Set `WORKER_MODE_ENABLED=true` and point `ENTRY_FILE` at your worker bootstrap s
 | `RESPONSE_BUFFER_BYTES` | `1048576` (1 MiB) | How much of a buffered response's output is held in memory. Past it, the response moves to a spool file on disk — see below. `0` = default |
 | `RESPONSE_SPOOL_MAX_BYTES` | `1073741824` (1 GiB) | Maximum bytes the spool files of all responses may hold together. A response that would push the total past it is answered with `503`. `0` = default |
 
-A response is buffered unless it streams (`Content-Type: text/event-stream` or `oxphp_stream_flush()`): it is sent when the script ends or calls `oxphp_finish_request()`, so everything the script writes is held until then, and afterwards for as long as the client takes to read it. Up to `RESPONSE_BUFFER_BYTES` that output stays in memory. Past it, the output moves to a temporary file, the rest of it follows, and the response is sent from that file, so a script that `readfile()`s a 500 MiB download no longer keeps 500 MiB of server memory for as long as a slow client takes to read it. The exception is a response eligible for [compression](../features/compression.md), which only a body of at most 3 MiB is: it is read back into memory to be compressed. Output a response streams is never spooled: it leaves at every flush.
+A response is buffered unless it streams (`Content-Type: text/event-stream`, `oxphp_stream_start()` or `oxphp_stream_flush()`): it is sent when the script ends or calls `oxphp_finish_request()`, so everything the script writes is held until then, and afterwards for as long as the client takes to read it. Up to `RESPONSE_BUFFER_BYTES` that output stays in memory. Past it, the output moves to a temporary file, the rest of it follows, and the response is sent from that file, so a script that `readfile()`s a 500 MiB download no longer keeps 500 MiB of server memory for as long as a slow client takes to read it. The exception is a response eligible for [compression](../features/compression.md), which only a body of at most 3 MiB is: it is read back into memory to be compressed. Output written in streaming mode is never spooled: a streamed response leaves at every flush. That includes what a request writes between `oxphp_stream_start()` and its first flush, which stays in memory until then — all of it, if the request never flushes.
 
 Spool files are created in the system temporary directory — `TMPDIR`, or `/tmp` when it is unset or empty — and removed from it right after they are created, so they do not stay in a directory listing, and the space each one holds is given back when its response has been sent or its client has gone, and also if the server is killed. Where that directory lives decides what the spool costs:
 
@@ -17296,7 +17332,7 @@ Route resolution
 6. **Static files** — served directly from an in-memory cache (for frequently accessed files) or streamed from disk. OxPHP adds `ETag`, `Last-Modified`, and `Cache-Control` headers automatically.
 7. **PHP execution** — the request is placed in the bounded queue and picked up by an available worker. If the queue is full, the client receives 529 immediately.
 8. **Compression** — text-based responses are compressed before being sent, with whichever of Brotli, Zstandard, and gzip the client's `Accept-Encoding` ranks highest; on a tie, cached static files get Brotli and everything else gets Zstandard (configurable via `COMPRESSION_ENCODINGS` and the per-coding level variables).
-9. **SSE streaming** — if the script sets `Content-Type: text/event-stream` or calls `oxphp_stream_flush()`, OxPHP switches to streaming mode: each `flush()` call sends a chunk to the client immediately without buffering the entire response. In Worker mode, SSE works cooperatively with [fiber multiplexing](../features/fiber-multiplexing.md).
+9. **SSE streaming** — if the script sets `Content-Type: text/event-stream` or calls `oxphp_stream_start()` or `oxphp_stream_flush()`, OxPHP switches to streaming mode: each `flush()` call sends a chunk to the client immediately without buffering the entire response. In Worker mode, SSE works cooperatively with [fiber multiplexing](../features/fiber-multiplexing.md).
 10. **Early response** — calling `oxphp_finish_request()` sends the HTTP response to the client immediately. The script continues executing in the background — for writing logs, updating caches, sending notifications — without holding the connection open.
 11. **Response delivery** — the completed response is sent back over the connection, and if [access logging](../features/access-logging.md) is enabled, a log entry is written. A PHP response that does not stream and is larger than `RESPONSE_BUFFER_BYTES` (1 MiB by default) is collected in a temporary file rather than in memory; see [Response Buffering](../operations/configuration.md#response-buffering).
 

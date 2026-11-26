@@ -5,3 +5,8 @@ streaming/test_stream_flush | GET | | 200 | transfer-encoding:chunked
 streaming/test_stream_flush_brotli | GET | -H "Accept-Encoding: br" | 200 | transfer-encoding:chunked, content-encoding:missing
 streaming/test_sse_autodetect
 streaming/test_sse_output_format | GET | | 200 | content-type:~text/event-stream
+streaming/test_flush_outside_a_stream_leaves_headers_open | GET | | 200 | x-after-flush:1, content-length:exists, transfer-encoding:missing
+streaming/test_stream_flush_sends_headers_as_php_does | GET | | 200 | transfer-encoding:chunked, x-cb:ran, x-late:missing, content-type:~text/html
+streaming/test_sse_flush_sends_headers_as_php_does | GET | | 200 | transfer-encoding:chunked, content-type:~text/event-stream
+streaming/test_stream_start_without_a_flush_is_an_ordinary_response | GET | | 201 | x-foo:1, content-length:exists, transfer-encoding:missing
+streaming/test_stream_start_failure_before_a_write_is_a_500 | GET | | 500 | content-length:exists, transfer-encoding:missing

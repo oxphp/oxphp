@@ -145,7 +145,7 @@ If you call `oxphp_finish_request()` before any `echo` output, the client receiv
 - All output (`echo`, `print`, `var_dump`) after the first call is silently discarded.
 - In worker mode, the worker remains occupied until the entire callback completes, including all post-response code.
 - The request timeout continues to apply to background code running after `oxphp_finish_request()`.
-- `oxphp_finish_request()` and `oxphp_stream_flush()` are mutually exclusive: calling `oxphp_finish_request()` before starting a stream prevents streaming, and calling it after `oxphp_stream_flush()` closes the stream.
+- `oxphp_finish_request()` and streaming are mutually exclusive: calling `oxphp_finish_request()` before starting a stream prevents streaming (`oxphp_stream_start()` and `oxphp_stream_flush()` then return `false`), and calling it in streaming mode ends the stream — the output not flushed yet goes out as its last chunk, and the client sees the response end while the script goes on.
 
 ## See Also
 

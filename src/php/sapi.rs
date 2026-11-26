@@ -739,6 +739,9 @@ pub fn try_early_send() -> bool {
     EARLY_TX.with(|slot| {
         let entry = slot.borrow_mut().take();
         if let Some((start, tx)) = entry {
+            // `http_response_code()` sets only `SG`, and this response is
+            // taken before the request's end collects it.
+            collect_response_code();
             let (body, headers, status, spool) = take_response();
             let _ = tx.send(ScriptResponse {
                 status,
@@ -938,11 +941,13 @@ pub fn set_stream_tokio_handle(handle: tokio::runtime::Handle) {
 }
 
 /// Send the output not flushed yet as the stream's last chunk, and close the
-/// stream. Called once the request is over, where nothing can wait: outside its
-/// fiber, on the scheduler's own stack in worker mode. So a queue with no room
-/// for that chunk gets it from a task that waits for the room in the request's
-/// place and closes the stream once it has sent it, and the worker moves on.
-fn finish_stream() {
+/// stream. Called where the request does not wait for its client: once it is
+/// over — outside its fiber, on the scheduler's own stack in worker mode — and
+/// at oxphp_finish_request(), whose script goes on without it. So a queue with
+/// no room for that chunk gets it from a task that waits for the room in the
+/// request's place and closes the stream once it has sent it. Without a stream
+/// it does nothing.
+pub fn finish_stream() {
     if flush_stream_chunk(false, &mut -1) {
         let tx = STREAM_TX.with(|slot| slot.borrow_mut().take().map(StreamSender::into_sender));
         let chunk = RESPONSE.with(|r| take_output(&mut r.borrow_mut().output));
@@ -1914,6 +1919,10 @@ unsafe extern "C" fn oxphp_flush(
         if !bindings::oxphp_bridge_get_headers_sent() {
             send_streaming_headers();
             bindings::oxphp_bridge_set_headers_sent(true);
+        }
+        // The flush oxphp_finish_request() makes ends the stream.
+        if try_early_send() {
+            return 0;
         }
         let mut fd = -1;
         let kept = flush_stream_chunk(wait_here != 0, &mut fd);

@@ -3,6 +3,7 @@
 
 headers/test_response_code_default
 headers/test_response_code_custom | GET | | 201 |
+headers/test_finish_request_keeps_its_response_code | GET | | 202 |
 headers/test_response_code_404 | GET | | 404 |
 headers/test_header_set | GET | | 200 | x-custom:test_value
 headers/test_header_replace | GET | | 200 | x-foo:baz
