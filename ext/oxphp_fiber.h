@@ -277,10 +277,9 @@ typedef struct {
      * under multiplexing a suspended fiber's response state is gone by the
      * time it resumes. All three are monotonic within a request (they only
      * ever go false→true), so capturing at suspend and re-installing at resume
-     * is a faithful restore. Both C (oxphp_stream_flush, oxphp_finish_request)
-     * and Rust (oxphp_flush, ub_write, try_early_send, the drain flush guard)
-     * read them, so the whole trio has to travel with the fiber. */
-    bool bridge_stream_mode;    /* ctx.stream_mode: chunked output has begun */
+     * is a faithful restore. Both C and Rust read them along the request's
+     * path, so the whole trio has to travel with the fiber. */
+    bool bridge_stream_mode;    /* ctx.stream_mode: the response streams, sent or not */
     bool bridge_headers_sent;   /* ctx.headers_sent: stream headers on the wire */
     bool bridge_finished;       /* ctx.finished: oxphp_finish_request() was called */
 

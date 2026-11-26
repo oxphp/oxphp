@@ -126,6 +126,8 @@ function oxphp_server_info(): array {}
  *
  * Any code after this call continues executing without blocking
  * the HTTP response. Similar to fastcgi_finish_request() in PHP-FPM.
+ * In streaming mode it ends the stream: the output not flushed yet goes out
+ * as its last chunk, without waiting for the client to read it.
  *
  * Returns false if already called on this request.
  *
@@ -163,8 +165,11 @@ function oxphp_is_worker(): bool {}
 /**
  * Checks whether the current request is in streaming mode.
  *
- * In streaming mode (SSE, chunked transfer), output is flushed
- * to the client immediately rather than buffered.
+ * In streaming mode each flush sends the output written since the last one to
+ * the client as a chunk, the first one with the headers. The request enters it
+ * at oxphp_stream_start(), at its first oxphp_stream_flush(), or when it sets
+ * Content-Type: text/event-stream; it is in streaming mode from then on,
+ * whether or not it has flushed anything yet.
  *
  * @return bool true if streaming mode is active
  *
@@ -177,14 +182,48 @@ function oxphp_is_worker(): bool {}
 function oxphp_is_streaming(): bool {}
 
 /**
+ * Puts the current request in streaming mode without sending anything.
+ *
+ * The status and headers go out with the request's first flush — flush(),
+ * oxphp_stream_flush(), oxphp_finish_request(), or the flush PHP makes after
+ * each write under ob_implicit_flush() — and each later flush sends the output
+ * written since as a chunk. Until then the request is answered as any other:
+ * header() and http_response_code() work until output first leaves PHP's
+ * output buffers, as under any server, and a request that ends or fails before
+ * its first flush gets an ordinary response, with its Content-Length, its
+ * compression, and the status a failure gives it.
+ *
+ * Use it for a response written as it is produced whose Content-Type is not
+ * text/event-stream, which starts streaming mode by itself: a CSV export, say.
+ * Once it is called the request counts as a stream when the server drains:
+ * rather than given the drain window, it is ended where an event stream would
+ * be — waiting at a suspension point in worker mode, or at its next flush.
+ *
+ * Calling it again does nothing. Returns false if oxphp_finish_request() was
+ * already called.
+ *
+ * @return bool true on success, false if the request is already finished
+ *
+ * @example
+ * oxphp_stream_start();
+ * header('Content-Type: text/csv');
+ * foreach ($rows as $row) {
+ *     echo implode(',', $row), "\n";
+ *     flush();
+ * }
+ */
+function oxphp_stream_start(): bool {}
+
+/**
  * Activate streaming mode and flush buffered output as a chunk to the client.
  *
- * On the first call, HTTP headers are sent immediately. Each subsequent call
- * flushes any output written since the last flush as a new chunk.
+ * The first flush of a stream sends its HTTP headers, after which header()
+ * has no effect and headers_sent() returns true. Each subsequent call flushes
+ * any output written since the last flush as a new chunk.
  *
  * Use this for Server-Sent Events (SSE), chunked transfer, or any real-time
- * streaming pattern. Streaming mode is also auto-activated when PHP sets
- * Content-Type: text/event-stream.
+ * streaming pattern. Streaming mode is also entered by oxphp_stream_start(),
+ * which sends nothing, and when PHP sets Content-Type: text/event-stream.
  *
  * Returns false if oxphp_finish_request() was already called.
  *

@@ -7,6 +7,3 @@ readfile('/tmp/mid.bin');
 oxphp_stream_flush();
 readfile('/tmp/mid.bin');
 echo 'TAIL';
-// Flushed explicitly: outside Worker mode, output written after the last
-// flush of a stream is not sent at all, and that is not what this checks.
-flush();

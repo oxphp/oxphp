@@ -16,3 +16,10 @@ timeout/test_timeout_sets_connection_status >> ?action=check
 # profile's other worker.
 timeout/test_stream_wait_ends_at_the_time_limit
 timeout/test_stream_wait_keeps_a_handler_exception
+
+# A stream reaches its client as it is written, ends where its script ends it
+# and keeps what it wrote last. The test is the stream's client, so the stream
+# runs on the profile's other worker.
+streaming/test_stream_start_sends_the_first_write_while_the_script_runs
+streaming/test_stream_finish_request_ends_the_stream
+streaming/test_stream_tail_after_the_last_flush_arrives
