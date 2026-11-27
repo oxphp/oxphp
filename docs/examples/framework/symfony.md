@@ -119,6 +119,7 @@ docker compose exec app php bin/console about
 - **Minimal extension footprint.** The Symfony skeleton's runtime needs only core extensions (`ctype`, `iconv`, `xml`), all present in the base image — `mbstring` is otherwise polyfilled. Native `intl` + `mbstring` are added because any real Symfony app uses them and the native versions are faster than the polyfill.
 - **`APP_ENV` from the container environment.** Symfony reads it from the real environment over `.env`, so set it in Compose.
 - **Static assets are served from `public/` by framework mode** — `{{ asset('css/app.css') }}` resolves to a real file on disk and is served directly, falling through to `index.php` only on a miss.
+- **Framework mode runs every request from a clean state**, so Symfony's shared services cannot carry one request's state into another, and `RUNTIME_HOOKS` makes no request suspend. Before moving Symfony to worker mode, read [Overlapping Requests and Framework State](../../features/overlapping-requests.md).
 
 ## Verify
 

@@ -162,6 +162,7 @@ docker compose exec app php artisan migrate
 - **`ENTRY_FILE=index.php` selects framework mode.** Laravel's `public/` becomes `DOCUMENT_ROOT`; the framework's own `.env`, `app/`, `vendor/` stay outside the document root and are never reachable over HTTP.
 - **Container environment overrides `.env`.** OxPHP passes the container environment to PHP, and Laravel's dotenv loader does not override real environment variables — so `DB_HOST`, `APP_ENV`, etc. set in Compose win.
 - **OPcache revalidates per request** in the `dev` target, so edits on the bind-mounted `src/` take effect immediately. For production, set `opcache.validate_timestamps=0` and drop the bind mount.
+- **Framework mode runs every request from a clean state**, so Laravel's static and singleton state cannot leak from one request into another, and `RUNTIME_HOOKS` makes no request suspend. Before moving Laravel to worker mode, read [Overlapping Requests and Framework State](../../features/overlapping-requests.md).
 
 ## Verify
 

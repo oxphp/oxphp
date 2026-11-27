@@ -65,6 +65,7 @@ End-to-end recipes for running popular PHP applications on OxPHP — each a comp
 - [Runtime Hooks](features/runtime-hooks.md) — make blocking `sleep()`, socket, connect, TLS and cURL waits in unmodified code suspend the fiber instead of the worker thread
 - [Shared Connections Under Runtime Hooks](features/runtime-hooks-shared-state.md) — one database or Redis connection used by several fibers, and state a hooked wait exposes
 - [cURL Under Runtime Hooks](features/runtime-hooks-curl.md) — cURL transfers, shared handles and multi handles under the `curl` category
+- [Overlapping Requests and Framework State](features/overlapping-requests.md) — why Laravel, Symfony and Yii3 leak request state or lose transactions when a worker overlaps requests
 - [Compression](features/compression.md) — Brotli, Zstandard and gzip for text-based responses, negotiated per client
 - [TLS](features/tls.md) — built-in TLS termination with certificate and key configuration
 - [Rate Limiting](features/rate-limiting.md) — per-IP rate limiting with configurable windows and limits

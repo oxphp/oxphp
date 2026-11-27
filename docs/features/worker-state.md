@@ -83,7 +83,7 @@ The following state survives across requests within the same worker:
 
 - **Variables in outer scope** — anything defined before `oxphp_worker()` and captured via `use`
 - **Static properties** — class static properties retain their values
-- **Database connections** — PDO, MySQLi, and other persistent connections remain open
+- **Database connections** — PDO, MySQLi, and other persistent connections remain open. Requests that overlap on the worker share such a connection; what that does to a transaction open on it is in [Transactions on a Shared Connection](overlapping-requests.md#transactions-on-a-shared-connection)
 - **Autoloaders** — registered autoloaders (Composer, custom) remain active
 - **Loaded classes and functions** — all previously loaded classes, interfaces, traits, and functions
 - **ini directives set during bootstrap** — an `ini_set()` in the outer scope holds for the life of the worker and is what per-request changes are rolled back to

@@ -34,6 +34,7 @@
 - [Early Response](docs/features/early-response.md): Send the HTTP response immediately with oxphp_finish_request() and continue running background tasks in OxPHP.
 - [Fiber Multiplexing](docs/features/fiber-multiplexing.md): Handle hundreds of concurrent requests on a single PHP worker thread using cooperative multitasking with fibers.
 - [Internal Server](docs/features/internal-server.md): A dedicated HTTP server for health checks, Prometheus metrics, live configuration, and plugin endpoints.
+- [Overlapping Requests and Framework State](docs/features/overlapping-requests.md): Why Laravel, Symfony and Yii3 leak request state or lose transactions when a worker overlaps requests, under RUNTIME_HOOKS above all, and how to run them.
 - [Profiler Reference](docs/features/profiling-reference.md): Profiler configuration, captured span contents, collapsed and xhprof exports, storage, internal routes, HTTP push, metrics and a command cheatsheet.
 - [Profiling Examples](docs/features/profiling-examples.md): Complete PHP examples for the OxPHP profiler: manual capture, attributes on services, batch jobs, A/B comparisons, self-profiling tests, custom decorators.
 - [Profiling PHP code](docs/features/profiling.md): A practical guide to the built-in per-request profiler: triggers, the PHP SDK, attributes, workflows for slow endpoints and leaks, and troubleshooting.
