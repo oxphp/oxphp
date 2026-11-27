@@ -115,6 +115,7 @@ docker compose exec app php yii          # the Yii console
 
 - **No database, no extra services** — the smallest possible OxPHP deployment: one image, one process.
 - **`yiisoft/assets` publishes static into `public/assets/<hash>/`** — real files on disk, served directly by framework mode. No URL-rewrite gymnastics are needed (unlike some asset pipelines that embed a version segment in the URL).
+- **Framework mode runs every request from a clean state**, so the services of Yii3's container cannot carry one request's state into another, and `RUNTIME_HOOKS` makes no request suspend. Before moving Yii3 to worker mode with one container per worker, read [Overlapping Requests and Framework State](../../features/overlapping-requests.md).
 
 ## Verify
 

@@ -9,7 +9,7 @@ This page covers what [runtime hooks](runtime-hooks.md) mean for a database or R
 
 ## Sharing One Connection Between Fibers
 
-**One connection shared between concurrent fibers is safe for the clients OxPHP guards, and gains nothing.** This is the normal shape of a worker-mode application rather than an edge case: WordPress, Laravel and Symfony open their database and cache clients once when the worker boots and hand the same ones to every request, and short of rewriting their data-access layer they cannot be asked for one connection per fiber.
+**One connection shared between concurrent fibers is safe for the clients OxPHP guards, and gains nothing.** This is the normal shape of a worker-mode application rather than an edge case: WordPress, Laravel and Symfony open their database and cache clients once when the worker boots and hand the same ones to every request, and short of rewriting their data-access layer they cannot be asked for one connection per fiber. The claim described below keeps the client's protocol intact. It does not reach the count a framework keeps of open transactions on its shared connection object, which still goes wrong when a request's first call on the connection begins a transaction while another request's transaction is open — see [Transactions on a Shared Connection](overlapping-requests.md#transactions-on-a-shared-connection).
 
 ### Why a shared connection needs a claim
 
@@ -178,7 +178,7 @@ In worker mode, every hooked wait that suspends the request is a point where the
 Two cases stay with the application:
 
 - **A build still running after that, or one that happens in a later request**, such as a service only some routes use, can still be seen half done by another request. Build such services in the worker script before `oxphp_worker()` is called. That code runs before the worker takes any request, so nothing can overlap it.
-- **Per-request state kept in a shared service and cleared after the request**, such as a "current route" or "current request" singleton, breaks on any overlap, however warm the worker is: the second request finds the first one's value, and the first one's reset wipes the second's. Building it ahead does not help. Run such an application in worker mode without `RUNTIME_HOOKS`.
+- **Per-request state kept in a shared service and cleared after the request**, such as a "current route" or "current request" singleton, breaks on any overlap, however warm the worker is: the second request finds the first one's value, and the first one's reset wipes the second's. Building it ahead does not help. Run such an application in worker mode without `RUNTIME_HOOKS` and without the suspension points it calls itself, which overlap requests too — see [Overlapping Requests and Framework State](overlapping-requests.md).
 
 ## See Also
 

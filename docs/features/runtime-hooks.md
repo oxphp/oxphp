@@ -7,6 +7,8 @@ description: Opt-in RUNTIME_HOOKS categories that make sleep(), socket reads, st
 
 `RUNTIME_HOOKS` replaces blocking PHP builtins with implementations that suspend the current fiber instead of pinning the worker thread, so code you cannot edit — a framework, a database client, an HTTP library — lets the worker run other requests while it waits. It is off by default and enabled by category.
 
+> **Warning:** Every hooked wait is a point where the worker can run another request, and requests that overlap share the application's container, singletons and static properties. A framework that keeps the current request, user or locale there — Laravel and Symfony do, and so does Yii3 with one container per worker — hands it to the other request, and a transaction on a shared connection can break. Read [Overlapping Requests and Framework State](overlapping-requests.md) before turning hooks on for such an application.
+
 ## How It Works
 
 | Category | What it hooks |
@@ -134,9 +136,12 @@ Read that as a fixed cost per call, not as a slowdown of the same work. A `strea
 
 Relying on `RUNTIME_HOOKS` for your own handlers ties their cooperativeness to a deployment setting rather than the code; prefer the explicit `oxphp_sleep()` there.
 
+**Check the application before turning hooks on.** Hooks add overlap points throughout code you did not write, which is safe only for an application that keeps request state per request and gives each transaction a connection of its own; [Overlapping Requests and Framework State](overlapping-requests.md#checking-an-application) shows how to check.
+
 ## See Also
 
 - [Shared Connections Under Runtime Hooks](runtime-hooks-shared-state.md) — one database or Redis connection used by several fibers, and application state a hooked wait exposes to other requests
 - [cURL Under Runtime Hooks](runtime-hooks-curl.md) — cURL transfers, shared handles and multi handles under the `curl` category
 - [Fiber Multiplexing](fiber-multiplexing.md) — how a worker runs several requests at once and where it can suspend one
+- [Overlapping Requests and Framework State](overlapping-requests.md) — what a framework's shared request state and a shared connection's transactions do when requests overlap
 - [Configuration Reference](../operations/configuration.md#runtime-hooks) — the `RUNTIME_HOOKS` variable

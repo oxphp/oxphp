@@ -236,7 +236,7 @@ A malformed value in any of these three variables (e.g. `ASYNC_WORKERS=8x`) is a
 |----------|---------|-------------|
 | `RUNTIME_HOOKS` | _(off)_ | Opt-in replacement of blocking PHP builtins with fiber-suspending implementations. `1`/`true`/`all` enables every hook category; a comma-separated list enables specific categories (e.g. `RUNTIME_HOOKS=sleep,streams`) |
 
-What each category hooks, how to check which ones are in effect, where they do not suspend and what they cost is in [Runtime Hooks](../features/runtime-hooks.md).
+What each category hooks, how to check which ones are in effect, where they do not suspend and what they cost is in [Runtime Hooks](../features/runtime-hooks.md). What the overlap they add does to a framework that keeps request state in shared objects is in [Overlapping Requests and Framework State](../features/overlapping-requests.md).
 
 ## Shared State
 

@@ -59,7 +59,7 @@ Between requests OxPHP resets the state a request owns: superglobals and `php://
 
 ## What Persists
 
-State the worker holds rather than a request survives across requests: variables the handler captures from the outer scope, static properties, open database connections, registered autoloaders, loaded classes and functions, and the ini directives and environment variables set during bootstrap. `$_ENV` is deliberately not reset. See [What Persists](worker-state.md#what-persists).
+State the worker holds rather than a request survives across requests: variables the handler captures from the outer scope, static properties, open database connections, registered autoloaders, loaded classes and functions, and the ini directives and environment variables set during bootstrap. `$_ENV` is deliberately not reset. See [What Persists](worker-state.md#what-persists). Requests that [overlap](fiber-multiplexing.md) on a worker share all of it at the same time — see [Overlapping Requests and Framework State](overlapping-requests.md) for what that means for a framework.
 
 ## Recycling
 
@@ -104,7 +104,7 @@ If `oxphp_worker()` is never called in the bootstrap script, no requests are dis
 
 Variables defined inside the `oxphp_worker()` callback are cleaned up by PHP's garbage collector, but static properties and globals defined in the outer scope persist. If you see data from one request appearing in another, check for static properties or global variables that accumulate state across calls.
 
-**Fix:** Reset static state explicitly at the start of each request callback, or avoid storing per-request state in statics.
+**Fix:** Reset static state explicitly at the start of each request callback, or avoid storing per-request state in statics. A reset at the start of a request does not help when requests overlap on the worker: the other request resets the state and sets its own while the first is suspended, and the first resumes into it (see [Overlapping Requests and Framework State](overlapping-requests.md)).
 
 ### 500s on a fresh worker with `RUNTIME_HOOKS`
 
@@ -112,7 +112,7 @@ Variables defined inside the `oxphp_worker()` callback are cleaned up by PHP's g
 
 **Cause:** One request is building a shared service, the build waits on a hooked socket, and a second request reaches the same half-built service. A worker [runs its first request alone](runtime-hooks-shared-state.md#hooked-waits-and-shared-application-state) until it ends or 250 ms after it first waits, so this takes a build still running after that, or one that happens in a later request.
 
-**Fix:** Build the service in the worker script before `oxphp_worker()`. On Yii3 this line cures this exception: `$container->get(\Yiisoft\Router\Middleware\Router::class);`. If the errors instead say that per-request state is already set, or it disappears halfway through a request, the state lives in a shared service and building ahead will not help: run without `RUNTIME_HOOKS`. Yii3's `CurrentRoute` is such a service, so this applies to any Yii3 handler that waits on a hooked socket.
+**Fix:** Build the service in the worker script before `oxphp_worker()`. On Yii3 this line cures this exception: `$container->get(\Yiisoft\Router\Middleware\Router::class);`. If the errors instead say that per-request state is already set, or it disappears halfway through a request, the state lives in a shared service and building ahead will not help: run without `RUNTIME_HOOKS`, and without the suspension points of your own code that overlap requests too (see [Overlapping Requests and Framework State](overlapping-requests.md)). Yii3's `CurrentRoute` is such a service, so this applies to any Yii3 handler that waits on a hooked socket.
 
 ### Worker recycles immediately (memory limit)
 
